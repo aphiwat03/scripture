@@ -60,33 +60,83 @@ remove(@Param('id') id: string) {
       ]
     },
     {
-      id: 'param-query-body',
-      name: '@Param, @Query, @Body',
-      description: 'สกัดข้อมูลจาก HTTP Request เข้ามาเป็นพารามิเตอร์ของฟังก์ชัน',
-      syntax: '@Param(key?), @Query(key?), @Body(key?)',
-      parameters: [
-        { name: 'key', type: 'string', required: false, description: 'ชื่อตัวแปรที่ต้องการดึง (ถ้าไม่ใส่จะได้เป็น Object ทั้งก้อน)' }
-      ],
+      id: 'param',
+      name: '@Param()',
+      description: 'ดึงตัวแปรที่อยู่ในเส้นทาง URL (Path Variables / Route Parameters)',
+      syntax: '@Param(key?)',
       examples: [
         {
-          title: 'การดึงข้อมูลจาก Request',
-          code: `// URL: /users/123?role=admin
+          title: 'ดึง Parameter จาก URL',
+          language: 'typescript',
+          code: `// เมื่อมีคนเรียก URL: GET /users/123
 @Get(':id')
-findOne(
-  @Param('id') id: string,      // id = "123"
-  @Query('role') role: string   // role = "admin"
-) {
-  return { id, role };
+findOne(@Param('id') id: string) {
+  // id จะมีค่าเท่ากับ "123"
+  return \`User ID: \${id}\`;
 }
 
-// POST body
-@Post()
-create(@Body() createUserDto: CreateUserDto) {
-  return this.usersService.create(createUserDto);
-}`,
-          language: 'typescript'
+// ถ้าไม่ระบุชื่อคีย์ จะได้ Object ทั้งก้อน
+@Get(':id/:status')
+findBoth(@Param() params: any) {
+  // params = { id: '123', status: 'active' }
+}`
         }
       ]
+    },
+    {
+      id: 'query',
+      name: '@Query()',
+      description: 'ดึงข้อมูลจาก "Query String" ใน URL (คือข้อความที่ต่อท้ายเครื่องหมาย ?)',
+      syntax: '@Query(key?)',
+      examples: [
+        {
+          title: 'ใช้งาน @Query()',
+          language: 'typescript',
+          code: `// เมื่อมีคนเรียก URL: GET /users?role=admin&age=20
+@Get()
+findUsers(
+  @Query('role') role: string, // ดึงเฉพาะคีย์ role ได้ "admin"
+  @Query('age') age: string    // ดึงเฉพาะคีย์ age ได้ "20"
+) {
+  return \`กำลังค้นหา User ที่มี Role: \${role} อายุ: \${age}\`;
+}
+
+// แบบดึงมาทั้งก้อน (ได้เป็น Object)
+@Get()
+findAll(@Query() queryParams: any) {
+  // queryParams = { role: 'admin', age: '20' }
+  return queryParams;
+}`
+        }
+      ],
+      notes: '🔥 ข้อควรระวัง: ข้อมูลที่ได้จาก @Query() จะเป็น String เสมอ แม้ว่าเราจะส่งตัวเลขมา (เช่น ?age=20 ก็จะได้เป็น "20") หากต้องการให้เป็นตัวเลข ต้องใช้ ParseIntPipe ช่วย (เช่น @Query("age", ParseIntPipe) age: number)'
+    },
+    {
+      id: 'body',
+      name: '@Body()',
+      description: 'ดึงข้อมูลที่ถูกส่งมาใน HTTP Body (มักใช้กับ POST, PUT, PATCH)',
+      syntax: '@Body(key?)',
+      examples: [
+        {
+          title: 'รับข้อมูลแบบ JSON',
+          language: 'typescript',
+          code: `// เมื่อมีคนยิง POST /users พร้อมแนบ JSON Body มา:
+// { "name": "John", "email": "john@email.com" }
+
+@Post()
+create(@Body() body: any) {
+  // body คือก้อน Object ที่รับมาเต็มๆ
+  return \`สร้าง User ชื่อ \${body.name}\`;
+}
+
+// หรือดึงแค่บางฟิลด์
+@Post()
+createSpecific(@Body('email') email: string) {
+  return \`Email คือ \${email}\`;
+}`
+        }
+      ],
+      notes: 'ในโลกของการทำงานจริง มักจะใช้ @Body() คู่กับคลาส DTO (Data Transfer Object) และ class-validator เพื่อตรวจสอบความถูกต้องของข้อมูล (Validation) เสมอ'
     },
     {
       id: 'req-res',
