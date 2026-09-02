@@ -18,9 +18,9 @@ export default async function DocsLayout({
   const { category } = await params
 
   return (
-    <div className="flex flex-col min-h-screen">
+    <div className="flex flex-col h-screen overflow-hidden">
       {/* ===== Top Header ===== */}
-      <header className="sticky top-0 z-30 h-14 flex items-center border-b border-gray-200 dark:border-gray-800 bg-white/90 dark:bg-gray-950/90 backdrop-blur-md">
+      <header className="flex-shrink-0 z-30 h-14 flex items-center border-b border-gray-200 dark:border-gray-800 bg-white/90 dark:bg-gray-950/90 backdrop-blur-md">
         <div className="flex items-center w-full px-4 gap-4">
           <MobileMenu languages={languages} currentLang={lang} currentCategory={category} />
           {/* Logo */}
@@ -73,7 +73,7 @@ export default async function DocsLayout({
       {/* ===== Body: Sidebar + Content ===== */}
       <div className="flex flex-1 overflow-hidden">
         {/* Sidebar (desktop only) */}
-        <div className="hidden lg:block">
+        <div className="hidden lg:flex flex-shrink-0 border-r border-gray-200 dark:border-gray-800">
           <Sidebar
             languages={languages}
             currentLang={lang}
@@ -82,7 +82,7 @@ export default async function DocsLayout({
         </div>
 
         {/* Main content */}
-        <main className="flex-1 min-w-0 overflow-y-auto">
+        <main className="flex-1 min-w-0 overflow-y-auto bg-white dark:bg-gray-950">
           {children}
         </main>
       </div>

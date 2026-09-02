@@ -41,10 +41,7 @@ export function Sidebar({ languages, currentLang, currentCategory }: SidebarProp
   return (
     <aside
       id="docs-sidebar"
-      className="w-64 flex-shrink-0 h-[calc(100vh-3.5rem)] sticky top-14 overflow-y-auto
-        border-r border-gray-200 dark:border-gray-800
-        bg-white dark:bg-gray-950
-        scrollbar-thin"
+      className="w-64 h-full overflow-y-auto bg-white dark:bg-gray-950 scrollbar-thin"
     >
       <div className="py-6 px-3 space-y-6">
         {[

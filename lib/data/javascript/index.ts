@@ -3,6 +3,7 @@ import { arrayCategory } from './array';
 import { stringCategory } from './string';
 import { objectCategory } from './object';
 import { storageCategory } from './storage';
+import { dataStructuresCategory } from './data-structures';
 
 export const javascript: Language = {
   id: 'javascript',
@@ -16,6 +17,7 @@ export const javascript: Language = {
     arrayCategory,
     stringCategory,
     objectCategory,
-    storageCategory
+    storageCategory,
+    dataStructuresCategory
   ],
 };
