@@ -4,7 +4,7 @@ import { CommandCard } from '@/components/CommandCard'
 import { getLanguage, getCategory } from '@/lib/data'
 
 
-export default async function CategoryPage({ params }: PageProps<'/docs/[lang]/[category]'>) {
+export default async function CategoryPage({ params }: { params: Promise<{ lang: string; category: string }> }) {
   const { lang, category } = await params
 
   const language = getLanguage(lang)

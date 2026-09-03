@@ -9,7 +9,7 @@ import Link from 'next/link'
 export default async function DocsLayout({
   children,
   params,
-}: LayoutProps<'/docs/[lang]/[category]'>) {
+}: { children: React.ReactNode; params: Promise<{ lang: string; category: string }> }) {
   const { lang } = await params
 
   const currentLang = getLanguage(lang)

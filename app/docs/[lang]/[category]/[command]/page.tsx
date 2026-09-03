@@ -5,7 +5,7 @@ import { getLanguage, getCategory, getCommand } from '@/lib/data'
 import Link from 'next/link'
 
 
-export default async function CommandPage({ params }: PageProps<'/docs/[lang]/[category]/[command]'>) {
+export default async function CommandPage({ params }: { params: Promise<{ lang: string; category: string; command: string }> }) {
   const { lang, category, command } = await params
 
   const language = getLanguage(lang)
