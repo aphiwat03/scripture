@@ -7,11 +7,15 @@ import { csharp } from './csharp'
 import { zustandLanguage } from './zustand'
 import { redisLanguage } from './redis'
 import { reactLanguage } from './react'
-import { dotnetLanguage } from './dotnet'
+import { prismaLanguage } from './prisma'
+import { postgresqlLanguage } from './postgresql'
+import { mysqlLanguage } from './mysql'
+import { databaseLanguage } from './database'
 import { sqlLanguage } from './sql'
+import { dotnetLanguage } from './dotnet'
 
 // รายชื่อภาษาทั้งหมดในแอป เรียงตาม Language -> Framework -> Tool
-export const languages: Language[] = [csharp, javascript, typescript, sqlLanguage, reactLanguage, nextjs, nestjsLanguage, dotnetLanguage, zustandLanguage, redisLanguage]
+export const languages: Language[] = [csharp, javascript, typescript, sqlLanguage, databaseLanguage, reactLanguage, nextjs, nestjsLanguage, dotnetLanguage, zustandLanguage, redisLanguage, prismaLanguage, postgresqlLanguage, mysqlLanguage]
 
 // Helper: หา language จาก id
 export function getLanguage(langId: string): Language | undefined {
