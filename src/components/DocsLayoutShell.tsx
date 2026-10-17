@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
@@ -24,6 +24,8 @@ interface DocsLayoutShellProps {
   children: React.ReactNode;
 }
 
+const emptySubscribe = () => () => {};
+
 export default function DocsLayoutShell({
   searchIndex,
   children,
@@ -33,7 +35,7 @@ export default function DocsLayoutShell({
 
   // Theme state from next-themes
   const { resolvedTheme, setTheme } = useTheme();
-  const [isMounted, setIsMounted] = useState(false);
+  const isMounted = useSyncExternalStore(emptySubscribe, () => true, () => false);
 
   // Mobile sidebar drawer state
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -41,10 +43,6 @@ export default function DocsLayoutShell({
   // Search modal state
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-
-  useEffect(() => {
-    setIsMounted(true);
-  }, []);
 
   const isDark = isMounted && resolvedTheme === 'dark';
 

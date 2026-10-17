@@ -40,21 +40,26 @@ export default function DocsPageContent({
   hasFullContent,
   children,
 }: DocsPageContentProps) {
-  // Active TOC heading state
-  const [activeHeadingId, setActiveHeadingId] = useState<string>(
-    headings[0]?.id || ''
-  );
+  // Scrolled TOC heading state keyed by slug to auto-reset when slug changes
+  const [scrolledHeading, setScrolledHeading] = useState<{
+    slug: string;
+    id: string;
+  } | null>(null);
+
+  const activeHeadingId =
+    scrolledHeading && scrolledHeading.slug === currentSlug
+      ? scrolledHeading.id
+      : headings[0]?.id || '';
 
   // Scroll spy for "On this page" right TOC
   useEffect(() => {
     if (headings.length === 0) return;
-    setActiveHeadingId(headings[0].id);
 
     const observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
           if (entry.isIntersecting) {
-            setActiveHeadingId(entry.target.id);
+            setScrolledHeading({ slug: currentSlug, id: entry.target.id });
             break;
           }
         }
@@ -200,7 +205,9 @@ export default function DocsPageContent({
                   >
                     <a
                       href={`#${h.id}`}
-                      onClick={() => setActiveHeadingId(h.id)}
+                      onClick={() =>
+                        setScrolledHeading({ slug: currentSlug, id: h.id })
+                      }
                       className={`block transition duration-200 ease-out ${
                         isActive
                           ? 'text-accent font-medium'

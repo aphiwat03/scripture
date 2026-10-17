@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useSyncExternalStore } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import {
   Globe,
@@ -223,6 +223,8 @@ interface StepFlowDiagramProps {
   subtitle?: string;
 }
 
+const emptySubscribe = () => () => {};
+
 export function InteractiveFlowDiagram({
   variant = 'request',
   title,
@@ -258,11 +260,7 @@ export function InteractiveFlowDiagram({
 
   const [activeIndex, setActiveIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(true);
-  const [isMounted, setIsMounted] = useState(false);
-
-  useEffect(() => {
-    setIsMounted(true);
-  }, []);
+  const isMounted = useSyncExternalStore(emptySubscribe, () => true, () => false);
 
   useEffect(() => {
     if (!isMounted || prefersReducedMotion || !isPlaying) return;

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useSyncExternalStore } from 'react';
 import { usePathname } from 'next/navigation';
 import { NAV_GROUPS } from '@/lib/nav-data';
 import { useNavStore } from '@/lib/nav-store';
@@ -11,10 +11,26 @@ interface SidebarProps {
   className?: string;
 }
 
+const emptySubscribe = () => () => {};
+
+const subscribeHash = (callback: () => void) => {
+  window.addEventListener('hashchange', callback);
+  return () => window.removeEventListener('hashchange', callback);
+};
+
+const getHashSnapshot = () =>
+  typeof window !== 'undefined' ? window.location.hash.replace('#', '') : '';
+const getServerHashSnapshot = () => '';
+
 export default function Sidebar({ onNavigate, className = '' }: SidebarProps) {
   const pathname = usePathname();
-  const [isMounted, setIsMounted] = useState(false);
-  const [activeHash, setActiveHash] = useState('');
+  const isMounted = useSyncExternalStore(emptySubscribe, () => true, () => false);
+  const urlHash = useSyncExternalStore(subscribeHash, getHashSnapshot, getServerHashSnapshot);
+  const [scrolledHash, setScrolledHash] = useState<{ path: string; hash: string } | null>(null);
+
+  const activeHash =
+    (scrolledHash && scrolledHash.path === pathname ? scrolledHash.hash : '') ||
+    urlHash;
 
   const {
     expandedGroups,
@@ -23,10 +39,6 @@ export default function Sidebar({ onNavigate, className = '' }: SidebarProps) {
     toggleItem,
     ensureActiveRouteExpanded,
   } = useNavStore();
-
-  useEffect(() => {
-    setIsMounted(true);
-  }, []);
 
   // Whenever pathname changes, expand the relevant group & item automatically
   useEffect(() => {
@@ -39,13 +51,8 @@ export default function Sidebar({ onNavigate, className = '' }: SidebarProps) {
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
-    // Initial hash from URL
-    if (window.location.hash) {
-      setActiveHash(window.location.hash.replace('#', ''));
-    }
-
     const handleHashChange = () => {
-      setActiveHash(window.location.hash.replace('#', ''));
+      setScrolledHash(null);
     };
     window.addEventListener('hashchange', handleHashChange);
 
@@ -61,7 +68,7 @@ export default function Sidebar({ onNavigate, className = '' }: SidebarProps) {
       (entries) => {
         for (const entry of entries) {
           if (entry.isIntersecting) {
-            setActiveHash(entry.target.id);
+            setScrolledHash({ path: pathname, hash: entry.target.id });
             break;
           }
         }

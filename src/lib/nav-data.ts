@@ -1285,7 +1285,7 @@ export const NAV_GROUPS: NavGroup[] = [
   // 3. หมวด DATABASE
   {
     title: 'DATABASE',
-    color: '#af52de',
+    color: '#f59e0b',
     items: [
       {
         title: 'PostgreSQL 16',
@@ -1731,7 +1731,7 @@ export const NAV_GROUPS: NavGroup[] = [
   // 4. หมวด TESTING & QUALITY
   {
     title: 'TESTING & QUALITY',
-    color: '#ff9500',
+    color: '#af52de',
     items: [
       {
         title: 'Testing Fundamentals',

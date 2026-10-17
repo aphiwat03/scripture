@@ -29,10 +29,19 @@ export async function generateMetadata({
   if (!pageData) {
     return { title: 'Not Found' };
   }
+
+  let title = pageData.meta.title;
+  if (pageData.meta.parentTitle) {
+    title =
+      pageData.meta.parentTitle === 'Security'
+        ? `${pageData.meta.title} (${pageData.meta.category} Security)`
+        : `${pageData.meta.title} (${pageData.meta.parentTitle})`;
+  } else if (pageData.meta.title === 'Security') {
+    title = `Security (${pageData.meta.category})`;
+  }
+
   return {
-    title: pageData.meta.parentTitle
-      ? `${pageData.meta.title} (${pageData.meta.parentTitle})`
-      : pageData.meta.title,
+    title,
     description:
       pageData.frontmatter?.summary ||
       `${pageData.meta.title} documentation in Scripture`,
