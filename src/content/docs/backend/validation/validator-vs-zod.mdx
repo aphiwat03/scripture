@@ -1,0 +1,156 @@
+---
+title: Validator vs Zod
+category: BACKEND
+parentTitle: Validation
+version: class-validator & Zod
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในสถาปัตยกรรม Fullstack TypeScript สมัยใหม่ (Next.js Frontend + NestJS 11 Backend) นักพัฒนามักมีคำถามสำคัญว่า *"ทำไมฝั่ง Frontend ถึงนิยมใช้ **Zod** คู่กับ React Hook Form แต่ฝั่ง Backend ของ NestJS ถึงนิยมใช้ **`class-validator` + `class-transformer`** และทั้งสองตัวมีข้อดี-ข้อเสียต่างกันอย่างไร?"*
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+| มิติการเปรียบเทียบ | `class-validator` + `class-transformer` (NestJS Standard) | `Zod` (Frontend & Functional Schema Standard) |
+| :--- | :--- | :--- |
+| **กระบวนทัศน์ (Paradigm)** | **OOP & Decorator Metadata (`reflect-metadata`)** ผูกกับคลาส TypeScript | **Functional & Schema-first (`z.object()`)** สกัด Type ด้วย `z.infer<typeof schema>` |
+| **การทำงานร่วมกับ NestJS Ecosystem** | **Native 100%**: รองรับ `ValidationPipe`, `ClassSerializerInterceptor` และ `@nestjs/swagger` CLI Plugin อัตโนมัติ | ต้องใช้ Pipe เสริม (เช่น `nestjs-zod`) และต้องแปลง Schema เป็น OpenAPI แยกต่างหาก |
+| **ขนาด Bundle Size (Frontend)** | ใหญ่และต้องเปิด `emitDecoratorMetadata` จึงไม่เหมาะกับการรันบนเบราว์เซอร์ | เล็กกะทัดรัด ไร้การพึ่งพา `reflect-metadata` และรองรับ `@hookform/resolvers/zod` โดยตรง |
+| **Type Safety ตอนแปลงข้อมูล** | แยกส่วนกันระหว่าง `@Transform()` (แปลงค่า) กับ `@Is*()` (ตรวจค่า) ต้องระวังลำดับการทำงาน | รวมการ Parse และ Transform เป็น Pipeline เดียวกัน (`z.coerce`, `.transform()`, `.refine()`) |
+| **การทำ Output Serialization** | ทรงพลังมากด้วย `@Exclude()`, `@Expose()` และ `ClassSerializerInterceptor` | ต้องสร้าง Schema ขาออกแยก (`OutputSchema.parse(data)`) ซึ่งทำสำเนาอ็อบเจกต์ใหม่ทุกครั้ง |
+
+<Callout type="tip" title="สถาปัตยกรรมที่ลงตัวที่สุดสำหรับ Fullstack (Next.js + NestJS 11)">
+ในโปรเจกต์ระดับ Enterprise เราสามารถดึงจุดแข็งของทั้งสองโลกมาทำงานร่วมกันได้อย่างสมบูรณ์แบบ: ใช้ Zod คู่กับ React Hook Form ในฝั่ง Next.js เพื่อตรวจสอบฟอร์มแบบทันที (Instant Client Validation) และใช้ class-validator + Swagger ในฝั่ง NestJS 11 เป็นปราการเหล็กด่านสุดท้ายที่สร้าง OpenAPI Contract ส่งกลับไปให้ฝั่ง Frontend!
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การเปรียบเทียบ Schema เดียวกันสำหรับฟอร์มสั่งตัดเนื้อพิเศษใน Zod (Frontend) คู่กับ class-validator (Backend) (พื้นฐาน)
+```typescript filename="src/modules/orders/dto/steak-custom-order-comparison.ts"
+// ============================================================================
+// ฝั่งที่ 1: Zod Schema (นิยมใช้บน Next.js Frontend คู่กับ React Hook Form)
+// ============================================================================
+import { z } from 'zod';
+
+export const SteakCustomOrderZodSchema = z
+  .object({
+    productId: z.string().uuid('รหัสสินค้าต้องเป็น UUID v4'),
+    cutThicknessMm: z
+      .number({ invalid_type_error: 'ความหนาต้องเป็นตัวเลข' })
+      .int('ความหนาต้องเป็นจำนวนเต็มมิลลิเมตร')
+      .min(10, 'หั่นสเต็กความหนาขั้นต่ำ 10 มม.')
+      .max(50, 'หั่นสเต็กความหนาสูงสุดไม่เกิน 50 มม.'),
+    weightGrams: z
+      .number()
+      .int()
+      .min(200, 'น้ำหนักขั้นต่ำ 200 กรัม'),
+    vacuumPacked: z.boolean().default(true),
+  })
+  .refine(
+    (data) => !(data.cutThicknessMm >= 30 && data.weightGrams < 400),
+    {
+      message: 'สเต็กความหนาตั้งแต่ 30 มม. ขึ้นไป ต้องสั่งน้ำหนักอย่างน้อย 400 กรัม',
+      path: ['weightGrams'],
+    },
+  );
+
+export type SteakCustomOrderZodType = z.infer<typeof SteakCustomOrderZodSchema>;
+
+// ============================================================================
+// ฝั่งที่ 2: class-validator DTO (ใช้บน NestJS 11 Backend คู่กับ ValidationPipe & Swagger)
+// ============================================================================
+import {
+  IsUUID,
+  IsInt,
+  Min,
+  Max,
+  IsBoolean,
+  IsOptional,
+} from 'class-validator';
+
+export class SteakCustomOrderBackendDto {
+  @IsUUID('4', { message: 'รหัสสินค้าต้องเป็น UUID v4' })
+  productId!: string;
+
+  @IsInt({ message: 'ความหนาต้องเป็นจำนวนเต็มมิลลิเมตร' })
+  @Min(10, { message: 'หั่นสเต็กความหนาขั้นต่ำ $constraint1 มม.' })
+  @Max(50, { message: 'หั่นสเต็กความหนาสูงสุดไม่เกิน $constraint1 มม.' })
+  cutThicknessMm!: number;
+
+  @IsInt()
+  @Min(200, { message: 'น้ำหนักขั้นต่ำ $constraint1 กรัม' })
+  weightGrams!: number;
+
+  @IsOptional()
+  @IsBoolean()
+  vacuumPacked: boolean = true;
+}
+```
+
+### ตัวอย่างที่ 2: การสร้าง Reusable Custom `ZodValidationPipe` ในกรณีที่ต้องการแชร์ Zod Schema ใน Monorepo กับ NestJS 11 (ขั้นสูง)
+```typescript filename="src/common/pipes/zod-validation.pipe.ts"
+import {
+  PipeTransform,
+  Injectable,
+  UnprocessableEntityException,
+} from '@nestjs/common';
+import { ZodSchema, ZodError } from 'zod';
+
+// ทางเลือกเสริม: หากทีมใช้ Monorepo (เช่น Turborepo) และต้องการใช้ Zod Schema ตัวเดียวกันทั้งหน้าบ้านและหลังบ้านในบาง Route
+@Injectable()
+export class ZodValidationPipe<TOutput>
+  implements PipeTransform<unknown, TOutput>
+{
+  constructor(private readonly schema: ZodSchema<TOutput>) {}
+
+  transform(value: unknown): TOutput {
+    const result = this.schema.safeParse(value);
+
+    if (result.success) {
+      return result.data;
+    }
+
+    // แปลง ZodError ให้กลายเป็นโครงสร้าง fieldErrors มาตรฐานเดียวกับ GlobalProblemDetailsFilter!
+    const fieldErrors = this.formatZodError(result.error);
+
+    throw new UnprocessableEntityException({
+      code: 'VALIDATION_FAILED',
+      error: 'Unprocessable Entity',
+      message: 'ข้อมูลไม่ผ่านการตรวจสอบตามโครงสร้าง Schema',
+      fieldErrors,
+    });
+  }
+
+  private formatZodError(error: ZodError) {
+    return error.issues.map((issue) => ({
+      field: issue.path.join('.') || 'general',
+      rule: issue.code,
+      message: issue.message,
+    }));
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/common/pipes/validation-strategy-comparison.ts"
+// ❌ ผิด (Anti-pattern): ตรวจความถูกต้องของข้อมูลเฉพาะที่ฝั่ง Frontend (React Hook Form + Zod)
+// แล้วฝั่ง Backend รับ req.body เข้าฐานข้อมูลเลยโดยไม่มี ValidationPipe เพราะคิดว่า "หน้าบ้านดักไว้แล้ว"!
+// ปัญหา: แฮกเกอร์ไม่ได้กดผ่านหน้าเว็บ React แต่ยิง cURL / Postman ตรงเข้า API ทำให้ส่งข้อมูลขยะหรือโจมตีระบบได้ทันที!
+
+// ✅ ถูก (Best Practice):
+// - Frontend Validation (Zod) มีไว้เพื่อ "User Experience (แจ้งเตือนผู้ใช้ทันทีไม่ต้องรอเน็ต)"
+// - Backend Validation (class-validator) มีไว้เพื่อ "Data Integrity & Security (ห้ามเชื่อข้อมูลจากไคลเอนต์เด็ดขาด)"
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `class-validator` + `class-transformer` เป็นหลักใน NestJS 11 เมื่อ**: ต้องการใช้ความสามารถเต็มรูปแบบของ `@nestjs/swagger`, `MappedTypes`, และ `ClassSerializerInterceptor` ตามมาตรฐานหลักของเฟรมเวิร์ก
+- **ควรใช้ `Zod` เมื่อ**: พัฒนาฟอร์มฝั่ง Frontend (React Hook Form), ตรวจสอบข้อมูลใน Next.js Server Actions, หรือตรวจสอบโครงสร้าง JSON ผลลัพธ์ที่ได้จาก AI / External Webhook
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ถ้าเราเขียน Validation ด้วย Zod บนหน้าเว็บ Next.js ครบถ้วนทุกช่องแล้ว ทำไมเรายังต้องเขียน DTO ด้วย `class-validator` ซ้ำอีกครั้งที่ฝั่ง NestJS Backend?
+   - **แนวคำตอบ**: เพราะโค้ดทั้งหมดที่รันอยู่บนเบราว์เซอร์ของผู้ใช้ (Frontend) อยู่ภายใต้การควบคุมของผู้ใช้ 100% ผู้โจมตีสามารถปิด JavaScript, แก้ไขโค้ดผ่าน Browser DevTools, หรือใช้โปรแกรมอย่าง Postman / Burp Suite / cURL ยิง HTTP Request ตรงเข้ามายัง NestJS API โดยไม่ผ่านหน้าเว็บ Next.js เลย ดังนั้นการทำ Validation ฝั่ง Frontend จึงมีไว้เพื่อความสะดวกของผู้ใช้ (UX) เท่านั้น ส่วนการทำ Validation ฝั่ง Backend คือปราการรักษาความปลอดภัยและปกป้องความถูกต้องของฐานข้อมูลที่ขาดไม่ได้เด็ดขาด
+2. **คำถาม**: ในกรณีที่เราต้องการให้ Error จาก `ValidationPipe` ของ NestJS แสดงผลใต้ช่อง Input ของ React Hook Form บนฝั่ง Frontend โดยอัตโนมัติ เราต้องเชื่อมโยงกันอย่างไร?
+   - **แนวคำตอบ**: ให้ตั้งค่า `exceptionFactory` ใน `ValidationPipe` ของ NestJS ให้คืนค่า Array ของ `{ field, message }` ที่ใช้ชื่อ Path ตรงกับชื่อฟิลด์ในฟอร์ม (เช่น `"shippingAddress.postalCode"` หรือ `"items[0].weightGrams"`) เมื่อฝั่ง Frontend ได้รับ HTTP `422` ก็สามารถวนลูปเรียก `form.setError(err.field, { type: 'server', message: err.message })` ของ React Hook Form เพื่อแสดงข้อความภาษาไทยจาก Backend ใต้ช่องกรอกข้อมูลนั้นได้ทันที
+
+---

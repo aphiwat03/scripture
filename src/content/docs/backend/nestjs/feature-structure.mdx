@@ -1,0 +1,144 @@
+---
+title: Feature Structure
+category: BACKEND
+parentTitle: NestJS 11
+version: NestJS 11
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด
+ในโปรเจกต์ขนาดเล็ก นักพัฒนามักนิยมจัดโฟลเดอร์ตามชนิดของไฟล์ (Technical Layering) เช่น มีโฟลเดอร์ `controllers/`, `services/`, `models/` ขนาดใหญ่ที่รวมทุกอย่างไว้ด้วยกัน เมื่อโปรเจกต์มีขนาดเกิน 50 ฟีเจอร์ นักพัฒนาจะต้องกระโดดข้ามโฟลเดอร์ไปมาเพื่อแก้ไขไฟล์ของฟีเจอร์เดียว
+
+ในระดับ Enterprise ของ NestJS เรายึดหลัก **Domain-Driven Design (DDD)** และ **Screaming Architecture** โดยจัดโฟลเดอร์แบบ **Feature Module Slices** เมื่อเปิดดูโครงสร้างโฟลเดอร์ โครงสร้างจะต้อง "ตะโกนบอก" ทันทีว่าระบบนี้ทำธุรกิจเกี่ยวกับอะไร (เช่น มีแผนกเนื้อ Products, มีแผนกคำสั่งซื้อ Orders, มีแผนกชำระเงิน Payments)
+
+## 2. หลักการเบื้องหลัง
+โครงสร้างโฟลเดอร์ระดับ Enterprise สำหรับ Smart Butcher Marketplace ถูกจัดระเบียบดังนี้:
+
+```text filename="docs/backend/nestjs.txt"
+src/
+├── common/                  # 1. ศูนย์รวม Cross-Cutting Concerns ที่ใช้ร่วมกันทั้งแอป
+│   ├── decorators/          #    Custom Decorators เช่น @Roles(), @Public(), @CurrentUser()
+│   ├── filters/             #    Exception Filters เช่น AllExceptionsFilter
+│   ├── guards/              #    Guards เช่น JwtAuthGuard, RolesGuard
+│   ├── interceptors/        #    Interceptors เช่น Logging, TransformResponse
+│   ├── middlewares/         #    Middlewares เช่น CorrelationId
+│   └── pipes/               #    Pipes เช่น MeatWeightRoundingPipe
+│
+├── config/                  # 2. การตั้งค่าระบบ
+│   ├── env.validation.ts    #    Zod Schema สำหรับตรวจสอบ .env
+│   └── configuration.ts     #    Custom Namespaced Config Factories
+│
+├── database/                # 3. ชั้นติดต่อฐานข้อมูล (Prisma / Database Module)
+│   ├── prisma.service.ts
+│   └── database.module.ts
+│
+├── modules/                 # 4. รวม Feature Modules ตามโดเมนธุรกิจ (Business Slices)
+│   ├── products/            #    โดเมนสินค้าเนื้อพรีเมียม
+│   │   ├── dto/             #    Data Transfer Objects (CreateMeatDto, UpdateMeatDto)
+│   │   ├── entities/        #    Domain Entities / Interfaces
+│   │   ├── products.controller.ts
+│   │   ├── products.service.ts
+│   │   └── products.module.ts
+│   │
+│   ├── orders/              #    โดเมนคำสั่งซื้อ
+│   │   ├── dto/
+│   │   ├── orders.controller.ts
+│   │   ├── orders.service.ts
+│   │   └── orders.module.ts
+│   │
+│   ├── payments/            #    โดเมนชำระเงิน
+│   │   ├── payments.service.ts
+│   │   └── payments.module.ts
+│   │
+│   └── categories/          #    โดเมนหมวดหมู่เนื้อ (Beef, Pork, Dry-Aged)
+│       ├── categories.controller.ts
+│       ├── categories.service.ts
+│       └── categories.module.ts
+│
+├── app.module.ts            # Root Module ประกอบชิ้นส่วนทุกอย่างเข้าด้วยกัน
+└── main.ts                  # จุดเริ่มต้น Entry Point ของแอปพลิเคชัน
+```
+
+## 3. ตัวอย่างโค้ด
+
+### ตัวอย่างที่ 1: โครงสร้างไฟล์ภายใน Feature Module `products`
+```typescript filename="src/modules/products/dto/create-meat.dto.ts"
+import { IsString, IsNotEmpty, IsEnum, IsNumber, Min, IsPositive } from 'class-validator';
+
+export enum MeatGrade {
+  WAGYU_A5 = 'WAGYU_A5',
+  WAGYU_A4 = 'WAGYU_A4',
+  BLACK_ANGUS = 'BLACK_ANGUS',
+  KUROBUTA = 'KUROBUTA',
+}
+
+export class CreateMeatDto {
+  @IsString()
+  @IsNotEmpty({ message: 'ชื่อชิ้นเนื้อห้ามเว้นว่าง' })
+  name: string;
+
+  @IsEnum(MeatGrade, { message: 'เกรดเนื้อไม่ถูกต้องตามมาตรฐาน' })
+  grade: MeatGrade;
+
+  @IsNumber()
+  @IsPositive({ message: 'ราคาต่อกิโลกรัมต้องมากกว่า 0' })
+  pricePerKg: number;
+
+  @IsNumber()
+  @Min(100, { message: 'น้ำหนักชิ้นเนื้อต้องมีอย่างน้อย 100 กรัม' })
+  weightGrams: number;
+}
+```
+
+### ตัวอย่างที่ 2: รวมโมดูลใน `products.module.ts` เพื่อพร้อมเสียบเข้ากับระบบ
+```typescript filename="src/modules/products/products.module.ts"
+import { Module } from '@nestjs/common';
+import { ProductsController } from './products.controller';
+import { ProductsService } from './products.service';
+import { WagyuPricingService } from './wagyu-pricing.service';
+import { DatabaseModule } from '../../database/database.module';
+
+@Module({
+  imports: [DatabaseModule],
+  controllers: [ProductsController],
+  providers: [ProductsService, WagyuPricingService],
+  exports: [ProductsService], // ส่งออกเฉพาะ Service ที่โมดูล Orders ต้องการเรียกใช้
+})
+export class ProductsModule {}
+```
+
+## 4. ผิด vs ถูก
+
+```typescript filename="src/nestjs.ts"
+// ❌ ผิด: โครงสร้างแบบปนเป (Technical Grouping) เมื่อโปรเจกต์ใหญ่ขึ้นจะกลายเป็นฝันร้าย
+src/
+  controllers/
+    products.controller.ts
+    orders.controller.ts
+    payments.controller.ts
+    users.controller.ts
+  services/
+    products.service.ts
+    orders.service.ts
+    payments.service.ts
+// ผลกระทบ: หากต้องการตัดแยกคำสั่งซื้อเป็น Microservice ต้องมานั่งแกะไฟล์ทีละโฟลเดอร์
+```
+
+```text filename="project-structure.txt"
+// ✅ ถูก: โครงสร้างแบบ Feature Module ชัดเจน (Domain-driven Cohesion)
+src/
+  modules/
+    products/   # รวมทุกอย่างเกี่ยวกับ Products อยู่ในโฟลเดอร์เดียว
+    orders/     # รวมทุกอย่างเกี่ยวกับ Orders อยู่ในโฟลเดอร์เดียว
+// ผลประโยชน์: แต่ละทีมสามารถเป็นเจ้าของ (Feature Ownership) แต่ละโฟลเดอร์ได้ และแยกเป็น Microservice ได้ทันที
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Feature Module Structure**: กับทุกโปรเจกต์ระดับ Production
+- **ไม่ควรสร้างไฟล์ขยะย่อยเกินความจำเป็น**: หากโมดูลนั้นมีเพียง 1 Service และไม่มีตรรกะซับซ้อน ไม่จำเป็นต้องสร้างโฟลเดอร์ `repositories/` แยกย่อยเพิ่มจนเกิดการ Over-engineering
+
+## 6. คำถามสัมภาษณ์
+**ถาม**: การจัดโครงสร้างโปรเจกต์แบบ Feature Module มีความได้เปรียบอย่างไรเมื่อองค์กรตัดสินใจที่จะย้ายจากสถาปัตยกรรม Monolith ไปสู่ Microservices ในอนาคต?
+**ตอบ**: สถาปัตยกรรม Feature Module มีระดับ **High Cohesion** และ **Low Coupling** อยู่แล้ว โค้ดที่เกี่ยวข้องกับ Domain ทั้งหมด (DTO, Controller, Service, Entity) ถูกรวมศูนย์อยู่ในโฟลเดอร์เดียว ทำให้เราสามารถ "ยกทั้งโฟลเดอร์" เช่น `src/modules/orders/` ออกไปสร้างเป็นโปรเจกต์ Microservice ใหม่ได้ทันทีโดยแทบไม่ต้องจัดระเบียบโค้ดใหม่
+
+---

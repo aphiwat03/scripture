@@ -1,0 +1,136 @@
+---
+title: Direct vs Pooler
+category: DATABASE
+parentTitle: Supabase
+version: Supabase & PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+จุดที่นักพัฒนาที่ใช้ **Prisma ORM คู่กับ Supabase** มักติดปัญหามากที่สุดคือการตั้งค่า Connection String ในไฟล์ `.env` เพราะในหน้า Settings ของ Supabase จะมี URL ให้เลือกหลายแบบ ทั้งพอร์ต `6543` และพอร์ต `5432` รวมถึงโฮสต์ที่เป็น Direct Database กับโฮสต์ที่เป็น Supavisor Pooler
+
+กฎเหล็กของการเชื่อมต่อ Prisma เข้ากับ Supabase มีเพียงหลักการเดียวที่ชัดเจนคือ **ต้องแยกสายการเชื่อมต่อออกเป็น 2 เส้น (`DATABASE_URL` และ `DIRECT_URL`)**:
+1. **`DATABASE_URL` (สายทำงานหลักของแอปพลิเคชัน):** ชี้ไปที่ **Supavisor Pooler พอร์ต `6543` (Transaction Mode)** พร้อมเติม `?pgbouncer=true`
+2. **`DIRECT_URL` (สายเฉพาะกิจสำหรับรัน Migration):** ชี้ไปที่ **พอร์ต `5432` (Session Mode บน Supavisor Pooler หรือ Direct Connection)** เพื่อให้ Prisma CLI สามารถล็อกตารางและรันคำสั่ง DDL ได้
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ทำไมการเข้าใจเรื่องเครือข่าย **IPv4 vs IPv6** บน Supabase ยุคใหม่จึงสำคัญมาก?
+1. **การเปลี่ยนผ่านสู่ IPv6 ของ Direct Connection (`db.<project_ref>.supabase.co`):**
+   ตั้งแต่ปี 2024 เป็นต้นมา โฮสต์เชื่อมต่อตรงเข้าฐานข้อมูลของ Supabase (`db.<ref>.supabase.co:5432`) ได้เปลี่ยนมาใช้ที่อยู่ **IPv6 เป็นค่าเริ่มต้น** (เว้นแต่จะซื้อ IPv4 Add-on เพิ่ม) ซึ่งเครือข่ายอินเทอร์เน็ตตามบ้าน, GitHub Actions Runners มาตรฐาน หรือผู้ให้บริการคลาวด์หลายเจ้ายังรองรับเฉพาะ **IPv4 เท่านั้น!** หากคุณนำโฮสต์ `db.<ref>.supabase.co` ไปใส่ใน `DIRECT_URL` แล้วรันบนเครือข่าย IPv4 จะเกิดข้อผิดพลาด `Can't reach database server` ทันที!
+2. **ทางออกด้วย Supavisor Pooler Host (`aws-0-<region>.pooler.supabase.com`):**
+   โฮสต์ของ Supavisor Pooler **รองรับทั้ง IPv4 และ IPv6 ฟรีทุกแพ็กเกจ!** และเปิดให้บริการพร้อมกันถึง 2 พอร์ตในโฮสต์เดียว:
+   - **พอร์ต `6543` บนโฮสต์ Pooler:** ทำงานในโหมด **Transaction Mode** -> ใช้เป็น `DATABASE_URL`
+   - **พอร์ต `5432` บนโฮสต์ Pooler:** ทำงานในโหมด **Session Mode** -> ใช้เป็น `DIRECT_URL` สำหรับรัน `prisma migrate deploy` บนเครือข่าย IPv4 ได้อย่างสมบูรณ์แบบ!
+
+```text filename="docs/database/supabase.txt"
+┌─────────────────────────────────────────────────────────────────────────┐
+│ แอปพลิเคชัน & CI/CD (เครือข่าย IPv4 / IPv6 เช่น Vercel, GitHub Actions) │
+└───────────────┬─────────────────────────────────────────┬───────────────┘
+                │                                         │
+   1. DATABASE_URL (Prisma Client)           2. DIRECT_URL (Prisma Migrate CLI)
+   พอร์ต 6543 + ?pgbouncer=true               พอร์ต 5432 (ไม่ต้องมี pgbouncer=true)
+                │                                         │
+                ▼                                         ▼
+┌───────────────────────────────────┐     ┌───────────────────────────────────┐
+│  Supavisor Pooler (Port 6543)     │     │  Supavisor Pooler (Port 5432)     │
+│  โหมด: Transaction Pooling        │     │  โหมด: Session Pooling            │
+└───────────────┬───────────────────┘     └───────────────┬───────────────────┘
+                │                                         │
+                └────────────────────┬────────────────────┘
+                                     ▼
+                    ┌─────────────────────────────────┐
+                    │   Supabase PostgreSQL 16 Engine │
+                    └─────────────────────────────────┘
+```
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การตั้งค่า `schema.prisma` และไฟล์ `.env` สำหรับเชื่อมต่อ Supabase ผ่าน Supavisor (รองรับ IPv4 100%)
+รูปแบบการตั้งค่าที่ถูกต้องแม่นยำที่สุดสำหรับระบบ **Smart Butcher Marketplace** บนภูมิภาคสิงคโปร์ (`ap-southeast-1`):
+
+```prisma filename="prisma/schema.prisma"
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // ใช้สำหรับรันคิวรีทั้งหมดของแอปพลิเคชัน (ผ่านพอร์ต 6543 Transaction Mode)
+  url       = env("DATABASE_URL")
+  // ใช้สำหรับคำสั่ง prisma migrate dev / deploy เท่านั้น (ผ่านพอร์ต 5432 Session Mode)
+  directUrl = env("DIRECT_URL")
+}
+```
+
+```ini filename=".env"
+# สังเกตรูปแบบชื่อผู้ใช้ของ Supavisor จะต้องเป็น: postgres.[รหัสโปรเจกต์ของคุณ]
+# 1. DATABASE_URL -> ใช้พอร์ต 6543 และบังคับเติม ?pgbouncer=true เสมอ!
+DATABASE_URL="postgresql://postgres.abcdefghijklm:YourStrongPass@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=10"
+
+# 2. DIRECT_URL -> ใช้โฮสต์ Pooler ตัวเดียวกัน (เพื่อรองรับ IPv4) แต่เปลี่ยนเป็นพอร์ต 5432 (Session Mode) และไม่มี pgbouncer=true!
+DIRECT_URL="postgresql://postgres.abcdefghijklm:YourStrongPass@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres"
+```
+
+<Callout type="warning" title="ข้อควรระวังเมื่อรหัสผ่านฐานข้อมูลมีอักขระพิเศษ">
+หากรหัสผ่านฐานข้อมูลของคุณมีอักขระพิเศษ เช่น `@`, `#`, `:`, `/`, `?` หรือ `%` คุณต้องทำการแปลงเป็นรหัส **URL-Encoding (Percent-encoding)** ใน Connection String เสมอ (เช่น แปลง `@` เป็น `%40` และแปลง `#` เป็น `%23`) มิฉะนั้นตัวอ่าน URL ของ Prisma จะแยกส่วนชื่อโฮสต์ผิดและเชื่อมต่อไม่สำเร็จ
+</Callout>
+
+### ตัวอย่างที่ 2: สคริปต์ตรวจสอบสุขภาพการเชื่อมต่อทั้งสองสาย (Healthcheck Diagnostic)
+ฟังก์ชันสำหรับทดสอบในขั้นตอนการ Deploy ว่าการเชื่อมต่อผ่าน Supavisor ทำงานได้ปกติและตรวจสอบเวอร์ชันของ PostgreSQL 16:
+
+```typescript filename="src/health/supabase-connection.health.ts"
+import { Injectable } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+
+@Injectable()
+export class SupabaseHealthService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async checkDatabaseConnectivity() {
+    const startTime = performance.now();
+
+    const result = await this.prisma.$queryRaw<
+      Array<{
+        pg_version: string;
+        current_db: string;
+        current_role: string;
+        server_time: Date;
+      }>
+    >`
+      SELECT
+        version() AS pg_version,
+        current_database() AS current_db,
+        current_user AS current_role,
+        NOW() AS server_time
+    `;
+
+    const latencyMs = Math.round((performance.now() - startTime) * 100) / 100;
+
+    return {
+      status: 'HEALTHY',
+      roundTripLatencyMs: latencyMs,
+      databaseInfo: result[0],
+    };
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การกำหนด `DIRECT_URL` บนเครือข่าย IPv4** | ใช้ `db.<ref>.supabase.co:5432` บน GitHub Actions หรือเครื่องที่ไม่มี IPv6 ทำให้รัน Migration ไม่ผ่าน | ใช้ `aws-0-<region>.pooler.supabase.com:5432` (Session Mode Pooler) ซึ่งรองรับ IPv4 เต็มรูปแบบ |
+| **รูปแบบ Username ของ Pooler** | ใส่แค่ `postgres` เฉยๆ ตอนต่อเข้าโฮสต์ `pooler.supabase.com` ทำให้เกิด Error `Tenant or user not found` | ต้องระบุรหัสโปรเจกต์ต่อท้ายเป็น `postgres.<project_ref>` เสมอเมื่อต่อเข้าโฮสต์ของ Supavisor |
+| **การใช้พอร์ต 6543 โดยไม่มีแฟล็ก** | ใช้พอร์ต `6543` ใน `DATABASE_URL` แต่ลืมใส่ `?pgbouncer=true` ทำให้คิวรีที่สองพังเพราะ Prepared Statement ซ้ำ | เติม `?pgbouncer=true` ต่อท้าย URL ที่ใช้พอร์ต `6543` ทุกครั้งโดยไม่มีข้อยกเว้น |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `DATABASE_URL` (พอร์ต 6543) คู่กับ `DIRECT_URL` (พอร์ต 5432) เมื่อ:** ใช้ Prisma ORM กับ Supabase ในทุกสภาพแวดล้อมตั้งแต่ Local Dev, Staging ไปจนถึง Production
+- **ไม่ควรนำ `DIRECT_URL` (พอร์ต 5432) ไปใส่แทน `DATABASE_URL` ในแอปพลิเคชัน Serverless:** เพราะพอร์ต 5432 ทำงานแบบ Session Mode ซึ่งมีโควตาจำนวนสายจำกัดมากและจะเต็มทันทีเมื่อ Serverless ขยายตัว
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: หากขณะเชื่อมต่อเข้ากับ Supabase Pooler คุณได้รับข้อความแจ้งเตือนว่า `FATAL: Tenant or user not found` สาเหตุเกิดจากอะไรและแก้ไขอย่างไร?**
+  - **แนวคำตอบ:** เกิดจากการใส่ชื่อ Database User ใน Connection String เป็นคำว่า `postgres` เฉยๆ เนื่องจากโฮสต์ของ Supavisor Pooler (`aws-0-<region>.pooler.supabase.com`) เป็นโครงสร้างพื้นฐานแบบ Multi-tenant ที่ใช้โฮสต์กลางร่วมกันหลายโปรเจกต์ ตัว Pooler จึงต้องทราบว่าคุณกำลังจะเชื่อมต่อไปยังฐานข้อมูลของโปรเจกต์ไหนผ่านนามสกุลของชื่อผู้ใช้ วิธีแก้คือต้องเปลี่ยนชื่อผู้ใช้ใน URL ให้เป็นรูปแบบ `postgres.<รหัส_project_ref>` เสมอ
+- **Q2: ทำไมการรัน `npx prisma migrate deploy` บน GitHub Actions ที่ต่อตรงไปยัง `db.<project_ref>.supabase.co:5432` จึงมักล้มเหลวด้วยปัญหา Network Unreachable และควรเปลี่ยนไปใช้อะไรแทน?**
+  - **แนวคำตอบ:** เพราะโฮสต์ Direct Connection (`db.<project_ref>.supabase.co`) ของ Supabase ยุคใหม่แจกจ่ายเฉพาะที่อยู่ **IPv6** เท่านั้น ในขณะที่ Runner มาตรฐานของ GitHub Actions รองรับเฉพาะเครือข่าย **IPv4** วิธีแก้ไขโดยไม่ต้องเสียเงินซื้อ IPv4 Add-on คือเปลี่ยน `DIRECT_URL` ให้ชี้ไปที่โฮสต์ของ Supavisor Pooler ในโหมด Session ที่พอร์ต 5432 (`aws-0-<region>.pooler.supabase.com:5432`) ซึ่งรองรับ IPv4 ฟรีและรองรับการทำ Migration เต็มรูปแบบ
+
+---

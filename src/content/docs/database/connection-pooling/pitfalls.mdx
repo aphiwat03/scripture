@@ -1,0 +1,68 @@
+---
+title: Anti-patterns
+category: DATABASE
+parentTitle: Connection Pooling
+version: PgBouncer & Supavisor
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การสร้าง `new PrismaClient()` หลายครั้งหรือสร้างใหม่ในทุก Request**
+   - **สาเหตุ:** ไม่ได้ใช้รูปแบบ Singleton Pattern ในการประกาศ `PrismaClient`
+   - **ผลกระทบ:** แต่ละอินสแตนซ์จะสร้าง Connection Pool แยกของตัวเองขึ้นมาเรื่อยๆ จนฐานข้อมูลเกิด `FATAL: sorry, too many clients already`
+   - **วิธีแก้:** สร้าง `PrismaClient` เป็น Global Singleton เพียงตัวเดียวตลอดทั้งโปรเจกต์
+
+2. **การตั้งค่า Pool Size สูงเกินไปโดยคิดว่ายิ่งเยอะยิ่งเร็ว**
+   - **สาเหตุ:** ตั้ง `connection_limit = 100` บนทุก Container โดยไม่คำนวณจำนวน CPU Cores ของฐานข้อมูล
+   - **ผลกระทบ:** เกิดภาวะ CPU Context Switching และแย่งชิง Lock ในฐานข้อมูลจนเวลาตอบสนองช้าลงหลายเท่าตัว
+   - **วิธีแก้:** คำนวณขนาด Pool ที่ทำงานพร้อมกันจริงตามสูตร `(CPU Cores * 2) + 1` และใช้ PgBouncer จัดการคิวด้านหน้า
+
+3. **การเชื่อมต่อ Serverless Functions เข้าหา PostgreSQL โดยตรงโดยไม่มี External Pooler**
+   - **สาเหตุ:** นำ Connection String พอร์ต 5432 ปกติไปใส่ใน Vercel หรือ AWS Lambda
+   - **ผลกระทบ:** เมื่อมีผู้ใช้งานเข้าพร้อมกัน Serverless จะขยายตัวเป็นร้อยฟังก์ชันและยิง Connection ทะลุเพดานฐานข้อมูลทันที
+   - **วิธีแก้:** เชื่อมต่อผ่าน PgBouncer หรือ Supavisor ในโหมด Transaction Pooling พร้อมระบุ `?pgbouncer=true&connection_limit=1`
+
+4. **การเรียกใช้ API ภายนอก (เช่น ส่งอีเมล หรือตัดบัตรเครดิต) อยู่ภายในบล็อก `$transaction`**
+   - **สาเหตุ:** นำ Business Logic ทั้งหมดยัดไว้ในฟังก์ชัน `prisma.$transaction(async (tx) => { ... })`
+   - **ผลกระทบ:** โปรเซสจะค้างอยู่ในสถานะ `idle in transaction` ยึด Connection ใน Pool ไว้นานหลายวินาทีจนสายใน Pool หมดเกลี้ยง
+   - **วิธีแก้:** ทำงานที่เกี่ยวกับเครือข่ายภายนอกให้เสร็จก่อนหรือหลังบล็อก `$transaction` เสมอ
+
+5. **การใช้ `kill -9` ในระดับ OS เพื่อตัด Connection ที่ค้าง**
+   - **สาเหตุ:** พยายามปิดโปรเซสที่ค้างด้วยวิธีเดียวกับแอปพลิเคชันทั่วไป
+   - **ผลกระทบ:** บังคับให้ PostgreSQL ทั้งคลัสเตอร์ต้องรีสตาร์ทและทำ Crash Recovery เพื่อป้องกัน Shared Memory เสียหาย
+   - **วิธีแก้:** ใช้คำสั่ง `SELECT pg_cancel_backend(pid)` หรือ `SELECT pg_terminate_backend(pid)` ภายใน SQL เท่านั้น
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+ตรวจสอบการตั้งค่าระบบจัดการการเชื่อมต่อสำหรับ **Smart Butcher Marketplace** ให้พร้อมรับโหลดระดับ Production:
+
+- [ ] **Singleton Prisma Instance:** ตรวจสอบแล้วว่ามีการสร้าง `new PrismaClient()` เพียงจุดเดียวในรูปแบบ Singleton และมีการเรียก `$disconnect()` เมื่อปิดแอปพลิเคชัน
+- [ ] **Pool Size Calculated:** กำหนดค่า `connection_limit` และ `pool_timeout` ใน `DATABASE_URL` สอดคล้องกับจำนวน Containers สูงสุดและสเปก CPU ของฐานข้อมูล
+- [ ] **External Pooler for Scale/Serverless:** ติดตั้ง PgBouncer หรือใช้ Supavisor ในโหมด `transaction` คั่นหน้าฐานข้อมูล พร้อมเติม `?pgbouncer=true` ใน `DATABASE_URL`
+- [ ] **Direct URL Separated:** แยก `DIRECT_URL` ที่ชี้ไปยังพอร์ต 5432 ไว้สำหรับการรัน `prisma migrate deploy` โดยเฉพาะ
+- [ ] **Short Transactions Only:** ตรวจสอบโค้ดทั้งหมดว่าไม่มีการเรียก HTTP API ภายนอกอยู่ภายในบล็อก `prisma.$transaction`
+- [ ] **Engine Timeouts Set:** ตั้งค่า `idle_in_transaction_session_timeout = '15s'` และ `statement_timeout` ใน PostgreSQL 16 เพื่อป้องกันสายค้างอัตโนมัติ
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อคุณเข้าใจสถาปัตยกรรมการจัดการ Connection Pool และการทำงานของ PgBouncer อย่างทะลุปรุโปร่งแล้ว ขั้นตอนต่อไปคือการนำความรู้นี้ไปประยุกต์ใช้บนแพลตฟอร์มคลาวด์ยอดนิยมที่มีระบบ Pooler ในตัว:
+
+<Callout type="tip" title="เส้นทางการศึกษาต่อสำหรับระบบฐานข้อมูลระดับ Production">
+1. **การใช้งาน Managed Connection Pooler (Supavisor) บนคลาวด์:**  
+   👉 **[Supabase](/docs/database/supabase)** — เจาะลึกการตั้งค่าพอร์ต 6543 (Transaction Mode) และพอร์ต 5432 (Session Mode) บน Supabase Cloud ร่วมกับ Prisma
+
+2. **การจัดการภาวะพร้อมกันและการล็อกแถวข้อมูลเชิงลึก:**  
+   👉 **[Concurrency](/docs/database/concurrency)** และ **[Transactions](/docs/database/transactions)** — เรียนรู้การทำงานร่วมกันระหว่าง Connection Pool, Isolation Levels และการป้องกันปัญหา Race Condition ตอนตัดสต็อกเนื้อ
+
+3. **การปรับแต่งประสิทธิภาพคิวรีเพื่อให้คืน Connection เข้า Pool เร็วที่สุด:**  
+   👉 **[Query Performance](/docs/database/query-performance)** และ **[Prisma ORM](/docs/backend/prisma-orm)** — ศึกษาการทำ Indexing และการปรับจูนคิวรีให้ทำงานจบภายในหลักมิลลิวินาที
+</Callout>

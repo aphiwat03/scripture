@@ -1,0 +1,104 @@
+---
+title: Network Debug
+category: BACKEND
+parentTitle: Docker
+version: Docker v27 & Compose v2
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เมื่อ Container ทั้งหมดรันอยู่ภายใต้ Custom Bridge Network เดียวกัน (`butcher_internal_net`) Docker จะเปิดใช้งาน **Embedded DNS Server** ที่ไอพี `127.0.0.11` ภายในเครือข่ายนั้น ทำให้แต่ละ Container สามารถเรียกหากันด้วย **Service Name** ได้เสมือนเป็นชื่อโดเมนจริง เช่น `butcher_api` สามารถเชื่อมต่อฐานข้อมูลได้ที่โฮสต์ `postgres_db` พอร์ต `5432` เสมอ แม้ว่า IP Address ภายในของ Container จะเปลี่ยนไปทุกครั้งที่รีสตาร์ทก็ตาม และเมื่อเกิดปัญหาในการทำงาน นักพัฒนาจำเป็นต้องเชี่ยวชาญชุดคำสั่ง Docker CLI เพื่อตรวจสอบ Log, ทรัพยากร และสถานะเครือข่ายอย่างรวดเร็ว
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+การแปลงชื่อและเส้นทางทราฟฟิกใน Docker Network มี 2 ทิศทางที่ต้องแยกให้ชัดเจน:
+1. **Container-to-Container (East-West Traffic)**: วิ่งผ่านเครือข่ายเสมือน `butcher_internal_net` โดยใช้พอร์ตภายในของโปรเซส (`CONTAINER_PORT`) เสมอ เช่น แม้เราจะแมปพอร์ต PostgreSQL ออกโฮสต์เป็น `127.0.0.1:5433:5432` แต่เมื่อ `butcher_api` คุยกับ `postgres_db` จะต้องคุยผ่านพอร์ต `5432` เสมอ
+2. **Host/Client-to-Container (North-South Traffic)**: วิ่งจากเบราว์เซอร์หรือ Postman บนเครื่องโฮสต์เข้ามาทางพอร์ตที่ถูก Publish (`HOST_PORT`) เช่น `http://localhost:3000`
+
+<Callout type="note" title="การเชื่อมต่อจากภายใน Container ออกมายัง Service ที่รันอยู่บนเครื่อง Host">
+ในกรณีที่คุณรันเฉพาะ NestJS ใน Docker แต่รันบริการอื่น (เช่น Mock Server หรือ Local Tool) ไว้บนเครื่อง Host โดยตรง คุณไม่สามารถใช้ `localhost` จากใน Container เพื่อชี้มายังเครื่อง Host ได้ ให้ใช้ชื่อโดเมนพิเศษ `host.docker.internal` แทน
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การตั้งค่า `PrismaService` ใน NestJS 11 พร้อมบันทึก Log การเชื่อมต่อและจัดการ Lifecycle เมื่อทำงานผ่าน Docker Internal DNS
+
+```typescript filename="src/modules/prisma/prisma.service.ts"
+import {
+  Injectable,
+  OnModuleInit,
+  OnModuleDestroy,
+  Logger,
+} from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
+
+@Injectable()
+export class PrismaService
+  extends PrismaClient
+  implements OnModuleInit, OnModuleDestroy
+{
+  private readonly logger = new Logger(PrismaService.name);
+
+  constructor() {
+    super({
+      log: [
+        { emit: 'Order' as never, level: 'error' },
+        { emit: 'stdout', level: 'warn' },
+      ],
+    });
+  }
+
+  async onModuleInit(): Promise<void> {
+    this.logger.log('กำลังเชื่อมต่อฐานข้อมูล PostgreSQL 16 ผ่าน Docker Network...');
+    await this.$connect();
+    this.logger.log('เชื่อมต่อฐานข้อมูล PostgreSQL 16 สำเร็จพร้อมให้บริการ');
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    this.logger.log('ได้รับสัญญาณปิดระบบ กำลังตัดการเชื่อมต่อฐานข้อมูลอย่างปลอดภัย...');
+    await this.$disconnect();
+  }
+}
+```
+
+ตัวอย่างที่ 2: ชุดคำสั่ง Docker Compose CLI มาตรฐานสำหรับการตรวจสอบสถานะ การดู Log การตรวจปริมาณการใช้ RAM/CPU และการเข้าถึงฐานข้อมูลเพื่อ Debug ในระบบจริง
+
+```bash filename="scripts/debug-containers.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 1. ตรวจสอบสถานะการทำงานและสถานะ Healthcheck ของทุก Container
+docker compose ps
+
+# 2. ดู Log ล่าสุด 100 บรรทัดของ NestJS API พร้อมติดตามแบบ Real-time และแสดงเวลา
+docker compose logs -f --tail=100 --timestamps butcher_api
+
+# 3. ตรวจสอบปริมาณการใช้ CPU, RAM (Memory Limit) และ Network I/O แบบสดๆ
+docker stats butcher_nestjs_api butcher_postgres_16 --no-stream
+
+# 4. ทดสอบรันคำสั่งตรวจสอบตารางสินค้าเนื้อวากิวใน PostgreSQL 16 โดยตรงผ่าน Container
+docker compose exec postgres_db psql -U butcher_admin -d smart_butcher_db -c \
+  "SELECT id, sku, name, \"pricePerKg\" FROM \"Product\" ORDER BY \"createdAt\" DESC LIMIT 5;"
+
+# 5. เปิด Shell เข้าไปตรวจสอบไฟล์ใน Container ของ NestJS (ในฐานะผู้ใช้ node)
+docker compose exec butcher_api sh
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การอ้างอิงที่อยู่ข้าม Container** | ฮาร์ดโค้ด IP Address ภายใน เช่น `172.18.0.2` ลงใน `DATABASE_URL` ซึ่งจะเปลี่ยนและพังทันทีเมื่อ Container ถูกรีครีเอต | อ้างอิงด้วยชื่อ Service (`postgres_db`) ผ่านระบบ Embedded DNS ของ Custom Bridge Network เสมอ |
+| **การดู Log เพื่อแก้ปัญหา** | ใช้ `docker compose logs` โดยไม่ใส่ `--tail` บนระบบที่รันมานานหลายสัปดาห์ ทำให้เทอร์มินัลค้างเพราะดึง Log หลายล้านบรรทัด | ใช้ `docker compose logs --tail=100 -f <service>` เพื่อดูเฉพาะเหตุการณ์ล่าสุด |
+| **การติดตั้งแก้ไขไฟล์สดใน Container** | เข้าไปแก้โค้ดใน `dist/` ผ่าน `docker compose exec` เพราะการแก้ไขทั้งหมดจะหายไปทันทีเมื่อรีสตาร์ท Container | แก้ไขที่ซอร์สโค้ดแล้วสั่ง `docker compose up -d --build` เพื่อสร้าง Image ใหม่ที่เป็นมาตรฐาน |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `docker compose exec` เมื่อ**: ต้องการตรวจสอบค่า Environment, ทดสอบการเชื่อมต่อเครือข่าย หรือรันคำสั่ง `psql` / `prisma migrate status` เพื่อวินิจฉัยปัญหาเฉพาะหน้า
+- **ไม่ควรใช้ `docker compose exec` เมื่อ**: ต้องการเปลี่ยนแปลงโครงสร้างระบบหรือแก้ไขโค้ดถาวร ทุกการเปลี่ยนแปลงต้องทำผ่านโค้ด, `Dockerfile`, หรือ `compose.yaml` (Infrastructure as Code) เสมอ
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: หากใน `compose.yaml` เราตั้งค่าพอร์ตของ `postgres_db` เป็น `ports: ["5435:5432"]` ตัวแปร `DATABASE_URL` ของ `butcher_api` ที่อยู่ใน Docker Network เดียวกันต้องใช้พอร์ต `5435` หรือ `5432` เพราะอะไร?
+   - **แนวคำตอบ**: ต้องใช้พอร์ต `5432` (`postgresql://...@postgres_db:5432/...`) เพราะการสื่อสารระหว่าง Container ภายใน Docker Network เดียวกันจะคุยกันที่พอร์ตของโพรเซสภายใน Container โดยตรง (`5432`) ส่วนพอร์ต `5435` เป็นพอร์ตที่เปิดไว้สำหรับโปรแกรมที่รันอยู่บนเครื่อง Host (เช่น DBeaver หรือ Prisma Studio บนเครื่องเรา) เพื่อเชื่อมต่อเข้ามาเท่านั้น
+2. **คำถาม**: คำสั่ง `docker compose restart butcher_api` ต่างจาก `docker compose up -d --force-recreate butcher_api` อย่างไรเมื่อเราเพิ่งแก้ไขค่าในไฟล์ `.env`?
+   - **แนวคำตอบ**: `docker compose restart` จะสั่งหยุดและสตาร์ทตัว Container เดิมซ้ำโดยไม่อ่านค่า Environment Variables ใหม่จากไฟล์ `.env` ในขณะที่ `docker compose up -d` (หรือ `--force-recreate`) จะอ่านการตั้งค่าล่าสุดและสร้าง Container ใหม่พร้อมฉีดค่า `.env` ที่อัปเดตแล้วเข้าไป
+
+---

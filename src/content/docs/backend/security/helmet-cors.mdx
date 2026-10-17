@@ -1,0 +1,162 @@
+---
+title: Helmet CORS
+category: BACKEND
+parentTitle: Security
+version: OWASP Top 10 API
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+โดยค่าเริ่มต้น HTTP Server ของ Node.js / Express จะส่ง Header ที่เปิดเผยข้อมูลเทคโนโลยีเบื้องหลัง เช่น `X-Powered-By: Express` และไม่ได้ส่ง HTTP Security Headers ที่สั่งให้เบราว์เซอร์เปิดเกราะป้องกันตัวเอง การติดตั้งมิดเดิลแวร์ **Helmet** ใน NestJS 11 จะช่วยเพิ่มและปรับแต่ง HTTP Response Headers กว่า 11 รายการในบรรทัดเดียว เพื่อป้องกันทั้งการถูกนำเว็บไปครอบด้วย `<iframe>` (Clickjacking), การเดาชนิดไฟล์ผิดพลาด (MIME Sniffing) และการบังคับใช้ HTTPS ตลอดกาล (HSTS)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+Header สำคัญที่ **Helmet** ตั้งค่าให้กับทุก Response มีดังนี้:
+- **`Strict-Transport-Security` (HSTS)**: เช่น `max-age=31536000; includeSubDomains; preload` สั่งให้เบราว์เซอร์จดจำว่าต้องเชื่อมต่อกับโดเมนนี้ผ่าน `HTTPS` เท่านั้นเป็นเวลา 1 ปี ป้องกันการโจมตีแบบ SSL Stripping (Man-in-the-Middle)
+- **`X-Content-Type-Options: nosniff`**: ห้ามเบราว์เซอร์เดาชนิดไฟล์เอง (MIME-type sniffing) เช่น หากลูกค้าอัปโหลดไฟล์รูปสลิปโอนเงินแต่แอบยัดโค้ด HTML ไว้ข้างใน เบราว์เซอร์จะไม่รันไฟล์นั้นเป็น HTML
+- **`X-Frame-Options: DENY` และ `Content-Security-Policy: frame-ancestors 'none'`**: ป้องกันแฮกเกอร์นำหน้าชำระเงินของเราไปซ้อนใน `<iframe>` โปร่งใสเพื่อหลอกให้ลูกค้ากดปุ่ม (Clickjacking)
+- **`Content-Security-Policy` (CSP)**: กำหนดแหล่งที่มาของ Script, Image, และ API ที่อนุญาตให้โหลดได้
+
+เมื่อใช้งานร่วมกับ **CORS ที่มี `credentials: true`** (เพื่อรับส่ง `HttpOnly Cookie`) เซิร์ฟเวอร์จะต้องตอบกลับ Header `Access-Control-Allow-Origin` เป็นชื่อโดเมนที่ตรงกับ `Origin` ของผู้เรียกแบบเฉพาะเจาะจงเท่านั้น (เช่น `https://smartbutcher.co.th`) และเพิ่ม Header `Vary: Origin` เสมอเพื่อไม่ให้ CDN แคช CORS Header ของโดเมนหนึ่งไปส่งให้โดเมนอื่น
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การติดตั้งและตั้งค่า Helmet ระดับ Production สำหรับ API Server ใน main.ts (พื้นฐาน)
+```typescript filename="src/main.ts"
+import { NestFactory } from '@nestjs/core';
+import helmet from 'helmet';
+import * as cookieParser from 'cookie-parser';
+import { AppModule } from './app.module';
+import { configureCoreApiSecurity } from './common/security/bootstrap-security.config';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+
+  // 1. ติดตั้ง Helmet พร้อมตั้งค่า Security Headers ที่เข้มงวดสำหรับ REST API
+  app.use(
+    helmet({
+      // ปิด X-Powered-By: Express อัตโนมัติ
+      hidePoweredBy: true,
+      // บังคับ HTTPS นาน 1 ปีเต็ม พร้อมครอบคลุมทุก Subdomain
+      hsts: {
+        maxAge: 31536000,
+        includeSubDomains: true,
+        preload: true,
+      },
+      // ป้องกัน MIME Sniffing
+      noSniff: true,
+      // ป้องกัน Clickjacking 100%
+      frameguard: {
+        action: 'deny',
+      },
+      // ตั้งค่า Content Security Policy สำหรับ API (ไม่อนุญาตให้รันสคริปต์หรือฝังเฟรมใดๆ)
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'none'"],
+          frameAncestors: ["'none'"],
+        },
+      },
+      // อนุญาตให้ Frontend ที่อยู่คนละ Subdomain (เช่น smartbutcher.co.th เรียก api.smartbutcher.co.th) โหลดทรัพยากรได้
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
+    }),
+  );
+
+  // 2. ติดตั้ง Cookie Parser และตั้งค่า Validation / Body Size Limit
+  app.use(cookieParser());
+  configureCoreApiSecurity(app);
+
+  await app.listen(process.env.PORT ?? 3000);
+}
+bootstrap();
+```
+
+### ตัวอย่างที่ 2: การสร้าง Dynamic CORS Configuration Factory ที่รองรับ Credentials และ Subdomains อย่างปลอดภัย (ขั้นสูง)
+```typescript filename="src/common/security/cors-options.factory.ts"
+import { CorsOptions } from '@nestjs/common/interfaces/external/cors-options.interface';
+import { ForbiddenException } from '@nestjs/common';
+
+export function createProductionCorsOptions(
+  allowedOriginsEnv: string | undefined,
+): CorsOptions {
+  const explicitWhitelist = new Set(
+    (allowedOriginsEnv ?? 'https://smartbutcher.co.th,https://admin.smartbutcher.co.th')
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter(Boolean),
+  );
+
+  return {
+    origin: (
+      requestOrigin: string | undefined,
+      callback: (err: Error | null, allow?: boolean) => void,
+    ) => {
+      // 1. คำขอที่ไม่มี Origin Header (เช่น Mobile App, Webhook จากธนาคาร, หรือ Server-to-Server SSR)
+      if (!requestOrigin) {
+        return callback(null, true);
+      }
+
+      // 2. ตรวจสอบว่าอยู่ในรายการ Whitelist ที่อนุญาตหรือไม่
+      if (explicitWhitelist.has(requestOrigin)) {
+        return callback(null, true);
+      }
+
+      // 3. ในโหมด Development อนุญาต localhost เฉพาะพอร์ตของ Next.js (3000, 3001)
+      if (
+        process.env.NODE_ENV === 'development' &&
+        /^http:\/\/localhost:(3000|3001)$/.test(requestOrigin)
+      ) {
+        return callback(null, true);
+      }
+
+      return callback(
+        new ForbiddenException(
+          `CORS Policy Violation: Origin "${requestOrigin}" is not permitted to access Smart Butcher API`,
+        ),
+        false,
+      );
+    },
+    credentials: true, // เปิดรับส่ง HttpOnly Cookie และ Authorization Header
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-CSRF-Token',
+      'Idempotency-Key',
+      'X-Request-Id',
+    ],
+    exposedHeaders: [
+      'Location',
+      'X-Request-Id',
+      'X-RateLimit-Limit',
+      'X-RateLimit-Remaining',
+      'X-RateLimit-Reset',
+    ],
+    maxAge: 86400, // แคช Preflight OPTIONS 24 ชั่วโมง
+  };
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/common/security/cors-helmet-comparison.ts"
+// ❌ ผิด (Anti-pattern): สะท้อนค่า Origin ทุกตัวกลับไปเป็น true (origin: true) คู่กับ credentials: true!
+export const DANGEROUS_CORS_CONFIG = {
+  // อันตรายร้ายแรง! การใส่ origin: true แปลว่าเว็บพนันหรือเว็บแฮกเกอร์ใดๆ ในโลกก็สามารถยิง API
+  // พร้อมแนบ HttpOnly Cookie ของลูกค้าเข้ามาสั่งเนื้อฟรีได้ทั้งหมด!
+  origin: true,
+  credentials: true,
+};
+
+// ✅ ถูก (Best Practice): เมื่อเปิด credentials: true ต้องตรวจสอบ requestOrigin กับ Set ของ Whitelist ที่ระบุโดเมนชัดเจนเท่านั้น
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรเปิดใช้งาน `helmet()` ในทุกโปรเจกต์ NestJS เสมอ**: โดยหากมีการเปิดหน้าเอกสาร Swagger UI (`/api/docs`) บนโหมด Development อาจต้องผ่อนปรน `contentSecurityPolicy` เฉพาะในโหมด Development เพื่อให้สคริปต์ของหน้า Swagger โหลดได้
+- **ไม่ควรใช้ `origin: true` หรือ Regex ที่หละหลวม (เช่น `/smartbutcher/`) ใน CORS**: เพราะแฮกเกอร์สามารถจดโดเมนชื่อ `https://evil-smartbutcher.com` เพื่อให้ผ่าน Regex ของเราได้ทันที!
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมการตั้งค่า CORS เป็น `{ origin: true, credentials: true }` จึงอันตรายยิ่งกว่าการตั้งค่า `{ origin: '*' }` เสียอีก?
+   - **แนวคำตอบ**: เพราะถ้าเราตั้ง `{ origin: '*', credentials: true }` เบราว์เซอร์สมัยใหม่จะตรวจพบว่าผิดมาตรฐาน W3C และบล็อกไม่ให้ทำงานตั้งแต่แรก แต่การตั้ง `{ origin: true, credentials: true }` ใน Express/NestJS คือการสั่งให้เซิร์ฟเวอร์อ่านค่า `Origin` จาก Request ของใครก็ได้ แล้วคัดลอกชื่อโดเมนนั้นใส่ลงใน `Access-Control-Allow-Origin` ตอบกลับไปแบบไดนามิก ทำให้เบราว์เซอร์เข้าใจว่าเซิร์ฟเวอร์อนุญาตเว็บของผู้โจมตีอย่างเป็นทางการ และยอมส่ง `HttpOnly Cookie` ของเหยื่อข้ามโดเมนไปให้ทันที!
+2. **คำถาม**: Header `Cross-Origin-Resource-Policy` (CORP) ของ Helmet ส่งผลอย่างไรเมื่อ Frontend ของเราอยู่ที่ `https://smartbutcher.co.th` แต่ API และรูปภาพอยู่ที่ `https://api.smartbutcher.co.th`?
+   - **แนวคำตอบ**: ค่าเริ่มต้นของ Helmet จะตั้ง `Cross-Origin-Resource-Policy: same-origin` ซึ่งจะบล็อกไม่ให้หน้าเว็บที่อยู่คนละ Subdomain โหลดรูปภาพหรือข้อมูลได้ ดังนั้นเมื่อแยก Subdomain ระหว่าง Frontend กับ API เราจึงต้องตั้งค่าใน Helmet เป็น `crossOriginResourcePolicy: { policy: 'cross-origin' }` หรือ `'same-site'` เพื่อให้โดเมนภายใต้ `*.smartbutcher.co.th` โหลดข้อมูลร่วมกันได้
+
+---

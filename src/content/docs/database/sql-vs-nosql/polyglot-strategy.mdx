@@ -1,0 +1,176 @@
+---
+title: Polyglot Strategy
+category: DATABASE
+parentTitle: SQL vs NoSQL
+version: Polyglot Persistence
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในอดีต องค์กรมักพยายามยัดเยียดงานทุกประเภทลงในฐานข้อมูลยี่ห้อเดียว แต่สถาปัตยกรรมระดับ Enterprise ยุคปัจจุบันใช้แนวคิดที่เรียกว่า **Polyglot Persistence (การใช้ฐานข้อมูลหลายประเภทร่วมกันตามความถนัดของแต่ละงานในระบบเดียว)**
+เหมือนกับในร้าน **Smart Butcher Marketplace** ที่เราไม่ได้ใช้มีดเล่มเดียวทำทุกอย่าง:
+- เราใช้ **มีดแล่เนื้อญี่ปุ่นความแม่นยำสูง (PostgreSQL 16)** เป็นฐานข้อมูลหลัก (Primary System of Record) สำหรับเก็บข้อมูลลูกค้า หมวดหมู่ สินค้า คำสั่งซื้อ รายการตัดแต่ง และการชำระเงิน เพราะต้องการความถูกต้องระดับ **100% ACID**
+- ควบคู่ไปกับการใช้ **ถาดสแตนเลสวางหน้าร้านที่หยิบได้ในเสี้ยววินาที (Redis)** สำหรับทำ Caching แค็ตตาล็อกสินค้า, จัดการคิวงานส่งอีเมลใบเสร็จ และทำ Rate Limiting ป้องกันบอท!
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ทำไมแกนกลางของระบบร้านค้าออนไลน์ (E-Commerce Core: `users`, `categories`, `products`, `orders`, `order_items`, `payments`) จึงต้องสร้างอยู่บน **PostgreSQL 16** เท่านั้น?
+1. **การป้องกันปัญหาขายสินค้าเกินสต็อก (Preventing Overselling via Row-Level Locking & Constraints):**
+   เมื่อเนื้อวากิว A5 ชิ้นสุดท้าย (`stock_weight_gr = 500`) ถูกลูกค้า 10 คนกดสั่งซื้อพร้อมกันในเสี้ยววินาทีเดียว PostgreSQL 16 มีกลไก Row-level Lock (`SELECT ... FOR UPDATE` หรือ Atomic `UPDATE ... WHERE stock_weight_gr >= 500`) คู่กับ `CHECK (stock_weight_gr >= 0)` ที่รับประกันในระดับเคอร์เนลของฐานข้อมูลว่าจะมีลูกค้าเพียง 1 คนเท่านั้นที่ตัดสต็อกสำเร็จ ส่วนอีก 9 คนจะถูกปฏิเสธอย่างปลอดภัย ไม่มีทางที่สต็อกจะติดลบ!
+2. **ความสมบูรณ์ของธุรกรรมข้ามตาราง (Multi-Table ACID Transaction):**
+   การกดสั่งซื้อ 1 ครั้งต้องทำการ: (1) ตัดสต็อกใน `products`, (2) สร้างหัวบิลใน `orders`, (3) สร้างรายการย่อยใน `order_items`, และ (4) บันทึกสถานะใน `payments` ทั้ง 4 ตารางนี้ต้องสำเร็จพร้อมกันทั้งหมดหรือยกเลิกทั้งหมด (`BEGIN ... COMMIT`) ซึ่งเป็นจุดแข็งที่สุดของ PostgreSQL 16
+3. **ความถูกต้องทางการเงินและการตรวจสอบย้อนหลัง (Financial Precision & Referential Integrity):**
+   ชนิดข้อมูล `NUMERIC(12, 2)` คำนวณเงินได้แม่นยำไร้ข้อผิดพลาดจากการปัดเศษ และ Foreign Key (`ON DELETE RESTRICT`) ป้องกันไม่ให้ใครเผลอลบข้อมูลสินค้าหรือลูกค้าที่มีประวัติการซื้อขายไปแล้วได้
+
+```text filename="docs/database/sql-vs-nosql.txt"
+                    ┌──────────────────────────────────────────┐
+                    │     Smart Butcher Backend (NestJS)       │
+                    └───────────┬──────────────────┬───────────┘
+                                │                  │
+        1. อ่านแคช / เช็ค Rate Limit (< 0.5ms)      │ 2. ธุรกรรมหลัก ACID (Orders / Stock / Payments)
+                                ▼                  ▼
+                    ┌───────────────────┐  ┌───────────────────────────────────┐
+                    │     Redis 7       │  │          PostgreSQL 16            │
+                    │  (In-Memory KV)   │  │   (Primary System of Record)      │
+                    ├───────────────────┤  ├───────────────────────────────────┤
+                    │ • Catalog Cache   │  │ • users, categories, products     │
+                    │ • Rate Limiter    │  │ • orders, order_items, payments   │
+                    │ • BullMQ Queues   │  │ • JSONB origin_metadata + FTS     │
+                    └───────────────────┘  └───────────────────────────────────┘
+```
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: โค้ดผสานการทำงานแบบ Polyglot Persistence (Redis Rate Limit + PostgreSQL 16 ACID Transaction + Redis Cache Invalidation)
+ตัวอย่างการใช้งานจริงที่สมบูรณ์แบบที่สุดของการผสาน **Redis** และ **PostgreSQL 16 (ผ่าน Prisma)** เข้าด้วยกันในกระบวนการสั่งซื้อเนื้อพรีเมียม:
+
+```typescript filename="src/orders/polyglot-checkout.service.ts"
+import { Injectable, BadRequestException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { RedisRateLimiterService } from '../security/redis-rate-limiter.service';
+import Redis from 'ioredis';
+
+@Injectable()
+export class PolyglotCheckoutService {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: Redis,
+    private readonly rateLimiter: RedisRateLimiterService
+  ) {}
+
+  async placeButcherOrder(params: {
+    userId: string;
+    productId: string;
+    quantityGrams: number;
+    paymentMethod: string;
+  }) {
+    // ขั้นตอนที่ 1 [Redis]: ตรวจสอบ Rate Limit ในหน่วยความจำ (< 0.3ms) เพื่อกันบอทยิงรัวๆ ก่อนถึง Postgres
+    await this.rateLimiter.enforceOrderRateLimit(params.userId, 5, 10);
+
+    // ขั้นตอนที่ 2 [PostgreSQL 16]: รัน ACID Transaction ตัดสต็อกและสร้างใบสั่งซื้ออย่างแม่นยำ 100%
+    const completedOrder = await this.prisma.$transaction(async (tx) => {
+      // ตัดสต็อกแบบ Atomic พร้อมตรวจสอบว่ามีเนื้อพอขายหรือไม่ในคำสั่งเดียว
+      const updatedCount = await tx.product.updateMany({
+        where: {
+          id: params.productId,
+          stockWeightGr: { gte: params.quantityGrams },
+        },
+        data: {
+          stockWeightGr: { decrement: params.quantityGrams },
+        },
+      });
+
+      if (updatedCount.count === 0) {
+        throw new BadRequestException('Insufficient Wagyu stock available.');
+      }
+
+      const product = await tx.product.findUniqueOrThrow({
+        where: { id: params.productId },
+        select: { id: true, pricePerKg: true, stockWeightGr: true },
+      });
+
+      const totalAmount = product.pricePerKg.mul(params.quantityGrams).div(1000);
+
+      // สร้างใบสั่งซื้อ รายการย่อย และบันทึกการชำระเงินเริ่มต้นใน Transaction เดียวกัน
+      const order = await tx.order.create({
+        data: {
+          userId: params.userId,
+          status: 'PENDING',
+          totalAmount,
+          items: {
+            create: {
+              productId: product.id,
+              quantityGrams: params.quantityGrams,
+              unitPricePerKg: product.pricePerKg,
+              subtotal: totalAmount,
+            },
+          },
+          payment: {
+            create: {
+              amount: totalAmount,
+              paymentMethod: params.paymentMethod,
+            },
+          },
+        },
+        include: { items: true, payment: true },
+      });
+
+      return { order, remainingStock: product.stockWeightGr };
+    });
+
+    // ขั้นตอนที่ 3 [Redis]: หลังจาก COMMIT ลง Postgres สำเร็จแล้ว จึงค่อยล้างแคชหน้ารายการสินค้าและส่งงานเข้าคิว!
+    await this.redis.del('smart_butcher:catalog:featured_wagyu:v1');
+
+    return completedOrder.order;
+  }
+}
+```
+
+### ตัวอย่างที่ 2: ตารางเปรียบเทียบการตัดสินใจเลือกฐานข้อมูลตามฟีเจอร์ของระบบ (Architecture Decision Matrix)
+เราสามารถสรุปกฎการเลือกใช้ฐานข้อมูลสำหรับแต่ละโมดูลในโปรเจกต์ออกมาเป็นโค้ดตั้งค่าสถาปัตยกรรมที่ชัดเจน:
+
+```typescript filename="src/config/storage-architecture.manifest.ts"
+export const SMART_BUTCHER_STORAGE_ARCHITECTURE = {
+  coreTransactionalData: {
+    tables: ['users', 'categories', 'products', 'orders', 'order_items', 'payments'],
+    engine: 'PostgreSQL 16',
+    rationale: 'Requires strict ACID transactions, NUMERIC financial precision, and Foreign Key integrity.',
+  },
+  semiStructuredProductSpecs: {
+    storageLocation: 'products.origin_metadata (JSONB column)',
+    engine: 'PostgreSQL 16 (JSONB + GIN Index)',
+    rationale: 'Eliminates the need for a separate MongoDB cluster while keeping specs transactional with products.',
+  },
+  highSpeedCacheAndRateLimiting: {
+    keys: ['smart_butcher:catalog:*', 'smart_butcher:ratelimit:*', 'smart_butcher:session:*'],
+    engine: 'Redis 7 (In-Memory)',
+    rationale: 'Sub-millisecond latency (< 0.5ms), atomic Lua scripts, and automatic TTL expiration.',
+  },
+  productMediaAndReceipts: {
+    buckets: ['product-images', 'payment-slips'],
+    engine: 'S3-Compatible Object Storage (Supabase Storage / Cloudflare R2)',
+    rationale: 'Keeps binary blobs out of PostgreSQL data pages to maintain fast backups and small DB size.',
+  },
+} as const;
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การนำฐานข้อมูลมารวมเกินความจำเป็น** | โปรเจกต์เพิ่งเริ่มต้นแต่ตั้งทั้ง Postgres, MongoDB, Cassandra, Neo4j และ Elasticsearch พร้อมกันจนทีมดูแลไม่ไหว | เริ่มต้นด้วย **PostgreSQL 16** (ใช้ทั้ง Relational + `JSONB` + Full-Text Search) คู่กับ **Redis** เมื่อจำเป็นเท่านั้น |
+| **ลำดับการล้างแคชใน Transaction** | สั่งลบแคชใน Redis *ก่อน* ที่บล็อก `prisma.$transaction` จะ `COMMIT` เสร็จ ทำให้มีจังหวะที่แคชกลับไปอ่านค่าเก่ามาเติมใหม่ | สั่งลบหรืออัปเดตแคชใน Redis **หลังจากที่ `prisma.$transaction` ทำการ `COMMIT` สำเร็จแล้วเท่านั้น** |
+| **การทำ Dual-Write โดยไม่มีตัวหลัก** | พยายามเขียนข้อมูลใบสั่งซื้อลงทั้ง Postgres และ MongoDB พร้อมกันในโค้ด พอตัวหนึ่งพังข้อมูลสองฝั่งก็ไม่ตรงกัน | กำหนดให้ **PostgreSQL 16 เป็น Single Source of Truth เพียงหนึ่งเดียว** ส่วนระบบรองให้รับข้อมูลผ่าน Cache-Aside หรือ Event Queue |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้สถาปัตยกรรม PostgreSQL 16 + Redis เมื่อ:** พัฒนาระบบ E-Commerce, ระบบจองคิว, ระบบ FinTech หรือระบบ SaaS ระดับ Production ที่ต้องการทั้งความถูกต้องของข้อมูล 100% และความเร็วในการตอบสนองระดับสูงสุด
+- **ไม่ควรเพิ่มฐานข้อมูลตัวที่ 3 หรือ 4 เข้ามาในระบบ:** จนกว่าคุณจะมีตัวเลขพิสูจน์ชัดเจน (Benchmark Metrics) ว่าฟีเจอร์ในตัวของ PostgreSQL 16 ไม่สามารถรองรับปริมาณข้อมูลเฉพาะทางส่วนนั้นได้อีกต่อไป
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ในการทำ Polyglot Persistence ระหว่าง PostgreSQL กับ Redis ทำไมเราจึงต้องสั่งลบแคช (`redis.del`) หลังจากที่ `prisma.$transaction` ทำการ `COMMIT` เสร็จแล้วเท่านั้น ห้ามสั่งลบแคชข้างในบล็อก Transaction?**
+  - **แนวคำตอบ:** เพราะขณะที่โค้ดยังอยู่ในบล็อก `$transaction` การเปลี่ยนแปลงใน PostgreSQL ยังไม่ถูก `COMMIT` (คนอื่นที่เข้ามาอ่านจะยังเห็นข้อมูลเก่าตามหลัก Isolation) หากเราสั่ง `redis.del()` ข้างในบล็อกก่อนที่จะ `COMMIT` แล้วในเสี้ยววินาทีนั้นมีผู้ใช้งานอีกรายเปิดหน้าเว็บเข้ามาพอดี ผู้ใช้รายนั้นจะเจอ Cache Miss แล้ววิ่งไปดึง **"ข้อมูลเก่าที่ยังไม่ Commit"** จาก PostgreSQL กลับมาเขียนทับลงใน Redis อีกครั้ง! ส่งผลให้แคชเก็บข้อมูลเก่าค้างไปจนกว่าจะหมดอายุ TTL
+- **Q2: หากผู้บริหารถามคุณว่า "ทำไมระบบร้านค้าออนไลน์ของเราถึงเลือกใช้ PostgreSQL 16 เป็นฐานข้อมูลหลักแทนที่จะใช้ NoSQL ทั้งหมด?" คุณจะให้เหตุผลทางวิศวกรรมและธุรกิจอย่างไร?**
+  - **แนวคำตอบ:**
+    1. **ความถูกต้องทางการเงินและสต็อก (ACID & Financial Integrity):** ระบบร้านค้าห้ามขายของเกินสต็อกที่มีและยอดเงินในใบเสร็จต้องตรงกับรายการสินค้าทุกสตางค์ ซึ่ง PostgreSQL 16 รับประกันผ่าน Multi-table ACID Transactions และชนิดข้อมูล `NUMERIC`
+    2. **ความยืดหยุ่นที่ครบจบในตัวเดียว (Multi-model Capabilities):** PostgreSQL 16 ไม่ได้เป็นแค่ตารางแบบเก่า แต่รองรับทั้ง `JSONB` (ทำงานแทน Document NoSQL ได้), Full-Text Search (ค้นหาข้อความได้) และ Vector Search (`pgvector`) ทำให้ลดต้นทุนและภาระในการดูแลรักษาฐานข้อมูลหลายยี่ห้อลงได้อย่างมหาศาล
+
+---

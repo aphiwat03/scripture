@@ -1,0 +1,120 @@
+---
+title: Normalization
+category: DATABASE
+parentTitle: Database Design
+version: Relational Modeling
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+**Normalization** คือกระบวนการจัดระเบียบโครงสร้างตารางเพื่อลดความซ้ำซ้อนของข้อมูล (Data Redundancy) และป้องกันความผิดปกติที่เกิดจากการเพิ่ม ลบ หรือแก้ไขข้อมูล (Update, Insert, and Delete Anomalies) โดยระดับที่ใช้เป็นมาตรฐานในระบบ Production คือ **1NF ถึง 3NF**:
+1. **First Normal Form (1NF):** ข้อมูลในแต่ละช่อง (Cell) ต้องเป็นค่าเดี่ยว (Atomic Value) ห้ามเก็บหลายค่าปนกันในช่องเดียว และห้ามสร้างคอลัมน์ซ้ำๆ กัน เช่น `cut_type_1`, `cut_type_2`, `cut_type_3`
+2. **Second Normal Form (2NF):** ต้องผ่าน 1NF ก่อน และคอลัมน์ที่ไม่ใช่คีย์หลักต้องขึ้นตรงต่อ Primary Key **ทั้งชุด** (Partial Dependency Elimination) มักพบในตารางที่มี Composite Key เช่น ในตาราง `order_items` ไม่ควรเก็บ `product_origin_country` แบบถาวรเพื่อใช้เป็นแหล่งอ้างอิงหลัก เพราะประเทศต้นกำเนิดขึ้นอยู่กับ `product_id` เพียงอย่างเดียว ไม่ได้ขึ้นอยู่กับ `order_id`
+3. **Third Normal Form (3NF):** ต้องผ่าน 2NF ก่อน และคอลัมน์ที่ไม่ใช่คีย์หลักต้องไม่ขึ้นอยู่กับคอลัมน์อื่นที่ไม่ใช่คีย์หลัก (Transitive Dependency Elimination) เช่น ในตาราง `orders` มี `user_id` อยู่แล้ว ไม่ควรเก็บ `user_loyalty_tier_discount_percent` ที่แปรผันตามระดับสมาชิกของผู้ใช้ไว้ในตารางออเดอร์โดยตรง แต่ควรแยกตารางระดับสมาชิกออกไป
+
+ส่วน **Denormalization** คือการจงใจเก็บข้อมูลซ้ำซ้อนหรือรวมข้อมูลบางส่วนเข้าด้วยกันอย่างมีแบบแผน **หลังจากที่เราออกแบบระบบให้เป็น 3NF เรียบร้อยแล้ว** เพื่อแลกกับความเร็วในการอ่านข้อมูล (Read Performance) ลดการทำ `JOIN` ข้ามตารางขนาดใหญ่ หรือเพื่อเก็บประวัติข้อมูล ณ เวลานั้น
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ในแง่การทำงานของ PostgreSQL 16:
+- **ข้อดีของ Normalization (3NF) ต่อการเขียนข้อมูล (Write-heavy):** ข้อมูลแต่ละชิ้นถูกเก็บไว้จุดเดียว เช่น ชื่อหมวดหมู่เนื้อเก็บอยู่ที่ตาราง `categories` เพียงแถวเดียว เมื่อต้องการแก้ไขชื่อหมวดหมู่ PostgreSQL จะแก้ไขเพียง 1 Tuple ใน 1 Page ไม่เกิดการล็อกแถวจำนวนมากในตาราง `products` และไม่สร้าง Dead Tuples จำนวนมหาศาล
+- **ต้นทุนของ Normalization ต่อการอ่านข้อมูล (Read-heavy):** เมื่อต้องแสดงหน้า Dashboard สรุปยอดขายที่ต้องดึงข้อมูลจาก 6 ตารางพร้อมกัน Query Planner ต้องทำ Hash Join หรือ Nested Loop Join ข้ามตารางทั้งหมด ซึ่งใช้ทั้ง CPU และ `work_mem`
+- **กลไกของ Denormalization:** เมื่อเราเพิ่มคอลัมน์สรุปผล เช่น `total_amount` ไว้ในตาราง `orders` (แทนที่จะคิวรี `SUM(quantity * unit_price)` จาก `order_items` ทุกครั้งที่เปิดดูหน้ารายการคำสั่งซื้อ) จะทำให้การอ่านข้อมูลทำได้ด้วยการอ่านแถวเดียว (Index Scan บนตารางเดียว) แต่ต้องแลกมาด้วยภาระในการรักษาความสอดคล้องของข้อมูล (Consistency) ตอนเขียน
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การแก้ปัญหาตารางที่ผิดหลัก 1NF-3NF ให้เป็นโครงสร้าง 3NF ที่ถูกต้อง
+เปรียบเทียบตารางที่ออกแบบรวมทุกอย่างไว้ด้วยกันจนเกิดความซ้ำซ้อน กับการแยกตารางตามหลัก 3NF:
+
+```sql filename="sql/05_normalization_1nf_to_3nf.sql"
+-- ❌ โครงสร้างที่ผิดหลัก 1NF, 2NF และ 3NF:
+-- เก็บรายการสินค้าหลายชิ้นในช่องเดียว และเก็บชื่อหมวดหมู่ซ้ำซ้อนในทุกสินค้า
+/*
+CREATE TABLE bad_product_catalog (
+    product_sku VARCHAR(50) PRIMARY KEY,
+    product_name VARCHAR(200),
+    available_weights_grams VARCHAR(100), -- ผิด 1NF: '200,300,500'
+    category_code VARCHAR(30),
+    category_name VARCHAR(100),           -- ผิด 3NF: ขึ้นอยู่กับ category_code ไม่ใช่ product_sku
+    category_storage_temp_c SMALLINT      -- ผิด 3NF: อุณหภูมิห้องเย็นขึ้นอยู่กับหมวดหมู่
+);
+*/
+
+-- ✅ โครงสร้างที่ถูกต้องตามหลัก 3NF:
+CREATE TABLE storage_categories (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    code VARCHAR(30) NOT NULL UNIQUE,
+    name VARCHAR(100) NOT NULL,
+    storage_temp_celsius SMALLINT NOT NULL -- แก้ไขที่เดียว มีผลกับสินค้าทุกชิ้นในหมวดนี้ทันที
+);
+
+CREATE TABLE normalized_products (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    category_id UUID NOT NULL REFERENCES storage_categories(id) ON DELETE RESTRICT,
+    sku VARCHAR(50) NOT NULL UNIQUE,
+    name VARCHAR(200) NOT NULL,
+    price_per_kg NUMERIC(10, 2) NOT NULL CHECK (price_per_kg > 0)
+);
+
+-- แยกตัวเลือกน้ำหนักการตัดแบ่งออกมาเป็นตารางย่อยเพื่อให้ผ่าน 1NF
+CREATE TABLE product_weight_options (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    product_id UUID NOT NULL REFERENCES normalized_products(id) ON DELETE CASCADE,
+    weight_grams INTEGER NOT NULL CHECK (weight_grams > 0),
+    UNIQUE (product_id, weight_grams)
+);
+```
+
+### ตัวอย่างที่ 2: การทำ Denormalization อย่างปลอดภัยด้วย Trigger และ Materialized View
+ในระบบ Smart Butcher การแสดงหน้ารายการคำสั่งซื้อต้องการเห็นยอดรวม `total_amount` และจำนวนชิ้นรวม `total_items_count` ทันทีโดยไม่ต้อง `JOIN` และ `SUM` จาก `order_items` ทุกครั้ง เราสามารถทำ Denormalization บนตาราง `orders` หรือใช้ Materialized View สำหรับงานรายงาน:
+
+```sql filename="sql/06_controlled_denormalization.sql"
+-- เพิ่มคอลัมน์ Denormalized บนตาราง orders เพื่อให้อ่านหน้ารายการคำสั่งซื้อได้เร็วที่สุด
+ALTER TABLE orders
+ADD COLUMN items_count INTEGER NOT NULL DEFAULT 0 CHECK (items_count >= 0);
+
+-- สร้าง Trigger Function เพื่ออัปเดตยอดรวมและจำนวนชิ้นในตาราง orders อัตโนมัติเมื่อ order_items เปลี่ยนแปลง
+CREATE OR REPLACE FUNCTION sync_order_summary()
+RETURNS TRIGGER AS $$
+DECLARE
+    target_order_id UUID;
+BEGIN
+    target_order_id := COALESCE(NEW.order_id, OLD.order_id);
+
+    UPDATE orders
+    SET 
+        total_amount = COALESCE((
+            SELECT SUM(subtotal) FROM order_items WHERE order_id = target_order_id
+        ), 0.00),
+        items_count = COALESCE((
+            SELECT SUM(quantity) FROM order_items WHERE order_id = target_order_id
+        ), 0)
+    WHERE id = target_order_id;
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_sync_order_summary
+AFTER INSERT OR UPDATE OR DELETE ON order_items
+FOR EACH ROW EXECUTE FUNCTION sync_order_summary();
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **ลำดับการออกแบบ** | ทำ Denormalization ตั้งแต่วันแรกเพราะกลัวการ `JOIN` จะช้า ทั้งที่ข้อมูลยังมีแค่หลักพันแถว | ออกแบบให้เป็น 3NF เป็นมาตรฐานตั้งต้นเสมอ แล้วค่อยทำ Denormalization เฉพาะจุดที่พิสูจน์แล้วว่าเป็นคอขวด |
+| **การอัปเดตข้อมูลที่ Denormalize** | ปล่อยให้โค้ดหน้าบ้านหรือ API หลายจุดต่างคนต่างบวกลบค่าสรุปเองจนข้อมูลไม่ตรงกัน | ควบคุมการอัปเดตภายใน Database Transaction เดียวกัน หรือใช้ Database Trigger / Materialized View |
+| **การใช้ JSONB แทนตาราง** | ยัดโครงสร้างข้อมูลสำคัญที่ต้องทำ Foreign Key และการค้นหาซับซ้อนลงในคอลัมน์ `JSONB` ก้อนเดียว | ใช้คอลัมน์ปกติสำหรับโครงสร้างหลัก และใช้ `JSONB` เฉพาะข้อมูลคุณลักษณะเสริมที่ยืดหยุ่น (เช่น `specifications`) |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรยึดหลัก Normalization (3NF) เมื่อ:** ข้อมูลนั้นมีการแก้ไขเปลี่ยนแปลงบ่อย ต้องการความถูกต้องแม่นยำสูง และไม่ต้องการให้เกิดความขัดแย้งกันของข้อมูลในระบบ
+- **ควรทำ Denormalization เมื่อ:** ระบบมีสัดส่วนการอ่านสูงกว่าการเขียนอย่างมาก (Read-to-Write ratio สูง) และคิวรีการ `JOIN` หรือ `GROUP BY` เริ่มกินเวลานานแม้จะสร้าง Index อย่างเหมาะสมแล้ว หรือเมื่อต้องการเก็บค่าประวัติ ณ เวลาที่เกิดรายการ (Historical Snapshot)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: "การ JOIN ใน Relational Database ทำให้ระบบช้า เราจึงควรรวมทุกตารางเข้าด้วยกันตั้งแต่แรก" คุณเห็นด้วยกับคำกล่าวนี้หรือไม่ เพราะเหตุใด?**
+  - **แนวคำตอบ:** ไม่เห็นด้วยอย่างยิ่ง ใน PostgreSQL 16 การ `JOIN` ตารางที่ผ่านการทำ Normalization และมี B-Tree Index บน Primary Key กับ Foreign Key อย่างถูกต้องสามารถประมวลผลข้อมูลหลักแสนถึงหลักล้านแถวได้ในเวลาเพียงไม่กี่มิลลิวินาที การรวมทุกตารางเข้าด้วยกันตั้งแต่แรกจะทำให้แถวข้อมูลมีขนาดใหญ่เกินความจำเป็น (เปลือง I/O และ Buffer Cache) และทำให้เกิดปัญหา Update Anomaly ร้ายแรงเมื่อข้อมูลมีการเปลี่ยนแปลง
+- **Q2: หากต้องทำระบบ Dashboard รายงานยอดขายรายวันของเนื้อแต่ละหมวดหมู่ ซึ่งคิวรีจริงใช้เวลา 3 วินาที คุณจะแก้ปัญหานี้ด้วยแนวคิด Denormalization อย่างไรโดยไม่กระทบโครงสร้างตารางหลัก?**
+  - **แนวคำตอบ:** ใช้ฟีเจอร์ **Materialized View** ของ PostgreSQL เพื่อบันทึกผลลัพธ์ของการ `JOIN` และ `SUM` ลงบนดิสก์เสมือนเป็นตารางสรุปพร้อมสร้าง Index กำกับ แล้วตั้งเวลาสั่ง `REFRESH MATERIALIZED VIEW CONCURRENTLY` เป็นระยะ (เช่น ทุก 5 หรือ 15 นาที) วิธีนี้ช่วยให้หน้า Dashboard อ่านข้อมูลได้ในระดับมิลลิวินาทีโดยที่ตารางธุรกรรมหลักยังคงเป็น 3NF บริสุทธิ์
+
+---

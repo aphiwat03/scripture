@@ -1,0 +1,167 @@
+---
+title: Codegen Client
+category: BACKEND
+parentTitle: Swagger
+version: OpenAPI 3.1 & NestJS Swagger
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ประโยชน์สูงสุดของการทำเอกสาร OpenAPI 3.0 ใน NestJS ไม่ได้หยุดอยู่แค่การเปิดหน้าเว็บ Swagger UI ให้คนอ่าน แต่คือการทำ **Contract-First / Code-First Type Generation** สำหรับทีม Frontend (Next.js) แทนที่นักพัฒนาฝั่ง Frontend จะต้องมานั่งเขียน `interface Product` หรือ `interface Order` ซ้ำด้วยมือในโปรเจกต์ Next.js (ซึ่งมักจะลืมอัปเดตเมื่อฝั่ง Backend แก้ไขฟิลด์) เราสามารถสั่งให้ NestJS ส่งออกไฟล์ `openapi.json` แล้วใช้เครื่องมืออย่าง **`openapi-typescript`** สร้างไฟล์ TypeScript Definitions (`api-schema.d.ts`) ให้ฝั่ง Frontend โดยอัตโนมัติ
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+วงจรการทำงานแบบ End-to-End Type Safety ระหว่าง NestJS 11 และ Next.js มีขั้นตอนดังนี้:
+1. นักพัฒนาฝั่ง Backend แก้ไข DTO ใน NestJS (เช่น เปลี่ยนชื่อฟิลด์ `price` เป็น `pricePerKg` ใน `ProductResponseDto`)
+2. รันสคริปต์ `pnpm run openapi:export` ซึ่งจะบูต NestJS Context แบบไม่เปิดพอร์ต (`app.init()`) สร้างออบเจกต์ OpenAPI Document แล้วบันทึกลงไฟล์ `openapi.json`
+3. ฝั่ง Frontend รัน `npx openapi-typescript ./openapi.json -o ./src/types/api-schema.d.ts`
+4. ทันทีที่รันเสร็จ TypeScript Compiler ของฝั่ง Frontend จะแจ้งเตือนจุดที่ยังอ้างอิงชื่อฟิลด์เก่า (`product.price`) ทั้งหมดทันทีตั้งแต่ขั้นตอนเขียนโค้ด (Compile-time Error) ก่อนที่จะปล่อยหลุดไปพังบนหน้าเว็บจริง
+
+<Callout type="tip" title="การรันสคริปต์ Export OpenAPI JSON โดยไม่ต้องเปิดพอร์ตเซิร์ฟเวอร์">
+เราสามารถสร้างสคริปต์แยกสำหรับสร้างไฟล์ `openapi.json` ในขั้นตอน CI/CD ได้โดยไม่ต้องสั่ง `app.listen(3000)` เพียงแค่สร้าง Application Context ด้วย `NestFactory.create(AppModule, { logger: false })` เรียก `SwaggerModule.createDocument()` แล้วใช้ `fs.writeFileSync()` บันทึกไฟล์แล้วสั่ง `await app.close()` ได้ทันทีภายในเวลาไม่กี่วินาที
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: สคริปต์ `scripts/export-openapi.ts` ในฝั่ง NestJS สำหรับสร้างไฟล์ `openapi.json` อัตโนมัติเพื่อส่งมอบให้ทีม Frontend หรือใช้ตรวจใน CI Pipeline
+
+```typescript filename="scripts/export-openapi.ts"
+import { writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { NestFactory } from '@nestjs/core';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { AppModule } from '../src/app.module';
+
+async function exportOpenApiSpec(): Promise<void> {
+  const app = await NestFactory.create(AppModule, {
+    logger: ['error', 'warn'],
+  });
+
+  app.setGlobalPrefix('api/v1');
+
+  const config = new DocumentBuilder()
+    .setTitle('Smart Butcher Marketplace API')
+    .setDescription('OpenAPI 3.0 Contract สำหรับสร้าง TypeScript Client ฝั่ง Frontend')
+    .setVersion('1.0.0')
+    .addBearerAuth(
+      { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
+      'jwt-access',
+    )
+    .build();
+
+  const document = SwaggerModule.createDocument(app, config, {
+    operationIdFactory: (controllerKey: string, methodKey: string) =>
+      `${controllerKey.replace('Controller', '')}_${methodKey}`,
+  });
+
+  const outputPath = resolve(process.cwd(), 'openapi.json');
+  writeFileSync(outputPath, JSON.stringify(document, null, 2), {
+    encoding: 'utf-8',
+  });
+
+  console.log(`[OpenAPI Export] สร้างไฟล์สเปกสำเร็จที่: ${outputPath}`);
+  await app.close();
+}
+
+void exportOpenApiSpec();
+```
+
+ตัวอย่างที่ 2: การนำ Type ที่สร้างจาก OpenAPI (`components['schemas']` และ `operations`) ไปสร้างฟังก์ชันดึงข้อมูลสินค้าเนื้อพรีเมียมและสร้างคำสั่งซื้อแบบ Type-safe 100% ในฝั่ง Frontend (Next.js)
+
+```typescript filename="src/lib/api/butcher-client.ts"
+// สมมติว่าไฟล์นี้รับ Type ที่ถูก Generate อัตโนมัติด้วยคำสั่ง:
+// npx openapi-typescript ./openapi.json -o ./src/types/openapi-schema.d.ts
+
+export interface GeneratedOpenApiComponents {
+  schemas: {
+    CreateProductDto: {
+      sku: string;
+      name: string;
+      marblingGrade: 'A3' | 'A4' | 'A5' | 'PRIME' | 'CHOICE';
+      pricePerKg: number;
+      stockWeightGrams: number;
+      categoryId: string;
+      cookingNote?: string;
+    };
+    ProductResponseDto: {
+      id: string;
+      sku: string;
+      name: string;
+      marblingGrade: 'A3' | 'A4' | 'A5' | 'PRIME' | 'CHOICE';
+      pricePerKg: number;
+      stockWeightGrams: number;
+      categoryId: string;
+      cookingNote?: string;
+      imageUrl: string | null;
+      createdAt: string;
+    };
+  };
+}
+
+export type ProductResponse =
+  GeneratedOpenApiComponents['schemas']['ProductResponseDto'];
+export type CreateProductInput =
+  GeneratedOpenApiComponents['schemas']['CreateProductDto'];
+
+export class SmartButcherApiClient {
+  constructor(
+    private readonly baseUrl: string,
+    private readonly getAccessToken?: () => string | null,
+  ) {}
+
+  async getProductById(productId: string): Promise<ProductResponse> {
+    const response = await fetch(
+      `${this.baseUrl}/api/v1/products/${encodeURIComponent(productId)}`,
+      {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+        },
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error(`ไม่สามารถดึงข้อมูลสินค้าได้ (HTTP ${response.status})`);
+    }
+
+    return (await response.json()) as ProductResponse;
+  }
+
+  async createProduct(input: CreateProductInput): Promise<ProductResponse> {
+    const token = this.getAccessToken?.();
+    const response = await fetch(`${this.baseUrl}/api/v1/products`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(input),
+    });
+
+    if (!response.ok) {
+      throw new Error(`สร้างสินค้าเนื้อไม่สำเร็จ (HTTP ${response.status})`);
+    }
+
+    return (await response.json()) as ProductResponse;
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การส่งต่อโครงสร้าง API ให้ทีม Frontend** | พิมพ์ตัวอย่าง JSON ส่งในแชทส่วนตัว ซึ่งไม่อัปเดตเมื่อโค้ดเปลี่ยนและไม่มีการตรวจ Type | ใช้ `openapi.json` เป็นตัวกลางในการ Generate TypeScript Types ให้โปรเจกต์ Frontend |
+| **การใช้ `any` หรือ `object` ใน DTO** | ประกาศฟิลด์ใน DTO เป็น `metadata: any` หรือ `Record<string, any>` ทำให้สเปก OpenAPI กลายเป็นออบเจกต์ว่างเปล่าไร้ชนิดข้อมูล | สร้าง Nested DTO Class ที่ระบุฟิลด์และชนิดข้อมูลอย่างชัดเจนเสมอ |
+| **การตั้งชื่อ `operationId`** | ปล่อยให้ `operationId` เปลี่ยนไปมาโดยไม่มีรูปแบบมาตรฐาน ทำให้โค้ดที่เรียกใช้ SDK พังเมื่อรีเจนเนอเรต | กำหนด `operationIdFactory` ให้คงที่ตามชื่อ Controller และชื่อเมธอด |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: ทำงานในโปรเจกต์ Fullstack (เช่น NestJS + Next.js) ที่ต้องการความมั่นใจว่าหาก Backend เปลี่ยนแปลงโครงสร้างข้อมูลของ `Product`, `Order` หรือ `Payment` ฝั่ง Frontend จะตรวจพบจุดที่กระทบทั้งหมดทันทีตอนรัน `tsc --noEmit`
+- **ไม่ควรใช้เมื่อ**: ห้ามเข้าไปแก้ไขไฟล์ `openapi-schema.d.ts` ที่ถูก Generate ออกมาด้วยมือโดยตรง เพราะการแก้ไขนั้นจะถูกเขียนทับทันทีที่รันคำสั่ง Generate รอบถัดไป
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: แนวทาง Code-First OpenAPI (เขียนโค้ด DTO ใน NestJS แล้ว Generate `openapi.json`) มีข้อดีอย่างไรเมื่อเทียบกับการเขียนไฟล์ `openapi.yaml` ด้วยมือแยกต่างหาก?
+   - **แนวคำตอบ**: การเขียนไฟล์ `openapi.yaml` แยกต่างหากด้วยมือขนาดหลายพันบรรทัดมักเกิดปัญหา **Documentation Drift** คือเมื่อเวลาเร่งด่วน นักพัฒนาแก้โค้ดใน Controller/DTO แต่ลืมอัปเดตไฟล์ YAML ทำให้เอกสารไม่ตรงกับระบบจริง ส่วนแนวทาง Code-First ใน NestJS ใช้คลาส DTO ตัวเดียวกันทั้งในการทำ Runtime Validation (`ValidationPipe`) และการสร้าง OpenAPI Schema จึงรับประกันได้ว่าเอกสารและโค้ดที่ทำงานจริงจะตรงกันเสมอ
+2. **คำถาม**: หากต้องการจัดการกับ Generic Paginated Response (เช่น `PaginatedResponseDto<ProductResponseDto>`) ใน `@nestjs/swagger` ต้องใช้ Decorator ใดช่วย?
+   - **แนวคำตอบ**: เนื่องจาก TypeScript ลบข้อมูล Generic Type Parameter (`<T>`) ทิ้งตอนคอมไพล์ เราจึงต้องใช้ `@ApiExtraModels(PaginatedResponseDto, ProductResponseDto)` ร่วมกับฟังก์ชัน `getSchemaPath()` ใน `@ApiOkResponse({ schema: { allOf: [{ $ref: getSchemaPath(PaginatedResponseDto) }, ...] } })` เพื่อให้ Swagger รู้จักทั้งโครงสร้าง Pagination หลักและชนิดของข้อมูลภายในอาเรย์ `items`
+
+---

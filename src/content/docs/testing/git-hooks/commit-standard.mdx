@@ -1,0 +1,183 @@
+---
+title: Commit Standard
+category: TESTING & QUALITY
+parentTitle: Git Hooks
+version: Husky 9 + lint-staged
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ประวัติการแก้ไขโค้ด (`git log`) ที่เต็มไปด้วยข้อความอย่าง `"fix bug"`, `"update"`, `"wip"` หรือ `"แก้บั๊กนิดหน่อย"` ทำให้ทีมไม่สามารถสืบค้นย้อนหลังได้เลยว่าแต่ละ Commit กระทบส่วนใดของระบบ **Smart Butcher Marketplace**
+
+มาตรฐาน **Conventional Commits** จึงกำหนดโครงสร้างข้อความ Commit ที่ทั้งมนุษย์และเครื่องจักรสามารถเข้าใจได้ตรงกัน:
+`<type>(<scope>): <subject>`
+- **`feat(order)`**: เพิ่มฟีเจอร์ใหม่ เช่น ระบบจองเนื้อวากิวดรายเอจล่วงหน้า (มีผลให้เลขเวอร์ชัน Minor เพิ่มขึ้น)
+- **`fix(payment)`**: แก้ไขบั๊กในระบบ เช่น แก้ปัญหาคำนวณทศนิยม PromptPay ผิดพลาด (มีผลให้เลขเวอร์ชัน Patch เพิ่มขึ้น)
+- **`perf(inventory)`**, **`refactor(auth)`**, **`test(checkout)`**, **`ci(github)`**, **`docs(readme)`**, **`chore(deps)`**
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+เมื่อนักพัฒนาสั่ง `git commit -m "feat(payment): support QR PromptPay webhook"` Git จะสร้างไฟล์ชั่วคราวชื่อ `.git/COMMIT_EDITMSG` แล้วเรียกสคริปต์ `.husky/commit-msg` โดยส่งพาธของไฟล์นี้เป็นอาร์กิวเมนต์ `$1`
+
+เครื่องมือ **Commitlint (`@commitlint/cli`)** จะอ่านข้อความจากไฟล์ `.git/COMMIT_EDITMSG` แล้วนำมาแยกส่วน (Parse) ด้วย Regular Expression เทียบกับกฎใน `commitlint.config.mjs`:
+1. ตรวจสอบว่า `type` อยู่ในรายการที่อนุญาตหรือไม่
+2. ตรวจสอบว่า `scope` ตรงกับโมดูลในระบบหรือไม่ (เช่น `user`, `product`, `category`, `order`, `payment`, `ci`)
+3. ตรวจสอบความยาวของหัวข้อไม่ให้เกิน 72–100 ตัวอักษร เพื่อไม่ให้ถูกตัดคำบนหน้าจอ GitHub
+
+<Callout type="note" title="ประโยชน์ทางตรงของ Conventional Commits ต่อระบบ Semantic Release">
+เมื่อข้อความ Commit ทุกตัวมีโครงสร้างมาตรฐาน เครื่องมืออย่าง semantic-release หรือ changesets สามารถกวาดอ่าน git log นับจาก Tag ล่าสุดเพื่อตัดสินใจอัปเกรดเลขเวอร์ชัน (Major.Minor.Patch) และสร้างไฟล์ CHANGELOG.md พร้อมประกาศ Release Notes อัตโนมัติบน GitHub ได้ทันทีโดยไม่ต้องเขียนมือแม้แต่บรรทัดเดียว
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1 (ระดับพื้นฐาน): การตั้งค่า `commitlint.config.mjs` ที่บังคับ Scope ตามโดเมนของ Smart Butcher Marketplace
+กำหนดให้ทุก Commit ต้องระบุทั้ง `type` และ `scope` ที่สอดคล้องกับโมดูลจริงในโปรเจกต์
+
+```javascript filename="commitlint.config.mjs"
+// @ts-check
+
+export default {
+  extends: ['@commitlint/config-conventional'],
+  rules: {
+    'type-enum': [
+      2,
+      'always',
+      [
+        'feat',
+        'fix',
+        'perf',
+        'refactor',
+        'docs',
+        'test',
+        'build',
+        'ci',
+        'chore',
+        'revert',
+      ],
+    ],
+    // บังคับให้ระบุ Scope ตามโดเมนของระบบร้านค้าเนื้อพรีเมียม
+    'scope-enum': [
+      2,
+      'always',
+      [
+        'user',
+        'product',
+        'category',
+        'order',
+        'order-item',
+        'payment',
+        'auth',
+        'ci',
+        'deps',
+      ],
+    ],
+    'scope-empty': [2, 'never'],
+    'subject-case': [2, 'never', ['start-case', 'pascal-case', 'upper-case']],
+    'header-max-length': [2, 'always', 100],
+  },
+};
+```
+
+### ตัวอย่างที่ 2 (ระดับ Production): ตัวแยกวิเคราะห์ประวัติ Commit อัตโนมัติสำหรับสร้างรายงาน Audit Trail ของระบบการเงินและสต็อกเนื้อ
+สคริปต์ TypeScript ที่อ่านข้อความ Conventional Commits เพื่อแยกแยะว่ามี Commit ใดบ้างที่กระทบโมดูลสำคัญ (`payment`, `order`, `product`) หรือมี `BREAKING CHANGE` ก่อนสั่ง Deploy ขึ้น Production
+
+```typescript filename="src/devops/release-commit-auditor.ts"
+export type AllowedCommitScope =
+  | 'user'
+  | 'product'
+  | 'category'
+  | 'order'
+  | 'order-item'
+  | 'payment'
+  | 'auth'
+  | 'ci'
+  | 'deps';
+
+export interface ParsedConventionalCommit {
+  rawHeader: string;
+  type: string;
+  scope: AllowedCommitScope;
+  isBreakingChange: boolean;
+  subject: string;
+}
+
+export interface ReleaseRiskReport {
+  recommendedBump: 'MAJOR' | 'MINOR' | 'PATCH';
+  touchesFinancialFlow: boolean;
+  commits: ParsedConventionalCommit[];
+}
+
+const COMMIT_HEADER_REGEX =
+  /^(?<type>feat|fix|perf|refactor|docs|test|build|ci|chore|revert)\((?<scope>user|product|category|order|order-item|payment|auth|ci|deps)\)(?<breaking>!)?:\s+(?<subject>.+)$/;
+
+export function parseConventionalCommitHeader(
+  header: string,
+): ParsedConventionalCommit {
+  const match = COMMIT_HEADER_REGEX.exec(header.trim());
+  if (!match?.groups) {
+    throw new Error(
+      `รูปแบบ Commit ไม่ถูกต้องตามมาตรฐาน: "${header}" (ตัวอย่างที่ถูก: "feat(order): add dry-aged reservation")`,
+    );
+  }
+
+  return {
+    rawHeader: header.trim(),
+    type: match.groups.type,
+    scope: match.groups.scope as AllowedCommitScope,
+    isBreakingChange: Boolean(match.groups.breaking),
+    subject: match.groups.subject,
+  };
+}
+
+export function generateReleaseRiskReport(
+  commitHeaders: readonly string[],
+): ReleaseRiskReport {
+  const parsedCommits = commitHeaders.map(parseConventionalCommitHeader);
+
+  const hasBreaking = parsedCommits.some((c) => c.isBreakingChange);
+  const hasFeature = parsedCommits.some((c) => c.type === 'feat');
+  const touchesFinancialFlow = parsedCommits.some(
+    (c) => c.scope === 'payment' || c.scope === 'order',
+  );
+
+  let recommendedBump: 'MAJOR' | 'MINOR' | 'PATCH' = 'PATCH';
+  if (hasBreaking) {
+    recommendedBump = 'MAJOR';
+  } else if (hasFeature) {
+    recommendedBump = 'MINOR';
+  }
+
+  return {
+    recommendedBump,
+    touchesFinancialFlow,
+    commits: parsedCommits,
+  };
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```bash filename="git-commit-messages.compare.sh"
+# ❌ ผิด (Anti-pattern): ข้อความกำกวม ไม่บอกทั้งประเภทการแก้ไขและโมดูลที่ได้รับผลกระทบ
+git commit -m "fix bug"
+git commit -m "update order and payment files"
+git commit -m "WIP"
+
+# ✅ ถูก (Best Practice): ระบุ type(scope): subject ชัดเจน อ่านปุ๊บรู้ทันทีว่าแก้อะไรและทำไม
+git commit -m "fix(payment): prevent duplicate PromptPay webhook charge on retry"
+git commit -m "feat(product): add marbling score filter for A5 Wagyu category"
+git commit -m "refactor(order-item): extract custom cut thickness price calculation"
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+- **ควรใช้เมื่อ**: ทำงานร่วมกันเป็นทีมตั้งแต่ 2 คนขึ้นไป หรือต้องการสร้างระบบ Release Notes อัตโนมัติ และต้องการให้การทำ `git bisect` เพื่อหาจุดกำเนิดบั๊กทำได้ง่าย
+- **ไม่ควรใช้**: หากนักพัฒนาเผลอสร้าง Commit ย่อยๆ ระหว่างทางใน Feature Branch ของตัวเอง ไม่จำเป็นต้องเข้มงวดทุก Commit ย่อยหากทีมตั้งค่า GitHub Pull Request ให้บังคับรวมเป็นหนึ่งเดียวด้วย **Squash and Merge** พร้อมตรวจชื่อ PR Title ด้วย Commitlint บน GitHub Actions
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+
+**Q1: เครื่องหมายอัศเจรีย์ `!` ใน Conventional Commits เช่น `feat(payment)!: migrate to Stripe v3 API` มีความหมายอย่างไร?**
+- **แนวคำตอบ**: เครื่องหมาย `!` หน้าเครื่องหมายทวิภาค (`:`) เป็นสัญลักษณ์ย่อที่ระบุว่า Commit นี้มี **Breaking Change** (การเปลี่ยนแปลงที่ไม่สามารถเข้ากันได้กับเวอร์ชันเก่า) ซึ่งจะสั่งให้เครื่องมือ Semantic Versioning ปรับเลขเวอร์ชันหลัก (Major Version เช่น จาก `1.4.2` เป็น `2.0.0`) ทันที
+
+---

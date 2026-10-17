@@ -1,0 +1,239 @@
+---
+title: Signed URLs
+category: BACKEND
+parentTitle: File Upload
+version: Multer & Supabase Storage
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในระบบ **Smart Butcher Marketplace** ไฟล์ที่อัปโหลดเข้ามามีระดับความลับของข้อมูล (Data Classification) แตกต่างกันอย่างชัดเจน:
+1. **Public Bucket (`butcher-public-assets`)**: ใช้เก็บรูปภาพสินค้า (`Product`) และรูปหมวดหมู่ (`Category`) ซึ่งทุกคนต้องเข้าถึงได้โดยไม่ต้องล็อกอิน כדיให้หน้าเว็บโหลดเร็วและรองรับ SEO
+2. **Private Bucket (`butcher-payment-slips`)**: ใช้เก็บสลิปการโอนเงินของลูกค้า (`Payment`) ซึ่งมีทั้งชื่อ-นามสกุลจริง เลขบัญชีบางส่วน และเวลาโอนเงิน ข้อมูลนี้จัดเป็นข้อมูลส่วนบุคคล (PII) และหลักฐานทางการเงิน **ห้ามเก็บใน Public Bucket เด็ดขาด** เมื่อลูกค้าเจ้าของออเดอร์หรือแอดมินต้องการเปิดดูสลิป ระบบจะสร้าง **Signed URL** ที่มีอายุการใช้งานจำกัด (เช่น 60–300 วินาที) ให้เฉพาะผู้มีสิทธิ์เท่านั้น
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+สำหรับ **Private Bucket** ใน Supabase Storage:
+- การเรียกไปยัง Public URL ปกติจะถูกปฏิเสธด้วยสถานะ `400/403` ทันที
+- ในฐานข้อมูลตาราง `Payment` เราจะไม่เก็บ URL เต็ม แต่จะเก็บเฉพาะ **Storage Object Path** (เช่น `slips/order-991/1760679000-uuid.jpg`) ไว้ในคอลัมน์ `slipStoragePath`
+- เมื่อมี Request ขอดูข้อมูลการชำระเงิน NestJS จะตรวจสอบสิทธิ์ก่อนว่าผู้เรียกเป็นเจ้าของ `Order` (`order.userId === currentUser.id`) หรือเป็น `ADMIN` หากผ่านเงื่อนไข จึงเรียก `supabase.storage.from('butcher-payment-slips').createSignedUrl(path, expiresInSeconds)` ซึ่งจะสร้าง URL ที่มี Cryptographic Token แนบอยู่ใน Query Parameter และหมดอายุอัตโนมัติเมื่อครบเวลา
+
+<Callout type="warning" title="ห้ามบันทึก Signed URL ลงในฐานข้อมูลถาวร">
+Signed URL มีอายุสั้นตามค่า `expiresIn` (เช่น 5 นาที) หากคุณบันทึก Signed URL ลงในคอลัมน์ของตาราง `Payment` หลังจากผ่านไป 5 นาที ลิงก์ในฐานข้อมูลจะใช้งานไม่ได้อีกต่อไป สิ่งที่ต้องบันทึกลงฐานข้อมูลคือ `slipStoragePath` (Path ภายใน Bucket) เท่านั้น แล้วจึงสร้าง Signed URL สดใหม่ตอนที่ดึงข้อมูลออกไปแสดงผล
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การเพิ่มเมธอด `uploadPrivateFile` และ `createSignedViewUrl` ใน `StorageService` สำหรับจัดการไฟล์ความลับสูง
+
+```typescript filename="src/modules/storage/storage.service.ts"
+import {
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+} from '@nestjs/common';
+import { SupabaseClient } from '@supabase/supabase-js';
+
+@Injectable()
+export class PrivateStorageHelper {
+  private readonly logger = new Logger(PrivateStorageHelper.name);
+
+  constructor(private readonly supabase: SupabaseClient) {}
+
+  async uploadPrivateFile(params: {
+    bucket: string;
+    storagePath: string;
+    file: Express.Multer.File;
+  }): Promise<{ bucket: string; path: string }> {
+    const { error } = await this.supabase.storage
+      .from(params.bucket)
+      .upload(params.storagePath, params.file.buffer, {
+        contentType: params.file.mimetype,
+        cacheControl: '3600',
+        upsert: false,
+      });
+
+    if (error) {
+      this.logger.error(
+        `Private upload error [${params.bucket}/${params.storagePath}]: ${error.message}`,
+      );
+      throw new InternalServerErrorException(
+        'ไม่สามารถบันทึกไฟล์หลักฐานการชำระเงินได้',
+      );
+    }
+
+    return {
+      bucket: params.bucket,
+      path: params.storagePath,
+    };
+  }
+
+  async createSignedViewUrl(
+    bucket: string,
+    storagePath: string,
+    expiresInSeconds = 300, // ค่าเริ่มต้น 5 นาที
+  ): Promise<string> {
+    const { data, error } = await this.supabase.storage
+      .from(bucket)
+      .createSignedUrl(storagePath, expiresInSeconds);
+
+    if (error || !data?.signedUrl) {
+      this.logger.error(
+        `Failed to generate signed URL for ${bucket}/${storagePath}: ${error?.message}`,
+      );
+      throw new InternalServerErrorException(
+        'ไม่สามารถสร้างลิงก์เข้าถึงไฟล์ชั่วคราวได้',
+      );
+    }
+
+    return data.signedUrl;
+  }
+}
+```
+
+ตัวอย่างที่ 2: การอัปโหลดสลิปโอนเงินของ `Order` และการตรวจสอบสิทธิ์เจ้าของออเดอร์ก่อนสร้าง Signed URL ใน `PaymentsService`
+
+```typescript filename="src/modules/payments/payments.service.ts"
+import {
+  Injectable,
+  NotFoundException,
+  ForbiddenException,
+  ConflictException,
+} from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
+import { PrivateStorageHelper } from '../storage/private-storage.helper';
+
+export interface AuthenticatedUser {
+  id: string;
+  role: 'CUSTOMER' | 'ADMIN';
+}
+
+@Injectable()
+export class PaymentsService {
+  private readonly SLIP_BUCKET = 'butcher-payment-slips';
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storageService: StorageService,
+    private readonly privateStorage: PrivateStorageHelper,
+  ) {}
+
+  async uploadPaymentSlip(params: {
+    orderId: string;
+    user: AuthenticatedUser;
+    file: Express.Multer.File;
+    paidAmount: number;
+  }) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: params.orderId },
+      include: { payment: true },
+    });
+
+    if (!order) {
+      throw new NotFoundException(`ไม่พบคำสั่งซื้อรหัส ${params.orderId}`);
+    }
+
+    if (order.userId !== params.user.id) {
+      throw new ForbiddenException('คุณไม่มีสิทธิ์แจ้งชำระเงินสำหรับคำสั่งซื้อของผู้อื่น');
+    }
+
+    if (order.payment?.status === 'VERIFIED') {
+      throw new ConflictException('คำสั่งซื้อนี้ได้รับการยืนยันยอดชำระเงินเรียบร้อยแล้ว');
+    }
+
+    const storagePath = this.storageService.buildSafeStoragePath(
+      'slips',
+      order.id,
+      params.file.mimetype,
+    );
+
+    // อัปโหลดขึ้น Private Bucket
+    await this.privateStorage.uploadPrivateFile({
+      bucket: this.SLIP_BUCKET,
+      storagePath,
+      file: params.file,
+    });
+
+    // บันทึกเฉพาะ storagePath ลงในตาราง Payment
+    const payment = await this.prisma.payment.upsert({
+      where: { orderId: order.id },
+      create: {
+        orderId: order.id,
+        amount: params.paidAmount,
+        slipStoragePath: storagePath,
+        status: 'PENDING_VERIFICATION',
+        uploadedAt: new Date(),
+      },
+      update: {
+        amount: params.paidAmount,
+        slipStoragePath: storagePath,
+        status: 'PENDING_VERIFICATION',
+        uploadedAt: new Date(),
+      },
+    });
+
+    return {
+      paymentId: payment.id,
+      orderId: payment.orderId,
+      status: payment.status,
+      uploadedAt: payment.uploadedAt,
+    };
+  }
+
+  async getPaymentSlipSignedUrl(paymentId: string, user: AuthenticatedUser) {
+    const payment = await this.prisma.payment.findUnique({
+      where: { id: paymentId },
+      include: {
+        order: {
+          select: { id: true, userId: true },
+        },
+      },
+    });
+
+    if (!payment || !payment.slipStoragePath) {
+      throw new NotFoundException('ไม่พบข้อมูลสลิปการโอนเงิน');
+    }
+
+    const isOwner = payment.order.userId === user.id;
+    const isAdmin = user.role === 'ADMIN';
+
+    if (!isOwner && !isAdmin) {
+      throw new ForbiddenException('คุณไม่มีสิทธิ์เข้าถึงหลักฐานการโอนเงินรายการนี้');
+    }
+
+    // สร้าง Signed URL ที่มีอายุเพียง 120 วินาที (2 นาที)
+    const signedUrl = await this.privateStorage.createSignedViewUrl(
+      this.SLIP_BUCKET,
+      payment.slipStoragePath,
+      120,
+    );
+
+    return {
+      paymentId: payment.id,
+      orderId: payment.order.id,
+      signedUrl,
+      expiresInSeconds: 120,
+    };
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การจัดเก็บสลิปโอนเงิน** | เก็บสลิปโอนเงินไว้ใน Public Bucket เดียวกับรูปสินค้า ทำให้ใครก็ตามที่รู้หรือสุ่ม URL เจอสามารถดูข้อมูลการเงินของลูกค้าได้ | แยกเก็บสลิปไว้ใน Private Bucket (`butcher-payment-slips`) เสมอ |
+| **การตรวจสอบสิทธิ์ก่อนดูสลิป** | เปิด Endpoint `/payments/:id/slip` โดยเช็คแค่ว่าล็อกอินแล้ว (`JwtAuthGuard`) แต่ไม่เช็คว่าเป็นเจ้าของ `Order` หรือไม่ (เกิดช่องโหว่ IDOR) | ตรวจสอบ Ownership (`payment.order.userId === user.id`) หรือสิทธิ์ `ADMIN` ก่อนออก Signed URL ทุกครั้ง |
+| **อายุของ Signed URL** | ตั้งค่า `expiresIn` นานระดับหลายเดือนหรือหลายปี เช่น `31536000` วินาที จนไม่ต่างอะไรกับ Public URL | ตั้งค่า `expiresIn` ให้สั้นเท่าที่จำเป็นต่อการเปิดดู เช่น `60` ถึง `300` วินาที |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Public Bucket เมื่อ**: ไฟล์นั้นเป็นข้อมูลสาธารณะที่ต้องการแสดงผลบนหน้าเว็บไซต์ให้ผู้ชมทุกคนเห็นได้อย่างรวดเร็วผ่าน CDN เช่น รูปภาพเนื้อวากิว (`Product`), รูปไอคอนหมวดหมู่ (`Category`)
+- **ควรใช้ Private Bucket + Signed URL เมื่อ**: ไฟล์มีข้อมูลส่วนบุคคล (PII), ข้อมูลทางการเงิน หรือเอกสารทางธุรกิจ เช่น สลิปโอนเงิน (`Payment`), ใบกำกับภาษีเต็มรูปแบบ หรือเอกสารรับรองฟาร์มเนื้อสำหรับผู้ค้าส่งเฉพาะราย
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ช่องโหว่ IDOR (Insecure Direct Object References) ในระบบดูสลิปโอนเงินเกิดขึ้นได้อย่างไร และป้องกันอย่างไร?
+   - **แนวคำตอบ**: เกิดขึ้นเมื่อระบบตรวจสอบเพียงแค่การยืนยันตัวตน (Authentication) ว่ามี JWT Token ที่ถูกต้อง แต่ไม่ได้ตรวจสอบสิทธิ์ความเป็นเจ้าของ (Authorization) ทำให้ลูกค้า A สามารถเปลี่ยนพารามิเตอร์ `paymentId` ใน URL เป็นของลูกค้า B เพื่อขอดูสลิปโอนเงินได้ วิธีป้องกันคือต้อง Query ข้อมูล `Payment` พร้อม `Order` มาเช็คเสมอว่า `payment.order.userId === currentUser.id` หรือผู้ใช้มี Role เป็น `ADMIN` ก่อนสร้าง Signed URL
+2. **คำถาม**: ทำไมเราควรเก็บค่า `slipStoragePath` (เช่น `slips/order-1/file.jpg`) ในฐานข้อมูล แทนการเก็บ URL เต็มของ Supabase?
+   - **แนวคำตอบ**: ประการแรก สำหรับ Private Bucket เราต้องใช้ `slipStoragePath` ในการเรียก `createSignedUrl()` ทุกครั้งที่ต้องการเข้าถึง ประการที่สอง หากในอนาคตมีการเปลี่ยน Custom Domain ของ Supabase หรือย้ายผู้ให้บริการ Storage (เช่น ย้ายไป AWS S3 หรือ Cloudflare R2) เราไม่จำเป็นต้องรันสคริปต์แก้ URL ในฐานข้อมูลหลายแสนแถว เพียงแค่ใช้ `storagePath` เดิมประกอบกับ Base URL หรือ SDK ใหม่ได้ทันที
+
+---

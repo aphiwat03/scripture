@@ -1,0 +1,114 @@
+---
+title: Why Migrations
+category: DATABASE
+parentTitle: Migrations
+version: Prisma Migrate & Zero-Downtime
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ลองจินตนาการถึงครัวตัดแต่งเนื้อของ **Smart Butcher Marketplace** ที่มีเชฟหลายกะทำงานร่วมกัน หากหัวหน้าเชฟกะเช้าแอบย้ายตำแหน่งตู้บ่มเนื้อ Dry-Aged และเปลี่ยนป้ายรหัสช่องเก็บเนื้อโดยไม่จดบันทึกและไม่แจ้งใคร เมื่อเชฟกะดึกเข้ามาทำงานย่อมหยิบเนื้อผิดเกรดส่งให้ลูกค้า
+
+การเข้าไปแก้ไขฐานข้อมูลโดยตรงผ่านเครื่องมือ GUI (เช่น pgAdmin, DBeaver หรือ Supabase Table Editor) บนเครื่อง Staging หรือ Production ก่อให้เกิดปัญหาร้ายแรงที่เรียกว่า **Schema Drift** คือสภาวะที่โครงสร้างจริงในฐานข้อมูลไม่ตรงกับโค้ดใน Git Repository ส่งผลให้:
+- โค้ดที่รันผ่านบนเครื่องนักพัฒนา (Local) พังทันทีเมื่อนำขึ้น Production เพราะขาดคอลัมน์หรือ Constraint ไม่ตรงกัน
+- ไม่สามารถตรวจสอบย้อนหลัง (Audit Trail) ได้ว่าใครเป็นคนลบคอลัมน์ หรือเปลี่ยนชนิดข้อมูลเมื่อไหร่และเพราะเหตุใด
+- ไม่สามารถจำลองสภาพแวดล้อมใหม่ (Reproducibility) สำหรับการรัน Automated Testing หรือการกู้คืนระบบได้
+
+การใช้ **Database Migration** คือการนำแนวคิด **Infrastructure as Code (IaC)** มาใช้กับโครงสร้างฐานข้อมูล โดยบันทึกทุกการเปลี่ยนแปลงเป็นไฟล์สคริปต์ SQL ที่มีลำดับเวลาชัดเจนและจัดเก็บอยู่ในระบบ Git ร่วมกับซอร์สโค้ดของแอปพลิเคชัน
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อใช้ระบบ State-based ร่วมกับ Versioned Migration อย่าง Prisma Migrate ระบบจะทำงานผ่านองค์ประกอบหลัก 3 ส่วน:
+1. **Declarative Schema (`schema.prisma`):** ไฟล์ต้นทางที่ระบุว่าโครงสร้างสุดท้ายที่ต้องการ (Desired State) ของตาราง `users`, `categories`, `products`, `orders`, `order_items`, และ `payments` มีหน้าตาอย่างไร
+2. **Migration History Directory (`prisma/migrations/`):** โฟลเดอร์ที่เก็บโฟลเดอร์ย่อยเรียงตามประทับเวลา (Timestamp) เช่น `20261017013000_add_dry_aged_days_to_products/migration.sql` ซึ่งเป็นไฟล์ DDL (Data Definition Language) มาตรฐานของ PostgreSQL 16
+3. **Transactional DDL Execution:** จุดเด่นที่สุดของ PostgreSQL 16 (ที่เหนือกว่า MySQL หรือ Oracle) คือ **คำสั่ง DDL แทบทั้งหมดสามารถรันอยู่ภายใต้ Transaction (`BEGIN ... COMMIT`) ได้** หากไฟล์ Migration มีคำสั่ง 5 คำสั่ง แล้วคำสั่งที่ 4 ล้มเหลว PostgreSQL จะทำการ Rollback คำสั่งที่ 1-3 กลับคืนให้โดยอัตโนมัติ (ยกเว้นคำสั่งพิเศษบางตัว เช่น `CREATE INDEX CONCURRENTLY`)
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: โครงสร้าง Declarative Schema ตั้งต้นของระบบ Smart Butcher
+แทนที่จะเขียนคำสั่งสร้างตารางกระจัดกระจาย เราประกาศโครงสร้างทั้งหมดไว้ในไฟล์ `schema.prisma` เพียงจุดเดียวเพื่อให้ทุกคนในทีมเห็นภาพเดียวกัน:
+
+```prisma filename="prisma/schema.prisma"
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  PREPARING_CUT
+  SHIPPING
+  DELIVERED
+  CANCELLED
+}
+
+model Category {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name        String    @unique @db.VarChar(100)
+  slug        String    @unique @db.VarChar(100)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  products    Product[]
+
+  @@map("categories")
+}
+
+model Product {
+  id            String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  categoryId    String      @map("category_id") @db.Uuid
+  sku           String      @unique @db.VarChar(50)
+  name          String      @db.VarChar(200)
+  marblingScore Int         @default(0) @map("marbling_score") @db.SmallInt
+  pricePerKg    Decimal     @map("price_per_kg") @db.Decimal(10, 2)
+  stockWeightGr Int         @default(0) @map("stock_weight_gr")
+  createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  category      Category    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  @@index([categoryId], map: "idx_products_category_id")
+  @@map("products")
+}
+```
+
+### ตัวอย่างที่ 2: ไฟล์ SQL Migration ที่ถูกบันทึกเข้าสู่ระบบ Version Control
+เมื่อมีการเพิ่มคอลัมน์ระดับการบ่มเนื้อ (`dry_aged_days`) และข้อบังคับ `CHECK` constraint ไฟล์ SQL ที่ถูกสร้างและเก็บใน Git จะเป็นหลักฐานชัดเจนที่สามารถทำ Code Review บน Pull Request ได้:
+
+```sql filename="prisma/migrations/20261017021500_add_dry_aged_spec/migration.sql"
+-- AlterTable: เพิ่มคอลัมน์จำนวนวันบ่มเนื้อ Dry-Aged พร้อมค่าเริ่มต้น 0 วัน (เนื้อสด)
+ALTER TABLE "products"
+ADD COLUMN "dry_aged_days" SMALLINT NOT NULL DEFAULT 0,
+ADD COLUMN "storage_temp_celsius" NUMERIC(4, 1) NOT NULL DEFAULT 1.5;
+
+-- AddConstraint: บังคับในระดับ PostgreSQL Engine ว่าจำนวนวันบ่มต้องไม่ติดลบและไม่เกิน 180 วัน
+ALTER TABLE "products"
+ADD CONSTRAINT "chk_products_dry_aged_days_range"
+CHECK ("dry_aged_days" >= 0 AND "dry_aged_days" <= 180);
+
+-- CreateIndex: สร้าง Partial Index สำหรับค้นหาเฉพาะเนื้อที่ผ่านการบ่ม Dry-Aged
+CREATE INDEX "idx_products_dry_aged_active"
+ON "products" ("dry_aged_days")
+WHERE "dry_aged_days" > 0;
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **วิธีการแก้ไขโครงสร้าง** | เปิด DBeaver หรือ pgAdmin ต่อเข้าฐานข้อมูลจริงแล้วกดเพิ่ม/ลบคอลัมน์ด้วยมือ | แก้ไข `schema.prisma` สร้างไฟล์ Migration ตรวจสอบ SQL และสั่งรันผ่านไปป์ไลน์อัตโนมัติ |
+| **การตรวจสอบความถูกต้อง** | รันคำสั่งแก้ตารางสดๆ โดยไม่มีการทำ Peer Review จากเพื่อนร่วมทีม | เปิด Pull Request ให้ทีมตรวจสอบไฟล์ `migration.sql` ทุกบรรทัดก่อนรวมโค้ดเข้ากิ่งหลัก |
+| **ความสอดคล้องของสภาพแวดล้อม** | โครงสร้างตารางบนเครื่อง Dev, Staging และ Production มีชื่อคอลัมน์และ Index ไม่ตรงกันเลย | ทุกสภาพแวดล้อมรันชุดไฟล์ `migration.sql` ลำดับเดียวกัน 100% |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ:** พัฒนาระบบทุกขนาดตั้งแต่โปรเจกต์เริ่มต้นไปจนถึงระบบ Enterprise ที่มีฐานข้อมูลเกี่ยวข้องกับข้อมูลลูกค้าและธุรกรรมการเงิน
+- **ไม่ควรใช้การแก้ฐานข้อมูลด้วยมือเมื่อ:** ระบบขึ้นสู่ชั้น Staging หรือ Production แล้ว (ยกเว้นกรณีฉุกเฉินระดับวิกฤต เช่น การสั่ง `DROP INDEX CONCURRENTLY` เพื่อแก้ปัญหาดิสก์เต็มหรือ Query Planner เลือก Index ผิด ซึ่งหลังจากแก้ฉุกเฉินแล้วต้องกลับมาซิงค์ไฟล์ Migration ให้ตรงกันทันที)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ปัญหา Schema Drift คืออะไร และส่งผลเสียต่อการ Deploy ระบบอย่างไร?**
+  - **แนวคำตอบ:** Schema Drift คือสภาวะที่โครงสร้างฐานข้อมูลจริงในสภาพแวดล้อมหนึ่ง (เช่น Production) เบี่ยงเบนไปจากโครงสร้างที่ระบุไว้ในซอร์สโค้ดและไฟล์ Migration มักเกิดจากการมีคนเข้าไปรันคำสั่ง `ALTER TABLE` หรือสร้าง Index ด้วยมือโดยตรง ส่งผลให้เวลา Deploy ฟีเจอร์ใหม่ สคริปต์ Migration อาจพังกลางคันเพราะพบคอลัมน์ซ้ำ หรือโค้ดแอปพลิเคชันเกิด Runtime Error เนื่องจากชนิดข้อมูลไม่ตรงกับที่ทดสอบในชั้น Staging
+- **Q2: ทำไม PostgreSQL จึงมีความปลอดภัยในการรัน Migration สูงกว่าฐานข้อมูลตระกูล MySQL?**
+  - **แนวคำตอบ:** เพราะ PostgreSQL รองรับ **Transactional DDL** คำสั่งเปลี่ยนแปลงโครงสร้างตาราง เช่น `CREATE TABLE`, `ALTER TABLE`, `DROP COLUMN` สามารถทำงานอยู่ภายในบล็อก `BEGIN ... COMMIT` ได้ หากสคริปต์ Migration มีหลายคำสั่งและเกิดข้อผิดพลาดขึ้นระหว่างทาง PostgreSQL จะยกเลิกการเปลี่ยนแปลงทั้งหมดในไฟล์นั้นกลับสู่สภาพเดิมทันที ในขณะที่ MySQL จะทำการ Implicit Commit ทุกครั้งที่เจอคำสั่ง DDL ทำให้ตารางค้างอยู่ในสถานะครึ่งๆ กลางๆ (Partially Applied)
+
+---

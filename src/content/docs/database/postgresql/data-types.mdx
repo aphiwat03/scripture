@@ -1,0 +1,200 @@
+---
+title: Data Types
+category: DATABASE
+parentTitle: PostgreSQL 16
+version: PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+การเลือกชนิดข้อมูลในฐานข้อมูล เปรียบเสมือนการเลือก "บรรจุภัณฑ์สำหรับเนื้อสัตว์" ในร้าน **Smart Butcher Marketplace**:
+- หากนำเนื้อสันในชั้นยอดไปใส่ในถุงพลาสติกบางๆ (เช่น นำตัวเลขเงินไปเก็บใน `FLOAT`) คุณภาพของเนื้อจะเน่าเสียเพราะความชื้นซึมผ่าน (เกิดความคลาดเคลื่อนทางทศนิยม เงินหาย)
+- หากนำเนื้อบด 100 กรัม ไปใส่ในกล่องโฟมแช่แข็งขนาดใหญ่ (เช่น นำค่า Flag สถานะไปเก็บใน `VARCHAR(255)`) จะเปลืองเนื้อที่จัดเก็บในตู้เย็นโดยเปล่าประโยชน์
+- การเลือก Data Type ที่แม่นยำและพอดี ไม่เพียงแต่ช่วยประหยัดพื้นที่จัดเก็บ แต่ยังช่วยให้ CPU สามารถประมวลผล เปรียบเทียบ และสร้าง B-Tree Index ได้ด้วยประสิทธิภาพสูงสุด
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. `text` vs `varchar(n)` vs `char(n)`
+- ในระบบฐานข้อมูลอื่นๆ เช่น Oracle หรือ MySQL โบราณ `VARCHAR(n)` อาจมีการจองพื้นที่ต่างจาก `TEXT`
+- แต่ใน **PostgreSQL:** ทั้ง `TEXT` และ `VARCHAR(n)` ใช้โครงสร้างภายในแบบเดียวกันทุกประการ เรียกว่า **`varlena` (Variable-length Array)** ซึ่งมี Header ขนาด 1 ถึง 4 ไบต์สำหรับระบุความยาวข้อมูล
+- **Performance:** `TEXT` มีความเร็วในการสืบค้นและเขียน **เท่ากับ `VARCHAR(n)` 100%**!
+- ข้อแตกต่างเพียงอย่างเดียวคือ `VARCHAR(n)` จะเพิ่ม Overhead ให้ CPU ต้องคอยเช็กความยาวตัวอักษรทุกครั้งที่มีการบันทึก
+- **คำแนะนำ:** ใช้ `TEXT` เป็นค่าเริ่มต้นสำหรับข้อความทั่วไป และใช้ `CHECK (length(...) <= N)` หากต้องการจำกัดความยาว หรือใช้ `VARCHAR(n)` เฉพาะเมื่อต้องการให้สอดคล้องกับมาตรฐานทางธุรกิจ เช่น รหัส SKU
+
+### 2. `numeric` (หรือ `decimal`) vs `float` (หรือ `double precision`)
+- `FLOAT` และ `DOUBLE PRECISION` ใช้มาตรฐาน **IEEE 754 Floating-Point** ซึ่งเก็บตัวเลขแบบประมาณค่าฐาน 2 ไม่สามารถแทนค่าเศษส่วนฐาน 10 บางค่าได้ตรงเป๊ะ (เช่น `0.1 + 0.2 = 0.30000000000000004`)
+- `NUMERIC(precision, scale)` เก็บตัวเลขแบบ Exact Arbitrary Precision เป็นเลขฐานสิบแท้จริง แม้จะกินพื้นที่และใช้ CPU ในการคำนวณมากกว่าเล็กน้อย แต่ **ห้ามใช้ FLOAT กับตัวเลขเงิน (`total_amount`), ราคาสินค้า (`unit_price`), และน้ำหนักเนื้อสัตว์เด็ดขาด**
+
+### 3. `timestamptz` vs `timestamp`
+- `timestamp with time zone` (`timestamptz`): **ต้องใช้ตัวนี้เสมอใน Production!** PostgreSQL จะแปลงเวลาที่ได้รับจาก Client ไม่ว่าจะมาจาก Timezone ใด ให้กลายเป็น **UTC (Universal Time Coordinated)** เพื่อบันทึกลงดิสก์ขนาด 8 ไบต์ และเมื่อส่งกลับให้ Client จะแปลงเป็น Timezone ของ Client ให้อัตโนมัติ
+- `timestamp without time zone` (`timestamp`): ไม่สนใจ Timezone เลย หากเซิร์ฟเวอร์รันที่กรุงเทพฯ (+07:00) แล้วย้ายไปรันบน Cloud ที่ไอร์แลนด์ (UTC) ข้อมูลเวลาจะเพี้ยนทันที 7 ชั่วโมง
+
+### 4. `UUID` (Universally Unique Identifier) v4 vs v7
+- `UUID v4`: สุ่มแบบสมบูรณ์ 128 บิต ส่งผลให้เมื่อทำ Index บน B-Tree จะเกิดปัญหา **Index Fragmentation (B-Tree Leaf Node Splits)** เพราะค่าไม่ได้เรียงตามเวลา ทำให้แคช `shared_buffers` ถูกดันออกตลอดเวลา
+- `UUID v7` ( Time-Ordered UUID): นำ Timestamp ไว้ส่วนหน้า และค่าสุ่มไว้ส่วนหลัง ทำให้ข้อมูลเรียงตามลำดับเวลา ช่วยแก้ปัญหา B-Tree Fragmentation ได้อย่างสมบูรณ์แบบ
+
+### 5. `JSONB` vs `JSON`
+- `JSON`: เก็บข้อความ String แบบดั้งเดิม ตรวจสอบเพียงว่าเป็น JSON ที่ถูกต้องหรือไม่ ทุกครั้งที่ Query ต้องแปลง (Parse) ใหม่ทั้งหมด ไม่รองรับการทำ Index ภายใน
+- `JSONB` (Binary JSON): ทำการแยกโครงสร้าง (Decomposition) ข้อมูลเป็น Binary Tree ตั้งแต่ขั้นตอนบันทึก แม้จะใช้เวลาเขียนช้ากว่าเล็กน้อย แต่ความเร็วในการ Query และ Filter ฟิลด์ข้างในไวกว่าหลายสิบเท่า และรองรับการทำ **GIN Index (Generalized Inverted Index)**
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การออกแบบ DDL ตารางในระบบ Smart Butcher ด้วย Data Types ที่ถูกต้อง
+ไฟล์นี้สร้างโครงสร้างตารางหลักของร้านขายเนื้อ ด้วย Data Types เกรด Production:
+
+```sql filename="05_production_schema.sql"
+-- สร้าง Extension สำหรับการสร้าง UUID และ Trigram Search
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- 1. ตาราง categories (หมวดหมู่เนื้อ เช่น วากิว, แองกัส, ดรายเอจ)
+CREATE TABLE categories (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 2. ตาราง users (ผู้ใช้งานระบบ)
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    full_name TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('CUSTOMER', 'BUTCHER', 'ADMIN')),
+    phone TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3. ตาราง products (สินค้าเนื้อพรีเมียม)
+CREATE TABLE products (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    category_id UUID NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+    name TEXT NOT NULL,
+    sku VARCHAR(30) NOT NULL UNIQUE,
+    price_per_kg NUMERIC(10, 2) NOT NULL CHECK (price_per_kg > 0),
+    stock_qty INT NOT NULL CHECK (stock_qty >= 0),
+    dry_aged_days INT NOT NULL DEFAULT 0 CHECK (dry_aged_days >= 0),
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    -- เก็บสเปกเฉพาะ เช่น ค่า Marble Score, สายพันธุ์, แหล่งที่มา เป็น JSONB
+    specifications JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- เก็บแท็กประเภทการตัดแต่งเนื้อที่รองรับเป็น Array
+    available_cuts TEXT[] NOT NULL DEFAULT ARRAY['STEAK', 'ROAST'],
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 4. ตาราง orders (คำสั่งซื้อเนื้อ)
+CREATE TABLE orders (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    order_no VARCHAR(32) NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status IN ('PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'COMPLETED', 'CANCELLED')),
+    total_amount NUMERIC(12, 2) NOT NULL CHECK (total_amount >= 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 5. ตาราง order_items (รายการเนื้อในแต่ละออเดอร์)
+CREATE TABLE order_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    product_id UUID NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
+    cut_type TEXT NOT NULL,
+    unit_price NUMERIC(10, 2) NOT NULL CHECK (unit_price > 0),
+    quantity INT NOT NULL CHECK (quantity > 0),
+    subtotal NUMERIC(12, 2) NOT NULL CHECK (subtotal > 0)
+);
+
+-- 6. ตาราง payments (การชำระเงิน)
+CREATE TABLE payments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id UUID NOT NULL REFERENCES orders(id) ON DELETE RESTRICT,
+    amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
+    method TEXT NOT NULL CHECK (method IN ('PROMPTPAY', 'CREDIT_CARD', 'BANK_TRANSFER')),
+    slip_url TEXT,
+    status TEXT NOT NULL CHECK (status IN ('PENDING', 'VERIFIED', 'REJECTED')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### ตัวอย่างที่ 2: การ Query ใช้งาน JSONB และ Array ในงานจริง
+ตัวอย่างการดึงข้อมูลสเปกเนื้อวากิวที่มี Marble Score (BMS) ตั้งแต่ 8 ขึ้นไป และตัดแบบ Ribeye ได้:
+
+```sql filename="06_jsonb_and_array_queries.sql"
+-- 1. เพิ่มข้อมูลตัวอย่างสินค้าเนื้อวากิวพร้อม JSONB specifications
+INSERT INTO categories (id, name, slug) 
+VALUES ('c1111111-1111-1111-1111-111111111111', 'Japanese Wagyu', 'japanese-wagyu');
+
+INSERT INTO products (
+    category_id, name, sku, price_per_kg, stock_qty, dry_aged_days, 
+    specifications, available_cuts
+) VALUES (
+    'c1111111-1111-1111-1111-111111111111',
+    'Miyazaki Wagyu A5 Striploin',
+    'WGY-MIYA-A5-STRIP',
+    5200.00,
+    15,
+    0,
+    '{"origin": "Miyazaki, Japan", "bms_score": 9, "feed_type": "Grain-fed 600 days", "halal": true}'::jsonb,
+    ARRAY['STEAK_1_INCH', 'STEAK_2_INCH', 'YAKINIKU', 'SHABU']
+);
+
+-- 2. Query ด้วย JSONB Containment Operator (@>)
+-- ค้นหาเนื้อที่ระบุว่าเป็น halal = true ใน JSONB
+SELECT name, price_per_kg, specifications->>'origin' AS origin
+FROM products
+WHERE specifications @> '{"halal": true}';
+
+-- 3. Query เจาะจงค่าตัวเลขใน JSONB โดยแปลงเป็น Integer
+-- ค้นหาเนื้อที่มี BMS Score >= 8
+SELECT name, sku, (specifications->>'bms_score')::int AS bms
+FROM products
+WHERE (specifications->>'bms_score')::int >= 8;
+
+-- 4. Query ค้นหาสินค้าที่มีรูปแบบการตัดแต่ง 'YAKINIKU' ในคอลัมน์ Array
+SELECT name, available_cuts
+FROM products
+WHERE 'YAKINIKU' = ANY(available_cuts);
+```
+
+**ตัวอย่างผลลัพธ์ของ Query (Expected Output):**
+```text filename="docs/database/postgresql.txt"
+            name             | price_per_kg |      origin      
+-----------------------------+--------------+------------------
+ Miyazaki Wagyu A5 Striploin |      5200.00 | Miyazaki, Japan
+(1 row)
+```
+
+## 4. ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+### ❌ สิ่งที่ผิด: ใช้ `FLOAT` เก็บเงิน และใช้ `TIMESTAMP WITHOUT TIME ZONE`
+```sql filename="sql/postgresql.sql"
+-- เสี่ยงต่อการเกิดข้อผิดพลาดร้ายแรง
+CREATE TABLE bad_orders (
+    id SERIAL PRIMARY KEY,
+    total_amount DOUBLE PRECISION, -- อันตราย! 100.10 + 200.20 อาจกลายเป็น 300.29999999999995
+    created_at TIMESTAMP          -- อันตราย! ไม่มี Timezone เมื่อ Server ย้าย Location เวลาจะเพี้ยนทันที
+);
+```
+
+### ✅ สิ่งที่ถูก: ใช้ `NUMERIC(12,2)` สำหรับเงิน และ `TIMESTAMPTZ` เสมอ
+```sql filename="sql/postgresql.sql"
+-- ถูกต้อง แม่นยำตามมาตรฐานสากล
+CREATE TABLE good_orders (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    total_amount NUMERIC(12, 2) NOT NULL, -- แม่นยำแน่นอน 100%
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP -- เก็บเป็น UTC สากล
+);
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **`JSONB`:** ควรใช้เมื่อต้องการเก็บ Metadata ที่มีโครงสร้างยืดหยุ่นสูงและแต่ละสินค้ามีฟิลด์ไม่เหมือนกัน (เช่น เนื้อวากิวมี `bms_score`, แต่เนื้อดรายเอจมี `aging_room_humidity`) แต่ **ห้ามนำฟิลด์ที่เป็นแกนหลักของธุรกิจ เช่น ราคา, สต็อก, สถานะคำสั่งซื้อ ไปซ่อนไว้ใน JSONB** เพราะจะเสียความสามารถในการทำ Foreign Key และ Integrity Constraint
+- **`TEXT`:** ควรใช้แทน `VARCHAR(255)` ใน 95% ของตารางใน PostgreSQL เพราะไม่มีข้อเสียเรื่องความเร็ว และไม่ต้องคอยกังวลเรื่องการขยายขนาดฟิลด์ในอนาคต
+
+## 6. คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: เหตุใดใน PostgreSQL จึงควรเลือกใช้ `TIMESTAMPTZ` แทน `TIMESTAMP` เสมอ แม้ว่าระบบจะให้บริการเฉพาะลูกค้าภายในประเทศไทย (+07:00) เท่านั้น?**
+  - *แนวคำตอบ:* แม้ผู้ใช้จะอยู่ใน Timezone เดียวกัน แต่ระบบคลาวด์ในปัจจุบัน (AWS RDS, GCP Cloud SQL, Docker Containers) ถูกตั้งค่าระบบปฏิบัติการเป็น UTC โดยค่าเริ่มต้น หากใช้ `TIMESTAMP` (Without Time Zone) ตัว Engine จะไม่เก็บออฟเซ็ตเวลา เมื่อแอปพลิเคชันส่งเวลาแบบ ISO 8601 (`2026-10-17T10:00:00+07:00`) เข้ามา Postgres จะตัด `+07:00` ทิ้งไปดื้อๆ ทำให้เวลาถูกบันทึกเป็น 10:00 UTC ซึ่งคลาดเคลื่อนจากความเป็นจริงไป 7 ชั่วโมง การใช้ `TIMESTAMPTZ` จะทำให้ Engine แปลงค่าทั้งหมดเป็น UTC จริง และแปลงกลับเป็น Local Timezone ของ Client ได้อย่างถูกต้องเสมอ
+- **Q2: การใช้ `ENUM` ที่สร้างด้วยคำสั่ง `CREATE TYPE ... AS ENUM` มีข้อเสียอะไรเมื่อเทียบกับการใช้ `TEXT` ร่วมกับ `CHECK constraint` ในระบบที่มีการ Deploy บ่อยครั้ง?**
+  - *แนวคำตอบ:* ข้อเสียหลักของ PostgreSQL Enum คือ: (1) การลบหรือเปลี่ยนชื่อค่า Enum ทำได้ยากมากในระดับ DDL ต้องรัน migration ที่ซับซ้อน, (2) ก่อน PostgreSQL เวอร์ชันใหม่ การเพิ่มค่า Enum เข้าไปใหม่ภายใน Transaction Block ไม่สามารถเรียกใช้ค่านั้นได้ทันทีใน Transaction เดียวกัน, (3) เครื่องมือ Database Migration เช่น Prisma มักมีปัญหากับการ Diff Enum Type ของ Postgres การใช้ `TEXT` ร่วมกับ `CHECK (status IN ('PENDING', 'PAID'))` ให้ความยืดหยุ่นในการแก้เงื่อนไขผ่าน `ALTER TABLE ... DROP/ADD CONSTRAINT` ได้ง่ายกว่ามากโดยไม่ต้องล็อกตารางนาน
+
+---

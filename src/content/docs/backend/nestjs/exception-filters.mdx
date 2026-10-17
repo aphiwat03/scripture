@@ -1,0 +1,150 @@
+---
+title: Exception Filters
+category: BACKEND
+parentTitle: NestJS 11
+version: NestJS 11
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด
+ในระบบร้านค้าออนไลน์ หากระบบค้นหาเนื้อสเต็กเกิดขัดข้อง ฐานข้อมูลดับ หรือสต็อกเนื้อหมดเกลี้ยง สิ่งที่แย่ที่สุดคือการปล่อยให้แอปพัง (Server Crash) หรือพ่น Stack Trace ของระบบและรหัสผ่านฐานข้อมูลออกไปให้ลูกค้าเห็นบนหน้าจอ
+
+ใน NestJS **Exception Filter** คือ "ตาข่ายดักจับข้อผิดพลาดชั้นสุดท้าย" ทำหน้าที่จับทุก Exception ที่หลุดรอดออกมาจาก Controller, Service, Guard หรือ Pipe แล้วแปลงให้กลายเป็น JSON Error Response ที่ได้มาตรฐาน สวยงาม ปลอดภัย และเข้าใจง่าย พร้อมบันทึกรายละเอียดข้อผิดพลาดลงในระบบ Log หลังบ้าน
+
+## 2. หลักการเบื้องหลัง
+เมื่อเกิด Exception ใดๆ ขึ้นในระบบ ตัว NestJS Layered Architecture จะส่ง Error นั้นไหลผ่านขึ้นมาตาม Request Pipeline
+- หากไม่มี Exception Filter ดักจับ NestJS จะใช้ Built-in `BaseExceptionFilter` ซึ่งจะส่งคืน JSON รูปแบบ `{ statusCode: 500, message: 'Internal server error' }`
+- การสร้าง Custom Exception Filter ต้องตกแต่งคลาสด้วย `@Catch()` และอิมพลีเมนต์ `ExceptionFilter`
+- ผ่านทาง `ArgumentsHost` เราสามารถเข้าถึง Native Response Object (`res`) ของ Express หรือ Fastify เพื่อกำหนด HTTP Status Code และสั่ง Render JSON ได้โดยตรง
+
+## 3. ตัวอย่างโค้ด
+
+### ตัวอย่างที่ 1: Custom Business Domain Exceptions
+```typescript filename="src/common/exceptions/butcher-business.exception.ts"
+import { HttpException, HttpStatus } from '@nestjs/common';
+
+// 1. Exception กรณีเนื้อส่วนที่ต้องการสั่งตัดหมดสต็อก
+export class MeatOutOfStockException extends HttpException {
+  constructor(meatName: string, requestedGrams: number) {
+    super(
+      {
+        errorCode: 'MEAT_OUT_OF_STOCK',
+        message: `ขออภัย เนื้อชิ้นพิเศษ ${meatName} มีปริมาณไม่เพียงพอสำหรับตัด ${requestedGrams} กรัม`,
+        timestamp: new Date().toISOString(),
+      },
+      HttpStatus.CONFLICT // 409 Conflict
+    );
+  }
+}
+
+// 2. Exception กรณีพยายามสั่งตัดเนื้อที่มีขนาดไม่ได้มาตรฐาน
+export class InvalidMeatCutException extends HttpException {
+  constructor(reason: string) {
+    super(
+      {
+        errorCode: 'INVALID_MEAT_CUT_SPECIFICATION',
+        message: `ข้อกำหนดการตัดแต่งเนื้อไม่ถูกต้อง: ${reason}`,
+      },
+      HttpStatus.UNPROCESSABLE_ENTITY // 422 Unprocessable Entity
+    );
+  }
+}
+```
+
+### ตัวอย่างที่ 2: Global All-Exceptions Filter ระดับ Enterprise
+```typescript filename="src/common/filters/all-exceptions.filter.ts"
+import {
+  ExceptionFilter,
+  Catch,
+  ArgumentsHost,
+  HttpException,
+  HttpStatus,
+  Logger,
+} from '@nestjs/common';
+import { Request, Response } from 'express';
+import { CORRELATION_ID_HEADER } from '../middlewares/correlation-id.middleware';
+
+@Catch() // ว่างไว้เพื่อดักจับข้อผิดพลาด "ทุกประเภท" (ทั้ง HttpException และ Unhandled Error)
+export class AllExceptionsFilter implements ExceptionFilter {
+  private readonly logger = new Logger(AllExceptionsFilter.name);
+
+  catch(exception: unknown, host: ArgumentsHost) {
+    const ctx = host.switchToHttp();
+    const response = ctx.getResponse<Response>();
+    const request = ctx.getRequest<Request>();
+
+    const correlationId = request.headers[CORRELATION_ID_HEADER] as string || 'no-trace';
+
+    let status = HttpStatus.INTERNAL_SERVER_ERROR;
+    let errorResponse: any = {
+      message: 'เกิดข้อผิดพลาดไม่คาดคิดภายในระบบ กรุณาติดต่อผู้ดูแล',
+    };
+
+    if (exception instanceof HttpException) {
+      status = exception.getStatus();
+      const res = exception.getResponse();
+      errorResponse = typeof res === 'object' ? res : { message: res };
+    } else if (exception instanceof Error) {
+      // บันทึก Critical Error ลง Log แต่ไม่พ่น Stack Trace กลับไปหาผู้ใช้
+      this.logger.error(
+        `[CRITICAL UNHANDLED ERROR] [${correlationId}] ${exception.message}`,
+        exception.stack
+      );
+    }
+
+    const standardizedPayload = {
+      success: false,
+      statusCode: status,
+      path: request.url,
+      correlationId: correlationId,
+      timestamp: new Date().toISOString(),
+      error: errorResponse,
+    };
+
+    response.status(status).json(standardizedPayload);
+  }
+}
+```
+
+## 4. ผิด vs ถูก
+
+```typescript filename="src/nestjs.ts"
+// ❌ ผิด: ใช้ try/catch ใน Controller แล้วส่ง 500 กลับไปเองแบบลูกทุ่ง
+@Controller('orders')
+export class BadOrderController {
+  @Post()
+  async create(@Body() body: any, @Res() res: any) {
+    try {
+      return await this.service.create(body);
+    } catch (err: any) {
+      // ❌ ผิดมหันต์: นำ stack trace ส่งกลับไปให้ Client เผยช่องโหว่ความปลอดภัย
+      return res.status(500).json({ error: err.message, stack: err.stack });
+    }
+  }
+}
+```
+
+```typescript filename="src/nestjs.ts"
+// ✅ ถูก: โยน Exception ออกจาก Service แล้วปล่อยให้ Global Exception Filter จัดการ
+@Injectable()
+export class GoodOrderService {
+  async create(body: CreateOrderDto) {
+    const inStock = await this.checkStock(body.productId);
+    if (!inStock) {
+      // ✅ โยน Business Exception ที่มีความหมายชัดเจน ระบบ Filter จะจับและแปลงเป็น JSON สวยงามให้เอง
+      throw new MeatOutOfStockException(body.productName, body.weightGrams);
+    }
+    return this.save(body);
+  }
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Exception Filter**: ดักจับ Error ทั้งระบบที่ระดับ Global หรือระดับ Controller เพื่อจัดระเบียบโครงสร้าง JSON Error ให้มีรูปแบบเดียวกัน และซ่อนความลับของเซิร์ฟเวอร์
+- **ไม่ควรใช้ Exception Filter แทน Business Logic**: ห้ามใช้ Exception ในการควบคุม Flow การทำงานปกติของโปรแกรม (Control Flow via Exceptions เป็น Anti-pattern) ควรใช้เฉพาะเมื่อเกิดข้อผิดพลาดจริงๆ
+
+## 6. คำถามสัมภาษณ์
+**ถาม**: ทำไมในระบบระดับ Production จึงห้ามส่ง `err.stack` (Stack Trace) หรือข้อความดิบจาก Database Driver กลับไปให้ Client ใน Exception Filter โดยเด็ดขาด?
+**ตอบ**: เพราะ Stack Trace และ Raw Database Errors มักเปิดเผยข้อมูลโครงสร้างภายในของระบบ เช่น ชื่อตารางในฐานข้อมูล, ชื่อโฟลเดอร์ไฟล์บนเซิร์ฟเวอร์, หรือเวอร์ชันของไลบรารี ซึ่งเป็นข้อมูลสำคัญที่ผู้ไม่หวังดี (Attacker) สามารถนำไปใช้วิเคราะห์เพื่อโจมตีระบบผ่านช่องโหว่แบบ Targeted Attack (เช่น SQL Injection หรือ Path Traversal)
+
+---

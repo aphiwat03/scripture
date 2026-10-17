@@ -1,0 +1,156 @@
+---
+title: Mapped Types
+category: BACKEND
+parentTitle: Validation
+version: class-validator & Zod
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในการสร้าง CRUD API เรามักจะมี DTO ที่มีฟิลด์คล้ายคลึงกัน เช่น `CreateProductDto`, `UpdateProductDto`, `UpdateProductPriceDto` หากเราคัดลอกโค้ด Decorator ทั้งหมดไปวางซ้ำๆ ในทุกไฟล์ เมื่อต้องเปลี่ยนกฎขั้นต่ำของราคาเนื้อ เราจะต้องตามไปแก้ทุกไฟล์ (ผิดหลักการ **DRY - Don't Repeat Yourself**)
+
+แพ็กเกจ **`@nestjs/mapped-types`** (หรือ **`@nestjs/swagger`** หากต้องการให้เอกสาร OpenAPI อัปเดตตามด้วย) จึงมีฟังก์ชันสร้างคลาส DTO ใหม่จากคลาสตั้งต้นโดยคงกฎของ `class-validator` ไว้ครบถ้วน:
+1. **`PartialType(BaseDto)`**: คัดลอกทุกฟิลด์พร้อมกฎเดิม แต่เติม `@IsOptional()` ให้ทุกฟิลด์อัตโนมัติ (เหมาะสำหรับ `PATCH`)
+2. **`PickType(BaseDto, ['fieldA', 'fieldB'] as const)`**: เลือกมาเฉพาะบางฟิลด์ที่ระบุ
+3. **`OmitType(BaseDto, ['sku'] as const)`**: เอาทุกฟิลด์ยกเว้นฟิลด์ที่ระบุ (เช่น ห้ามแก้ไขรหัส `sku` ตอนทำ Update)
+4. **`IntersectionType(DtoA, DtoB)`**: รวมฟิลด์และกฎจาก 2 คลาสเข้าด้วยกัน
+
+และสำหรับกฎทางธุรกิจที่ซับซ้อนเกินกว่า Decorator มาตรฐาน (เช่น กฎเปรียบเทียบระหว่าง 2 ฟิลด์ในอ็อบเจกต์เดียวกัน: *"ถ้าเลือกหั่นแบบ `STEAK_THICK_25MM` น้ำหนักเนื้อ `weightGrams` ต้องสั่งขั้นต่ำ 350 กรัมขึ้นไป"*) เราสามารถเขียน **Custom Validator (`ValidatorConstraint`)** ขึ้นมาใช้งานเองได้
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ต่างจาก Utility Types ของ TypeScript (`Partial<T>`, `Pick<T>`, `Omit<T>`) ที่ทำงานเฉพาะตอน Compile-time แล้วหายไปตอนรันจริง ฟังก์ชัน `PartialType`, `PickType`, `OmitType` ของ NestJS เป็น **Runtime Class Factory Functions** ที่ทำการคัดลอก Property Metadata ของ `class-validator` และ `class-transformer` จาก Prototype ของคลาสแม่ มาผูกเข้ากับคลาสลูกที่สร้างขึ้นใหม่ในหน่วยความจำ ทำให้ `ValidationPipe` ตรวจสอบคลาสลูกได้เหมือนเขียน Decorator เองทุกประการ
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การประกอบร่าง UpdateProductDto ด้วย PartialType และ OmitType (พื้นฐาน)
+```typescript filename="src/modules/products/dto/update-product.dto.ts"
+// หมายเหตุ: หากโปรเจกต์ใช้ @nestjs/swagger ให้ import จาก '@nestjs/swagger' แทน '@nestjs/mapped-types'
+// เพื่อให้หน้าเอกสาร Swagger UI แสดงฟิลด์เป็น Optional ตามไปด้วยโดยอัตโนมัติ
+import { PartialType, OmitType, PickType } from '@nestjs/mapped-types';
+import { CreateProductDto } from './create-product.dto';
+
+// 1. UpdateProductDto สำหรับ PATCH /products/:id
+// - ห้ามแก้ไขรหัส 'sku' และ 'categoryId' (ใช้ OmitType ตัดออก)
+// - ฟิลด์ที่เหลือทั้งหมดกลายเป็น Optional แต่ยังคงกฎ @Min, @Max, @IsEnum เดิมไว้ 100%!
+export class UpdateProductDto extends PartialType(
+  OmitType(CreateProductDto, ['sku', 'categoryId'] as const),
+) {}
+
+// 2. QuickAdjustStockAndPriceDto สำหรับหน้าปรับราคาและสต็อกด่วนของเชฟ
+// - ดึงมาเฉพาะ 2 ฟิลด์คือ pricePerKgThb และ stockWeightGrams แบบบังคับกรอก (Required)
+export class QuickAdjustStockAndPriceDto extends PickType(CreateProductDto, [
+  'pricePerKgThb',
+  'stockWeightGrams',
+] as const) {}
+```
+
+### ตัวอย่างที่ 2: การสร้าง Cross-Field Custom Validator ตรวจสอบความสัมพันธ์ระหว่างรูปแบบการหั่นเนื้อและน้ำหนักขั้นต่ำ (ขั้นสูง)
+```typescript filename="src/modules/orders/validators/valid-cut-weight.validator.ts"
+import {
+  ValidatorConstraint,
+  ValidatorConstraintInterface,
+  ValidationArguments,
+   ValidationOptions,
+  registerDecorator,
+} from 'class-validator';
+import { MeatCutStyle } from '../dto/create-order.dto';
+
+interface CutWeightTarget {
+  cutStyle?: MeatCutStyle;
+  weightGrams?: number;
+}
+
+// กฎทางธุรกิจของเชฟแล่เนื้อ Smart Butcher:
+// - หั่นสเต็กหนา 25 มม. (STEAK_THICK_25MM) ต้องสั่งขั้นต่ำ 350 กรัม ต่อชิ้น
+// - สั่งเนื้อก้อนใหญ่ไม่หั่น (WHOLE_SUBPRIMAL_BLOCK) ต้องสั่งขั้นต่ำ 1,500 กรัม (1.5 กก.)
+// - หั่นชาบูหรือยากินิกุ สั่งขั้นต่ำ 200 กรัม
+const MIN_WEIGHT_BY_CUT_STYLE: Record<MeatCutStyle, number> = {
+  [MeatCutStyle.STEAK_THICK_25MM]: 350,
+  [MeatCutStyle.STEAK_MEDIUM_20MM]: 250,
+  [MeatCutStyle.YAKINIKU_5MM]: 200,
+  [MeatCutStyle.SHABU_THIN_2MM]: 200,
+  [MeatCutStyle.WHOLE_SUBPRIMAL_BLOCK]: 1500,
+};
+
+@ValidatorConstraint({ name: 'isValidMeatCutWeight', async: false })
+export class IsValidMeatCutWeightConstraint
+  implements ValidatorConstraintInterface
+{
+  validate(weightGrams: unknown, args: ValidationArguments): boolean {
+    if (typeof weightGrams !== 'number') {
+      return false;
+    }
+
+    const object = args.object as CutWeightTarget;
+    if (!object.cutStyle || !(object.cutStyle in MIN_WEIGHT_BY_CUT_STYLE)) {
+      return true; // ให้ @IsEnum ของ cutStyle เป็นตัวแจ้งเตือนแทนหาก cutStyle ผิด
+    }
+
+    const requiredMinGrams = MIN_WEIGHT_BY_CUT_STYLE[object.cutStyle];
+    return weightGrams >= requiredMinGrams;
+  }
+
+  defaultMessage(args: ValidationArguments): string {
+    const object = args.object as CutWeightTarget;
+    const requiredMinGrams = object.cutStyle
+      ? (MIN_WEIGHT_BY_CUT_STYLE[object.cutStyle] ?? 200)
+      : 200;
+
+    return `สำหรับการสั่งตัดรูปแบบ "${object.cutStyle}" ต้องระบุน้ำหนักเนื้อขั้นต่ำอย่างน้อย ${requiredMinGrams.toLocaleString('th-TH')} กรัมขึ้นไป (คุณระบุ ${args.value} กรัม)`;
+  }
+}
+
+// สร้าง Custom Decorator @IsValidMeatCutWeight() เพื่อให้เรียกใช้งานบนฟิลด์ใน DTO ได้อย่างสะอาดตา
+export function IsValidMeatCutWeight(validationOptions?: ValidationOptions) {
+  return function (object: object, propertyName: string) {
+    registerDecorator({
+      target: object.constructor,
+      propertyName,
+      options: validationOptions,
+      constraints: [],
+      validator: IsValidMeatCutWeightConstraint,
+    });
+  };
+}
+```
+
+```typescript filename="src/modules/orders/dto/custom-validated-order-item.dto.ts"
+import { IsEnum, IsInt, Max } from 'class-validator';
+import { MeatCutStyle } from './create-order.dto';
+import { IsValidMeatCutWeight } from '../validators/valid-cut-weight.validator';
+
+export class CustomValidatedOrderItemDto {
+  @IsEnum(MeatCutStyle)
+  cutStyle!: MeatCutStyle;
+
+  @IsInt()
+  @Max(10000)
+  // ใช้ Custom Decorator ที่เราสร้างขึ้นเพื่อตรวจเทียบกับค่า cutStyle ของอ็อบเจกต์เดียวกัน!
+  @IsValidMeatCutWeight()
+  weightGrams!: number;
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/products/mapped-types-comparison.ts"
+import { CreateProductDto } from './dto/create-product.dto';
+
+// ❌ ผิด (Anti-pattern): ใช้ TypeScript Partial<CreateProductDto> หรือใช้ Asynchronous Custom Validator ยิงเช็ค DB ในทุกๆ แถวของ Array
+export type BrokenUpdateDto = Partial<CreateProductDto>; // เป็น type ที่ถูกลบทิ้งตอนรันจริง ValidationPipe ไม่ทำงาน!
+
+// ✅ ถูก (Best Practice): ใช้ PartialType(CreateProductDto) จาก @nestjs/mapped-types (หรือ @nestjs/swagger)
+// และหลีกเลี่ยงการคิวรีฐานข้อมูลใน Custom Validator หากสามารถตรวจแบบ Batch ในชั้น Service ได้เร็วกว่า
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Custom Validator (`ValidatorConstraint`) เมื่อ**: เป็นการตรวจสอบรูปแบบข้อมูลหรือความสัมพันธ์ระหว่างฟิลด์ภายใน DTO เดียวกันที่จบในหน่วยความจำ (CPU-bound validation) เช่น วันสิ้นสุดโปรโมชั่นต้องมากกว่าวันเริ่มต้น (`endDate > startDate`) หรือน้ำหนักเนื้อสัมพันธ์กับรูปแบบการหั่น
+- **ไม่ควรใช้ Async Custom Validator เพื่อคิวรีฐานข้อมูลใน Array (`items[]`)**: เช่น หากลูกค้าส่ง `items` มา 30 รายการ แล้วเราใช้ Async Custom Validator เช็ค `prisma.product.findUnique()` ทีละรายการ จะเกิด N+1 Database Queries ตั้งแต่ใน Pipe! สำหรับการเช็คว่า `productId` มีอยู่จริงหรือไม่ ให้รวบรวม ID ทั้งหมดไปเช็คด้วย `prisma.product.findMany({ where: { id: { in: ids } } })` เพียงครั้งเดียวในชั้น Service จะเร็วกว่าหลายสิบเท่า
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ถ้าโปรเจกต์ของเราติดตั้ง `@nestjs/swagger` เพื่อสร้างเอกสาร OpenAPI อยู่แล้ว เหตุใดเราจึงต้อง `import { PartialType, PickType, OmitType } from '@nestjs/swagger'` แทนที่จะ import จาก `'@nestjs/mapped-types'`?
+   - **แนวคำตอบ**: เพราะฟังก์ชันใน `@nestjs/mapped-types` จะคัดลอกเฉพาะ Metadata ของ `class-validator` และ `class-transformer` เท่านั้น แต่ไม่คัดลอก Metadata ของ `@ApiProperty()` สำหรับ Swagger ส่งผลให้ในหน้าเอกสาร Swagger UI คลาส `UpdateProductDto` จะปรากฏเป็นอ็อบเจกต์ว่างเปล่า! ในขณะที่ `PartialType` จาก `@nestjs/swagger` จะคัดลอกทั้งกฎของ `class-validator` และปรับ `@ApiProperty({ required: false })` ให้ในหน้า Swagger พร้อมกันโดยอัตโนมัติ
+2. **คำถาม**: หากต้องการเขียน Async Custom Validator ที่ต้องเรียกใช้ `PrismaService` (ผ่าน Dependency Injection ของ NestJS) เราต้องตั้งค่าอะไรเพิ่มเติมใน `main.ts`?
+   - **แนวคำตอบ**: โดยค่าเริ่มต้น `class-validator` จะสร้างอินสแตนซ์ของ `ValidatorConstraint` เองทำให้ไม่รู้จัก DI Container ของ NestJS (`this.prisma` จะเป็น `undefined`) เราต้องเรียกฟังก์ชัน `useContainer(app.select(AppModule), { fallbackOnErrors: true })` จากแพ็กเกจ `class-validator` ในไฟล์ `main.ts` และแปะ `@Injectable()` บนคลาส Constraint นั้น
+
+---

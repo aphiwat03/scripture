@@ -1,0 +1,154 @@
+---
+title: Constraints
+category: DATABASE
+parentTitle: PostgreSQL 16
+version: PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในการสร้างระบบจำหน่ายเนื้อระดับพรีเมียม **Smart Butcher Marketplace**:
+- หากไม่มี Constraints ระดับ Database Engine เปรียบเหมือนร้านขายเนื้อที่พึ่งพาเพียง "ความจำของพนักงานคิดเงินหน้าร้าน" (Application Code)
+- วันดีคืนดี พนักงานหน้าร้านอาจจะกดคีย์บอร์ดพิมพ์ราคาเนื้อติดลบ `-500` บาท หรือเผลอคีย์ตัดสต็อกเนื้อไป `-50` ชิ้น หรือลูกค้าสั่งซื้อเนื้อจากหมวดหมู่ที่ถูกลบไปแล้วแต่รายการในออเดอร์ยังค้างอยู่
+- **Database Constraints เปรียบเสมือน "กฎฟิสิกส์ประจำร้าน":** ไม่ว่าใครจะพยายามยิง API หรือรันสคริปต์อะไรเข้ามา ฐานข้อมูลจะทำหน้าที่เป็นป้อมปราการสุดท้ายในการปฏิเสธคำสั่งที่ไม่ถูกต้องทันที เพื่อให้แน่ใจว่าระบบจะไม่มีวันมีข้อมูลเน่าเสีย (Corrupted Data) เข้าไปอยู่ในฮาร์ดดิสก์
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. Primary Key และ Unique Constraints
+- เมื่อประกาศ `PRIMARY KEY` ระบบ PostgreSQL จะสร้างดัชนีแบบ **B-Tree Index** แบบ Unique ขึ้นมาเบื้องหลัง พร้อมบังคับกฎ `NOT NULL`
+- `UNIQUE`: รับประกันว่าไม่มีข้อมูลซ้ำซ้อน
+- **ความพิเศษของ PostgreSQL 15 & 16 (`NULLS NOT DISTINCT`):**
+  - ตามมาตรฐาน SQL ดั้งเดิม `NULL` หมายถึง "ไม่ทราบค่า" ดังนั้น `NULL != NULL` ทำให้ใน Postgres ยุคก่อน แถวที่มีค่า `NULL` ในคอลัมน์ที่เป็น UNIQUE สามารถซ้ำกันได้หลายแถว
+  - ใน PostgreSQL 15+ สามารถระบุคำสั่ง `UNIQUE NULLS NOT DISTINCT` เพื่อบังคับให้มีค่า `NULL` ได้เพียงแถวเดียวเท่านั้น!
+
+### 2. CHECK Constraints
+- ทำการประเมินค่านิพจน์แบบ Boolean ทุกครั้งที่มีการสั่ง `INSERT` หรือ `UPDATE`
+- หากผลลัพธ์เป็น `TRUE` หรือ `UNKNOWN` (มีค่า NULL ปน) ข้อมูลจะผ่าน หากผลลัพธ์เป็น `FALSE` จะถูกปฏิเสธทันทีด้วย Error Code `23514 (check_violation)`
+
+### 3. Foreign Key และพฤติกรรม `ON DELETE`
+เมื่อมีการอ้างอิงตารางแม่ (Parent) กับตารางลูก (Child) ผ่าน `FOREIGN KEY`:
+- `ON DELETE RESTRICT`: ไม่อนุญาตให้ลบแถวในตารางแม่ หากยังมีแถวในตารางลูกชี้มาอยู่ (Throw error ทันที)
+- `ON DELETE NO ACTION`: มีพฤติกรรมคล้าย `RESTRICT` แต่ต่างกันตรงที่ `NO ACTION` รองรับการทำงานแบบ **Deferred Constraint Check** (รอตรวจตอนจบ Transaction ก่อนสั่ง `COMMIT`)
+- `ON DELETE CASCADE`: เมื่อลบแถวในตารางแม่ แถวทั้งหมดในตารางลูกที่อ้างอิงถึงจะถูกลบตามไปด้วยอัตโนมัติ (เช่น ลบ Order -> ลบ Order Items ทั้งหมดของ Order นั้น)
+- `ON DELETE SET NULL`: เมื่อลบแถวในตารางแม่ ให้เซตค่า Foreign Key ในตารางลูกให้เป็น `NULL` (เช่น ลบ Category -> ให้ Product ที่เคยอยู่ในหมวดหมู่นี้กลายเป็น `category_id = NULL`)
+- `ON DELETE SET DEFAULT`: ปรับค่า Foreign Key ในตารางลูกให้กลับไปเป็นค่า Default ที่กำหนดไว้
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การกำหนด Constraints ครบวงจรและ Foreign Key Behaviors
+สร้างความสัมพันธ์ระหว่าง Categories, Products, Orders และ Order Items:
+
+```sql filename="07_constraints_mastery.sql"
+-- สร้างตารางสินค้าพร้อม Integrity Constraints ขั้นสูง
+CREATE TABLE butcher_products (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    sku TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    -- ราคาต้องมากกว่า 0 เสมอ
+    price_per_kg NUMERIC(10,2) NOT NULL CONSTRAINT chk_positive_price CHECK (price_per_kg > 0),
+    -- สต็อกต้องไม่ติดลบ
+    stock_qty INT NOT NULL CONSTRAINT chk_non_negative_stock CHECK (stock_qty >= 0),
+    -- จำนวนวันที่ทำ Dry-aged ต้องอยู่ระหว่าง 0 ถึง 120 วัน
+    dry_aged_days INT NOT NULL DEFAULT 0 CONSTRAINT chk_valid_aging_days CHECK (dry_aged_days BETWEEN 0 AND 120),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- สร้างตารางคำสั่งซื้อ
+CREATE TABLE butcher_orders (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_no TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CONSTRAINT chk_order_status CHECK (
+        status IN ('PENDING', 'PAID', 'PREPARING', 'SHIPPED', 'CANCELLED')
+    ),
+    total_amount NUMERIC(12,2) NOT NULL CONSTRAINT chk_positive_total CHECK (total_amount >= 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- สร้างตาราง Order Items พร้อมระบุ ON DELETE CASCADE
+CREATE TABLE butcher_order_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id UUID NOT NULL REFERENCES butcher_orders(id) ON DELETE CASCADE,
+    product_id UUID NOT NULL REFERENCES butcher_products(id) ON DELETE RESTRICT,
+    quantity INT NOT NULL CONSTRAINT chk_item_quantity CHECK (quantity > 0),
+    unit_price NUMERIC(10,2) NOT NULL CONSTRAINT chk_item_price CHECK (unit_price > 0),
+    subtotal NUMERIC(12,2) NOT NULL CONSTRAINT chk_item_subtotal CHECK (subtotal > 0),
+    -- ห้ามสั่งสินค้าชิ้นเดิมซ้ำหลายบรรทัดในออเดอร์เดียวกัน (ให้ใช้วิธีเพิ่ม quantity แทน)
+    CONSTRAINT uq_order_product UNIQUE (order_id, product_id)
+);
+```
+
+### ตัวอย่างที่ 2: การทดสอบความถูกต้องและการจำลอง Violation Errors
+ทดสอบว่า Engine ตอบสนองอย่างไรเมื่อมีคนพยายามป้อนข้อมูลผิด:
+
+```sql filename="08_test_constraints.sql"
+-- 1. ทดสอบป้อนเนื้อที่มีจำนวนวัน Dry-aged ผิดธรรมชาติ (เกิน 120 วัน)
+INSERT INTO butcher_products (sku, name, price_per_kg, stock_qty, dry_aged_days)
+VALUES ('DRY-TEST-01', 'Over-aged Beef', 1200.00, 5, 300);
+
+/* ผลลัพธ์ Error ที่ PostgreSQL ส่งกลับมา:
+ERROR:  new row for relation "butcher_products" violates check constraint "chk_valid_aging_days"
+DETAIL:  Failing row contains (..., DRY-TEST-01, Over-aged Beef, 1200.00, 5, 300, ...).
+*/
+
+-- 2. ทดสอบ ON DELETE RESTRICT
+-- สร้างสินค้าและนำไปผูกใน Order
+INSERT INTO butcher_products (id, sku, name, price_per_kg, stock_qty)
+VALUES ('p1111111-1111-1111-1111-111111111111', 'T-BONE-001', 'Dry-aged T-Bone', 1850.00, 10);
+
+INSERT INTO butcher_orders (id, order_no, status, total_amount)
+VALUES ('o1111111-1111-1111-1111-111111111111', 'ORD-2026-999', 'PAID', 1850.00);
+
+INSERT INTO butcher_order_items (order_id, product_id, quantity, unit_price, subtotal)
+VALUES ('o1111111-1111-1111-1111-111111111111', 'p1111111-1111-1111-1111-111111111111', 1, 1850.00, 1850.00);
+
+-- พยายามลบสินค้าที่ถูกสั่งซื้อไปแล้ว:
+DELETE FROM butcher_products WHERE id = 'p1111111-1111-1111-1111-111111111111';
+
+/* ผลลัพธ์ Error จาก Foreign Key RESTRICT:
+ERROR:  update or delete on table "butcher_products" violates foreign key constraint "butcher_order_items_product_id_fkey" on table "butcher_order_items"
+DETAIL:  Key (id)=(p1111111-1111-1111-1111-111111111111) is still referenced from table "butcher_order_items".
+*/
+
+-- 3. ทดสอบ ON DELETE CASCADE
+-- เมื่อลบออเดอร์ butcher_orders รายการลูกใน butcher_order_items จะถูกลบตามทันทีอย่างปลอดภัย
+DELETE FROM butcher_orders WHERE id = 'o1111111-1111-1111-1111-111111111111';
+-- ผลลัพธ์: DELETE 1 (และรายการใน butcher_order_items หายไปด้วยอัตโนมัติ)
+```
+
+## 4. ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+### ❌ สิ่งที่ผิด: ลืมสร้าง Index บน Foreign Key Columns
+ใน PostgreSQL เมื่อคุณสร้าง `FOREIGN KEY (order_id) REFERENCES orders(id)` **ระบบจะไม่สร้าง Index บนคอลัมน์ `order_id` ของตารางลูกให้อัตโนมัติ!**
+```sql filename="sql/postgresql.sql"
+-- สิ่งที่คนมักมองข้าม:
+CREATE TABLE order_items (
+    id UUID PRIMARY KEY,
+    order_id UUID REFERENCES orders(id) ON DELETE CASCADE
+    -- ไม่มี Index บน order_id!
+);
+-- ผลกระทบ: ทุกครั้งที่มีการ DELETE แถวใน orders หรือ UPDATE orders.id 
+-- PostgreSQL จะต้องทำ Sequential Scan เต็มตาราง order_items นับล้านแถวเพื่อเช็กว่ามีลูกหรือไม่!
+```
+
+### ✅ สิ่งที่ถูก: สร้าง B-Tree Index บน Foreign Key Column ทุกตัวเสมอ
+```sql filename="sql/postgresql.sql"
+-- กฎเหล็กของ Senior Database Engineer:
+CREATE TABLE order_items (
+    id UUID PRIMARY KEY,
+    order_id UUID REFERENCES orders(id) ON DELETE CASCADE
+);
+-- สร้าง Index ทันที:
+CREATE INDEX idx_order_items_order_id ON order_items(order_id);
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `ON DELETE CASCADE`:** เฉพาะความสัมพันธ์แบบที่เป็น "เนื้อแท้ส่วนเดียวกัน" (Composition / Strong Ownership) เช่น ลบ Order แล้วลบ Order Items ทิ้ง หรือลบ User แล้วลบ User Profiles ทิ้ง
+- **ห้ามใช้ `ON DELETE CASCADE`:** กับความสัมพันธ์ทางการเงินและการบัญชี เช่น ลบ Product แล้วสั่งให้ Cascade ลบประวัติการสั่งซื้อในอดีตทิ้ง หรือลบ Customer แล้วลบใบกำกับภาษีทิ้งเด็ดขาด (ต้องใช้ `RESTRICT` หรือเปลี่ยนสถานะเป็น Soft Delete แทน)
+
+## 6. คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: อะไรคือความแตกต่างทางเทคนิคระหว่าง `ON DELETE RESTRICT` และ `ON DELETE NO ACTION` ใน PostgreSQL?**
+  - *แนวคำตอบ:* แม้ว่าทั้งคู่จะปฏิเสธการลบแถวแม่เมื่อยังมีแถวลูกอ้างอิงอยู่ แต่ `NO ACTION` ปฏิบัติตามมาตรฐาน SQL อย่างเคร่งครัดโดยเปิดโอกาสให้สามารถกำหนดเป็น `DEFERRABLE INITIALLY DEFERRED` ได้ ซึ่งหมายความว่า ในระหว่าง Transaction เราสามารถสั่งลบแถวแม่ก่อนได้ ตราบใดที่ก่อนจบ Transaction (ก่อนสั่ง COMMIT) เราได้ทำการลบแถวลูกตามไป หรือย้าย Foreign Key ไปชี้ที่อื่นแล้ว Transaction นั้นจะผ่าน ในขณะที่ `RESTRICT` จะไม่ยอมให้ทำ Deferred Check เลยเด็ดขาด มันจะตรวจสอบและโยน Error ขัดขวางทันทีที่คำสั่ง DELETE หรือ UPDATE แถวแม่ถูกรัน
+- **Q2: เพราะเหตุใด PostgreSQL จึงไม่สร้าง Index บน Foreign Key ให้โดยอัตโนมัติ เหมือนกับที่ทำใน Primary Key และ Unique Constraints?**
+  - *แนวคำตอบ:* เพราะ Primary Key และ Unique จำเป็นต้องใช้ Unique B-Tree Index ในการตรวจสอบความซ้ำซ้อน (Uniqueness Validation) ในจังหวะ INSERT/UPDATE ทางเทคนิคจึงหลีกเลี่ยงไม่ได้ แต่สำหรับ Foreign Key คอลัมน์ฝั่งลูกอนุญาตให้มีค่าซ้ำกันได้ และไม่ใช่ทุกกรณีที่ตารางลูกจำเป็นต้องถูกค้นหาผ่าน Foreign Key (เช่น ตาราง Log บางประเภทที่มีแต่ INSERT) ทีมออกแบบ PostgreSQL จึงไม่บังคับสร้าง Index เพื่อไม่ให้สิ้นเปลืองพื้นที่ดิสก์และไม่เพิ่มภาระ Write Overhead โดยไม่จำเป็น แต่ในทางปฏิบัติของระบบ Production วิศวกรต้องสร้าง Index บน FK เองเสมอเพื่อป้องกันการเกิด Table Lock และ Sequential Scan เมื่อมีการลบแถวแม่
+
+---

@@ -1,0 +1,111 @@
+---
+title: Prisma Pool Limit
+category: DATABASE
+parentTitle: Connection Pooling
+version: PgBouncer & Supavisor
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ค่าเริ่มต้นของ PostgreSQL 16 กำหนดเพดานการเชื่อมต่อสูงสุดไว้ที่ **`max_connections = 100`** (และกันไว้ให้ Superuser 3 สาย เหลือให้ใช้งานจริง **97 สาย**)
+ลองดูสิ่งที่มักเกิดขึ้นในสถาปัตยกรรมยุคใหม่ของร้าน **Smart Butcher Marketplace**:
+- เราตั้งค่า `connection_limit = 20` ใน Prisma Client
+- วันปกติ เรารันเซิร์ฟเวอร์ Backend ไว้แค่ **2 Containers** -> ใช้สายรวมกัน $2 \times 20 = 40\text{ สาย}$ (ระบบทำงานปกติสุข)
+- วันจัดโปรโมชันใหญ่ ระบบ Auto-scaling ขยาย Backend ออกเป็น **8 Containers**!
+- ทันใดนั้น 8 Containers พยายามเปิดสายรวมกัน $8 \times 20 = \mathbf{160\text{ สาย}}$ ซึ่งทะลุเพดาน 97 สายของ PostgreSQL 16 ทันที!
+- ผลลัพธ์คือ Containers ตัวใหม่ๆ จะพังด้วยข้อผิดพลาด **`FATAL: sorry, too many clients already (SQLSTATE 53300)`**
+
+นอกจากนี้ ในโหมดการพัฒนาด้วย Next.js หรือ NestJS หากไม่ได้สร้าง `PrismaClient` ในรูปแบบ **Singleton Pattern** ทุกครั้งที่เราแก้โค้ดแล้วเซฟ (Hot Module Replacement - HMR) ระบบจะสร้าง `new PrismaClient()` ตัวใหม่ขึ้นมาเรื่อยๆ โดยไม่ปิดตัวเก่า จนสายเต็ม 100 สายภายในไม่กี่นาที!
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **สถาปัตยกรรม Connection Pool ภายใน Prisma Engine:**
+   ตัว `PrismaClient` แต่ละอินสแตนซ์จะมี Connection Pool ของตัวเองฝังอยู่ใน Query Engine โดยควบคุมผ่านพารามิเตอร์ใน Query String ของ `DATABASE_URL` ได้แก่:
+   - `connection_limit`: จำนวนการเชื่อมต่อสูงสุดที่อินสแตนซ์นี้จะเปิดไปยังฐานข้อมูล (หากไม่ระบุ Prisma จะคำนวณจากจำนวนคอร์ของเครื่องที่รันแอปพลิเคชันตามสูตร `num_physical_cpus * 2 + 1`)
+   - `pool_timeout`: จำนวนวินาทีสูงสุดที่คิวรีจะยอมเข้าแถวรอรับ Connection ที่ว่างจาก Pool (ค่าเริ่มต้นคือ `10` วินาที หากเกินเวลานี้จะโยน Error `P2024`)
+   - `connect_timeout`: จำนวนวินาทีสูงสุดในการพยายามเชื่อมต่อระดับ TCP ครั้งแรก (ค่าเริ่มต้นคือ `5` วินาที)
+2. **การรั่วไหลของ Connection จากการสร้าง `new PrismaClient()` ซ้ำซ้อน:**
+   เนื่องจากแต่ละอินสแตนซ์ของ `PrismaClient` ถือครอง Pool แยกของตัวเอง หากนักพัฒนาเผลอเขียน `const prisma = new PrismaClient()` ไว้ภายในฟังก์ชัน Controller หรือถูกเรียกซ้ำจากการทำ Hot Reload ในโหมด Development อินสแตนซ์เก่าจะยังคงถือสาย TCP ค้างไว้กับ PostgreSQL จนกว่าจะเต็มเพดาน
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การตั้งค่า `connection_limit` และ `pool_timeout` ใน `DATABASE_URL` และการทำ Global Singleton
+รูปแบบการประกาศ `PrismaClient` มาตรฐาน Production ที่ป้องกันปัญหา Connection รั่วไหลทั้งในโหมด Development (Hot Reload) และ Production:
+
+```ini filename=".env"
+# กำหนดเพดานการเชื่อมต่อต่อ 1 Container ไว้อย่างชัดเจน (เช่น 10 สาย) และเวลารอคิวสูงสุด 10 วินาที
+DATABASE_URL="postgresql://butcher_app:SecretPass@db.smartbutcher.internal:5432/smart_butcher_db?schema=public&connection_limit=10&pool_timeout=10&connect_timeout=5"
+```
+
+```typescript filename="src/lib/prisma-singleton.ts"
+import { PrismaClient } from '@prisma/client';
+
+// ประกาศ Type บน globalThis เพื่อเก็บอินสแตนซ์เดียวของ PrismaClient ข้ามรอบการทำ Hot Reload
+const globalForPrisma = globalThis as unknown as {
+  prismaInstance: PrismaClient | undefined;
+};
+
+export const prisma =
+  globalForPrisma.prismaInstance ??
+  new PrismaClient({
+    log:
+      process.env.NODE_ENV === 'development'
+        ? ['query', 'warn', 'error']
+        : ['error'],
+  });
+
+// ในโหมดที่ไม่ใช่ Production ให้ผูกอินสแตนซ์ไว้กับ globalThis เสมอเพื่อป้องกันการสร้าง Pool ซ้ำซ้อน
+if (process.env.NODE_ENV !== 'production') {
+  globalForPrisma.prismaInstance = prisma;
+}
+```
+
+### ตัวอย่างที่ 2: การจัดการ Lifecycle และการคืน Connection อย่างสะอาดใน NestJS (`PrismaService`)
+ในเฟรมเวิร์ก NestJS เราใช้ `@Injectable()` คู่กับ `OnModuleInit` และ `OnModuleDestroy` (พร้อมเปิด `app.enableShutdownHooks()`) เพื่อรับประกันว่าเมื่อ Container ถูกสั่งปิดหรือรีสตาร์ทตอน Deploy ระบบจะสั่ง `await this.$disconnect()` เพื่อคืนสายให้ PostgreSQL 16 ทันทีโดยไม่ทิ้งสายผีดิบ (`Zombie Connections`) ค้างไว้:
+
+```typescript filename="src/prisma/prisma.service.ts"
+import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
+
+@Injectable()
+export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(PrismaService.name);
+
+  constructor() {
+    super({
+      log: ['warn', 'error'],
+    });
+  }
+
+  async onModuleInit() {
+    await this.$connect();
+    this.logger.log('✅ Connected to Smart Butcher PostgreSQL 16 Pool successfully.');
+  }
+
+  async onModuleDestroy() {
+    this.logger.log('🔌 Gracefully disconnecting Prisma Pool from PostgreSQL 16...');
+    await this.$disconnect();
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การสร้างอินสแตนซ์ Prisma** | เรียก `new PrismaClient()` ภายในฟังก์ชัน API Route หรือสร้างหลายอินสแตนซ์ในโปรเจกต์เดียว | สร้าง `PrismaClient` แบบ **Global Singleton** เพียงตัวเดียวตลอดทั้งแอปพลิเคชัน |
+| **การคำนวณโควตาตอน Auto-scale** | ตั้ง `connection_limit=30` แล้วปล่อยให้ Kubernetes ขยายเป็น 10 Pods ($30 \times 10 = 300 > 100$) | คำนวณให้ `(จำนวน Pods สูงสุด × connection_limit) + สายสำรอง < max_connections` เสมอ หรือใช้ PgBouncer |
+| **การปิด Container ตอน Deploy** | สั่ง Kill โปรเซสแอปพลิเคชันทันทีโดยไม่เรียก `$disconnect()` ทำให้สายค้างใน Postgres นานหลายนาที | ดักจับสัญญาณ `SIGTERM` / `OnModuleDestroy` เพื่อเรียก `await prisma.$disconnect()` อย่างสะอาด |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรตั้งค่า `connection_limit` ใน URL ด้วยตัวเองเมื่อ:** รันแอปพลิเคชันหลาย Instances (Horizontal Scaling) เพื่อควบคุมจำนวนสายรวมไม่ให้เกินเพดานของฐานข้อมูล
+- **ไม่ควรพึ่งพาเพียง Connection Pool ภายใน Prisma เพียงลำพังเมื่อ:** รันแอปพลิเคชันในรูปแบบ **Serverless Functions (เช่น Vercel Functions, AWS Lambda)** หรือมีจำนวน Containers หลายสิบตัว ในกรณีนั้นต้องติดตั้ง External Connection Pooler อย่าง **PgBouncer** หรือ **Supavisor** คั่นกลางเสมอ
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ทำไมในขณะพัฒนาเว็บด้วย Next.js บนเครื่องตัวเอง นักพัฒนาจึงมักเจอปัญหา `FATAL: sorry, too many clients already` หลังจากกดเซฟไฟล์โค้ดไปได้สักพัก และมีวิธีแก้อย่างไร?**
+  - **แนวคำตอบ:** เพราะฟีเจอร์ Fast Refresh / Hot Module Replacement (HMR) ของ Next.js จะทำการรันไฟล์โมดูลใหม่ทุกครั้งที่มีการแก้ไขและบันทึกโค้ด หากเราเขียน `export const prisma = new PrismaClient()` แบบปกติ ทุกครั้งที่กดเซฟจะมีการสร้าง `PrismaClient` อินสแตนซ์ใหม่พร้อมเปิด Connection Pool ชุดใหม่เพิ่มเข้าไปเรื่อยๆ โดยที่อินสแตนซ์เก่าไม่ถูกปิด วิธีแก้คือต้องเก็บอินสแตนซ์ไว้ในตัวแปรระดับโกลบอล (`globalThis.prisma`) เพื่อให้การโหลดโมดูลซ้ำหยิบอินสแตนซ์เดิมมาใช้งาน
+- **Q2: รหัสข้อผิดพลาด `P2024` ของ Prisma (`Timed out fetching a new connection from the connection pool`) เกิดจากสาเหตุใด และแตกต่างจากข้อผิดพลาด `too many clients already` ของ PostgreSQL อย่างไร?**
+  - **แนวคำตอบ:**
+    - `too many clients already` เกิดขึ้นที่ฝั่ง **PostgreSQL Server** เมื่อจำนวนการเชื่อมต่อจริงจากทุกแอปพลิเคชันรวมกันทะลุค่า `max_connections`
+    - ส่วน `P2024` เกิดขึ้นที่ฝั่ง **Prisma Client ภายในแอปพลิเคชันเอง** เมื่อการเชื่อมต่อใน Pool ของอินสแตนซ์นั้น (ตามค่า `connection_limit`) ถูกยืมไปใช้งานเต็มทุกสาย และคิวรีใหม่ที่เข้ามาต่อแถวรอนานเกินค่า `pool_timeout` (10 วินาที) โดยยังไม่ได้สายว่างกลับมา ซึ่งมักมีสาเหตุมาจากคิวรีที่ทำงานช้ามากหรือเกิดการล็อกกันในฐานข้อมูล
+
+---

@@ -1,0 +1,238 @@
+---
+title: Query Priority
+category: TESTING & QUALITY
+parentTitle: Frontend Testing
+version: RTL & MSW v2
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+หัวใจของการค้นหา Elements บนหน้าจอด้วย React Testing Library แบ่งออกเป็น 2 แกนหลัก คือ:
+1. **จะรอหรือจะเช็กอย่างไร (Query Variants):** `getBy*`, `queryBy*`, และ `findBy*` (รวมถึงรุ่นพหูพจน์ `getAllBy*`, `queryAllBy*`, `findAllBy*`)
+2. **จะค้นหาด้วยคุณลักษณะใด (Accessibility Priority):** ลำดับความสำคัญที่ส่งเสริมให้หน้าเว็บรองรับเทคโนโลยีช่วยเหลือผู้พิการทางสายตา (Screen Readers) ไปในตัว
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+| ประเภทคำสั่ง | เมื่อไม่พบ Element (0 รายการ) | เมื่อพบ 1 รายการ | เมื่อพบมากกว่า 1 รายการ | รองรับ Async / รอ DOM อัปเดต |
+| :--- | :--- | :--- | :--- | :--- |
+| **`getBy...`** | โยน Error ทันที | คืนค่า `HTMLElement` | โยน Error ทันที | ❌ ไม่รอ (Synchronous) |
+| **`queryBy...`** | คืนค่า `null` (ไม่โยน Error) | คืนค่า `HTMLElement` | โยน Error ทันที | ❌ ไม่รอ (Synchronous) |
+| **`findBy...`** | โยน Error เมื่อหมดเวลา (Default 1000ms) | คืนค่า `Promise<HTMLElement>` | โยน Error เมื่อหมดเวลา | ✅ รอผ่าน `waitFor` อัตโนมัติ |
+
+สำหรับลำดับความสำคัญในการเลือกใช้ Query (ตามหลัก **Accessibility Tree**):
+1. **สิ่งที่ผู้ใช้ทุกคนเข้าถึงได้ (Accessible to Everyone):**
+   - `getByRole`: อันดับ 1 เสมอ เช่น `getByRole('button', { name: /checkout/i })`, `getByRole('heading', { level: 2 })`
+   - `getByLabelText`: ดีที่สุดสำหรับช่องกรอกข้อมูลในฟอร์ม (`<label>` ที่ผูกกับ `<input>`)
+   - `getByPlaceholderText` / `getByText` / `getByDisplayValue`
+2. **Semantic Queries:** `getByAltText` (สำหรับรูปภาพเนื้อวากิว), `getByTitle`
+3. **ทางเลือกสุดท้าย (Escape Hatch):** `getByTestId` (`data-testid="..."`) ใช้เฉพาะกรณีที่ข้อความเปลี่ยนตลอดเวลาหรือโครงสร้างซับซ้อนจนระบุด้วย Role ไม่ได้
+
+นอกจากนี้เมื่อหน้าจอมีรายการซ้ำกันหลายชิ้น (เช่น ตารางรายการสินค้าหลายแถว) เราจะใช้ฟังก์ชัน **`within(element)`** เพื่อจำกัดขอบเขตการค้นหาให้อยู่เฉพาะในการ์ดหรือแถวที่เราสนใจ
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1 (พื้นฐาน): การใช้ `getByRole`, `queryByText` และ `findByRole` ทดสอบแบนเนอร์และสถานะโหลดข้อมูลตู้บ่มเนื้อ
+ตัวอย่างที่แสดงความแตกต่างของการตรวจจับ Element ที่มีอยู่ทันที, Element ที่ต้องไม่ปรากฏบนหน้าจอ (`queryBy`) และ Element ที่ปรากฏขึ้นหลังจากโหลดข้อมูลเสร็จ (`findBy`):
+
+```tsx filename="src/components/vault/DryAgingVaultStatus.spec.tsx"
+import React, { useState, useEffect } from 'react';
+import { render, screen } from '@testing-library/react';
+
+export interface VaultChamberData {
+  chamberId: string;
+  temperatureCelsius: number;
+  humidityPercent: number;
+  hasContaminationAlert: boolean;
+}
+
+export function DryAgingVaultStatus({
+  fetchChamberStatus,
+}: {
+  fetchChamberStatus: () => Promise<VaultChamberData>;
+}) {
+  const [data, setData] = useState<VaultChamberData | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    fetchChamberStatus().then((res) => {
+      if (mounted) setData(res);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [fetchChamberStatus]);
+
+  return (
+    <section aria-labelledby="vault-heading">
+      <h2 id="vault-heading">Dry-Aging Vault Telemetry</h2>
+      {!data ? (
+        <p role="status">Connecting to vault sensors...</p>
+      ) : (
+        <div>
+          <p>Chamber: {data.chamberId}</p>
+          <p>Temp: {data.temperatureCelsius}°C | Humidity: {data.humidityPercent}%</p>
+          {data.hasContaminationAlert && (
+            <div role="alert">CRITICAL: Humidity anomaly detected in aging vault!</div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+describe('DryAgingVaultStatus Queries (getBy, queryBy, findBy)', () => {
+  it('should display sensor telemetry via findByText and hide alert banner when vault is normal', async () => {
+    const mockFetch = jest.fn().mockResolvedValue({
+      chamberId: 'VAULT-A5-NORTH',
+      temperatureCelsius: 1.2,
+      humidityPercent: 80,
+      hasContaminationAlert: false,
+    });
+
+    render(<DryAgingVaultStatus fetchChamberStatus={mockFetch} />);
+
+    // 1. getByRole: ตรวจหัวข้อที่ปรากฏบนหน้าจอทันทีแบบ Synchronous
+    expect(
+      screen.getByRole('heading', { name: 'Dry-Aging Vault Telemetry', level: 2 }),
+    ).toBeInTheDocument();
+
+    // 2. findByText: รอให้ Promise resolve และ DOM อัปเดตแบบ Asynchronous
+    const telemetryText = await screen.findByText('Temp: 1.2°C | Humidity: 80%');
+    expect(telemetryText).toBeInTheDocument();
+
+    // 3. queryByRole: ยืนยันว่าไม่มี Alert แสดงขึ้นมา (ต้องใช้ queryBy เพราะคืนค่า null ไม่โยน Error)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('should render critical alert role when vault sensor reports contamination anomaly', async () => {
+    const mockFetch = jest.fn().mockResolvedValue({
+      chamberId: 'VAULT-A5-SOUTH',
+      temperatureCelsius: 6.5,
+      humidityPercent: 95,
+      hasContaminationAlert: true,
+    });
+
+    render(<DryAgingVaultStatus fetchChamberStatus={mockFetch} />);
+
+    const alertBanner = await screen.findByRole('alert');
+    expect(alertBanner).toHaveTextContent(
+      'CRITICAL: Humidity anomaly detected in aging vault!',
+    );
+  });
+});
+```
+
+### ตัวอย่างที่ 2 (ขั้นสูง): การใช้ `within()` ค้นหาปุ่มเฉพาะเจาะจงภายในตารางรายการ `OrderItem` หลายแถว
+ในหน้าสรุปคำสั่งซื้อที่มีเนื้อหลายชิ้น ปุ่มในแต่ละแถวจะมีชื่อเหมือนกันว่า *"Remove Cut"* หากใช้ `screen.getByRole('button', { name: 'Remove Cut' })` จะโยน Error เพราะเจอหลายปุ่ม เราจึงใช้ `within(row)` เพื่อเจาะจงแถวของเนื้อที่ต้องการทดสอบ:
+
+```tsx filename="src/components/orders/OrderItemsTable.spec.tsx"
+import React from 'react';
+import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+
+export interface OrderItem {
+  id: string;
+  productName: string;
+  cutThicknessCm: number;
+  weightKg: number;
+  subtotal: number;
+}
+
+export function OrderItemsTable({
+  items,
+  onRemoveItem,
+}: {
+  items: OrderItem[];
+  onRemoveItem: (itemId: string) => void;
+}) {
+  return (
+    <table aria-label="Butcher Order Items">
+      <thead>
+        <tr>
+          <th>Cut Name</th>
+          <th>Thickness</th>
+          <th>Subtotal</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {items.map((item) => (
+          <tr key={item.id} aria-label={`Order row for ${item.productName}`}>
+            <td>{item.productName}</td>
+            <td>{item.cutThicknessCm} cm</td>
+            <td>฿{item.subtotal.toLocaleString()}</td>
+            <td>
+              <button type="button" onClick={() => onRemoveItem(item.id)}>
+                Remove Cut
+              </button>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+describe('OrderItemsTable Scoped Queries with within()', () => {
+  const sampleItems: OrderItem[] = [
+    {
+      id: 'item-ribeye-01',
+      productName: 'Miyazaki A5 Ribeye',
+      cutThicknessCm: 3.5,
+      weightKg: 0.5,
+      subtotal: 2600,
+    },
+    {
+      id: 'item-tenderloin-02',
+      productName: 'Kobe A5 Tenderloin Chateaubriand',
+      cutThicknessCm: 4.0,
+      weightKg: 0.4,
+      subtotal: 3800,
+    },
+  ];
+
+  it('should scope query to specific table row using within() and trigger remove callback for Kobe Tenderloin', async () => {
+    const user = userEvent.setup();
+    const handleRemove = jest.fn();
+
+    render(<OrderItemsTable items={sampleItems} onRemoveItem={handleRemove} />);
+
+    // ค้นหาแถวของ Kobe A5 Tenderloin Chateaubriand ด้วย Accessible Name
+    const kobeRow = screen.getByRole('row', {
+      name: 'Order row for Kobe A5 Tenderloin Chateaubriand',
+    });
+
+    // ตรวจสอบราคาและกดปุ่ม Remove Cut เฉพาะที่อยู่ภายในแถว kobeRow เท่านั้น
+    expect(within(kobeRow).getByText('฿3,800')).toBeInTheDocument();
+
+    const removeButtonInKobeRow = within(kobeRow).getByRole('button', {
+      name: 'Remove Cut',
+    });
+    await user.click(removeButtonInKobeRow);
+
+    expect(handleRemove).toHaveBeenCalledTimes(1);
+    expect(handleRemove).toHaveBeenCalledWith('item-tenderloin-02');
+  });
+});
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การเช็กว่า Element ไม่มีอยู่** | ใช้ `expect(() => screen.getByText('Error')).toThrow()` ซึ่งอ่านยากและผิดจุดประสงค์ | ใช้ `expect(screen.queryByText('Error')).not.toBeInTheDocument()` เสมอเมื่อตรวจการไม่มีอยู่ของ Element |
+| **การรอ Element ปรากฏ** | เขียน `await waitFor(() => expect(screen.getByText('Loaded')).toBeInTheDocument())` ยืดยาว | ใช้ `expect(await screen.findByText('Loaded')).toBeInTheDocument()` ซึ่งกระชับและมีความหมายตรงตัวกว่า |
+| **การแปะ `data-testid` พร่ำเพรื่อ** | ใส่ `data-testid="submit-btn"` ให้ปุ่มทุกปุ่มแทนที่จะใช้ข้อความบนปุ่ม ทำให้ไม่รู้เลยว่าปุ่มขาด Accessible Name หรือไม่ | ใช้ `getByRole('button', { name: /.../i })` เป็นหลัก เพื่อบังคับให้ HTML มี Accessibility ที่ถูกต้อง |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `getBy*` เมื่อ:** ค้นหา Element ที่เรนเดอร์อยู่บนหน้าจอตั้งแต่วินาทีแรก
+- **ควรใช้ `queryBy*` เมื่อ:** ต้องการยืนยันว่า Element นั้น **ไม่ปรากฏ** อยู่บนหน้าจอ (เช่น Modal ปิดไปแล้ว หรือไม่มีข้อความแจ้งเตือนข้อผิดพลาด)
+- **ควรใช้ `findBy*` เมื่อ:** ค้นหา Element ที่จะปรากฏขึ้นหลังจากการดึงข้อมูล API, การคลิกปุ่มเปลี่ยนสถานะ หรือการตรวจสอบฟอร์มแบบ Async
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: หากเราใช้ `expect(await screen.findByRole('alert')).not.toBeInTheDocument()` เพื่อเช็กว่าไม่มีข้อความแจ้งเตือน จะเกิดปัญหาอะไรขึ้น?**
+  - *แนวคำตอบ:* เมธอด `findByRole` จะพยายามรอจนกว่าจะเจอ Element ที่มี `role="alert"` หากไม่มี Element นั้นปรากฏขึ้นเลย มันจะค้างรอจนครบเวลา Timeout (1000ms) แล้วโยน Error ทันทีก่อนที่จะไปถึง `.not.toBeInTheDocument()` ดังนั้นการเช็กว่า Element ไม่มีอยู่จึงห้ามใช้ `findBy*` เด็ดขาด ต้องใช้ `queryBy*` เท่านั้น
+- **Q2: การใช้ `getByRole` ช่วยยกระดับคุณภาพ Accessibility (A11y) ของเว็บไซต์ในระดับ Production ได้อย่างไร?**
+  - *แนวคำตอบ:* เพราะ `getByRole` ค้นหาผ่าน Accessibility Tree แบบเดียวกับที่โปรแกรมอ่านหน้าจอ (Screen Reader เช่น NVDA หรือ VoiceOver) ใช้งาน หากนักพัฒนาสร้างปุ่มด้วย `<div onClick={...}>สั่งซื้อ</div>` หรือสร้าง `<input>` โดยไม่ผูก `<label htmlFor="...">` คำสั่ง `getByRole('button')` หรือ `getByLabelText()` จะหาไม่เจอและทำให้เทสต์พังทันที จึงเป็นการบังคับให้นักพัฒนาต้องเขียน Semantic HTML ที่ถูกต้องตั้งแต่วินาทีแรก
+
+---

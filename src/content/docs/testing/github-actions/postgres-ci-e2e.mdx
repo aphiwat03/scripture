@@ -1,0 +1,217 @@
+---
+title: Postgres CI E2E
+category: TESTING & QUALITY
+parentTitle: GitHub Actions
+version: GitHub Actions CI
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การทดสอบเพียงแค่ Unit Test ด้วยการจำลองข้อมูล (Mock) ไม่สามารถตรวจจับบั๊กที่เกิดจากคำสั่ง SQL จริง, การทำ Database Transaction Locking ตอนตัดสต็อกเนื้อวากิวพร้อมกันหลายออเดอร์ หรือการแสดงผลหน้าเว็บจริงบนเบราว์เซอร์ได้
+
+GitHub Actions จึงมีฟีเจอร์ทรงพลังชื่อ **Service Containers (`services:`)** ที่ช่วยให้เราสามารถปลุกฐานข้อมูล **PostgreSQL 16** ขึ้นมาข้างๆ โค้ดของเราระหว่างรัน CI เพื่อทำการ:
+1. รัน Database Migrations และ Seed ข้อมูลเนื้อพรีเมียมเริ่มต้น (`Category`, `Product`, `User`)
+2. รัน Backend Integration Tests (NestJS 11 + Supertest) กับ PostgreSQL 16 ของจริง
+3. รัน **Playwright E2E Tests** เพื่อจำลองลูกค้าเปิดหน้าเว็บ Next.js 16 เลือกชิ้นเนื้อ ใส่ตะกร้า และกดชำระเงินจนครบกระบวนการ
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+เมื่อเราระบุ `services: postgres:` ในไฟล์ GitHub Actions Workflow:
+1. GitHub Runner จะสั่ง `docker pull postgres:16-alpine` และ启动 Container ขึ้นมาก่อนเริ่มรัน Steps ของโปรเจกต์
+2. สิ่งที่สำคัญที่สุดคือการใช้ `--health-cmd pg_isready` ใน `options:` เพื่อให้ GitHub Actions **รอจนกว่า PostgreSQL จะบูตเสร็จและพร้อมรับ TCP Connection ที่พอร์ต 5432 จริงๆ** ก่อนจึงค่อยเริ่มรันขั้นต่อไป หากไม่มี Health Check ขั้นตอนการรัน Migration มักจะพังแบบสุ่มเพราะเชื่อมต่อฐานข้อมูลเร็วเกินไป
+3. สำหรับ Playwright เมื่อพบเทสต์ที่ล้มเหลวบน CI เราไม่เห็นหน้าจอของเครื่องเซิร์ฟเวอร์ จึงต้องตั้งค่า `actions/upload-artifact@v4` ที่มีเงื่อนไข `if: ${{ !cancelled() }}` เพื่ออัปโหลดไฟล์ `playwright-report` และไฟล์ Trace (`.zip`) กลับมาให้นักพัฒนาดาวน์โหลดไปเปิดดูย้อนหลังได้ทีละเฟรม
+
+<Callout type="tip" title="เทคนิคเร่งความเร็ว PostgreSQL 16 บน CI ด้วย tmpfs หรือ fsync=off">
+เนื่องจากข้อมูลใน PostgreSQL Service Container บน CI ใช้สำหรับการทดสอบชั่วคราวแล้วลบทิ้งทันทีหลังจบ Job เราสามารถส่งพารามิเตอร์ -c fsync=off -c full_page_writes=off ให้กับ Postgres เพื่อไม่ต้องรอการเขียนลงดิสก์จริง ช่วยให้การรัน Migration และการล้างข้อมูลระหว่างเทสต์เร็วขึ้นถึง 30-50%
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1 (ระดับพื้นฐาน): GitHub Actions Workflow สำหรับรัน PostgreSQL 16 Service Container และ Playwright E2E
+ไฟล์ตั้งค่า `.github/workflows/e2e-playwright.yml` ระดับ Production ที่มี Health Check สำหรับฐานข้อมูลและเก็บรายงานเมื่อเทสต์พัง
+
+```yaml filename=".github/workflows/e2e-playwright.yml"
+name: Smart Butcher - E2E & Database Integration CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e-tests:
+    name: PostgreSQL 16 + Playwright E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # ปลุก PostgreSQL 16 Container พร้อมตรวจสอบความพร้อมด้วย pg_isready
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: butcher_ci
+          POSTGRES_PASSWORD: butcher_ci_secret
+          POSTGRES_DB: smart_butcher_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U butcher_ci -d smart_butcher_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DATABASE_URL: postgresql://butcher_ci:butcher_ci_secret@localhost:5432/smart_butcher_test
+      JWT_SECRET: ci-only-ephemeral-jwt-secret-key-2026
+
+    steps:
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 2. Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: 3. Clean Install Dependencies
+        run: npm ci
+
+      - name: 4. Install Playwright Chromium Browser
+        run: npx playwright install --with-deps chromium
+
+      - name: 5. Run Database Migrations & Seed Butcher Catalog
+        run: |
+          npm run db:migrate
+          npm run db:seed
+
+      - name: 6. Run Playwright E2E Suite
+        run: npx playwright test
+
+      - name: 7. Upload Playwright Trace & Report on Failure
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-e2e-report
+          path: playwright-report/
+          retention-days: 7
+```
+
+### ตัวอย่างที่ 2 (ระดับ Production): สคริปต์ Seed ข้อมูลและเทสต์ E2E ที่ตรวจสอบการตัดสต็อกและการชำระเงินกับฐานข้อมูลจริง
+โค้ดเตรียมข้อมูล (`Category`, `Product`, `User`, `Order`, `Payment`) และการทดสอบแบบ End-to-End บน CI
+
+```typescript filename="e2e/butcher-checkout-flow.spec.ts"
+import { test, expect } from '@playwright/test';
+import type {
+  Category,
+  Order,
+  Payment,
+  Product,
+  User,
+} from '../src/domain/butcher-order-guard';
+
+export interface SeededMarketplaceFixture {
+  vipUser: User;
+  wagyuCategory: Category;
+  striploinProduct: Product;
+}
+
+export const ciSeedFixture: SeededMarketplaceFixture = {
+  vipUser: {
+    id: 'usr-ci-001',
+    email: 'vip.customer@smartbutcher.test',
+    role: 'CUSTOMER',
+    isVip: true,
+  },
+  wagyuCategory: {
+    id: 'cat-ci-dry-aged',
+    name: 'Dry-Aged Beef Collection',
+    requiresColdTruck: true,
+  },
+  striploinProduct: {
+    id: 'prod-ci-striploin',
+    categoryId: 'cat-ci-dry-aged',
+    name: 'Kobe A5 Striploin 60-Day Dry-Aged',
+    sku: 'KOBE-STR-60D',
+    pricePerKg: 6200,
+    stockKg: 5.0,
+    dryAgedDays: 60,
+  },
+};
+
+test.describe('Smart Butcher Checkout E2E on GitHub Actions', () => {
+  test('allows VIP user to order custom-cut dry-aged striploin and completes payment', async ({
+    page,
+  }) => {
+    await page.goto('/products/KOBE-STR-60D');
+
+    await expect(
+      page.getByRole('heading', { name: ciSeedFixture.striploinProduct.name }),
+    ).toBeVisible();
+
+    // เลือกน้ำหนักเนื้อ 1.0 กิโลกรัม
+    const weightInput = page.getByLabel('น้ำหนักที่ต้องการ (กก.):');
+    await weightInput.fill('1.0');
+
+    await page.getByRole('button', { name: 'สั่งตัดเนื้อชิ้นนี้' }).click();
+
+    // ตรวจสอบหน้าสรุปคำสั่งซื้อ (ลด 10% สำหรับ VIP จาก 6,200 เหลือ 5,580 บาท)
+    await page.goto('/checkout');
+    await expect(page.getByText('5,580 บาท')).toBeVisible();
+
+    // ยืนยันการชำระเงินและตรวจรับข้อมูล Order & Payment จาก API
+    const paymentResponsePromise = page.waitForResponse(
+      (res) =>
+        res.url().includes('/api/orders/checkout') && res.status() === 201,
+    );
+
+    await page.getByRole('button', { name: 'ชำระเงินด้วย PromptPay' }).click();
+
+    const response = await paymentResponsePromise;
+    const body = (await response.json()) as { order: Order; payment: Payment };
+
+    expect(body.order.totalAmount).toBe(5580);
+    expect(body.payment.status).toBe('PAID');
+  });
+});
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```yaml filename=".github/workflows/postgres-service.compare.yml"
+# ❌ ผิด (Anti-pattern): ไม่ใส่ health-cmd ให้ PostgreSQL และติดตั้งเบราว์เซอร์ทุกตัวโดยไม่จำเป็น
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - 5432:5432
+steps:
+  - run: npx playwright install # ดาวน์โหลดทั้ง Chromium, Firefox, WebKit เสียเวลาหลายนาที
+
+# ✅ ถูก (Best Practice): ใช้ pg_isready รอจนฐานข้อมูลพร้อม และติดตั้งเฉพาะเบราว์เซอร์ที่ใช้จริงใน PR
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - 5432:5432
+    options: >-
+      --health-cmd="pg_isready -U butcher_ci"
+      --health-interval=5s
+      --health-retries=5
+steps:
+  - run: npx playwright install --with-deps chromium
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+- **ควรใช้ Service Container (`postgres:16-alpine`) เมื่อ**: ต้องการทดสอบ API, Prisma/TypeORM Migrations, Foreign Key Constraints และ Transaction Isolation Levels ให้ตรงกับฐานข้อมูลจริงบน Production
+- **ไม่ควรใช้**: ไม่ควรใช้ SQLite in-memory แทน PostgreSQL ในการทำ Integration Test หากระบบจริงใช้ฟีเจอร์เฉพาะของ PostgreSQL เช่น `JSONB`, `ENUM`, `UUID` หรือ `SELECT ... FOR UPDATE` เพราะพฤติกรรมเรื่อง Concurrency และการล็อกแถวข้อมูลแตกต่างกันอย่างสิ้นเชิง
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+
+**Q1: ทำไมในขั้นตอนการรัน Migration บน GitHub Actions บางครั้งจึงเกิด Error `ECONNREFUSED 127.0.0.1:5432` ทั้งที่ได้ประกาศ `services: postgres` ไว้แล้ว และต้องแก้ไขอย่างไร?**
+- **แนวคำตอบ**: เพราะการที่ Docker สตาร์ท Container ของ Postgres เสร็จ (`docker run`) ไม่ได้แปลว่ากระบวนการของฐานข้อมูลข้างในบูตเสร็จและพร้อมรับการเชื่อมต่อแล้ว หากไม่กำหนด `--health-cmd="pg_isready"` ในส่วน `options` ของ Service Container ตัว GitHub Runner จะเริ่มรัน Step ถัดไปทันทีทำให้ต่อพอร์ต 5432 ไม่ติด การใส่ `--health-cmd` จะบังคับให้ Runner รอจนกว่า `pg_isready` จะคืนค่าสำเร็จก่อนเสมอ
+
+---

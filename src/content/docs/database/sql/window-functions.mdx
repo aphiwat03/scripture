@@ -1,0 +1,167 @@
+---
+title: Window Functions
+category: DATABASE
+parentTitle: SQL
+version: SQL:2023 & PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ลองจินตนาการถึงห้องบ่มเนื้อที่มีเนื้อแขวนเรียงรายอยู่ร้อยชิ้น หากใช้ `GROUP BY` จะเหมือนกับการนำเนื้อทั้งหมดไปบดรวมกันในโถเดียวจนมองไม่เห็นชิ้นเนื้อรายตัวเดิมอีกต่อไป
+แต่ **Window Functions** เปรียบเสมือนการเปิด "บานหน้าต่างกระจกใส" เล็งไปที่ชิ้นเนื้อแต่ละชิ้น โดยที่เรา **ยังคงเห็นเนื้อทุกชิ้นคงเดิมครบถ้วน 100%** แต่เราสามารถคำนวณเปรียบเทียบชิ้นเนื้อนั้นกับเพื่อนร่วมรุ่นในหน้าต่างเดียวกันได้ เช่น:
+- ชิ้นนี้ราคาแพงเป็นอันดับที่เท่าไรในหมวดหมู่เนื้อของมัน (`RANK()`)
+- ยอดขายสะสมตั้งแต่ต้นเดือนจนถึงออเดอร์นี้เป็นเงินเท่าไร (`Running Total`)
+- ยอดขายของออเดอร์นี้เติบโตหรือลดลงเมื่อเทียบกับออเดอร์ก่อนหน้า (`LAG()`)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+โครงสร้างไวยากรณ์หลักของ Window Function คือ:
+```sql filename="sql/sql.sql"
+FUNCTION() OVER (
+    PARTITION BY <คอลัมน์แบ่งกลุ่ม>
+    ORDER BY <คอลัมน์เรียงลำดับ>
+    ROWS/RANGE BETWEEN <จุดเริ่มต้นหน้าต่าง> AND <จุดสิ้นสุดหน้าต่าง>
+)
+```
+
+1. **ลำดับการประมวลผล**: Window Functions จะประมวลผล **หลัง** `WHERE`, `GROUP BY`, และ `HAVING` แต่เกิดขึ้น **ก่อน** `ORDER BY` และ `LIMIT` ดังนั้นเราจึง **ไม่สามารถใส่ Window Function ใน WHERE ได้โดยตรง**
+2. **ความแตกต่างของ Ranking Functions**:
+   - `ROW_NUMBER()`: ให้เลขลำดับเรียงแถว $1, 2, 3, 4, \dots$ เสมอ ไม่ซ้ำกันแม้ค่าจะเท่ากัน
+   - `RANK()`: ให้เลขลำดับเท่ากันหากค่าเท่ากัน แต่จะ **ข้ามเลขลำดับถัดไป** เช่น $1, 2, 2, 4, \dots$
+   - `DENSE_RANK()`: ให้เลขลำดับเท่ากันหากค่าเท่ากัน แต่จะ **ไม่ข้ามเลขลำดับถัดไป** เช่น $1, 2, 2, 3, \dots$
+3. **Window Frame**:
+   - `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`: คำนวณสะสมตั้งแต่แถวแรกของกลุ่มจนถึงแถวปัจจุบัน (ค่าเริ่มต้นเมื่อมี `ORDER BY`)
+   - `ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING`: นำแถวก่อนหน้า แถวปัจจุบัน และแถวถัดไปมาคำนวณค่าเฉลี่ยเคลื่อนที่ (Moving Average)
+
+```text filename="docs/database/sql.txt"
+เปรียบเทียบการทำงาน: GROUP BY vs WINDOW FUNCTION
+
+[ ตารางข้อมูลตั้งต้น: 4 แถว ]
+Row 1: หมวดวากิว  | เนื้อสันนอก | 4500 บาท
+Row 2: หมวดวากิว  | เนื้อสันใน  | 4800 บาท
+Row 3: หมวดแองกัส | ริบอาย     | 2400 บาท
+Row 4: หมวดแองกัส | ทีโบน      | 2600 บาท
+
++-------------------------------------+---------------------------------------------------------------+
+| GROUP BY category (ยุบแถวเหลือ 2 แถว) | WINDOW FUNCTION (คงแถวเดิมครบ 4 แถว พร้อมคอลัมน์วิเคราะห์)        |
++-------------------------------------+---------------------------------------------------------------+
+| วากิว : ราคารวม 9300 บาท             | Row 1: วากิว  | 4500 | อันดับ 2 ในกลุ่ม | ยอดรวมสะสมกลุ่ม 4500 |
+| แองกัส : ราคารวม 5000 บาท           | Row 2: วากิว  | 4800 | อันดับ 1 ในกลุ่ม | ยอดรวมสะสมกลุ่ม 9300 |
+|                                     | Row 3: แองกัส | 2400 | อันดับ 2 ในกลุ่ม | ยอดรวมสะสมกลุ่ม 2400 |
+|                                     | Row 4: แองกัส | 2600 | อันดับ 1 ในกลุ่ม | ยอดรวมสะสมกลุ่ม 5000 |
++-------------------------------------+---------------------------------------------------------------+
+```
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การจัดอันดับสินค้าขายดีที่สุด Top 2 ในแต่ละหมวดหมู่ด้วย `DENSE_RANK()`
+ใช้ CTE ครอบ Window Function เพื่อกรองหยิบเฉพาะ 2 อันดับแรกของแต่ละหมวดหมู่:
+
+```sql filename="sql/sql.sql"
+-- ค้นหาเนื้อที่ราคาต่อกิโลกรัมสูงสุด 2 อันดับแรกในแต่ละหมวดหมู่
+WITH ranked_products AS (
+    SELECT 
+        category_id,
+        sku,
+        name,
+        price_per_kg,
+        stock_qty,
+        -- จัดอันดับราคาแยกตามหมวดหมู่ โดยราคาเท่ากันได้อันดับเท่ากันและไม่กระโดดข้ามเลข
+        DENSE_RANK() OVER (
+            PARTITION BY category_id 
+            ORDER BY price_per_kg DESC
+        ) AS price_rank_in_category
+    FROM products
+    WHERE is_active = TRUE
+)
+SELECT 
+    category_id,
+    price_rank_in_category,
+    sku,
+    name,
+    price_per_kg
+FROM ranked_products
+WHERE price_rank_in_category <= 2
+ORDER BY category_id ASC, price_rank_in_category ASC;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| category_id | price_rank_in_category | sku | name | price_per_kg |
+| :--- | :--- | :--- | :--- | :--- |
+| 1 | 1 | WAGYU-A5-RIB | Miyazaki Wagyu A5 Ribeye | 4500.00 |
+| 2 | 1 | AUS-WAGYU-MB9-TEND | Australian Wagyu Tenderloin MB9+ | 3900.00 |
+| 3 | 1 | TOMAHAWK-DA60-PRM | 60-Day Dry-Aged Tomahawk Prime | 3600.00 |
+| 3 | 2 | ANGUS-DA45-TBONE | 45-Day Dry-Aged Black Angus T-Bone | 2800.00 |
+
+### ตัวอย่างที่ 2: Running Total ยอดขายสะสม และการใช้ `LAG()` วิเคราะห์การเติบโตของยอดขาย
+คำนวณยอดขายสะสมตามช่วงเวลา พร้อมนำยอดของออเดอร์ก่อนหน้ามาเทียบเพื่อดูส่วนต่าง:
+
+```sql filename="sql/sql.sql"
+-- คำนวณยอดขายสะสม (Cumulative Sales) และเปรียบเทียบกับออเดอร์ก่อนหน้า
+SELECT 
+    id AS order_id,
+    order_no,
+    total_amount,
+    created_at::date AS order_date,
+    
+    -- 1. ยอดขายสะสมตั้งแต่ต้นจนถึงออเดอร์ปัจจุบัน (Running Total)
+    SUM(total_amount) OVER (
+        ORDER BY created_at ASC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS running_total_revenue,
+    
+    -- 2. ดึงยอดเงินของออเดอร์ก่อนหน้ามาเปรียบเทียบ
+    LAG(total_amount, 1) OVER (
+        ORDER BY created_at ASC
+    ) AS previous_order_amount,
+    
+    -- 3. คำนวณส่วนต่างของยอดเงินเทียบกับออเดอร์ก่อนหน้า
+    total_amount - LAG(total_amount, 1) OVER (ORDER BY created_at ASC) AS growth_from_prev_order
+FROM orders
+WHERE status = 'COMPLETED'
+ORDER BY created_at ASC;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| order_id | order_no | total_amount | order_date | running_total_revenue | previous_order_amount | growth_from_prev_order |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| 1 | ORD-20261001-001 | 13500.00 | 2026-10-01 | 13500.00 | *NULL* | *NULL* |
+| 2 | ORD-20261005-002 | 5600.00 | 2026-10-05 | 19100.00 | 13500.00 | -7900.00 |
+
+## 4. ผิด vs ถูก (Anti-patterns & Best Practices)
+
+### ❌ โค้ดที่ผิด: ใส่ Window Function ลงใน `WHERE` clause โดยตรง
+```sql filename="sql/sql.sql"
+-- ผิดไวยากรณ์: PostgreSQL จะฟ้อง ERROR: window functions are not allowed in WHERE
+SELECT name, price_per_kg
+FROM products
+WHERE ROW_NUMBER() OVER (ORDER BY price_per_kg DESC) <= 3;
+```
+
+### ✅ โค้ดที่ถูก: ใช้ CTE หรือ Subquery ครอบก่อนแล้วจึงกรองใน WHERE
+```sql filename="sql/sql.sql"
+-- ถูกต้อง: คำนวณ Window Function ใน Subquery/CTE ก่อน แล้วกรองผลลัพธ์ใน Query ด้านนอก
+WITH ranked AS (
+    SELECT name, price_per_kg, ROW_NUMBER() OVER (ORDER BY price_per_kg DESC) AS rn
+    FROM products
+)
+SELECT name, price_per_kg
+FROM ranked
+WHERE rn <= 3;
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้:** เมื่อต้องการจัดอันดับ (Ranking / Leaderboard), คำนวณผลรวมสะสม (Running Total / Year-to-Date), เปรียบเทียบค่าระหว่างแถวติดกัน (Time-series MoM, DoD), หรือคำนวณ Moving Average
+- **ไม่ควรใช้:** หากต้องการตัวเลขสรุปภาพรวมเพียงแถวเดียวเพื่อแสดงบนกล่องสถิติหน้า Dashboard (กรณีนี้ใช้ `GROUP BY` ปกติจะประหยัดทรัพยากรกว่ามาก)
+
+## 6. คำถามสัมภาษณ์ (Interview Questions)
+- **Q1: จงอธิบายความแตกต่างระหว่าง `ROW_NUMBER()`, `RANK()`, และ `DENSE_RANK()` หากมีสินค้า 3 รายการที่มีราคา 3,000 บาทเท่ากันเป็นอันดับที่สอง?**
+  - *คำตอบ:* หากสินค้าอันดับ 1 มีราคา 5,000 บาท:
+    - `ROW_NUMBER()` จะสุ่มให้ลำดับเป็น 2, 3, 4 ไม่ซ้ำกันเลย
+    - `RANK()` จะให้ทั้งสามรายการเป็นอันดับ 2 เท่ากัน แล้วแถวถัดไปจะกระโดดข้ามไปเป็นอันดับ **5**
+    - `DENSE_RANK()` จะให้ทั้งสามรายการเป็นอันดับ 2 เท่ากัน แล้วแถวถัดไปจะเรียงต่อเป็นอันดับ **3** ทันทีโดยไม่ข้ามเลข
+- **Q2: คำสั่ง Window Frame แบบ `ROWS` ต่างจาก `RANGE` อย่างไรในการคำนวณผลรวมสะสม?**
+  - *คำตอบ:* `ROWS` จะนับจำนวนแถวจริงทางกายภาพ (Physical rows) โดยไม่สนใจว่าค่าในคอลัมน์ที่สั่งเรียงลำดับจะซ้ำกันหรือไม่ ส่วน `RANGE` จะพิจารณาตามค่าตรรกะของข้อมูล (Logical value offset) หากมีแถวที่ค่าใน `ORDER BY` เท่ากัน (Peers) กลไก `RANGE` จะนำแถวที่ค่าเท่ากันทั้งหมดมารวมยอดสะสมพร้อมกันในคราวเดียว ซึ่งอาจทำให้ตัวเลขกระโดดได้
+
+---

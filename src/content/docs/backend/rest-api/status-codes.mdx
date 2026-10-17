@@ -1,0 +1,240 @@
+---
+title: Status Codes
+category: BACKEND
+parentTitle: REST API Design
+version: RESTful API Standards
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+**HTTP Status Code** คือภาษาสากลที่เซิร์ฟเวอร์ใช้บอกผลลัพธ์ของการประมวลผลให้ไคลเอนต์ทราบทันทีตั้งแต่ระดับ HTTP Header โดยไม่ต้องแกะอ่าน JSON Body การเลือกรหัสสถานะที่ถูกต้องช่วยให้ทั้ง Frontend (เช่น TanStack Query), API Gateway, CDN และระบบ Monitoring (เช่น Datadog / Prometheus) ตัดสินใจทำงานต่อได้อย่างแม่นยำ เช่น รู้ทันทีว่าควร Retry อัตโนมัติ หรือควรเด้งไปหน้า Login
+
+<Callout type="warning" title="ห้ามทำ 200 OK ซ่อน Error เด็ดขาด">
+หนึ่งในความผิดพลาดที่ร้ายแรงที่สุดคือการคืนค่า HTTP 200 OK ทุกครั้งแต่ใส่ข้อความใน JSON ว่า status เป็น error เพราะจะทำให้ระบบ Reverse Proxy, CDN caching และ Error Monitoring เข้าใจผิดว่าระบบทำงานปกติทั้งหมด
+</Callout>
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+รหัสสถานะแบ่งออกเป็น 5 หมวดหมู่ตามเลขหลักแรก แต่ในระบบ Production API ของ **Smart Butcher Marketplace** เราจะเน้นใช้งานรหัสหลักๆ ดังนี้:
+- **2xx (Success)**:
+  - `200 OK`: สำเร็จตามปกติและมีเนื้อหาส่งกลับ (ใช้กับ `GET`, `PUT`, `PATCH`)
+  - `201 Created`: สร้าง Resource ใหม่สำเร็จ (ใช้กับ `POST` เช่น สร้าง `Order` หรือ `Product` ใหม่) และควรแนบ Header `Location` ชี้ไปยัง URI ของที่เพิ่งสร้าง
+  - `202 Accepted`: รับคำขอเข้าคิวประมวลผลแบบ Asynchronous แล้ว (เช่น สั่งสร้างใบกำกับภาษี PDF หรือส่งคำขอตัดแต่งเนื้อพิเศษเข้า Message Queue)
+  - `204 No Content`: สำเร็จแต่ไม่มีข้อมูลส่งกลับใน Body (ใช้กับ `DELETE` หรือการกดบันทึกที่ไม่ต้องคืนข้อมูล)
+- **3xx (Redirection / Caching)**:
+  - `304 Not Modified`: ข้อมูลเนื้อในแคตตาล็อกยังไม่เปลี่ยนแปลงตั้งแต่ครั้งล่าสุดที่ถาม (ใช้คู่กับ `ETag` หรือ `If-None-Match` เพื่อประหยัดแบนด์วิดท์)
+- **4xx (Client Error - ไคลเอนต์ส่งข้อมูลไม่ถูกต้อง ห้าม Retry ด้วยข้อมูลเดิม)**:
+  - `400 Bad Request`: รูปแบบ JSON พัง หรือพารามิเตอร์ผิดโครงสร้างพื้นฐาน
+  - `401 Unauthorized`: ยังไม่ได้ยืนยันตัวตน หรือ JWT Access Token หมดอายุ/ไม่ถูกต้อง
+  - `403 Forbidden`: ยืนยันตัวตนแล้ว แต่ไม่มีสิทธิ์เข้าถึง (เช่น ลูกค้าทั่วไป `CUSTOMER` พยายามเรียก Endpoint ลบสินค้าของ `ADMIN`)
+  - `404 Not Found`: ไม่พบ Resource ที่ระบุ เช่น รหัสเนื้อ `Product` หรือรหัสใบสั่งซื้อ `Order` ไม่มีอยู่จริง
+  - `409 Conflict`: ขัดแย้งกับสถานะปัจจุบันของระบบ เช่น อีเมลสมาชิกซ้ำ, สต็อกเนื้อวากิวชิ้นนั้นถูกคนอื่นซื้อตัดหน้าไปแล้ว, หรือพยายามยกเลิก `Order` ที่จัดส่งออกไปแล้ว
+  - `422 Unprocessable Entity`: โครงสร้าง JSON ถูกต้อง แต่ไม่ผ่านกฎทางธุรกิจหรือ Validation เชิงลึก (เช่น สั่งเนื้อ Dry-Aged น้ำหนักต่ำกว่าขั้นต่ำ 200 กรัม)
+  - `429 Too Many Requests`: ส่งคำขอถี่เกินขีดจำกัด (Rate Limit Exceeded)
+- **5xx (Server Error - ระบบหลังบ้านมีปัญหา ไคลเอนต์สามารถทำ Exponential Backoff Retry ได้)**:
+  - `500 Internal Server Error`: เกิด Unhandled Exception ในโค้ดฝั่งเซิร์ฟเวอร์
+  - `502 Bad Gateway` / `503 Service Unavailable` / `504 Gateway Timeout`: เซิร์ฟเวอร์ปลายทาง (เช่น ระบบ Payment Gateway ธนาคาร หรือฐานข้อมูล) ล่มหรือตอบสนองไม่ทันเวลา
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การระบุ Status Code อย่างชัดเจนใน OrdersController (พื้นฐาน)
+```typescript filename="src/modules/orders/orders.controller.ts"
+import {
+  Controller,
+  Post,
+  Get,
+  Delete,
+  Param,
+  Body,
+  Res,
+  HttpCode,
+  HttpStatus,
+  ParseUUIDPipe,
+} from '@nestjs/common';
+import { Response } from 'express';
+import { OrdersService } from './orders.service';
+import { CreateOrderDto } from './dto/create-order.dto';
+
+@Controller('orders')
+export class OrdersController {
+  constructor(private readonly ordersService: OrdersService) {}
+
+  // คืนค่า 201 Created พร้อมแนบ Header Location ชี้ไปยัง Order ที่สร้างเสร็จ
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  async createOrder(
+    @Body() dto: CreateOrderDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const createdOrder = await this.ordersService.createOrder(dto);
+    res.setHeader('Location', `/api/v1/orders/${createdOrder.id}`);
+    return createdOrder;
+  }
+
+  // คืนค่า 202 Accepted สำหรับงานที่ใช้เวลาประมวลผลนานใน Background Queue
+  @Post(':id/invoice-generation')
+  @HttpCode(HttpStatus.ACCEPTED)
+  async requestTaxInvoice(@Param('id', ParseUUIDPipe) orderId: string) {
+    const jobTicket = await this.ordersService.enqueueTaxInvoicePdf(orderId);
+    return {
+      message: 'รับคำขอออกใบกำกับภาษีเต็มรูปแบบแล้ว ระบบกำลังจัดทำเอกสาร',
+      ticketId: jobTicket.id,
+      statusCheckUrl: `/api/v1/orders/${orderId}/invoice-status/${jobTicket.id}`,
+    };
+  }
+
+  // คืนค่า 204 No Content เมื่อลบรายการ OrderItem ออกจากตะกร้าสำเร็จ
+  @Delete(':orderId/items/:itemId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async removeOrderItem(
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @Param('itemId', ParseUUIDPipe) itemId: string,
+  ): Promise<void> {
+    await this.ordersService.removeOrderItem(orderId, itemId);
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การโยน HTTP Exceptions ที่สื่อความหมายตามบริบทธุรกิจใน OrdersService (ขั้นสูง)
+```typescript filename="src/modules/orders/orders.service.ts"
+import {
+  Injectable,
+  NotFoundException,
+  ForbiddenException,
+  ConflictException,
+  UnprocessableEntityException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import { CreateOrderDto } from './dto/create-order.dto';
+
+export interface OrderEntity {
+  id: string;
+  userId: string;
+  status: 'PENDING_PAYMENT' | 'PAID' | 'PREPARING_CUT' | 'SHIPPED' | 'CANCELLED';
+  totalAmountThb: number;
+}
+
+@Injectable()
+export class OrdersService {
+  async cancelOrder(orderId: string, currentUserId: string, userRole: string): Promise<OrderEntity> {
+    const order = await this.findOrderFromDb(orderId);
+
+    // 1. 404 Not Found: ไม่พบรหัสคำสั่งซื้อในระบบ
+    if (!order) {
+      throw new NotFoundException({
+        code: 'ORDER_NOT_FOUND',
+        message: `ไม่พบคำสั่งซื้อรหัส ${orderId} ในระบบ Smart Butcher`,
+      });
+    }
+
+    // 2. 403 Forbidden: เป็นคำสั่งซื้อของคนอื่น และผู้ใช้ไม่ใช่ ADMIN
+    if (order.userId !== currentUserId && userRole !== 'ADMIN') {
+      throw new ForbiddenException({
+        code: 'ORDER_ACCESS_DENIED',
+        message: 'คุณไม่มีสิทธิ์ยกเลิกคำสั่งซื้อของลูกค้ารายอื่น',
+      });
+    }
+
+    // 3. 409 Conflict: สถานะปัจจุบันของ Resource ไม่สามารถเปลี่ยนเป็น CANCELLED ได้
+    if (order.status === 'PREPARING_CUT' || order.status === 'SHIPPED') {
+      throw new ConflictException({
+        code: 'ORDER_ALREADY_IN_PREPARATION',
+        message: `ไม่สามารถยกเลิกคำสั่งซื้อได้เนื่องจากเชฟกำลังตัดแต่งเนื้อหรือจัดส่งแล้ว (สถานะปัจจุบัน: ${order.status})`,
+      });
+    }
+
+    return {
+      ...order,
+      status: 'CANCELLED',
+    };
+  }
+
+  async createOrder(dto: CreateOrderDto): Promise<OrderEntity> {
+    // 4. 422 Unprocessable Entity: ตรวจสอบกฎทางธุรกิจเชิงลึก (น้ำหนักเนื้อขั้นต่ำสำหรับการสั่งตัดพิเศษ)
+    for (const item of dto.items) {
+      if (item.isCustomDryAgeCut && item.weightGrams < 300) {
+        throw new UnprocessableEntityException({
+          code: 'MINIMUM_CUT_WEIGHT_VIOLATION',
+          message: `เนื้อสั่งตัดพิเศษ (Custom Cut) รหัส ${item.productId} ต้องสั่งขั้นต่ำ 300 กรัมขึ้นไป`,
+        });
+      }
+    }
+
+    // 5. 503 Service Unavailable: กรณีระบบตรวจสอบอุณหภูมิคลังห้องเย็นเชื่อมต่อไม่ได้ชั่วคราว
+    const isColdChainSystemOnline = true;
+    if (!isColdChainSystemOnline) {
+      throw new ServiceUnavailableException({
+        code: 'COLD_STORAGE_TELEMETRY_OFFLINE',
+        message: 'ระบบตรวจสอบสต็อกห้องเย็นกำลังบำรุงรักษาชั่วคราว กรุณาลองใหม่อีกครั้งใน 1 นาที',
+      });
+    }
+
+    return {
+      id: 'ord-778899',
+      userId: dto.userId,
+      status: 'PENDING_PAYMENT',
+      totalAmountThb: 5400,
+    };
+  }
+
+  private async findOrderFromDb(id: string): Promise<OrderEntity | null> {
+    if (id === '00000000-0000-0000-0000-000000000000') return null;
+    return {
+      id,
+      userId: 'usr-customer-01',
+      status: 'PREPARING_CUT',
+      totalAmountThb: 3200,
+    };
+  }
+
+  async enqueueTaxInvoicePdf(orderId: string) {
+    return { id: `job-inv-${orderId}` };
+  }
+
+  async removeOrderItem(_orderId: string, _itemId: string): Promise<void> {
+    return;
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/payments/status-code-comparison.ts"
+// ❌ ผิด (Anti-pattern): คืนค่า HTTP 200 OK ตลอดกาล แล้วบังคับให้ Frontend เช็ค flag เอาเอง
+export function handlePaymentAntiPattern() {
+  // HTTP/1.1 200 OK
+  return {
+    success: false,
+    statusCode: 500,
+    errorMessage: 'Database connection failed',
+  };
+}
+
+// ✅ ถูก (Best Practice): คืนค่า HTTP Status Code ตามความจริง เพื่อให้ HTTP Layer ทำงานร่วมกับ Client Library ได้ทันที
+import { ConflictException, UnauthorizedException } from '@nestjs/common';
+
+export function handlePaymentBestPractice(isTokenValid: boolean, isAlreadyPaid: boolean) {
+  if (!isTokenValid) {
+    // คืน HTTP 401 -> Frontend Interceptor ดักจับเพื่อทำ Refresh Token อัตโนมัติได้ทันที
+    throw new UnauthorizedException('เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่');
+  }
+  if (isAlreadyPaid) {
+    // คืน HTTP 409 -> บอกชัดเจนว่าคำสั่งซื้อนี้ถูกชำระเงินเรียบร้อยแล้ว
+    throw new ConflictException('คำสั่งซื้อนี้ได้รับการชำระเงินเสร็จสมบูรณ์แล้ว');
+  }
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `401` vs `403` ให้ชัดเจน**: ใช้ `401 Unauthorized` เมื่อระบบยังไม่รู้ว่าผู้เรียกคือใคร (ยังไม่ส่ง Token หรือ Token หมดอายุ) และใช้ `403 Forbidden` เมื่อระบบรู้แล้วว่าคือใคร แต่ Role หรือ Permission ไม่ถึงเกณฑ์
+- **ไม่ควรใช้ `404` แทน `400/422`**: หากลูกค้าส่งรหัสคูปองส่วนลดไม่ถูกต้องในการสร้าง `Order` ควรคืน `422 Unprocessable Entity` พร้อมรหัสข้อผิดพลาดเฉพาะเจาะจง แทนการคืน `404 Not Found` เฉยๆ ซึ่งจะทำให้ Frontend แยกไม่ออกว่า URL ของ Endpoint ผิด หรือข้อมูลข้างในไม่ถูกต้อง
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ความแตกต่างระหว่าง `400 Bad Request`, `409 Conflict` และ `422 Unprocessable Entity` ในการออกแบบ REST API คืออะไร?
+   - **แนวคำตอบ**:
+     - `400 Bad Request` ใช้เมื่อไคลเอนต์ส่งข้อมูลที่ผิดไวยากรณ์ (Malformed syntax) เช่น JSON ปิดปีกกาไม่ครบ หรือส่งชนิดข้อมูลพื้นฐานผิด
+     - `422 Unprocessable Entity` ใช้เมื่อโครงสร้าง JSON และชนิดข้อมูลถูกต้องครบถ้วน แต่ผิดเงื่อนไขทางธุรกิจ (Semantic validation error) เช่น วันจัดส่งเนื้อพรีเมียมที่เลือกเป็นวันในอดีต
+     - `409 Conflict` ใช้เมื่อข้อมูลที่ส่งมาถูกต้องทุกอย่าง แต่ขัดแย้งกับสถานะของข้อมูลในฐานข้อมูล ณ เวลานั้น เช่น พยายามตัดสต็อกสินค้าที่เพิ่งหมดไป หรือลงทะเบียนด้วยเบอร์โทรศัพท์ที่ซ้ำกับที่มีอยู่
+2. **คำถาม**: เมื่อไหร่ที่เราควรตอบกลับด้วย `202 Accepted` แทนที่จะเป็น `200 OK` หรือ `201 Created`?
+   - **แนวคำตอบ**: ใช้เมื่อการประมวลผลคำขอนั้นใช้เวลานานเกินกว่าจะให้ HTTP Request รอได้ (เช่น เกิน 1-2 วินาที) เช่น การสั่งสร้างรายงานยอดขายเนื้อประจำปี, การประมวลผลวิดีโอตรวจสอบลายไขมันเนื้อด้วย AI, หรือการส่งงานเข้า Message Queue (BullMQ / RabbitMQ) เซิร์ฟเวอร์จะรับเรื่องและตอบ `202 Accepted` พร้อมแนบ URL สำหรับเช็คสถานะงาน (Polling) หรือแจ้งผลผ่าน WebSocket/Webhook ในภายหลัง
+
+---

@@ -1,0 +1,108 @@
+---
+title: Middleware
+category: BACKEND
+parentTitle: NestJS 11
+version: NestJS 11
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด
+จินตนาการว่าก่อนที่ลูกค้าจะก้าวขาเข้าสู่ประตูร้าน Smart Butcher จะมีเจ้าหน้าที่คอยติดตั้งป้ายชื่อระบุตัวตน (Correlation ID) ให้กับลูกค้าแต่ละคน และจดบันทึกลงสมุดว่ามีใครเดินผ่านเข้าประตูมาเวลาใดบ้าง
+
+ใน NestJS **Middleware** คือฟังก์ชันที่ทำงานเทียบเท่ากับ Express Middleware แบบ 100% มันถูกเรียกใช้งานก่อนที่ NestJS จะจับคู่ Request เข้ากับ Routing Tree เสียอีก จึงเหมาะอย่างยิ่งสำหรับงานประเภท Network Transport, Security Headers, การทำ Body Parsing, และการฉีด Correlation ID สำหรับระบบ Distributed Tracing
+
+## 2. หลักการเบื้องหลัง
+คลาสที่เป็น Middleware จะต้องอิมพลีเมนต์อินเทอร์เฟซ `NestMiddleware` ซึ่งมีเมธอด `use(req: Request, res: Response, next: NextFunction)`
+- สามารถดัดแปลงตัวแปร `req` และ `res` ได้อย่างอิสระ
+- ต้องเรียกคำสั่ง `next()` เพื่อส่งการทำงานต่อไปยัง Middleware ถัดไปหรือเข้าสู่ Nest Routing Pipeline หากไม่เรียก `next()` การทำงานจะค้างและ Client จะพบปัญหา Timeout
+- ไม่สามารถเข้าถึง NestJS `ExecutionContext` ได้ เพราะยังไม่ผ่านการค้นหา Route Handler
+
+## 3. ตัวอย่างโค้ด
+
+### ตัวอย่างที่ 1: Correlation ID Middleware สำหรับระบบ Distributed Tracing
+```typescript filename="src/common/middlewares/correlation-id.middleware.ts"
+import { Injectable, NestMiddleware } from '@nestjs/common';
+import { Request, Response, NextFunction } from 'express';
+import { randomUUID } from 'crypto';
+
+export const CORRELATION_ID_HEADER = 'x-correlation-id';
+
+@Injectable()
+export class CorrelationIdMiddleware implements NestMiddleware {
+  use(req: Request, res: Response, next: NextFunction) {
+    // 1. ตรวจสอบว่า Client แนบ Correlation ID มาหรือไม่ ถ้าไม่มีให้สร้างใหม่ด้วย UUID v4
+    const correlationId =
+      (req.headers[CORRELATION_ID_HEADER] as string) || `butcher-trace-${randomUUID()}`;
+
+    // 2. แปะค่าลงใน Request Header เพื่อส่งต่อให้ Service ภายใน
+    req.headers[CORRELATION_ID_HEADER] = correlationId;
+
+    // 3. แนบค่าลงใน Response Header กลับไปให้ Frontend รับรู้เพื่อใช้อ้างอิงตอนแจ้งปัญหา
+    res.setHeader(CORRELATION_ID_HEADER, correlationId);
+
+    next();
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การลงทะเบียน Middleware ด้วย `MiddlewareConsumer` ใน `AppModule`
+```typescript filename="src/app.module.ts"
+import {
+  Module,
+  NestModule,
+  MiddlewareConsumer,
+  RequestMethod,
+} from '@nestjs/common';
+import { CorrelationIdMiddleware } from './common/middlewares/correlation-id.middleware';
+import { OrdersModule } from './modules/orders/orders.module';
+import { ProductsModule } from './modules/products/products.module';
+import { OrdersController } from './modules/orders/orders.controller';
+
+@Module({
+  imports: [OrdersModule, ProductsModule],
+})
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    // บังคับใช้ CorrelationIdMiddleware กับทุกๆ เส้นทางในแอปพลิเคชัน
+    consumer.apply(CorrelationIdMiddleware).forRoutes({ path: '*', method: RequestMethod.ALL });
+
+    // ตัวอย่างการจำกัดให้ Middleware ทำงานเฉพาะ OrdersController เท่านั้น
+    // consumer.apply(SpecialAuditMiddleware).forRoutes(OrdersController);
+  }
+}
+```
+
+## 4. ผิด vs ถูก
+
+```typescript filename="src/nestjs.ts"
+// ❌ ผิด: ลืมเรียกฟังก์ชัน next() ใน Middleware
+@Injectable()
+export class BadMiddleware implements NestMiddleware {
+  use(req: Request, res: Response, next: NextFunction) {
+    console.log(`Request เข้ามาที่: ${req.url}`);
+    // ❌ ลืมเรียก next()
+    // ผลกระทบ: คำขอของลูกค้าจะค้างเติ่ง (Hanging Request) จนเกิด Gateway Timeout 504
+  }
+}
+```
+
+```typescript filename="src/nestjs.ts"
+// ✅ ถูก: เรียก next() เสมอในทุกเงื่อนไข
+@Injectable()
+export class GoodMiddleware implements NestMiddleware {
+  use(req: Request, res: Response, next: NextFunction) {
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+    next(); // ✅ ส่งต่องานไปยังด่านถัดไปอย่างถูกต้อง
+  }
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Middleware**: ติดตั้ง Third-party Express/Fastify Plugins เช่น `helmet()`, `compression()`, `cors()`, หรือสร้าง Request Tracing ID
+- **ไม่ควรใช้ Middleware**: ตรวจสอบสิทธิ์ผู้ใช้ตาม Roles หรือสิทธิ์การเข้าถึงข้อมูลเฉพาะโมดูล (ควรย้ายไปทำที่ **Guards** ซึ่งมี `ExecutionContext` ให้ใช้งาน)
+
+## 6. คำถามสัมภาษณ์
+**ถาม**: ข้อจำกัดที่สำคัญที่สุดของ Middleware ใน NestJS เมื่อเทียบกับ Interceptors คืออะไร?
+**ตอบ**: Middleware ไม่สามารถรับรู้ได้ว่า Request นั้นกำลังจะถูกส่งต่อไปยัง Controller ตัวใด หรือ Method ใด (ไม่มี `ExecutionContext`) และไม่สามารถดักจับหรือแปลงค่าผลลัพธ์ (Response Data) ที่ Controller ส่งกลับออกมาผ่าน Paradigm แบบ Functional Reactive (RxJS) ได้เหมือนกับ Interceptors
+
+---

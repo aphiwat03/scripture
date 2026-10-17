@@ -1,0 +1,57 @@
+---
+title: Anti-patterns
+category: DATABASE
+parentTitle: Database Design
+version: Relational Modeling
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **Entity-Attribute-Value (EAV) Anti-pattern:** การสร้างตารางแบบกว้างๆ เพียงตารางเดียวที่มีคอลัมน์ `(entity_id, attribute_name, attribute_value_text)` เพื่อเก็บคุณลักษณะทุกอย่างของสินค้า ส่งผลให้สูญเสียการตรวจสอบ Data Type ไม่สามารถใส่ Foreign Key ได้ และต้องเขียน `JOIN` ตัวเองเป็นสิบครั้งเวลาดึงข้อมูล ใน PostgreSQL 16 ควรใช้คอลัมน์ปกติสำหรับฟิลด์หลักควบคู่กับคอลัมน์ `JSONB` สำหรับคุณลักษณะเสริมแทน
+2. **God Table (ตารางครอบจักรวาล):** การยัดข้อมูลผู้ใช้ ที่อยู่ ข้อมูลร้านค้า และตั้งค่าการแจ้งเตือนรวมไว้ในตาราง `users` ตารางเดียวที่มี 80 คอลัมน์ ทำให้ทุกครั้งที่อัปเดตฟิลด์เล็กๆ เกิดการคัดลอกแถวขนาดใหญ่ทั้งแถวตามกลไก MVCC ของ PostgreSQL
+3. **การไม่ระบุ Scale และ Precision ใน `NUMERIC`:** การประกาศแค่ `NUMERIC` ลอยๆ โดยไม่กำหนดเป็น `NUMERIC(12, 2)` ทำให้เผลอเก็บทศนิยมหลายสิบตำแหน่งโดยไม่ตั้งใจ และเกิดปัญหาการปัดเศษไม่ตรงกันระหว่างชั้น Database กับ Application
+4. **การลบข้อมูลประวัติด้วย `ON DELETE CASCADE`:** การตั้งค่า Cascade บนความสัมพันธ์ระหว่าง `users` กับ `orders` หรือ `products` กับ `order_items` ซึ่งเสี่ยงต่อการทำลายข้อมูลทางบัญชีและภาษีย้อนหลังทั้งหมดเมื่อมีการลบข้อมูลหลัก
+5. **การเก็บข้อมูลหลายค่าคั่นด้วยลูกน้ำ (Comma-Separated Values):** การเก็บแท็กสินค้าหรือตัวเลือกการตัดเนื้อเป็น `'steak,shabu,yakiniku'` ในคอลัมน์ `VARCHAR` ซึ่งผิดหลัก 1NF ทำให้ค้นหาด้วย Index ปกติไม่ได้และตรวจสอบความถูกต้องของแต่ละค่าไม่ได้
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+- [ ] **Naming Standard:** ชื่อตารางทั้งหมดเป็นคำนามพหูพจน์ และชื่อตารางรวมถึงคอลัมน์ทุกตัวใช้รูปแบบ `snake_case` ตัวพิมพ์เล็กทั้งหมด
+- [ ] **Primary Keys:** ตารางทุกตารางมี Primary Key (`UUID` v4/v7 สำหรับตารางที่เปิดเผยผ่าน API หรือ `BIGINT IDENTITY` สำหรับตารางภายใน/Log)
+- [ ] **Foreign Keys & Indexes:** ทุกความสัมพันธ์มีการประกาศ `FOREIGN KEY` พร้อมระบุ `ON DELETE RESTRICT` หรือ `CASCADE` อย่างเหมาะสม และสร้าง Index บนคอลัมน์ Foreign Key ทุกตัวแล้ว
+- [ ] **Financial Precision:** คอลัมน์ที่เกี่ยวกับราคา ส่วนลด และยอดเงินทั้งหมดใช้ `NUMERIC(10, 2)` หรือ `NUMERIC(12, 2)` เท่านั้น ห้ามมี `FLOAT` หรือ `REAL`
+- [ ] **Order Snapshots:** ตาราง `order_items` และ `orders` มีการเก็บ Snapshot ของราคา ชื่อสินค้า และที่อยู่จัดส่ง ณ เวลาที่ทำรายการเรียบร้อยแล้ว
+- [ ] **Check Constraints:** มีการใส่ `CHECK` constraint ป้องกันค่าติดลบ (`price_per_kg > 0`, `stock_qty >= 0`) และตรวจสอบความสอดคล้องของยอดเงินรวมในระดับตาราง
+- [ ] **Timestamps with Timezone:** ทุกตารางใช้ `TIMESTAMPTZ` สำหรับ `created_at`, `updated_at`, และ `deleted_at`
+- [ ] **Soft Delete Safe Unique Index:** ตารางที่ใช้ Soft Delete มีการใช้ Partial Unique Index (`WHERE deleted_at IS NULL`) แทน Unique Constraint ปกติ
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อคุณออกแบบโครงสร้างตารางและความสัมพันธ์ของฐานข้อมูลได้อย่างรัดกุมแล้ว ขั้นตอนต่อไปคือการวางกลยุทธ์ดัชนีและการปรับจูนประสิทธิภาพคิวรี:
+
+<Callout type="tip" title="เส้นทางการเรียนรู้ต่อเนื่องสำหรับ Senior Database Engineer">
+แนะนำให้ศึกษาต่อในหัวข้อการสร้างดัชนี (Indexing) เพื่อเร่งความเร็วในการค้นหาข้อมูลบนโครงสร้างตารางที่เราเพิ่งออกแบบเสร็จสิ้น และการจัดการ Schema Migration อย่างปลอดภัยบนระบบจริง
+</Callout>
+
+- **พื้นฐานระบบฐานข้อมูลและคำสั่ง SQL:**
+  - [PostgreSQL 16 Architecture & Data Types](/docs/database/postgresql)
+  - [SQL เชิงลึกสำหรับระบบ Production](/docs/database/sql)
+  - [เปรียบเทียบ SQL vs NoSQL และการเลือกใช้](/docs/database/sql-vs-nosql)
+- **การเพิ่มประสิทธิภาพและการจัดการธุรกรรม (ลำดับถัดไปที่แนะนำ):**
+  - [Indexing ใน PostgreSQL 16](/docs/database/indexing)
+  - [Query Performance & Optimization](/docs/database/query-performance)
+  - [Transactions & ACID](/docs/database/transactions)
+  - [Concurrency Control & Locking](/docs/database/concurrency)
+- **การดูแลรักษาระบบและการเชื่อมต่อฝั่ง Backend:**
+  - [Database Migrations](/docs/database/migrations)
+  - [Database Security & Row-Level Security](/docs/database/security)
+  - [Prisma ORM](/docs/backend/prisma-orm)
+  - [NestJS Framework](/docs/backend/nestjs)

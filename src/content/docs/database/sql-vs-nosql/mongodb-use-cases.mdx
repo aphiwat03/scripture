@@ -1,0 +1,142 @@
+---
+title: MongoDB Use Cases
+category: DATABASE
+parentTitle: SQL vs NoSQL
+version: Polyglot Persistence
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+**MongoDB** คือฐานข้อมูลฝั่ง NoSQL ประเภท **Document Store** ที่ได้รับความนิยมสูงสุด โดยจัดเก็บข้อมูลในรูปแบบเอกสาร **BSON (Binary JSON)** ภายในกลุ่มที่เรียกว่า **Collections** (เทียบได้กับตารางใน SQL)
+จุดแข็งที่แท้จริงของ MongoDB คือการที่ **"โครงสร้างข้อมูลในฐานข้อมูลมีรูปร่างตรงกับ Object ในโค้ด JavaScript/TypeScript ทันทีโดยไม่ต้องแปลงตาราง"** และการรองรับปริมาณการเขียนข้อมูลขาเข้า (Write-heavy Ingestion) ที่มีโครงสร้างเปลี่ยนแปลงตลอดเวลาและการทำ Horizontal Auto-Sharding ข้ามเซิร์ฟเวอร์หลายเครื่องได้ในตัว
+
+ในระบบ **Smart Butcher Marketplace** แม้เราจะใช้ PostgreSQL 16 เก็บคำสั่งซื้อและการเงิน แต่ถ้าเรามีระบบ **"IoT Cold-Chain Telemetry"** ที่ติดตั้งเซนเซอร์วัดอุณหภูมิ ความชื้น และพิกัด GPS ไว้ในตู้แช่เนื้อและรถขนส่งห้องเย็นทุกคัน ซึ่งยิงข้อมูลเข้ามาวินาทีละหลายหมื่นรายการและเซนเซอร์แต่ละรุ่นส่งฟิลด์มาไม่เหมือนกันเลย งานลักษณะนี้คือพื้นที่ที่ MongoDB (หรือ Time-Series DB) ฉายแสงได้อย่างยอดเยี่ยม
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **WiredTiger Storage Engine & BSON:**
+   MongoDB ใช้เอนจินจัดเก็บข้อมูลชื่อ **WiredTiger** ซึ่งใช้การล็อกระดับเอกสาร (Document-level Concurrency Control) และจัดเก็บข้อมูลเป็น BSON ที่รองรับชนิดข้อมูลมากกว่า JSON ปกติ เช่น `ObjectId` (ขนาด 12 ไบต์ที่มีประทับเวลาฝังอยู่), `Date`, `Decimal128` และไบนารี
+2. **หลักการออกแบบ: ข้อมูลที่ถูกอ่านด้วยกัน ควรถูกเก็บฝังไว้ด้วยกัน (Data that is accessed together should be stored together):**
+   - **Embedding (การฝังเอกสารย่อย):** ยุบรวมข้อมูลย่อยเข้าไปอยู่ในเอกสารแม่ก้อนเดียว ทำให้การดึงข้อมูลทั้งหมดทำได้ในการอ่านดิสก์เพียง 1 ครั้ง (Single Document Atomic Read/Write)
+   - **Referencing (การอ้างอิง):** แยกเอกสารออกจากกันเมื่ออาร์เรย์ย่อยมีโอกาสเติบโตแบบไร้ขีดจำกัด (Unbounded Array Growth) เพราะ MongoDB มีข้อจำกัดทางสถาปัตยกรรมที่สำคัญมากคือ **เอกสาร 1 ใบห้ามมีขนาดเกิน 16 MB เด็ดขาด!**
+3. **Native Horizontal Sharding:**
+   เมื่อข้อมูลเติบโตสู่ระดับหลายสิบ Terabytes MongoDB สามารถกระจายเอกสารไปเก็บตามเครื่องเซิร์ฟเวอร์ต่างๆ (Shards) โดยอัตโนมัติตามค่า **Shard Key** ที่เรากำหนด (เช่น `device_id` ของตู้แช่เนื้อ)
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: โครงสร้างเอกสาร BSON สำหรับเก็บข้อมูลเซนเซอร์ตู้บ่มเนื้อ Dry-Aged (Schema-flexible IoT Logs)
+เซนเซอร์ตู้บ่มเนื้อรุ่นที่ 1 ส่งเฉพาะอุณหภูมิและความชื้น ส่วนเซนเซอร์รุ่นที่ 2 ส่งค่าความเร็วพัดลมและระดับแสง UV เพิ่มเข้ามา ซึ่งสามารถบันทึกลงใน Collection เดียวกันได้ทันทีโดยไม่ต้องรัน `ALTER TABLE`:
+
+```typescript filename="src/telemetry/cold-chain-telemetry.schema.ts"
+import { MongoClient, ObjectId, Decimal128 } from 'mongodb';
+
+export interface ColdChainSensorEvent {
+  _id?: ObjectId;
+  chamberId: string; // ใช้เป็น Shard Key และ Index หลัก
+  productSkuBatch: string;
+  recordedAt: Date;
+  temperatureCelsius: number;
+  humidityPercent: number;
+  // โครงสร้างยืดหยุ่นที่แตกต่างกันไปตามรุ่นของฮาร์ดแวร์เซนเซอร์ในแต่ละห้องเย็น
+  hardwareDiagnostics: {
+    firmwareVersion: string;
+    uvSterilizerActive?: boolean;
+    airflowVelocityMps?: number;
+    compressorAlerts?: string[];
+  };
+}
+
+export async function recordColdChainReading(
+  mongoClient: MongoClient,
+  reading: ColdChainSensorEvent
+) {
+  const db = mongoClient.db('smart_butcher_telemetry');
+  const collection = db.collection<ColdChainSensorEvent>('chamber_logs');
+
+  // บันทึกเอกสารความเร็วสูงแบบไม่ต้องตรวจ Foreign Key ข้ามตาราง
+  const result = await collection.insertOne({
+    ...reading,
+    recordedAt: new Date(),
+  });
+
+  return result.insertedId;
+}
+```
+
+### ตัวอย่างที่ 2: การสร้าง TTL Index (ลบข้อมูลเก่าอัตโนมัติ) และการรัน Aggregation Pipeline วิเคราะห์อุณหภูมิห้องเย็น
+ฟีเจอร์ที่ทรงพลังมากของ MongoDB สำหรับข้อมูล Log คือ **TTL Index (Time-To-Live Index)** ที่สั่งให้ฐานข้อมูลลบเอกสารที่อายุเกิน 90 วันทิ้งให้อัตโนมัติ และการสรุปผลด้วย Aggregation Pipeline:
+
+```typescript filename="src/telemetry/cold-chain-analytics.service.ts"
+import { Db } from 'mongodb';
+
+export class ColdChainAnalyticsService {
+  constructor(private readonly telemetryDb: Db) {}
+
+  async ensureIndexesAndTtl() {
+    const col = this.telemetryDb.collection('chamber_logs');
+
+    // 1. สร้าง Compound Index สำหรับค้นหาตามรหัสตู้บ่มและช่วงเวลา
+    await col.createIndex({ chamberId: 1, recordedAt: -1 });
+
+    // 2. สร้าง TTL Index: สั่งให้ MongoDB ลบข้อมูลเซนเซอร์ที่เก่าเกิน 90 วันทิ้งอัตโนมัติ!
+    await col.createIndex(
+      { recordedAt: 1 },
+      { expireAfterSeconds: 90 * 24 * 60 * 60 }
+    );
+  }
+
+  async findOverheatedChambersLastHour() {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+
+    // ใช้ MongoDB Aggregation Pipeline เพื่อหาตู้บ่มเนื้อที่อุณหภูมิเฉลี่ยเกิน 4.0 องศาเซลเซียส
+    return this.telemetryDb
+      .collection('chamber_logs')
+      .aggregate([
+        {
+          $match: {
+            recordedAt: { $gte: oneHourAgo },
+          },
+        },
+        {
+          $group: {
+            _id: '$chamberId',
+            avgTempCelsius: { $avg: '$temperatureCelsius' },
+            maxTempCelsius: { $max: '$temperatureCelsius' },
+            sampleCount: { $sum: 1 },
+          },
+        },
+        {
+          $match: {
+            maxTempCelsius: { $gt: 4.0 },
+          },
+        },
+        {
+          $sort: { maxTempCelsius: -1 },
+        },
+      ])
+      .toArray();
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การฝัง Array ที่โตไม่จำกัด** | ฝังอาร์เรย์ `orders` ทั้งหมดของลูกค้าไว้ในเอกสาร `user` ใบเดียว พอลูกค้าซื้อครบหมื่นครั้ง เอกสารทะลุเพดาน **16 MB** จนพัง | ฝัง (Embed) เฉพาะข้อมูลที่มีจำนวนจำกัดแน่นอน (เช่น รายการสินค้าไม่เกิน 50 ชิ้นใน 1 บิล) ส่วนข้อมูลที่โตเรื่อยๆ ต้องแยก Collection |
+| **การนำ MongoDB มาจำลองเป็น SQL** | แยกข้อมูลออกเป็น 15 Collections ย่อยๆ แล้วเขียน `$lookup` (Join) ซ้อนกัน 6 ชั้นในทุกคิวรี | หากข้อมูลมีความสัมพันธ์ซับซ้อนและต้อง Join ตลอดเวลา ให้ใช้ **PostgreSQL 16** ตั้งแต่แรก |
+| **การใช้ชนิดข้อมูลตัวเลขกับการเงิน** | เก็บยอดเงินใน MongoDB เป็น Number ปกติของ JavaScript (IEEE 754 Float) ทำให้ทศนิยมเพี้ยน | หากต้องเก็บตัวเลขทศนิยมแม่นยำใน MongoDB ต้องใช้ชนิดข้อมูล `Decimal128` เสมอ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ MongoDB เมื่อ:** ข้อมูลมีลักษณะเป็นเอกสารที่จบในตัวเอง (Self-contained Documents) เช่น ระบบจัดการเนื้อหาบทความ (CMS), ข้อมูลบันทึกเหตุการณ์จากอุปกรณ์ IoT / Event Logs, ระบบแชท หรือแค็ตตาล็อกสินค้าที่มีโครงสร้าง属性แตกต่างกันหลายร้อยรูปแบบและต้องการทำ Horizontal Sharding ขนาดใหญ่
+- **ไม่ควรใช้ MongoDB เป็นฐานข้อมูลหลักเมื่อ:** ระบบเป็นงานบัญชี การเงิน การธนาคาร หรือระบบตัดสต็อก E-Commerce ที่ต้องอาศัยการทำ Multi-table Transactions และการตรวจสอบความสัมพันธ์แบบ Referential Integrity อย่างเข้มงวด
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ในการออกแบบ Schema ของ MongoDB เราใช้เกณฑ์อะไรในการตัดสินใจว่าควรใช้วิธี Embedding (ฝังข้อมูลไว้ในเอกสารเดียวกัน) หรือ Referencing (แยกเอกสารแล้วเก็บ ID อ้างอิง)?**
+  - **แนวคำตอบ:** พิจารณาจาก 3 ปัจจัยหลัก:
+    1. **ความสัมพันธ์และขีดจำกัดขนาด 16 MB:** หากเป็นความสัมพันธ์แบบ 1-to-Few (เช่น ที่อยู่จัดส่ง 2-3 แห่งของลูกค้า หรือรายการสินค้าใน 1 ใบสั่งซื้อ) ให้ใช้ **Embedding** แต่ถ้าเป็น 1-to-Many หรือ 1-to-Squillions ที่เติบโตไปเรื่อยๆ ไม่มีเพดาน (เช่น ประวัติการเข้าชมสินค้า หรือคอมเมนต์รีวิว) ต้องใช้ **Referencing** เพื่อไม่ให้ขนาดเอกสารทะลุลิมิต 16 MB
+    2. **รูปแบบการอ่านและเขียน:** หากข้อมูลสองส่วนถูกดึงมาแสดงผลพร้อมกันเสมอและไม่ค่อยถูกแก้ไขแยกกัน ให้ใช้ Embedding
+    3. **ความซ้ำซ้อนของการอัปเดต:** หากข้อมูลส่วนนั้นถูกอ้างอิงจากหลายที่และมีการเปลี่ยนค่าบ่อยๆ ให้ใช้ Referencing
+- **Q2: หากคุณใช้ PostgreSQL 16 อยู่แล้ว และมีโจทย์ต้องเก็บข้อมูลสเปกสินค้าที่มีฟิลด์ยืดหยุ่นไม่แน่นอนประมาณ 100,000 ชิ้น คุณจำเป็นต้องตั้งเซิร์ฟเวอร์ MongoDB เพิ่มหรือไม่?**
+  - **แนวคำตอบ:** ไม่จำเป็นเลย เพราะที่ขนาดข้อมูลระดับนี้ คอลัมน์ `JSONB` พร้อมดัชนี `GIN Index` ใน PostgreSQL 16 สามารถจัดเก็บและสืบค้นข้อมูลโครงสร้างยืดหยุ่นได้ด้วยความเร็วระดับมิลลิวินาทีเทียบเท่า MongoDB โดยไม่ต้องเพิ่มภาระในการดูแลรักษาฐานข้อมูลตัวที่สอง (Operational Overhead) และยังได้ประโยชน์จากการทำ ACID Transaction ร่วมกับตาราง `orders` ในฐานข้อมูลเดียวกันอีกด้วย
+
+---

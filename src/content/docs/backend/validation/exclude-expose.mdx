@@ -1,0 +1,223 @@
+---
+title: Exclude Expose
+category: BACKEND
+parentTitle: Validation
+version: class-validator & Zod
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+นอกจากจะต้องตรวจสอบข้อมูลขาเข้าอย่างเข้มงวดแล้ว การควบคุมข้อมูลขาออก (**Output Serialization**) เพื่อป้องกันไม่ให้ข้อมูลความลับในฐานข้อมูล (เช่น `passwordHash` ของผู้ใช้, `internalCostPerKg` ต้นทุนเนื้อของร้าน, หรือ `gatewaySecretToken`) รั่วไหลออกไปใน JSON Response ก็มีความสำคัญระดับวิกฤต (ป้องกัน **OWASP API3: Excessive Data Exposure**)
+
+ใน **NestJS 11** เราใช้ **`ClassSerializerInterceptor`** ร่วมกับ Decorators จาก `class-transformer` ได้แก่:
+- **`@Exclude()`**: สั่งตัดฟิลด์นั้นทิ้ง ห้ามแปลงออกเป็น JSON เด็ดขาด (หรือแปะ `@Exclude()` ที่ระดับหัวคลาสเพื่อซ่อนทุกฟิลด์เป็นค่าเริ่มต้นแบบ Whitelist Strategy)
+- **`@Expose()`**: สั่งอนุญาตให้แสดงฟิลด์นั้น หรือใช้แปะบน `getter` method เพื่อสร้างฟิลด์คำนวณพิเศษ (Computed Property) ส่งออกไปให้ Frontend
+- **`@Transform()`**: แปลงชนิดข้อมูลขาออก เช่น แปลง `Prisma.Decimal` ให้เป็น `number` หรือจัดรูปแบบเงินบาท
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อเปิดใช้งาน `ClassSerializerInterceptor` ใน NestJS ทุกครั้งที่ Controller คืนค่าอ็อบเจกต์ที่เป็น **Instance ของคลาส** (เช่น `new UserResponseDto(user)` หรือผ่าน `plainToInstance(UserResponseDto, user)`) ตัว Interceptor จะเรียกเมธอด **`instanceToPlain(responseObject)`** ของ `class-transformer` เบื้องหลัง
+
+<Callout type="warning" title="ข้อควรระวังเมื่อคืนค่าจาก Prisma โดยตรง">
+ผลลัพธ์ที่ได้จากคำสั่ง prisma.user.findUnique() เป็นเพียง Plain JavaScript Object ธรรมดา ไม่ใช่ Instance ของคลาส UserResponseDto! หากคุณ return ผลลัพธ์ของ Prisma ออกไปจาก Controller ตรงๆ ตัว ClassSerializerInterceptor จะไม่รู้ว่าต้องใช้กฎ @Exclude() ของคลาสไหน และปล่อยให้ passwordHash หลุดออกไปทันที! ดังนั้นจึงต้องแปลงผ่าน plainToInstance(UserResponseDto, rawUser, { excludeExtraneousValues: true }) เสมอ
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การใช้ `@Exclude()` ซ่อนรหัสผ่าน และ `@Expose()` สร้าง Computed Fields ใน UserResponseDto (พื้นฐาน)
+```typescript filename="src/modules/users/dto/user-response.dto.ts"
+import { Exclude, Expose } from 'class-transformer';
+import { UserRole } from '@prisma/client';
+
+// แนวทางที่ปลอดภัยที่สุด (Secure Whitelist): แปะ @Exclude() ระดับ Class
+// เพื่อซ่อนทุกฟิลด์เป็นค่าเริ่มต้น แล้วเลือกเปิดเฉพาะฟิลด์ที่มี @Expose() เท่านั้น!
+@Exclude()
+export class UserResponseDto {
+  @Expose()
+  id!: string;
+
+  @Expose()
+  email!: string;
+
+  @Expose()
+  fullName!: string;
+
+  @Expose()
+  phoneNumber!: string | null;
+
+  @Expose()
+  role!: UserRole;
+
+  @Expose()
+  createdAt!: Date;
+
+  // ฟิลด์ความลับจากฐานข้อมูลจะถูกตัดทิ้ง 100% แม้จะเผลอส่งติดมาจาก Prisma
+  passwordHash?: string;
+  refreshTokenHash?: string | null;
+
+  // สร้าง Computed Property ส่งให้ Frontend ใช้งานได้ทันทีด้วย @Expose() บน getter
+  @Expose()
+  get MaskedPhoneNumber(): string | null {
+    if (!this.phoneNumber || this.phoneNumber.length < 10) {
+      return null;
+    }
+    // แปลง "0812345678" เป็น "081-XXX-5678"
+    return `${this.phoneNumber.slice(0, 3)}-XXX-${this.phoneNumber.slice(-4)}`;
+  }
+
+  @Expose()
+  get isButcherStaff(): boolean {
+    return (
+      this.role === UserRole.ADMIN || this.role === UserRole.BUTCHER_CHEF
+    );
+  }
+
+  constructor(partial: Partial<UserResponseDto>) {
+    Object.assign(this, partial);
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การจัดการ Serialization ของ `Prisma.Decimal` และ Nested Entities ใน ProductDetailResponseDto (ขั้นสูง)
+```typescript filename="src/modules/products/dto/product-detail-response.dto.ts"
+import { Exclude, Expose, Transform, Type } from 'class-transformer';
+import { Prisma, MeatGrade } from '@prisma/client';
+
+@Exclude()
+export class CategorySummaryResponseDto {
+  @Expose()
+  id!: string;
+
+  @Expose()
+  name!: string;
+
+  @Expose()
+  slug!: string;
+}
+
+@Exclude()
+export class ProductDetailResponseDto {
+  @Expose()
+  id!: string;
+
+  @Expose()
+  sku!: string;
+
+  @Expose()
+  name!: string;
+
+  @Expose()
+  grade!: MeatGrade;
+
+  @Expose()
+  marblingScore!: number;
+
+  @Expose()
+  dryAgedDays!: number | null;
+
+  // แปลงชนิดข้อมูล Prisma.Decimal ขาออกให้เป็นตัวเลขทศนิยม 2 ตำแหน่งสำหรับ JSON
+  @Expose()
+  @Transform(({ value }: { value: Prisma.Decimal | number }) =>
+    value !== undefined && value !== null ? Number(value) : 0,
+  )
+  pricePerKgThb!: number;
+
+  @Expose()
+  stockWeightGrams!: number;
+
+  // ซ่อนต้นทุนนำเข้าเนื้อของร้าน (wholesaleCostPerKgThb) ไม่ให้หลุดออกไปหาลูกค้าเด็ดขาด!
+  wholesaleCostPerKgThb?: Prisma.Decimal;
+
+  @Expose()
+  @Type(() => CategorySummaryResponseDto)
+  category?: CategorySummaryResponseDto;
+
+  // คำนวณราคาตัวอย่างสำหรับชิ้นสเต็กมาตรฐานขนาด 300 กรัม ให้ Frontend นำไปโชว์ได้ทันที
+  @Expose()
+  get estimatedSteak300gPriceThb(): number {
+    const priceNum = Number(this.pricePerKgThb ?? 0);
+    return Math.round(priceNum * 0.3);
+  }
+}
+```
+
+```typescript filename="src/modules/products/products-serialization.controller.ts"
+import {
+  Controller,
+  Get,
+  Param,
+  UseInterceptors,
+  ClassSerializerInterceptor,
+  SerializeOptions,
+  ParseUUIDPipe,
+} from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
+import { ProductDetailResponseDto } from './dto/product-detail-response.dto';
+
+@Controller('products')
+@UseInterceptors(ClassSerializerInterceptor)
+// บังคับให้ตัดทุกฟิลด์ที่ไม่ได้แปะ @Expose() ทิ้งอย่างเด็ดขาดทั่วทั้ง Controller
+@SerializeOptions({ strategy: 'excludeAll', excludeExtraneousValues: true })
+export class ProductsSerializationController {
+  @Get(':id/serialized')
+  async getSerializedProduct(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<ProductDetailResponseDto> {
+    // ข้อมูลดิบจาก Prisma ที่มีฟิลด์ความลับ wholesaleCostPerKgThb ติดมาด้วย
+    const rawFromPrisma = {
+      id,
+      sku: 'SB-KOBE-A5-01',
+      name: 'Kobe Beef Striploin A5',
+      grade: 'JAPANESE_A5',
+      marblingScore: 12,
+      dryAgedDays: null,
+      pricePerKgThb: 9500,
+      wholesaleCostPerKgThb: 5200, // ข้อมูลความลับ! จะถูกตัดทิ้งโดยอัตโนมัติ
+      stockWeightGrams: 4500,
+      category: {
+        id: 'cat-01',
+        name: 'Japanese Wagyu',
+        slug: 'japanese-wagyu',
+        internalNotes: 'Import from Hyogo Prefecture', // จะถูกตัดทิ้งเช่นกัน!
+      },
+    };
+
+    return plainToInstance(ProductDetailResponseDto, rawFromPrisma, {
+      excludeExtraneousValues: true,
+    });
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/users/serialization-comparison.ts"
+import { plainToInstance } from 'class-transformer';
+import { UserResponseDto } from './dto/user-response.dto';
+
+// ❌ ผิด (Anti-pattern): ใช้ Blacklist (@Exclude เฉพาะบางฟิลด์) และลืมครอบ plainToInstance ก่อนส่งออกจาก Controller
+export function returnUserAntiPattern(rawPrismaUser: any) {
+  // 1. คืน Plain Object จาก Prisma ตรงๆ -> ClassSerializerInterceptor ไม่ทำงาน!
+  // 2. ถ้าวันหน้าเพิ่มคอลัมน์ twoFactorSecret ในตาราง users แล้วลืมมาเติม @Exclude() ข้อมูลจะรั่วไหลทันที!
+  return rawPrismaUser;
+}
+
+// ✅ ถูก (Best Practice): ใช้ Whitelist Strategy (@Exclude() ระดับ Class + @Expose() เฉพาะฟิลด์ที่เปิดเผย)
+// และแปลงด้วย plainToInstance(..., { excludeExtraneousValues: true }) เสมอ
+export function returnUserBestPractice(rawPrismaUser: unknown): UserResponseDto {
+  return plainToInstance(UserResponseDto, rawPrismaUser, {
+    excludeExtraneousValues: true,
+  });
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้กลยุทธ์ `excludeExtraneousValues: true` (Whitelist Serialization) เสมอ**: เพื่อการันตีว่าต่อให้นักพัฒนาคนอื่นเพิ่มคอลัมน์ความลับใหม่ในตาราง PostgreSQL คอลัมน์นั้นจะไม่มีวันหลุดออกไปทาง API จนกว่าจะมีการมาแปะ `@Expose()` อย่างจงใจ
+- **ไม่ควรพึ่งพาแค่ `@Exclude()` ขาออกแทนการใช้ `select` ใน Prisma**: สำหรับคอลัมน์ใหญ่หรือข้อมูลความลับสุดยอด ควรใช้ทั้ง `select` ใน Prisma (เพื่อไม่ดึงขึ้นมาจาก DB ตั้งแต่แรก) และใช้ `ResponseDto` เป็นด่านป้องกันชั้นที่สอง (Defense in Depth)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมเราจึงควรตั้งค่า `@Exclude()` ที่ระดับหัวคลาส แล้วค่อยแปะ `@Expose()` ที่แต่ละฟิลด์ (Whitelist approach) แทนที่จะแปะ `@Exclude()` เฉพาะที่ฟิลด์ `passwordHash` (Blacklist approach)?
+   - **แนวคำตอบ**: เพราะในโปรเจกต์จริง โมเดลในฐานข้อมูลมีการเพิ่มคอลัมน์ใหม่ตลอดเวลา เช่น ในอนาคตทีมอาจเพิ่มคอลัมน์ `stripeCustomerId`, `resetPasswordToken`, หรือ `internalCreditScore` ลงในตาราง `users` หากใช้แบบ Blacklist แล้วนักพัฒนาลืมตามไปแปะ `@Exclude()` ในทุกๆ Response DTO ข้อมูลความลับใหม่เหล่านั้นจะรั่วไหลออกไปทาง API ทันทีโดยไม่มีใครรู้ตัว แต่ถ้าใช้แบบ Whitelist ฟิลด์ใหม่ทุกตัวจะถูกซ่อนไว้เป็นค่าเริ่มต้นเสมอจนกว่าเราจะอนุญาตด้วย `@Expose()`
+2. **คำถาม**: ถ้าเราเปิดใช้งาน `ClassSerializerInterceptor` ระดับ Global แล้ว แต่ทำไมเวลา Controller ของเรา `return await this.prisma.user.findMany()` ฟิลด์ที่มี `@Exclude()` ถึงยังไม่ถูกตัดออก?
+   - **แนวคำตอบ**: เพราะ `ClassSerializerInterceptor` ตรวจสอบจากต้นแบบของอ็อบเจกต์ (`Object.getPrototypeOf`) ว่าเป็น Instance ของคลาสที่มี Metadata ของ `class-transformer` หรือไม่ ซึ่งอ็อบเจกต์ที่คืนมาจาก Prisma Client เป็นเพียง Plain Object (`{}`) ที่ไม่มี Prototype ของคลาส `UserResponseDto` วิธีแก้คือต้องแปลงอ็อบเจกต์นั้นด้วย `plainToInstance(UserResponseDto, users)` หรือ `new UserResponseDto(user)` ก่อนส่งออกจาก Controller
+
+---

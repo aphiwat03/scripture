@@ -1,0 +1,206 @@
+---
+title: HTTP Server
+category: BACKEND
+parentTitle: Node.js
+version: Node.js 22 LTS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เมื่อลูกค้าเข้าสู่หน้าเว็บไซต์ **Smart Butcher Marketplace** เพื่อดูรายการเนื้อสเต็ก เบราว์เซอร์จะส่ง HTTP Request ข้ามเครือข่ายอินเทอร์เน็ตมายังเซิร์ฟเวอร์ Node.js ของเรา:
+- แทนที่ Node.js จะรอให้ข้อมูลอัปโหลดเสร็จสิ้นทั้งหมดก่อนแล้วค่อยประมวลผล Node.js ปฏิบัติต่อ Request และ Response ในฐานะ **Streams** (สายน้ำของข้อมูลที่ไหลมาทีละก้อน หรือ Chunk)
+- ช่วยให้เซิร์ฟเวอร์เริ่มอ่านหรือส่งข้อมูลกลับไปได้ทันทีโดยไม่ต้องรอโหลดเนื้อหาทั้งหมดลง RAM ส่งผลให้ใช้หน่วยความจำน้อยและมี Latency ต่ำ
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **`node:http` createServer:**
+   - ฟังก์ชัน `http.createServer((req, res) => { ... })` จะสร้างอินสแตนซ์ของ `http.Server`
+   - พารามิเตอร์ `req` เป็นอินสแตนซ์ของ `http.IncomingMessage` ซึ่งสืบทอดมาจาก **`stream.Readable`**
+   - พารามิเตอร์ `res` เป็นอินสแตนซ์ของ `http.ServerResponse` ซึ่งสืบทอดมาจาก **`stream.Writable`**
+2. **Chunked Transfer Encoding:**
+   - เมื่อเราใช้ `res.write(chunk)` โดยไม่ได้กำหนด Header `Content-Length` ไว้ล่วงหน้า Node.js จะส่ง Header `Transfer-Encoding: chunked` โดยอัตโนมัติ
+   - ทำให้ส่งข้อมูลที่มีขนาดใหญ่มาก (เช่น ไฟล์ประวัติสต็อกเนื้อ) ออกไปได้เรื่อยๆ โดยที่เซิร์ฟเวอร์ไม่ต้องคำนวณขนาดรวมทั้งหมดล่วงหน้า
+3. **Handling Raw Buffers & Memory Limits:**
+   - ข้อมูลที่ส่งเข้ามาทาง `req` ในอีเวนต์ `'data'` จะเป็น **Raw Buffer** (ไบนารีข้อมูล)
+   - หากไม่มีการจำกัดขนาดของ Buffer ที่อ่านเข้ามา ผู้ไม่ประสงค์ดีอาจส่ง Request Body ขนาด 1GB เพื่อทำให้เกิดปัญหา Out of Memory (DoS Attack)
+
+```text filename="docs/backend/nodejs.txt"
+Client (Browser / Mobile App)
+          │
+          │ 1. HTTP Request (TCP Connection)
+          ▼
+   node:http Server
+          │
+          ├─► req (Readable Stream) ──► อีเวนต์ 'data' (Buffer chunk) ──► อีเวนต์ 'end'
+          │
+          └─► res (Writable Stream) ──► res.writeHead() ──► res.write() ──► res.end()
+```
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: Native HTTP Server จัดการ Routing และเสิร์ฟข้อมูลรายการเนื้อ (JSON API)
+```typescript filename="src/native-http-server.ts"
+import http from 'node:http';
+
+interface ButcherProductItem {
+  id: string;
+  name: string;
+  category: 'BEEF' | 'PORK';
+  priceThb: number;
+}
+
+const butcherCatalog: ButcherProductItem[] = [
+  { id: 'cut_01', name: 'สันนอกวากิว A5 (Sirloin)', category: 'BEEF', priceThb: 3800 },
+  { id: 'cut_02', name: 'สันคอหมูดำคุโรบูตะ (Collar)', category: 'PORK', priceThb: 420 },
+];
+
+const server = http.createServer((req, res) => {
+  const { method, url } = req;
+  console.log(`[HTTP Request] ${method} ${url}`);
+
+  // CORS Headers พื้นฐาน
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  // Routing: GET /api/products
+  if (method === 'GET' && url === '/api/products') {
+    const payload = JSON.stringify({
+      success: true,
+      data: butcherCatalog,
+      timestamp: new Date().toISOString(),
+    });
+
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Length': Buffer.byteLength(payload),
+    });
+    res.end(payload);
+    return;
+  }
+
+  // Route ไม่ตรงกับที่กำหนด: 404 Not Found
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ success: false, message: 'ไม่พบ Route ที่ต้องการในระบบ Smart Butcher' }));
+});
+
+const PORT = 3001;
+server.listen(PORT, () => {
+  console.log(`[Server Ready] Smart Butcher Native HTTP รันอยู่ที่ http://localhost:${PORT}`);
+});
+```
+
+### ตัวอย่างที่ 2: การอ่าน Stream Body แบบจำกัดขนาด (Safe Body Parser ป้องกัน DoS)
+```typescript filename="src/safe-body-parser.ts"
+import http from 'node:http';
+
+const MAX_BODY_SIZE_BYTES = 1 * 1024 * 1024; // จำกัดขนาดไม่เกิน 1 MB สำหรับคำสั่งซื้อ
+
+export function parseJsonBody<T>(req: http.IncomingMessage): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let receivedBytes = 0;
+
+    req.on('data', (chunk: Buffer) => {
+      receivedBytes += chunk.length;
+
+      // ป้องกัน DoS Attack: ตัดการเชื่อมต่อทันทีหากข้อมูลเกินขนาดที่อนุญาต
+      if (receivedBytes > MAX_BODY_SIZE_BYTES) {
+        req.destroy(); // ปิด Socket ทันที
+        reject(new Error('Payload Too Large: ขนาดข้อมูลคำสั่งซื้อเกิน 1MB'));
+        return;
+      }
+
+      chunks.push(chunk);
+    });
+
+    req.on('end', () => {
+      try {
+        const rawString = Buffer.concat(chunks).toString('utf-8');
+        if (!rawString) {
+          resolve({} as T);
+          return;
+        }
+        const parsed = JSON.parse(rawString);
+        resolve(parsed);
+      } catch (err) {
+        reject(new Error('Invalid JSON Payload: ข้อมูลที่ส่งมาไม่ใช่ JSON ที่ถูกต้อง'));
+      }
+    });
+
+    req.on('error', (err) => {
+      reject(err);
+    });
+  });
+}
+
+// นำไปใช้ใน Server
+const orderServer = http.createServer(async (req, res) => {
+  if (req.method === 'POST' && req.url === '/api/orders') {
+    try {
+      const orderBody = await parseJsonBody<{ productId: string; quantity: number }>(req);
+      console.log('[Order Received] ได้รับข้อมูลคำสั่งซื้อ:', orderBody);
+
+      res.writeHead(201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, message: 'บันทึกคำสั่งซื้อเนื้อสำเร็จ' }));
+    } catch (error: any) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: error.message }));
+    }
+  }
+});
+```
+
+## 4. ผิด vs ถูก (Anti-patterns & Best Practices)
+
+### ❌ โค้ดที่ผิด: ลืมดักจับอีเวนต์ error บน Stream ทำให้เซิร์ฟเวอร์แครชเมื่อไคลเอนต์กดยกเลิก
+```typescript filename="bad-stream-pipe.ts"
+import fs from 'node:fs';
+import http from 'node:http';
+
+http.createServer((req, res) => {
+  // ผิด: ไพพ์ไฟล์ขนาดใหญ่ไปยัง Response โดยไม่ดัก error
+  // หากลูกค้าปิดเบราว์เซอร์กะทันหัน Socket จะพัง และส่ง Error 'ECONNRESET' ที่ไม่มีตัวดักจับ
+  // ทำให้ทั้งแอปพลิเคชัน Node.js แคชทันที
+  const stream = fs.createReadStream('/data/meat-catalog-catalog.pdf');
+  stream.pipe(res);
+}).listen(3000);
+```
+
+### ✅ โค้ดที่ถูก: ใช้ `stream.pipeline` เพื่อจัดการ Error และปิด Cleanup อัตโนมัติ
+```typescript filename="good-stream-pipe.ts"
+import fs from 'node:fs';
+import http from 'node:http';
+import { pipeline } from 'node:stream';
+
+http.createServer((req, res) => {
+  const fileStream = fs.createReadStream('/data/meat-catalog-catalog.pdf');
+  res.writeHead(200, { 'Content-Type': 'application/pdf' });
+
+  // ถูกต้อง: pipeline จะคอยดักจับ Error และปิด Stream ทั้งสองฝั่งให้อัตโนมัติเมื่อเกิดข้อผิดพลาด
+  pipeline(fileStream, res, (err) => {
+    if (err) {
+      console.warn('[Stream Warning] ลูกค้าตัดการเชื่อมต่อก่อนโหลดไฟล์เสร็จ:', err.message);
+    } else {
+      console.log('[Stream Success] ส่งไฟล์แค็ตตาล็อกเนื้อสำเร็จ');
+    }
+  });
+}).listen(3000);
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้:** การทำความเข้าใจโครงสร้างพื้นฐานระดับลึก, การสร้าง Lightweight Health Check Server, หรือการทำ Reverse Proxy ขนาดย่อม
+- **ไม่ควรใช้:** การสร้าง Business Application ขนาดใหญ่ด้วย Native `node:http` โดยตรง ควรใช้ Framework คุณภาพสูงอย่าง **NestJS 11** หรือ **Fastify** ซึ่งมีระบบ Dependency Injection, Interceptors, Validation Pipes, และ Security Guards มาให้ในตัว
+
+## 6. คำถามสัมภาษณ์ (Interview Questions)
+- **Q1: ใน `http.createServer` ทำไมเราจึงต้องดักฟังอีเวนต์ `data` และ `end` แทนที่จะอ่านค่าออกมาเป็นตัวแปรธรรมดา?**
+  - *คำตอบ:* เพราะ HTTP Request Body ใน Node.js ถูกส่งมอบในรูปแบบ **Readable Stream** ข้อมูลขนาดใหญ่อาจถูกส่งแยกออกเป็นหลายๆ TCP Packets (Chunks) การดักฟังอีเวนต์ `data` ช่วยให้เรารับข้อมูลทีละส่วน และ `end` เป็นสัญญาณบ่งชี้ว่าส่งข้อมูลครบถ้วนแล้ว รูปแบบนี้ช่วยป้องกันไม่ให้เซิร์ฟเวอร์ต้องโหลดข้อมูลทั้งหมดลง RAM ในครั้งเดียว
+- **Q2: `Transfer-Encoding: chunked` คืออะไร และมีประโยชน์อย่างไรในงาน Backend?**
+  - *คำตอบ:* เป็นกลไกการส่งข้อมูลของ HTTP/1.1 ที่เซิร์ฟเวอร์ไม่จำเป็นต้องระบุขนาดของเนื้อหา (`Content-Length`) ล่วงหน้า แต่จะส่งข้อมูลเป็นชิ้นๆ (Chunks) พร้อมขนาดของแต่ละชิ้น มีประโยชน์อย่างยิ่งเมื่อต้องสตรีมข้อมูลขนาดใหญ่หรือข้อมูลที่สร้างขึ้นแบบเรียลไทม์ (เช่น การส่งไฟล์ CSV ออเดอร์ขนาดใหญ่ หรือการตอบกลับของ AI Chatbot)
+
+---

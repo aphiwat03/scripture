@@ -1,0 +1,177 @@
+---
+title: RBAC Decorator
+category: BACKEND
+parentTitle: Authentication
+version: JWT & Passport.js
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+หลังจากที่ `JwtAuthGuard` ยืนยันตัวตนสำเร็จและนำข้อมูลผู้ใช้ไปวางไว้ที่ `request.user` แล้ว ขั้นตอนถัดไปคือ **Authorization (การตรวจสอบสิทธิ์ตามบทบาท - RBAC)** เช่น ในระบบ **Smart Butcher Marketplace**:
+- `CUSTOMER`: สั่งซื้อเนื้อพรีเมียมและดูใบสั่งซื้อของตนเองได้
+- `BUTCHER_CHEF`: ดูคิวการตัดแต่งเนื้อและอัปเดตสถานะการบ่มเนื้อ Dry-Aged ได้
+- `ADMIN`: จัดการเพิ่ม/ลบสินค้า (`Product`), ตั้งราคาเนื้อต่อกิโลกรัม และอนุมัติการคืนเงิน (`Payment`) ได้
+
+นอกจากนี้ เพื่อไม่ให้โค้ดใน Controller ต้องเขียน `@Req() req: Request` แล้วทำ Type Casting `(req as any).user` ซึ่งเสี่ยงต่อความผิดพลาด เราจะสร้าง Custom Parameter Decorator ชื่อ **`@CurrentUser()`** ที่ดึงข้อมูลผู้ใช้ปัจจุบันออกมาอย่าง Type-safe 100%
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ในวงจรชีวิตของ NestJS 11 เมื่อเราลงทะเบียน Guard หลายตัว ลำดับการทำงานจะเรียงตามลำดับการลงทะเบียน:
+1. **`JwtAuthGuard` ต้องทำงานเป็นลำดับแรกเสมอ**: เพื่อแกะ JWT และสร้างอ็อบเจกต์ `request.user`
+2. **`RolesGuard` ต้องทำงานเป็นลำดับที่สอง**: โดยใช้ `Reflector` อ่าน Metadata จาก Decorator `@Roles(...)` ที่แปะอยู่บน Controller Method แล้วนำมาเปรียบเทียบกับ `request.user.role` หากไม่ตรงกันจะโยน `403 ForbiddenException` ทันที (สังเกตว่าเป็น `403 Forbidden` ไม่ใช่ `401 Unauthorized` เพราะระบบรู้แล้วว่าคุณคือใคร แต่สิทธิ์ไม่ถึง)
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสร้าง `@CurrentUser()` และ `@Roles()` Custom Decorators แบบ Type-safe (พื้นฐาน)
+```typescript filename="src/modules/auth/decorators/current-user.decorator.ts"
+import { createParamDecorator, ExecutionContext, SetMetadata } from '@nestjs/common';
+import { UserRole } from '@prisma/client';
+import { Request } from 'express';
+import { AuthenticatedUser } from '../strategies/jwt.strategy';
+
+export const ROLES_METADATA_KEY = 'requiredUserRoles';
+
+// 1. Decorator สำหรับกำหนดบทบาทที่ได้รับอนุญาต เช่น @Roles(UserRole.ADMIN, UserRole.BUTCHER_CHEF)
+export const Roles = (...roles: UserRole[]) =>
+  SetMetadata(ROLES_METADATA_KEY, roles);
+
+// 2. Parameter Decorator สำหรับดึงผู้ใช้ที่ Login อยู่ทั้งหมด หรือเจาะจงเฉพาะฟิลด์ เช่น @CurrentUser('id')
+export const CurrentUser = createParamDecorator(
+  (
+    data: keyof AuthenticatedUser | undefined,
+    ctx: ExecutionContext,
+  ): AuthenticatedUser | AuthenticatedUser[keyof AuthenticatedUser] | undefined => {
+    const request = ctx
+      .switchToHttp()
+      .getRequest<Request & { user?: AuthenticatedUser }>();
+    const user = request.user;
+
+    if (!user) {
+      return undefined;
+    }
+
+    return data ? user[data] : user;
+  },
+);
+```
+
+### ตัวอย่างที่ 2: การสร้าง `RolesGuard` และการนำไปใช้ใน Controller ของระบบ Smart Butcher (ขั้นสูง)
+```typescript filename="src/modules/auth/guards/roles.guard.ts"
+import {
+  Injectable,
+  CanActivate,
+  ExecutionContext,
+  ForbiddenException,
+} from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { UserRole } from '@prisma/client';
+import { Request } from 'express';
+import { ROLES_METADATA_KEY } from '../decorators/current-user.decorator';
+import { AuthenticatedUser } from '../strategies/jwt.strategy';
+
+@Injectable()
+export class RolesGuard implements CanActivate {
+  constructor(private readonly reflector: Reflector) {}
+
+  canActivate(context: ExecutionContext): boolean {
+    // อ่านรายการ Roles ที่กำหนดไว้บน Method หรือระดับ Controller
+    const requiredRoles = this.reflector.getAllAndOverride<UserRole[]>(
+      ROLES_METADATA_KEY,
+      [context.getHandler(), context.getClass()],
+    );
+
+    // หากไม่ได้แปะ @Roles() แปลว่าผู้ใช้ที่ Login แล้วทุกบทบาทสามารถเข้าถึงได้
+    if (!requiredRoles || requiredRoles.length === 0) {
+      return true;
+    }
+
+    const request = context
+      .switchToHttp()
+      .getRequest<Request & { user?: AuthenticatedUser }>();
+    const user = request.user;
+
+    if (!user || !requiredRoles.includes(user.role)) {
+      throw new ForbiddenException({
+        code: 'INSUFFICIENT_ROLE_PERMISSION',
+        message: `สิทธิ์ของคุณ (${user?.role ?? 'GUEST'}) ไม่ได้รับอนุญาตให้ดำเนินการส่วนนี้ (ต้องการสิทธิ์: ${requiredRoles.join(', ')})`,
+      });
+    }
+
+    return true;
+  }
+}
+```
+
+```typescript filename="src/modules/orders/butcher-operations.controller.ts"
+import { Controller, Patch, Get, Param, Body, ParseUUIDPipe } from '@nestjs/common';
+import { UserRole } from '@prisma/client';
+import {
+  Roles,
+  CurrentUser,
+} from '../auth/decorators/current-user.decorator';
+import { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
+import { Public } from '../auth/guards/jwt-auth.guard';
+
+@Controller('butcher-operations')
+export class ButcherOperationsController {
+  // 1. ทุกคนเข้าดูตารางรอบการจัดส่งรถห้องเย็นได้โดยไม่ต้อง Login
+  @Public()
+  @Get('cold-chain-schedule')
+  async getPublicSchedule() {
+    return {
+      morningSlot: '09:00 - 12:00',
+      afternoonSlot: '14:00 - 17:00',
+    };
+  }
+
+  // 2. เฉพาะเชฟแล่เนื้อ (BUTCHER_CHEF) และผู้ดูแลระบบ (ADMIN) เท่านั้นที่อัปเดตสถานะการตัดแต่งเนื้อได้
+  @Roles(UserRole.BUTCHER_CHEF, UserRole.ADMIN)
+  @Patch('orders/:orderId/start-cutting')
+  async markOrderAsCutting(
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @CurrentUser() chef: AuthenticatedUser,
+    @Body() body: { butcherStationNo: number },
+  ) {
+    return {
+      orderId,
+      status: 'PREPARING_CUT',
+      assignedChefId: chef.id,
+      assignedChefEmail: chef.email,
+      station: body.butcherStationNo,
+    };
+  }
+
+  // 3. ลูกค้าทั่วไปดึงเฉพาะรหัส ID ของตนเองอย่างกระชับด้วย @CurrentUser('id')
+  @Get('my-loyalty-tier')
+  async getMyLoyaltyTier(@CurrentUser('id') userId: string) {
+    return {
+      userId,
+      tier: 'WAGYU_CONNOISSEUR_GOLD',
+    };
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/orders/rbac-comparison.ts"
+// ❌ ผิด (Anti-pattern): ลงทะเบียน RolesGuard ก่อน JwtAuthGuard หรือรับ userId / role จาก Request Body!
+export class InsecureOrderDto {
+  userId!: string; // แฮกเกอร์ส่ง userId ของคนอื่นมาสั่งซื้อในนามคนอื่นได้ทันที!
+  role!: 'ADMIN';
+}
+
+// ✅ ถูก (Best Practice): ห้ามรับ userId หรือ role ของผู้กระทำจาก Request Body เด็ดขาด!
+// ต้องดึงจาก @CurrentUser() ที่ผ่านการตรวจสอบลายเซ็น JWT จาก JwtAuthGuard แล้วเท่านั้น
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `@Roles()` และ `RolesGuard` เมื่อ**: กฎการเข้าถึงขึ้นอยู่กับบทบาทระดับกว้าง (Coarse-grained permission) เช่น เฉพาะ `ADMIN` เท่านั้นที่สร้างสินค้าใหม่ได้
+- **ไม่ควรใช้ `RolesGuard` เพียงอย่างเดียวสำหรับการตรวจสอบความเป็นเจ้าของข้อมูล (Ownership)**: เช่น ลูกค้า `CUSTOMER` มีสิทธิ์ดูใบสั่งซื้อ แต่ต้องดูได้เฉพาะใบสั่งซื้อที่ `order.userId === currentUser.id` เท่านั้น (เรื่องนี้ต้องตรวจในระดับ Service/Query เพื่อป้องกันช่องโหว่ BOLA/IDOR ซึ่งจะเจาะลึกในบทเรียน Security)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: จะเกิดอะไรขึ้นหากเราลงทะเบียน `RolesGuard` ไว้ก่อน `JwtAuthGuard` ใน `AppModule`?
+   - **แนวคำตอบ**: ระบบจะปฏิเสธการเข้าถึงด้วย `403 Forbidden` ทุกครั้งที่มีการใช้ `@Roles()`! เพราะเมื่อ `RolesGuard` ทำงานก่อน ตัว `JwtAuthGuard` ยังไม่ได้ถูกรัน ทำให้ `request.user` ยังเป็น `undefined` เสมอ ดังนั้นลำดับการลงทะเบียน `APP_GUARD` ใน `AppModule` จึงต้องใส่ `JwtAuthGuard` เป็นตัวแรก และตามด้วย `RolesGuard` เป็นตัวที่สองเสมอ
+2. **คำถาม**: ถ้าผู้ดูแลระบบเพิ่งเปลี่ยน Role ของพนักงานในฐานข้อมูลจาก `BUTCHER_CHEF` เป็น `CUSTOMER` ทำไมพนักงานคนนั้นอาจยังเรียก API ของเชฟได้อยู่อีกสูงสุด 15 นาที และเราจะแก้ปัญหานี้ได้อย่างไร?
+   - **แนวคำตอบ**: เพราะ `role` ถูกฝังอยู่ใน Payload ของ Stateless Access Token ที่มีอายุ 15 นาที ตราบใดที่ Access Token ใบนั้นยังไม่หมดอายุ `JwtStrategy` ก็ยังอ่านค่า `role` เดิมจาก Token ได้ วิธีแก้สำหรับระบบที่ต้องการให้การลดสิทธิ์มีผลทันที (Immediate Revocation) คือการเก็บชุดรายการ `revokedUserIds` หรือ `tokenVersion` ไว้ใน Redis Cache เมื่อมีการเปลี่ยนสิทธิ์หรือแบนผู้ใช้ ให้เพิ่มเลข `tokenVersion` เพื่อให้ Access Token ใบเก่าถูกปฏิเสธทันที
+
+---

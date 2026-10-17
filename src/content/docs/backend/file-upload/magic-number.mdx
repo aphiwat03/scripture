@@ -1,0 +1,186 @@
+---
+title: Magic Number
+category: BACKEND
+parentTitle: File Upload
+version: Multer & Supabase Storage
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+การตรวจสอบความถูกต้องของไฟล์ (File Validation) ไม่สามารถเชื่อถือค่า `file.mimetype` หรือนามสกุลไฟล์ใน `file.originalname` ที่ส่งมาจาก Client ได้เพียงอย่างเดียว เพราะค่าเหล่านี้ถูกสร้างขึ้นจาก HTTP Header ของฝั่งผู้ส่ง ซึ่งแฮกเกอร์สามารถนำไฟล์สคริปต์อันตราย (`.html`, `.svg` ที่ฝัง XSS หรือ `.exe`) มาเปลี่ยนชื่อเป็น `wagyu-slip.jpg` เพื่อหลอกระบบได้ การตรวจสอบระดับ Production ใน NestJS 11 จึงใช้ `ParseFilePipe` ร่วมกับการตรวจสอบ **Magic Number (File Signature)** คือการอ่านไบต์แรกๆ ของ `file.buffer` เพื่อพิสูจน์โครงสร้างไบนารีที่แท้จริงของไฟล์
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ไฟล์ไบนารีแต่ละชนิดมีลำดับเลขฐานสิบหก (Hexadecimal Signature) เฉพาะตัวอยู่ที่ส่วนหัวของไฟล์ (Header Bytes):
+- **JPEG (`image/jpeg`)**: ขึ้นต้นด้วยไบต์ `FF D8 FF`
+- **PNG (`image/png`)**: ขึ้นต้นด้วย 8 ไบต์ `89 50 4E 47 0D 0A 1A 0A`
+- **WebP (`image/webp`)**: ไบต์ที่ 0-3 คือ `52 49 46 46` (`"RIFF"`) และไบต์ที่ 8-11 คือ `57 45 42 50` (`"WEBP"`)
+
+เมื่อเราสร้าง Custom `FileValidator` สำหรับ `ParseFilePipe` ใน NestJS เราสามารถเข้าถึง `file.buffer` เพื่อตรวจสอบไบต์เหล่านี้ได้โดยตรงในระดับหน่วยความจำ (`Buffer.subarray()`) โดยใช้เวลาระดับไมโครวินาที และป้องกันการปลอมแปลงนามสกุลไฟล์ได้อย่างเด็ดขาด
+
+<Callout type="warning" title="ข้อควรระวังในการอนุญาตไฟล์ SVG">
+หลีกเลี่ยงการอนุญาตให้ผู้ใช้งานทั่วไปอัปโหลดไฟล์ `.svg` (`image/svg+xml`) สำหรับรูปโปรไฟล์หรือสลิปโอนเงิน เนื่องจากไฟล์ SVG มีโครงสร้างเป็น XML ที่สามารถฝังแท็ก `<script>` ได้ หากถูกเปิดดูโดยตรงบนเบราว์เซอร์จะนำไปสู่ช่องโหว่ Stored Cross-Site Scripting (Stored XSS) ทันที ควรจำกัดเฉพาะ `image/jpeg`, `image/png` และ `image/webp` เท่านั้น
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การใช้ `ParseFilePipe` มาตรฐานร่วมกับ `MaxFileSizeValidator` และ `FileTypeValidator` สำหรับตรวจสอบเบื้องต้น
+
+```typescript filename="src/modules/categories/categories.controller.ts"
+import {
+  Controller,
+  Post,
+  Param,
+  ParseUUIDPipe,
+  UploadedFile,
+  UseInterceptors,
+  ParseFilePipe,
+  MaxFileSizeValidator,
+  FileTypeValidator,
+  HttpStatus,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+
+@Controller('categories')
+export class CategoriesController {
+  @Post(':id/banner')
+  @UseInterceptors(
+    FileInterceptor('banner', {
+      limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
+    }),
+  )
+  async uploadCategoryBanner(
+    @Param('id', new ParseUUIDPipe({ version: '4' })) categoryId: string,
+    @UploadedFile(
+      new ParseFilePipe({
+        validators: [
+          new MaxFileSizeValidator({
+            maxSize: 2 * 1024 * 1024,
+            message: 'ขนาดไฟล์แบนเนอร์หมวดหมู่เนื้อต้องไม่เกิน 2MB',
+          }),
+          new FileTypeValidator({
+            fileType: /^image\/(jpeg|png|webp)$/,
+          }),
+        ],
+        errorHttpStatusCode: HttpStatus.UNPROCESSABLE_ENTITY,
+        fileIsRequired: true,
+      }),
+    )
+    file: Express.Multer.File,
+  ) {
+    return {
+      categoryId,
+      mimeType: file.mimetype,
+      size: file.size,
+    };
+  }
+}
+```
+
+ตัวอย่างที่ 2: การสร้าง Custom `MagicNumberImageValidator` เพื่อตรวจพิสูจน์ File Signature (`JPEG`, `PNG`, `WebP`) ระดับไบต์จาก `Buffer` สำหรับตรวจสอบสลิปโอนเงิน (`Payment`) และรูปสินค้า (`Product`)
+
+```typescript filename="src/common/validators/magic-number-image.validator.ts"
+import { FileValidator } from '@nestjs/common';
+
+export interface MagicNumberValidatorOptions {
+  allowedMimeTypes: Array<'image/jpeg' | 'image/png' | 'image/webp'>;
+}
+
+export class MagicNumberImageValidator extends FileValidator<
+  MagicNumberValidatorOptions,
+  Express.Multer.File
+> {
+  constructor(protected readonly validationOptions: MagicNumberValidatorOptions) {
+    super(validationOptions);
+  }
+
+  public isValid(file?: Express.Multer.File): boolean {
+    if (!file || !file.buffer || file.buffer.length < 12) {
+      return false;
+    }
+
+    const detectedMime = this.detectMimeTypeFromBuffer(file.buffer);
+    if (!detectedMime) {
+      return false;
+    }
+
+    // ต้องตรงกับรายการที่อนุญาต และตรงกับ MIME type ที่ประกาศมา
+    return this.validationOptions.allowedMimeTypes.includes(detectedMime);
+  }
+
+  public buildErrorMessage(): string {
+    const allowed = this.validationOptions.allowedMimeTypes.join(', ');
+    return `โครงสร้างไฟล์ไบนารีไม่ถูกต้อง (Magic Number Mismatch) อนุญาตเฉพาะไฟล์รูปภาพจริงประเภท: ${allowed}`;
+  }
+
+  private detectMimeTypeFromBuffer(
+    buffer: Buffer,
+  ): 'image/jpeg' | 'image/png' | 'image/webp' | null {
+    // 1. ตรวจ JPEG: FF D8 FF
+    if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+      return 'image/jpeg';
+    }
+
+    // 2. ตรวจ PNG: 89 50 4E 47 0D 0A 1A 0A
+    const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    const isPng = pngSignature.every((byte, index) => buffer[index] === byte);
+    if (isPng) {
+      return 'image/png';
+    }
+
+    // 3. ตรวจ WebP: "RIFF" (0..3) และ "WEBP" (8..11)
+    const riffHeader = buffer.subarray(0, 4).toString('ascii');
+    const webpHeader = buffer.subarray(8, 12).toString('ascii');
+    if (riffHeader === 'RIFF' && webpHeader === 'WEBP') {
+      return 'image/webp';
+    }
+
+    return null;
+  }
+}
+```
+
+```typescript filename="src/common/pipes/image-upload.pipe.ts"
+import {
+  ParseFilePipe,
+  MaxFileSizeValidator,
+  HttpStatus,
+} from '@nestjs/common';
+import { MagicNumberImageValidator } from '../validators/magic-number-image.validator';
+
+export function createStrictImageParsePipe(maxSizeBytes = 5 * 1024 * 1024): ParseFilePipe {
+  return new ParseFilePipe({
+    validators: [
+      new MaxFileSizeValidator({
+        maxSize: maxSizeBytes,
+        message: (maxSize) =>
+          `ไฟล์มีขนาดใหญ่เกินกำหนด (สูงสุดไม่เกิน ${(maxSize / (1024 * 1024)).toFixed(1)} MB)`,
+      }),
+      new MagicNumberImageValidator({
+        allowedMimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
+      }),
+    ],
+    errorHttpStatusCode: HttpStatus.UNPROCESSABLE_ENTITY,
+    fileIsRequired: true,
+  });
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การตรวจสอบชนิดไฟล์** | เช็คเพียง `file.originalname.endsWith('.jpg')` หรือ `file.mimetype === 'image/jpeg'` ซึ่งปลอมแปลงได้ง่ายผ่านเครื่องมืออย่าง Postman หรือ `curl` | ใช้ Custom `FileValidator` ใน `ParseFilePipe` เพื่ออ่านไบต์แรกของ `file.buffer` (Magic Number) |
+| **HTTP Status เมื่อไฟล์ผิดรูปแบบ** | โยน `500 Internal Server Error` หรือไม่กำหนดสถานะที่ชัดเจน | กำหนด `errorHttpStatusCode: HttpStatus.UNPROCESSABLE_ENTITY` (`422`) หรือ `400 Bad Request` พร้อมข้อความที่ชัดเจน |
+| **การทำซ้ำโค้ด Validation** | เขียน `if (file.size > ...)` ซ้ำๆ ในทุกเมธอดของ Controller หรือ Service | สร้าง Factory Function เช่น `createStrictImageParsePipe()` เพื่อนำกลับมาใช้ซ้ำได้ในทุก Endpoint |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: ทุก Endpoint ที่เปิดรับไฟล์จากผู้ใช้งานภายนอก ไม่ว่าจะเป็นลูกค้าที่อัปโหลดสลิปโอนเงิน (`Payment`) หรือแอดมินที่อัปโหลดรูปภาพเนื้อพรีเมียม (`Product`)
+- **ไม่ควรใช้เมื่อ**: ไม่ควรพึ่งพาเฉพาะการตรวจ Magic Number เพียงอย่างเดียวหากระบบต้องการควบคุมขนาดมิติภาพ (Width x Height) หรือลบข้อมูลพิกัด GPS (EXIF Metadata) ออกจากภาพถ่ายสลิปหรือภาพถ่ายสินค้า ซึ่งควรใช้ไลบรารีอย่าง `sharp` ประมวลผลเพิ่มเติมในชั้น Service
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: Magic Number ของไฟล์คืออะไร และช่วยป้องกันช่องโหว่ความปลอดภัยใดได้บ้าง?
+   - **แนวคำตอบ**: Magic Number คือลำดับไบต์คงที่บริเวณส่วนหัวของไฟล์ไบนารีที่ระบุรูปแบบไฟล์จริง (เช่น `FF D8 FF` สำหรับ JPEG) การตรวจสอบค่านี้ช่วยป้องกันการโจมตีแบบ Unrestricted File Upload ที่ผู้โจมตีเปลี่ยนนามสกุลไฟล์สคริปต์หรือมัลแวร์เป็น `.jpg` หรือแก้ไข `Content-Type` Header ใน HTTP Request เพื่อหลอกให้เซิร์ฟเวอร์จัดเก็บและเผยแพร่ไฟล์อันตราย
+2. **คำถาม**: หากต้องการทำ Endpoint ที่ไฟล์รูปภาพเป็น Optional (เช่น ตอนแก้ไขข้อมูล `Product` ที่อาจไม่ได้เปลี่ยนรูป) ต้องตั้งค่า `ParseFilePipe` อย่างไร?
+   - **แนวคำตอบ**: กำหนดออปชัน `fileIsRequired: false` ใน `new ParseFilePipe({ fileIsRequired: false, validators: [...] })` เมื่อไม่มีไฟล์แนบมา Pipe จะข้ามการทำงานของ `validators` และคืนค่า `undefined` ให้กับพารามิเตอร์ใน Controller โดยไม่โยน Error
+
+---

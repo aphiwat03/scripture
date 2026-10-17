@@ -1,0 +1,227 @@
+---
+title: Frontend Contract
+category: BACKEND
+parentTitle: REST API Design
+version: RESTful API Standards
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+API ที่ดีไม่ได้วัดกันที่โค้ดฝั่ง Backend สวยงามเพียงอย่างเดียว แต่วัดกันที่ **Developer Experience (DX)** ของทีม Frontend และ Mobile ที่นำ API ไปใช้งาน การออกแบบ **API Contract** ที่ดีต้องช่วยลดภาระการแปลงข้อมูลซ้ำซ้อนฝั่งบ้านหน้าบ้าน ป้องกันบั๊กเรื่องการคำนวณทศนิยมของเงินและเขตเวลา (Timezone) และส่งข้อมูลที่พร้อมนำไปเรนเดอร์บนหน้าจอ (UI-ready representation) ได้ทันทีโดยไม่ต้องยิง API ย่อยตามหลังอีกหลายสิบครั้ง
+
+หลักการสำคัญในการออกแบบ API Contract สำหรับ **Smart Butcher Marketplace**:
+1. **ใช้ `camelCase` สำหรับ JSON Keys ทั้งหมด**: เพื่อให้ตรงกับมาตรฐาน JavaScript / TypeScript ฝั่ง Frontend
+2. **วันที่และเวลาต้องเป็น ISO 8601 ในเขตเวลา UTC เสมอ**: เช่น `"2026-10-17T09:15:30.000Z"` เพื่อให้ Frontend นำไปแปลงแสดงผลตาม Timezone ของผู้ใช้แต่ละคนได้อย่างแม่นยำ
+3. **ข้อมูลการเงินและน้ำหนักต้องชัดเจนเรื่องหน่วย**: ระบุหน่วยในชื่อฟิลด์ เช่น `weightGrams` (กรัม), `totalAmountThb` หรือส่งค่าเป็นหน่วยย่อยสตางค์ (`amountSatang: 450000`) เพื่อป้องกันปัญหา Floating-point (`0.1 + 0.2 !== 0.3`)
+4. **คืนค่า Resource ล่าสุดกลับมาเสมอหลังทำ `POST`, `PUT`, `PATCH`**: เพื่อให้ Frontend (เช่น TanStack Query) นำไปอัปเดต Local Cache ได้ทันทีโดยไม่ต้องเสียเวลายิง `GET` ซ้ำ
+5. **แนบ Computed Permissions / Allowed Actions**: แทนที่จะให้ Frontend เขียน `if-else` ซ้ำกับ Backend ว่าปุ่ม "ยกเลิกคำสั่งซื้อ" ควรกดได้หรือไม่ ให้ Backend คำนวณและส่งฟิลด์ `capabilities` หรือ `allowedActions` ไปให้พร้อมใช้งาน
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อเรานำแนวคิด **Contract-First / Schema-Driven Development** มาใช้ใน NestJS 11 ร่วมกับ `@nestjs/swagger` (OpenAPI 3.1) คลาส DTO ขาเข้าและขาออกที่เราประกาศจะถูกใช้สร้างไฟล์ `openapi.json` โดยอัตโนมัติ ซึ่งทีม Frontend สามารถใช้เครื่องมืออย่าง `openapi-typescript` เจนเนอเรตออกมาเป็น TypeScript Interfaces ที่ตรงกับ Backend 100% หาก Backend แก้ไขชื่อฟิลด์ใน DTO ระบบ CI/CD จะแจ้งเตือน Type Error ที่ฝั่ง Frontend ทันทีตั้งแต่ก่อนขึ้น Production
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การออกแบบ OrderDetailResponseDto ที่ครบจบพร้อมเรนเดอร์และรองรับ TanStack Query (พื้นฐาน)
+```typescript filename="src/modules/orders/dto/order-detail-response.dto.ts"
+export type OrderStatus =
+  | 'PENDING_PAYMENT'
+  | 'PAID'
+  | 'PREPARING_CUT'
+  | 'READY_FOR_COLD_DELIVERY'
+  | 'DELIVERED'
+  | 'CANCELLED';
+
+export interface OrderItemContractDto {
+  id: string;
+  product: {
+    id: string;
+    sku: string;
+    name: string;
+    thumbnailUrl: string;
+    categoryName: string; // แนบชื่อหมวดหมู่มาให้เลย ไม่ต้องให้ Frontend ยิง GET /categories/:id ซ้ำ
+  };
+  cutSpecification: {
+    style: 'STEAK' | 'SHABU' | 'YAKINIKU' | 'WHOLE_BLOCK';
+    thicknessMm: number;
+    vacuumSealed: boolean;
+  };
+  weightGrams: number;
+  unitPricePerKgThb: number;
+  lineTotalSatang: number; // เก็บเป็นสตางค์ (จำนวนเต็ม) ป้องกันปัญหาทศนิยมคลาดเคลื่อน
+  lineTotalFormatted: string; // เช่น "฿3,450.00" พร้อมแสดงผลทันทีหากไม่ต้องการคำนวณเพิ่ม
+}
+
+export interface OrderDetailContractDto {
+  id: string;
+  orderNumber: string; // รหัสที่มนุษย์อ่านง่ายสำหรับแสดงบนหน้าเว็บ เช่น "SB-20261017-0089"
+  status: OrderStatus;
+  customer: {
+    id: string;
+    fullName: string;
+    phoneNumber: string;
+  };
+  items: OrderItemContractDto[];
+  pricingSummary: {
+    subtotalSatang: number;
+    coldChainShippingSatang: number;
+    discountSatang: number;
+    grandTotalSatang: number;
+    currency: 'THB';
+  };
+  deliverySchedule: {
+    estimatedArrivalStartIso: string; // ISO 8601 UTC: "2026-10-18T03:00:00.000Z"
+    estimatedArrivalEndIso: string;   // ISO 8601 UTC: "2026-10-18T05:00:00.000Z"
+    targetTemperatureCelsius: number; // เช่น 2 องศาเซลเซียส
+  };
+  // Computed Capabilities: บอก Frontend ชัดเจนว่าสถานะนี้ผู้ใช้กดปุ่มอะไรได้บ้าง
+  allowedActions: {
+    canCancel: boolean;
+    canChangeDeliverySlot: boolean;
+    canDownloadTaxInvoice: boolean;
+    canRequestQualityRefund: boolean;
+  };
+  createdAtIso: string;
+  updatedAtIso: string;
+}
+```
+
+### ตัวอย่างที่ 2: การสร้าง Mapper Service แปลง Entity จากฐานข้อมูลให้เป็น Frontend-Friendly Contract (ขั้นสูง)
+```typescript filename="src/modules/orders/orders-contract.mapper.ts"
+import { Injectable } from '@nestjs/common';
+import {
+  OrderDetailContractDto,
+  OrderStatus,
+} from './dto/order-detail-response.dto';
+
+export interface RawOrderFromPrisma {
+  id: string;
+  orderNumber: string;
+  status: OrderStatus;
+  userId: string;
+  userFullName: string;
+  userPhone: string;
+  subtotalSatang: number;
+  shippingSatang: number;
+  discountSatang: number;
+  grandTotalSatang: number;
+  deliveryStart: Date;
+  deliveryEnd: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+@Injectable()
+export class OrdersContractMapper {
+  toDetailContract(raw: RawOrderFromPrisma): OrderDetailContractDto {
+    // คำนวณสิทธิ์การกดปุ่มบนหน้าจอจากสถานะปัจจุบันที่ฝั่ง Backend เพียงที่เดียว (Single Source of Truth)
+    const canCancel =
+      raw.status === 'PENDING_PAYMENT' || raw.status === 'PAID';
+    const canChangeDeliverySlot =
+      raw.status === 'PENDING_PAYMENT' || raw.status === 'PAID';
+    const canDownloadTaxInvoice =
+      raw.status === 'PAID' ||
+      raw.status === 'PREPARING_CUT' ||
+      raw.status === 'READY_FOR_COLD_DELIVERY' ||
+      raw.status === 'DELIVERED';
+    const canRequestQualityRefund = raw.status === 'DELIVERED';
+
+    return {
+      id: raw.id,
+      orderNumber: raw.orderNumber,
+      status: raw.status,
+      customer: {
+        id: raw.userId,
+        fullName: raw.userFullName,
+        phoneNumber: raw.userPhone,
+      },
+      items: [
+        {
+          id: 'item-wagyu-01',
+          product: {
+            id: 'prod-kobe-a5',
+            sku: 'SB-KOBE-RIB-A5',
+            name: 'Kobe Wine Beef Ribeye A5',
+            thumbnailUrl: 'https://cdn.smartbutcher.co.th/cuts/kobe-ribeye.webp',
+            categoryName: 'Japanese Wagyu A5',
+          },
+          cutSpecification: {
+            style: 'STEAK',
+            thicknessMm: 25,
+            vacuumSealed: true,
+          },
+          weightGrams: 500,
+          unitPricePerKgThb: 8800,
+          lineTotalSatang: 440000,
+          lineTotalFormatted: this.formatSatangToThb(440000),
+        },
+      ],
+      pricingSummary: {
+        subtotalSatang: raw.subtotalSatang,
+        coldChainShippingSatang: raw.shippingSatang,
+        discountSatang: raw.discountSatang,
+        grandTotalSatang: raw.grandTotalSatang,
+        currency: 'THB',
+      },
+      deliverySchedule: {
+        estimatedArrivalStartIso: raw.deliveryStart.toISOString(),
+        estimatedArrivalEndIso: raw.deliveryEnd.toISOString(),
+        targetTemperatureCelsius: 1.5,
+      },
+      allowedActions: {
+        canCancel,
+        canChangeDeliverySlot,
+        canDownloadTaxInvoice,
+        canRequestQualityRefund,
+      },
+      createdAtIso: raw.createdAt.toISOString(),
+      updatedAtIso: raw.updatedAt.toISOString(),
+    };
+  }
+
+  private formatSatangToThb(satang: number): string {
+    const baht = satang / 100;
+    return new Intl.NumberFormat('th-TH', {
+      style: 'currency',
+      currency: 'THB',
+      minimumFractionDigits: 2,
+    }).format(baht);
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/orders/contract-comparison.ts"
+// ❌ ผิด (Anti-pattern): ส่งเฉพาะ Foreign Key ID เปลือยๆ, ส่งเวลาแบบไม่มี Timezone, และคืนแค่ { updated: true } ตอน PATCH
+export const UNFRIENDLY_CONTRACT = {
+  id: 'ord-1',
+  user_id: 'usr-9', // ใช้ snake_case ปน และส่งแค่ ID ทำให้ Frontend ต้องยิง API อีกเส้นเพื่อเอาชื่อลูกค้า
+  cat_id: 'cat-2',
+  total_price: 4400.000000000001, // ปัญหา Floating point!
+  created_at: '17/10/2026 15:30', // ไม่มี Timezone และไม่เป็นมาตรฐาน ISO 8601
+};
+
+// ✅ ถูก (Best Practice): ใช้ camelCase สม่ำเสมอ, แนบข้อมูลสำคัญของ Relation ที่ต้องแสดงผลมาให้พอดี, และใช้ ISO 8601 UTC
+export const FRIENDLY_CONTRACT = {
+  id: 'ord-1',
+  orderNumber: 'SB-20261017-0001',
+  customerSummary: {
+    id: 'usr-9',
+    displayName: 'คุณธนภัทร นักชิมเนื้อ',
+  },
+  grandTotalSatang: 440000,
+  createdAtIso: '2026-10-17T08:30:00.000Z',
+};
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรแนบข้อมูล Relation ย่อย (Embedded Summary Object) เมื่อ**: หน้าจอ UI ต้องแสดงชื่อหมวดหมู่ (`categoryName`) หรือชื่อสินค้า (`product.name`) คู่กับรายการใบสั่งซื้อเสมอ เพื่อป้องกันไม่ให้ Frontend เกิดปัญหา N+1 HTTP Requests
+- **ไม่ควรส่ง Entity จาก Prisma ออกไปตรงๆ โดยไม่ผ่าน DTO/Mapper**: เพราะโครงสร้างตารางในฐานข้อมูลอาจมีฟิลด์ความลับ (เช่น `passwordHash`, `costPricePerKg` ต้นทุนเนื้อของร้าน) และทำให้การเปลี่ยนชื่อคอลัมน์ในฐานข้อมูลกระทบกับ Frontend ทันที
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมหลังจากทำคำขอ `PATCH /api/v1/products/:id` หรือ `POST /api/v1/orders` เราจึงควรส่งข้อมูลอ็อบเจกต์ที่อัปเดตล่าสุดกลับไปใน Response Body แทนที่จะส่งแค่ `{ "message": "Success" }`?
+   - **แนวคำตอบ**: เพราะเมื่อเซิร์ฟเวอร์ประมวลผลเสร็จ มักจะมีฟิลด์ที่ถูกคำนวณหรือเปลี่ยนแปลงโดยเซิร์ฟเวอร์ เช่น `updatedAt`, `orderNumber`, หรือราคารวมสุทธิหลังหักส่วนลด การส่ง Resource ล่าสุดกลับมาช่วยให้ State Management ฝั่ง Frontend (เช่น TanStack Query `queryClient.setQueryData`) นำข้อมูลก้อนใหม่ไปอัปเดตหน้าจอได้ทันทีโดยไม่ต้องเสียเวลายิง `GET` ซ้ำอีกรอบ ช่วยลดทั้ง Latency และภาระของเซิร์ฟเวอร์ได้ถึงครึ่งหนึ่ง
+2. **คำถาม**: การส่งฟิลด์ `allowedActions` (เช่น `{ canCancel: false, canDownloadTaxInvoice: true }`) ไปใน API Response ช่วยแก้ปัญหาทางสถาปัตยกรรมอย่างไร?
+   - **แนวคำตอบ**: ช่วยรักษาหลักการ **Single Source of Truth** ของกฎทางธุรกิจ (Business Rules) หากเราไม่ส่ง `allowedActions` ไป นักพัฒนา Web, iOS และ Android จะต้องไปเขียน `if (order.status === 'PENDING' || ...)` แยกกันถึง 3 ที่ เมื่อบริษัทเปลี่ยนกฎว่า *"คำสั่งซื้อที่จ่ายเงินแล้วแต่ยังไม่เกิน 15 นาทียังยกเลิกได้"* ถ้าไม่ส่ง `allowedActions` จาก Backend เราจะต้องแก้โค้ดและรออัปเดตแอปมือถือทั้งระบบ แต่ถ้าใช้ `allowedActions` เราแก้โค้ดที่ Backend จุดเดียว ทุกแพลตฟอร์มจะแสดงผลปุ่มกดตามกฎใหม่ทันที
+
+---

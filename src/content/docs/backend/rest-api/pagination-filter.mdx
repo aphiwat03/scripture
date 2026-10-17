@@ -1,0 +1,275 @@
+---
+title: Pagination Filter
+category: BACKEND
+parentTitle: REST API Design
+version: RESTful API Standards
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในระบบอีคอมเมิร์ซที่มีสินค้าและคำสั่งซื้อหลักแสนรายการ การดึงข้อมูลทั้งหมดกลับไปในครั้งเดียว (`SELECT * FROM products`) จะทำให้ฐานข้อมูลล่ม, หน่วยความจำของ Node.js เต็ม (Out of Memory), และหน้าเว็บของลูกค้าค้าง ดังนั้น API ที่ดึงข้อมูลเป็นรายการ (Collection Endpoints) จะต้องรองรับกลไก **Pagination (การแบ่งหน้า)**, **Filtering (การกรองตามเงื่อนไข)**, **Sorting (การจัดเรียงลำดับ)** และ **Searching (การค้นหาด้วยคำสำคัญ)** เสมอ
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+การแบ่งหน้า (Pagination) ในระบบ Production มี 2 รูปแบบหลักที่มีกลไกการทำงานในฐานข้อมูลต่างกันอย่างสิ้นเชิง:
+
+| คุณสมบัติ | Offset-based Pagination (`page`, `limit`) | Cursor-based / Keyset Pagination (`cursor`, `limit`) |
+| :--- | :--- | :--- |
+| **กลไก SQL** | `LIMIT 20 OFFSET 10000` | `WHERE (created_at, id) < ($1, $2) ORDER BY created_at DESC, id DESC LIMIT 20` |
+| **ความเร็วเมื่อข้อมูลลึกขึ้น** | ช้าลงแบบเชิงเส้น $O(N)$ เพราะ Database ต้องกวาดอ่านแล้วทิ้ง 10,000 แถวแรก | เร็วคงที่ $O(1)$ ตลอดกาลเพราะกระโดดไปยังตำแหน่ง B-Tree Index ทันที |
+| **ปัญหาข้อมูลซ้ำ/ตกหล่น** | เกิดปัญหา **Page Drift** เมื่อมีรายการเนื้อใหม่แทรกเข้ามาขณะลูกค้ากำลังเลื่อนหน้า | ไม่มีปัญหาข้อมูลซ้ำหรือกระโดดข้าม แม้มีข้อมูลใหม่เพิ่มเข้ามาตลอดเวลา |
+| **การกระโดดข้ามหน้า** | กระโดดไปหน้า 50 ได้ทันที เหมาะกับตาราง Admin Backoffice | กระโดดไปหน้า произвольный ไม่ได้ เหมาะกับ Infinite Scroll หรือ Feed สินค้า |
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การออกแบบ Query DTO สำหรับ Filtering, Sorting, Searching และ Offset Pagination (พื้นฐาน)
+```typescript filename="src/modules/products/dto/query-products.dto.ts"
+import {
+  IsOptional,
+  IsInt,
+  Min,
+  Max,
+  IsString,
+  IsEnum,
+  IsBoolean,
+} from 'class-validator';
+import { Type, Transform } from 'class-transformer';
+
+export enum MeatGradeFilter {
+  A5 = 'A5',
+  A4 = 'A4',
+  PRIME = 'PRIME',
+  CHOICE = 'CHOICE',
+}
+
+export enum ProductSortField {
+  PRICE_PER_KG = 'pricePerKg',
+  CREATED_AT = 'createdAt',
+  MARBLING_SCORE = 'marblingScore',
+}
+
+export enum SortOrder {
+  ASC = 'asc',
+  DESC = 'desc',
+}
+
+export class QueryProductsDto {
+  // Pagination (Offset-based พร้อมจำกัดค่าสูงสุดของ limit ป้องกัน DoS)
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page: number = 1;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  limit: number = 20;
+
+  // Searching (ค้นหาชื่อชิ้นเนื้อ เช่น "Ribeye", "Miyazaki")
+  @IsOptional()
+  @IsString()
+  search?: string;
+
+  // Filtering (กรองตามหมวดหมู่, เกรดเนื้อ, ช่วงราคา และสถานะสต็อก)
+  @IsOptional()
+  @IsString()
+  categoryId?: string;
+
+  @IsOptional()
+  @IsEnum(MeatGradeFilter)
+  grade?: MeatGradeFilter;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  minPrice?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  maxPrice?: number;
+
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  inStockOnly?: boolean;
+
+  // Sorting (บังคับผ่าน Enum Whitelist เพื่อป้องกัน SQL Injection หรือการ Sort คอลัมน์ที่ไม่มี Index)
+  @IsOptional()
+  @IsEnum(ProductSortField)
+  sortBy: ProductSortField = ProductSortField.CREATED_AT;
+
+  @IsOptional()
+  @IsEnum(SortOrder)
+  sortOrder: SortOrder = SortOrder.DESC;
+}
+```
+
+### ตัวอย่างที่ 2: การทำ Cursor-based Pagination พร้อมเข้ารหัส Opaque Cursor สำหรับหน้า Feed สินค้าและประวัติ Order (ขั้นสูง)
+```typescript filename="src/modules/products/products-query.service.ts"
+import { Injectable, BadRequestException } from '@nestjs/common';
+import { QueryProductsDto } from './dto/query-products.dto';
+
+export interface ProductSummary {
+  id: string;
+  name: string;
+  categorySlug: string;
+  grade: string;
+  marblingScore: number;
+  pricePerKgThb: number;
+  inStock: boolean;
+  createdAt: string;
+}
+
+interface DecodedCursor {
+  createdAt: string;
+  id: string;
+}
+
+@Injectable()
+export class ProductsQueryService {
+  // 1. การดึงข้อมูลแบบ Offset Pagination สำหรับหน้าตารางจัดการสินค้าของ Admin
+  async findWithOffsetPagination(query: QueryProductsDto) {
+    const skip = (query.page - 1) * query.limit;
+    const take = query.limit;
+
+    // จำลองการสร้างเงื่อนไขส่งเข้า Prisma ORM (ดูรายละเอียดเชิงลึกในบทเรียน Prisma ORM)
+    const totalItems = 145;
+    const totalPages = Math.ceil(totalItems / take);
+
+    const items: ProductSummary[] = [
+      {
+        id: 'prod-001',
+        name: 'Miyazaki Wagyu A5 Striploin',
+        categorySlug: 'japanese-wagyu',
+        grade: 'A5',
+        marblingScore: 12,
+        pricePerKgThb: 6900,
+        inStock: true,
+        createdAt: '2026-10-17T07:00:00.000Z',
+      },
+    ];
+
+    return {
+      items,
+      pagination: {
+        page: query.page,
+        limit: query.limit,
+        totalItems,
+        totalPages,
+        skip,
+      },
+    };
+  }
+
+  // 2. การดึงข้อมูลแบบ Cursor-based Pagination สำหรับหน้า Infinite Scroll ของลูกค้า
+  async findWithCursorPagination(limit: number = 20, rawCursor?: string) {
+    const safeLimit = Math.min(Math.max(limit, 1), 50);
+    const decoded = rawCursor ? this.decodeCursor(rawCursor) : null;
+
+    // เมื่อดึงจาก DB เราจะดึงมา safeLimit + 1 แถว เพื่อเช็คว่ามีหน้าถัดไปหรือไม่
+    const mockDbRows: ProductSummary[] = [
+      {
+        id: 'prod-101',
+        name: '45-Day Dry-Aged USDA Prime Tomahawk',
+        categorySlug: 'dry-aged-steaks',
+        grade: 'PRIME',
+        marblingScore: 9,
+        pricePerKgThb: 4200,
+        inStock: true,
+        createdAt: '2026-10-17T06:30:00.000Z',
+      },
+      {
+        id: 'prod-102',
+        name: 'Kagoshima Wagyu A4 Tenderloin',
+        categorySlug: 'japanese-wagyu',
+        grade: 'A4',
+        marblingScore: 10,
+        pricePerKgThb: 5800,
+        inStock: true,
+        createdAt: '2026-10-17T06:00:00.000Z',
+      },
+    ];
+
+    const hasNextPage = mockDbRows.length > safeLimit;
+    const items = hasNextPage ? mockDbRows.slice(0, safeLimit) : mockDbRows;
+    const lastItem = items[items.length - 1];
+
+    const nextCursor =
+      hasNextPage && lastItem
+        ? this.encodeCursor({ createdAt: lastItem.createdAt, id: lastItem.id })
+        : null;
+
+    return {
+      items,
+      pagination: {
+        limit: safeLimit,
+        appliedCursor: decoded,
+        nextCursor,
+      },
+    };
+  }
+
+  private encodeCursor(payload: DecodedCursor): string {
+    return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  }
+
+  private decodeCursor(cursor: string): DecodedCursor {
+    try {
+      const jsonStr = Buffer.from(cursor, 'base64url').toString('utf8');
+      const parsed = JSON.parse(jsonStr) as DecodedCursor;
+      if (!parsed.createdAt || !parsed.id) {
+        throw new Error('Invalid cursor structure');
+      }
+      return parsed;
+    } catch {
+      throw new BadRequestException({
+        code: 'INVALID_PAGINATION_CURSOR',
+        message: 'รหัส Cursor สำหรับเลื่อนหน้าไม่ถูกต้อง',
+      });
+    }
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/products/pagination-comparison.ts"
+// ❌ ผิด (Anti-pattern): ไม่จำกัดค่าสูงสุดของ limit และยอมรับชื่อคอลัมน์ sortBy จาก Query String โดยตรง
+export function buildUnsafeQuery(limitParam: number, sortByParam: string) {
+  // 1. แฮกเกอร์สามารถส่ง ?limit=99999999 เพื่อโจมตีให้ Server Memory เต็ม (OOM Crash)
+  // 2. แฮกเกอร์สามารถส่ง ?sortBy=passwordHash หรือคอลัมน์ที่ไม่มี Index ทำให้เกิด Full Table Scan
+  return { take: limitParam, orderBy: { [sortByParam]: 'desc' } };
+}
+
+// ✅ ถูก (Best Practice): บังคับเพดาน limit สูงสุดไม่เกิน 100 และตรวจ sortBy ผ่าน Enum Whitelist เท่านั้น
+import { ProductSortField, SortOrder } from './dto/query-products.dto';
+
+export function buildSafeQuery(
+  limitParam: number,
+  sortByParam: ProductSortField,
+  sortOrderParam: SortOrder,
+) {
+  const safeLimit = Math.min(Math.max(limitParam, 1), 100);
+  return {
+    take: safeLimit,
+    orderBy: [{ [sortByParam]: sortOrderParam }, { id: 'asc' as const }], // ใส่ id เป็น Tie-breaker เสมอ
+  };
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Offset Pagination (`page`, `limit`) เมื่อ**: เป็นหน้า Dashboard ของผู้ดูแลระบบ (Admin Backoffice) ที่ต้องการเห็นจำนวนหน้าทั้งหมด และต้องการคลิกกระโดดไปหน้าเลขใดๆ ก็ได้ และจำนวนข้อมูลที่กรองแล้วไม่ได้อยู่ในระดับหลายล้านแถว
+- **ควรใช้ Cursor Pagination (`cursor`, `limit`) เมื่อ**: เป็นหน้าแสดงรายการสินค้าฝั่งลูกค้า (Infinite Scroll), หน้าประวัติคำสั่งซื้อ (`Order`), หรือการดึงข้อมูลต่อเนื่องผ่าน Mobile App ที่เน้นความเร็วคงที่และห้ามเกิดข้อมูลซ้ำเมื่อมีสินค้าใหม่เติมเข้ามา
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมการทำ Sorting หรือ Cursor Pagination จึงต้องใส่คอลัมน์ที่เป็น Unique (เช่น `id`) เป็น Tie-breaker ตัวสุดท้ายใน `ORDER BY` เสมอ?
+   - **แนวคำตอบ**: เพราะหากเราเรียงลำดับด้วยคอลัมน์ที่สามารถมีค่าซ้ำกันได้ เช่น `pricePerKg` (เนื้อหลายชิ้นราคา 3,500 บาทเท่ากัน) หรือ `createdAt` ที่เวลาตรงกันระดับมิลลิวินาที ลำดับการคืนค่าของฐานข้อมูลในแถวที่มีค่าเท่ากันจะไม่แน่นอน (Non-deterministic) ทำให้เวลาเลื่อนหน้าถัดไปอาจเจอสินค้าชิ้นเดิมซ้ำ หรือสินค้าบางชิ้นหายไป การใส่ `ORDER BY price_per_kg DESC, id ASC` จะการันตีลำดับที่แน่นอน 100% ทุกครั้ง
+2. **คำถาม**: การเข้ารหัส Cursor เป็น `base64url` (Opaque Cursor) มีข้อดีกว่าการส่งค่า `lastCreatedAt` และ `lastId` เปลือยๆ ใน Query String อย่างไร?
+   - **แนวคำตอบ**: การทำ Opaque Cursor ช่วยซ่อนรายละเอียดโครงสร้างคอลัมน์ภายในฐานข้อมูล (Abstraction) หากในอนาคตทีม Backend เปลี่ยนวิธีจัดเรียงลำดับจาก `createdAt + id` ไปเป็น `popularityScore + createdAt + id` ฝั่ง Frontend ก็ไม่จำเป็นต้องแก้ไขโค้ดเลย เพราะ Frontend มีหน้าที่เพียงนำสตริง `nextCursor` ที่ได้รับไปส่งต่อในคำขอถัดไปเท่านั้น
+
+---

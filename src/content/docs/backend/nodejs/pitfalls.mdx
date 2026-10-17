@@ -1,0 +1,65 @@
+---
+title: Anti-patterns
+category: BACKEND
+parentTitle: Node.js
+version: Node.js 22 LTS
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+ในการพัฒนา Backend ด้วย Node.js ในระดับ Enterprise นักพัฒนามักพบข้อผิดพลาดที่ส่งผลต่อประสิทธิภาพและความเสถียรของระบบ ดังนี้:
+
+### 1. การบล็อก Event Loop ด้วย Synchronous Operations หรือ Complex Regex (ReDoS)
+- **พฤติกรรม:** การใช้ `fs.readFileSync`, `crypto.pbkdf2Sync`, หรือ Regular Expression ที่มีปัญหา Catastrophic Backtracking ในการตรวจสอบอีเมลลูกค้า
+- **ผลกระทบ:** V8 Call Stack ถูกจองไว้คนเดียว ทำให้ผู้ใช้ทั้งระบบไม่สามารถโหลดหน้าเว็บหรือส่งคำสั่งซื้อได้
+- **แนวทางแก้ไข:** ใช้ Asynchronous APIs เสมอ และทดสอบ Regular Expression ด้วยเครื่องมือตรวจสอบ ReDoS
+
+### 2. ปัญหา Memory Leak จาก Unbounded Caching หรือ Event Listeners
+- **พฤติกรรม:** การสร้าง Global Map หรือ Array เก็บประวัติออเดอร์ของ User โดยไม่มีการเคลียร์ทิ้ง หรือการสั่ง `socket.on(...)` ซ้ำๆ ทุกครั้งที่มี Request เข้ามาโดยไม่สั่ง `removeListener`
+- **ผลกระทบ:** เซิร์ฟเวอร์ใช้ RAM สูงขึ้นเรื่อยๆ จนกระทั่งเกิดข้อผิดพลาด `JavaScript heap out of memory` และ Process แครช
+- **แนวทางแก้ไข:** ใช้เครื่องมือเช่น LRU Cache (`lru-cache`) ที่จำกัดขนาด และใช้ `events.once()` หรือถอด Listener ทันทีเมื่อเลิกใช้งาน
+
+### 3. การละเลยและกลืน Error ใน Promise (Error Swallowing)
+- **พฤติกรรม:** การเขียน `.catch(() => {})` หรือบล็อก `try { ... } catch (e) {}` ว่างเปล่าไว้เพื่อไม่ให้ระบบฟ้อง Error
+- **ผลกระทบ:** เมื่อระบบตัดเงินลูกค้าล้มเหลว หรือฐานข้อมูลเชื่อมต่อไม่ได้ ระบบจะไม่แจ้งเตือนใดๆ ทำให้ตรวจสอบหาสาเหตุยากมาก
+- **แนวทางแก้ไข:** ส่งต่อ Error ให้ Global Error Handler เสมอ หรือบันทึก Structured Logging พร้อม Stack Trace
+
+### 4. การผสมผสาน ESM และ CommonJS โดยไม่เข้าใจ Build Pipeline
+- **พฤติกรรม:** พยายาม `require()` แพ็กเกจที่เป็น ESM-only หรือการใช้ตัวแปร `__dirname` ในไฟล์ที่ประกาศ `"type": "module"`
+- **ผลกระทบ:** เกิด Runtime Error `ERR_REQUIRE_ESM` หรือ `ReferenceError: __dirname is not defined` ตอน Deploy ขึ้น Production
+- **แนวทางแก้ไข:** แปลงโปรเจกต์เป็น ESM อย่างสมบูรณ์ และใช้ `import.meta.dirname` แทน
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+ก่อนนำบริการ Node.js Backend ขึ้นสู่สภาพแวดล้อม Production ให้ตรวจสอบความพร้อมตามรายการนี้:
+
+- [ ] **Event Loop Hygiene:** ไม่มีคำสั่งตระกูล `*Sync` (เช่น `fs.readFileSync`, `fs.writeFileSync`) ใน Request Handling Path
+- [ ] **Thread Pool Tuning:** ปรับแต่งค่า `UV_THREADPOOL_SIZE` ให้เหมาะสมกับ CPU Cores และภาระงาน Crypto/File I/O ของระบบ
+- [ ] **Async Flow Consistency:** ไม่มีการใช้ `forEach` กับฟังก์ชัน `async` ให้เปลี่ยนไปใช้ `Promise.all` หรือ `for...of` แทน
+- [ ] **Strict Module System:** มีการระบุ `"type": "module"` ใน `package.json` อย่างชัดเจน และไม่มีการเรียกใช้ CJS Globals ใน ESM
+- [ ] **Deterministic Dependencies:** ไฟล์ `pnpm-lock.yaml` หรือ `package-lock.json` ถูกบันทึกลง Git และใน CI ใช้คำสั่ง `--frozen-lockfile` หรือ `npm ci`
+- [ ] **Type-safe Env Validation:** ตัวแปร `.env` ทั้งหมดได้รับการตรวจสอบผ่าน Schema (เช่น Zod) ทันทีตั้งแต่เริ่มบูตโปรเซส
+- [ ] **Stream Error Handling:** ทุก Stream ไปป์ไลน์มีการใช้ `stream.pipeline` เพื่อดักจับ Error และปิด Stream อย่างปลอดภัย
+- [ ] **Payload Size Limit:** มีการจำกัดขนาดของ Request Body เพื่อป้องกันการโจมตีแบบ Denial of Service (DoS)
+- [ ] **Global Error Trapping:** ลงทะเบียนดักฟังอีเวนต์ `unhandledRejection` และ `uncaughtException` พร้อมระบบแจ้งเตือน
+- [ ] **Graceful Shutdown Protocol:** ดักฟังสัญญาณ `SIGTERM` และ `SIGINT` เพื่อเคลียร์ In-flight Requests และปิด Database Connections อย่างปลอดภัย
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+หลังจากเข้าใจกลไกการทำงานระดับลึกของ Node.js Runtime ทั้งหมดแล้ว ขั้นตอนสำคัญถัดไปในการก้าวสู่การเป็น Full-stack Developer มืออาชีพ คือการนำหลักการเหล่านี้ไปประยุกต์ใช้ในระดับ Architecture ด้วยเฟรมเวิร์กมาตรฐานระดับองค์กร
+
+<Callout type="tip" title="ก้าวสู่สถาปัตยกรรมระดับสูงกับ NestJS 11">
+แม้ Node.js จะมอบความยืดหยุ่นสูง แต่ในโปรเจกต์ขนาดใหญ่ การจัดการโครงสร้างโค้ด, Dependency Injection, และสถาปัตยกรรมแบบ Modular จำเป็นต้องมีแบบแผนที่แข็งแกร่ง
+
+ศึกษาแกนหลักของฝั่ง Backend ต่อได้ที่:  
+👉 **[NestJS 11](/docs/backend/nestjs)** เพื่อเรียนรู้ Controllers, Providers, Modules, Middleware, Exception Filters, และการเชื่อมต่อกับ Prisma ORM แบบลงลึก
+</Callout>

@@ -1,0 +1,144 @@
+---
+title: Groq SDK Setup
+category: BACKEND
+parentTitle: AI Integration
+version: Groq SDK & Llama 3.3
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในการเชื่อมต่อกับผู้ให้บริการ AI อย่าง Groq กฎเหล็กด้านสถาปัตยกรรมคือ **ห้ามเรียกใช้ Groq SDK จากฝั่ง Frontend (Browser / Client Component) โดยตรงเด็ดขาด** เพราะการทำเช่นนั้นจะต้องฝัง `GROQ_API_KEY` ไปกับโค้ดฝั่งบ้าน ทำให้ผู้ไม่หวังดีสามารถเปิด DevTools แกะเอา API Key ไปใช้งานฟรีจนโควตาเต็มหรือเสียค่าใช้จ่ายมหาศาลภายในไม่กี่นาที ดังนั้นทุกคำขอที่เกี่ยวกับ AI ต้องวิ่งผ่าน **NestJS 11 Backend** ซึ่งทำหน้าที่เป็นตัวกลางในการ:
+1. ตรวจสอบสิทธิ์ผู้ใช้ (`JwtAuthGuard`) และจำกัดจำนวนครั้งในการเรียก (Rate Limiting)
+2. ดึงข้อมูลจริงจากฐานข้อมูล PostgreSQL (เช่น ข้อมูล `Product` และ `Category` จริงที่มีสต็อกอยู่) มาประกอบเป็น Context (Grounding)
+3. เรียกใช้ Groq API ภายใต้การควบคุมจำนวน Token และส่งเฉพาะผลลัพธ์ที่ผ่านการตรวจสอบแล้วกลับไปยัง Client
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เบื้องหลังการทำงานของ `groq-sdk` บน Node.js / NestJS:
+- SDK สื่อสารกับ Groq Cloud ผ่านโปรโตคอล HTTPS ที่เข้ากันได้กับมาตรฐาน OpenAI Chat Completions (`/openai/v1/chat/completions`)
+- Groq ประมวลผลโมเดลภาษาบนฮาร์ดแวร์เฉพาะทางที่เรียกว่า **LPU (Language Processing Unit)** ซึ่งให้ความเร็วในการสร้างคำตอบ (Tokens per second) สูงมากและมีค่าความหน่วงเริ่มต้น (Time-to-First-Token) ต่ำระดับหลักร้อยมิลลิวินาที จึงเหมาะอย่างยิ่งสำหรับฟีเจอร์โต้ตอบแบบทันใจในร้านค้าออนไลน์
+
+<Callout type="note" title="การทำ Context Grounding ด้วยข้อมูลจาก Prisma ORM">
+แทนที่จะปล่อยให้โมเดล AI คิดค้นชื่อสินค้าหรือราคาเนื้อขึ้นมาเอง (ซึ่งจะเกิดอาการ Hallucination หรือแต่งข้อมูลมั่ว) สถาปัตยกรรมที่ถูกต้องคือให้ NestJS ดึงข้อมูลจริงของ `Product` (เช่น เกรดไขมัน ราคาต่อกิโลกรัม น้ำหนักคงเหลือ) จาก PostgreSQL ผ่าน Prisma ก่อน แล้วจึงส่งข้อมูลจริงนั้นแนบไปใน Prompt เพื่อให้ AI วิเคราะห์เฉพาะจากข้อมูลที่มีอยู่จริงเท่านั้น
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การกำหนด Interface และ DTO สำหรับฟีเจอร์ขอคำแนะนำการย่างสเต็ก (AI Cooking Guide) ของสินค้าเนื้อพรีเมียมในระบบ Smart Butcher Marketplace
+
+```typescript filename="src/modules/ai-butcher/dto/ask-cooking-guide.dto.ts"
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsEnum, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+
+export enum CookingEquipment {
+  CAST_IRON_PAN = 'CAST_IRON_PAN',
+  CHARCOAL_GRILL = 'CHARCOAL_GRILL',
+  SOUS_VIDE = 'SOUS_VIDE',
+  AIR_FRYER = 'AIR_FRYER',
+}
+
+export enum PreferredDoneness {
+  RARE = 'RARE',
+  MEDIUM_RARE = 'MEDIUM_RARE',
+  MEDIUM = 'MEDIUM',
+  MEDIUM_WELL = 'MEDIUM_WELL',
+}
+
+export class AskCookingGuideDto {
+  @ApiProperty({
+    description: 'รหัสสินค้าเนื้อพรีเมียมที่ต้องการขอคำแนะนำการปรุง (UUID v4)',
+    example: '7c9e6679-7425-40de-944b-e07fc1f90ae7',
+  })
+  @IsUUID('4')
+  productId!: string;
+
+  @ApiProperty({
+    description: 'อุปกรณ์ทำอาหารที่ลูกค้ามีอยู่ที่บ้าน',
+    enum: CookingEquipment,
+    enumName: 'CookingEquipment',
+    example: CookingEquipment.CAST_IRON_PAN,
+  })
+  @IsEnum(CookingEquipment)
+  equipment!: CookingEquipment;
+
+  @ApiProperty({
+    description: 'ระดับความสุกที่ลูกค้าต้องการ',
+    enum: PreferredDoneness,
+    enumName: 'PreferredDoneness',
+    example: PreferredDoneness.MEDIUM_RARE,
+  })
+  @IsEnum(PreferredDoneness)
+  doneness!: PreferredDoneness;
+
+  @ApiPropertyOptional({
+    description: 'ความต้องการเพิ่มเติมของลูกค้า (จำกัดไม่เกิน 200 ตัวอักษร)',
+    example: 'ไม่ทานเนยวัว ขอคำแนะนำการใช้น้ำมันหรือไขมันวัวแทนครับ',
+    maxLength: 200,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  customNote?: string;
+}
+```
+
+ตัวอย่างที่ 2: การออกแบบ Controller ที่บังคับผ่านการยืนยันตัวตนและส่งต่อรหัสสินค้าไปยัง Service เพื่อดึงข้อมูลจริงจากฐานข้อมูลก่อนเรียก AI
+
+```typescript filename="src/modules/ai-butcher/ai-butcher.controller.ts"
+import { Controller, Post, Body, Req } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiOkResponse } from '@nestjs/swagger';
+import { ApiAuthRequired } from '../../common/decorators/api-auth-required.decorator';
+import { AskCookingGuideDto } from './dto/ask-cooking-guide.dto';
+import { AiButcherService } from './ai-butcher.service';
+
+interface AuthenticatedRequest {
+  user: {
+    id: string;
+    role: 'CUSTOMER' | 'ADMIN';
+  };
+}
+
+@ApiTags('AI Master Butcher (ผู้ช่วย AI แนะนำการปรุงเนื้อ)')
+@Controller('ai-butcher')
+export class AiButcherController {
+  constructor(private readonly aiButcherService: AiButcherService) {}
+
+  @Post('cooking-guide')
+  @ApiAuthRequired('CUSTOMER', 'ADMIN')
+  @ApiOperation({
+    summary: 'ขอคำแนะนำการย่างเนื้อวากิวเฉพาะชิ้นด้วย Groq AI (Llama 3.1 8B)',
+    description: 'ดึงข้อมูลเกรดเนื้อจริงจากฐานข้อมูลแล้ววิเคราะห์วิธีปรุงตามอุปกรณ์ที่ลูกค้าเลือก',
+  })
+  @ApiOkResponse({
+    description: 'คืนค่าคำแนะนำการย่างเนื้อในรูปแบบ Structured JSON',
+  })
+  async generateCookingGuide(
+    @Req() req: AuthenticatedRequest,
+    @Body() dto: AskCookingGuideDto,
+  ) {
+    return this.aiButcherService.generateCookingGuideForProduct(
+      req.user.id,
+      dto,
+    );
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **จุดที่เรียกใช้ Groq SDK** | เรียกใช้ `new Groq({ apiKey, dangerouslyAllowBrowser: true })` บนฝั่ง Frontend ทำให้ API Key รั่วไหลสู่สาธารณะทันที | เรียกใช้ `groq-sdk` เฉพาะภายใน NestJS Backend Service เท่านั้น |
+| **การส่งข้อมูลสินค้าให้ AI** | ให้ Frontend ส่งราคาหรือเกรดเนื้อเข้ามาใน Request Body โดยตรง ซึ่งผู้ใช้อาจปลอมแปลงข้อมูลได้ | ให้ Frontend ส่งมาเฉพาะ `productId` แล้วให้ Backend ดึงข้อมูล `Product` จริงจาก PostgreSQL มาประกอบ Prompt |
+| **การจำกัดความยาวข้อความขาเข้า** | รับ `customNote: string` แบบไม่จำกัดความยาว ทำให้ผู้ใช้ส่งข้อความยาวหลายหมื่นคำมาผลาญโควตา Input Token | ใช้ `@MaxLength(200)` ใน DTO เพื่อจำกัดขนาดข้อความจากผู้ใช้ตั้งแต่ชั้น `ValidationPipe` |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: ต้องการให้ AI ช่วยวิเคราะห์ สรุป แนะนำสินค้า (`Product`) จับคู่เมนูอาหาร หรือสร้างคำแนะนำการปรุงเนื้อเฉพาะบุคคลจากข้อมูลที่มีอยู่ในระบบ
+- **ไม่ควรใช้เมื่อ**: ห้ามใช้ LLM ในการคำนวณยอดเงินรวมของคำสั่งซื้อ (`Order.totalAmount`) หรือการตัดสต็อกเนื้อ (`Product.stockWeightGrams`) เด็ดขาด งานคำนวณทางการเงินและสต็อกต้องใช้ Deterministic Code และ Database Transaction ใน PostgreSQL เท่านั้น
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมในไลบรารี `groq-sdk` จึงต้องมีแฟล็กชื่อ `dangerouslyAllowBrowser` และทำไมเราถึงไม่ควรเปิดใช้งานในระบบ Production?
+   - **แนวคำตอบ**: ผู้พัฒนา SDK ตั้งชื่อแฟล็กนี้ให้มีคำว่า `dangerously` เพื่อเตือนนักพัฒนาว่า หากรันโค้ดนี้บนเบราว์เซอร์ ตัว `GROQ_API_KEY` จะถูกบันทึกลงใน JavaScript Bundle ที่ส่งไปให้เครื่องของผู้ใช้ทุกคน ทำให้ใครก็สามารถคัดลอก API Key ไปยิง API เองได้ไม่จำกัด การใช้งานระดับ Production จึงต้องเรียกผ่าน Backend Server เสมอ
+2. **คำถาม**: ทำไมเราไม่ควรใช้ LLM คำนวณราคาสุทธิของ `OrderItem` แม้ว่า LLM จะสามารถบวกลบเลขใน Prompt ได้?
+   - **แนวคำตอบ**: เพราะ LLM เป็นโมเดลเชิงความน่าจะเป็น (Probabilistic Model) ไม่ใช่เครื่องคิดเลขเชิงตรรกะ (Deterministic Calculator) โมเดลมีโอกาสคาดเคลื่อนในการคำนวณทศนิยมหรือถูกหลอกด้วย Prompt Injection ให้ลดราคาสินค้าได้ ดังนั้นการคำนวณเงินและสต็อกต้องใช้โค้ด TypeScript ร่วมกับชนิดข้อมูล `Decimal` ในฐานข้อมูลเสมอ
+
+---

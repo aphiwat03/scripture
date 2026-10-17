@@ -1,0 +1,133 @@
+---
+title: Restore Drills
+category: DATABASE
+parentTitle: Backup
+version: pg_dump & WAL PITR
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เหตุการณ์สุดคลาสสิกที่ทำลายหลายบริษัทมาแล้วคือ: ตั้งเวลา Cronjob ให้รัน `pg_dump` ทุกคืนอย่างดี แต่ดันเซฟไฟล์ Backup ไว้ในฮาร์ดดิสก์ก้อนเดียวกันกับที่รันฐานข้อมูล! วันหนึ่งเมื่อดิสก์ของเซิร์ฟเวอร์พัง หรือถูกแรนซัมแวร์เข้ารหัสเครื่อง ทั้งฐานข้อมูลจริงและไฟล์ Backup ที่ทำสะสมมาตลอด 2 ปีก็หายวับไปพร้อมกันในพริบตา
+
+วิศวกรโครงสร้างพื้นฐานจึงต้องยึดหลัก **กฎ 3-2-1 Backup Rule**:
+- **3 สำเนาของข้อมูล:** ข้อมูลจริง 1 ชุด และข้อมูลสำรองอย่างน้อย 2 ชุด
+- **2 สื่อจัดเก็บที่ต่างกัน:** เช่น บนดิสก์ NVMe ของเซิร์ฟเวอร์ และบน Cloud Object Storage (AWS S3 หรือ Cloudflare R2)
+- **1 สำเนาต้องอยู่นอกสถานที่ (Off-site / Cross-Region):** แยกบัญชีหรือแยกศูนย์ข้อมูล (Data Center) เพื่อป้องกันภัยพิบัติระดับภูมิภาค
+
+และที่สำคัญที่สุดคือการจัดตาราง **Automated Restore Drill (การซ้อมกู้คืนข้อมูลจริง)** เพื่อพิสูจน์ว่าไฟล์ที่อัปโหลดขึ้นคลาวด์สามารถนำมากู้คืนและอ่านข้อมูลได้จริง
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **การป้องกันรหัสผ่านรั่วไหลใน Process List (`.pgpass` หรือ Environment Variable):**
+   ในการเขียนสคริปต์อัตโนมัติ ห้ามส่งรหัสผ่านเป็นอาร์กิวเมนต์ในบรรทัดคำสั่ง (เพราะผู้ใช้อื่นบนเครื่องสามารถรัน `ps aux` แอบดูได้) ให้ใช้ไฟล์ `~/.pgpass` ที่ตั้งสิทธิ์ `chmod 0600` หรือส่งผ่านตัวแปรสภาพแวดล้อม `PGPASSWORD` ภายในสคริปต์ที่รัดกุม
+2. **การเข้ารหัสก่อนส่งขึ้นคลาวด์และการจัดการอายุไฟล์ (Retention Policy):**
+   ไฟล์สำรองข้อมูลของร้าน **Smart Butcher Marketplace** มีทั้งชื่อ เบอร์โทร ที่อยู่จัดส่งของลูกค้า (`users`, `orders`) และยอดเงิน (`payments`) จึงต้องถูกเข้ารหัส (Server-Side Encryption `SSE-KMS` หรือ Client-Side Encryption) ก่อนจัดเก็บบน S3/R2 พร้อมตั้งกฎ Lifecycle Policy เพื่อลบไฟล์เก่าที่เกินระยะเวลา (เช่น เก็บรายวันย้อนหลัง 14 วัน, รายสัปดาห์ย้อนหลัง 8 สัปดาห์, รายเดือนย้อนหลัง 12 เดือน - GFS Rotation)
+3. **การตรวจสอบความถูกต้องอัตโนมัติ (Automated Verification):**
+   สคริปต์ซ้อมกู้คืนจะทำการดึงไฟล์ล่าสุดจาก S3/R2 ลงมารันใส่ Container ชั่วคราว แล้วรันคิวรีตรวจสอบจำนวนแถว (`COUNT(*)`) และยอดรวมเงิน (`SUM(amount)`) เทียบเกณฑ์มาตรฐานก่อนส่งแจ้งเตือนผลลัพธ์เข้า Slack หรือ Discord ของทีมวิศวกร
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: สคริปต์ Production Backup อัตโนมัติพร้อมส่งขึ้น Cloud Object Storage (S3 / Cloudflare R2)
+สคริปต์ Bash มาตรฐานสูงที่เปิดโหมด `set -euo pipefail` (หยุดทันทีเมื่อคำสั่งใดๆ ในท่อส่งข้อมูลพัง) บีบอัดด้วย Zstandard และอัปโหลดขึ้น S3/R2:
+
+```bash filename="scripts/automated_pg_backup.sh"
+#!/usr/bin/env bash
+# บังคับให้สคริปต์หยุดทำงานทันทีหากเกิด Error แม้แต่จุดเดียวในไปป์ไลน์
+set -euo pipefail
+
+TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
+BACKUP_DIR="/var/backups/smart_butcher"
+BACKUP_FILENAME="smart_butcher_${TIMESTAMP}.dump"
+LOCAL_PATH="${BACKUP_DIR}/${BACKUP_FILENAME}"
+S3_BUCKET_URI="s3://smart-butcher-offsite-backups/daily/${BACKUP_FILENAME}"
+RETENTION_DAYS=7
+
+mkdir -p "${BACKUP_DIR}"
+
+echo "[$(date -u)] Starting PostgreSQL 16 backup for Smart Butcher Marketplace..."
+
+# 1. รัน pg_dump รูปแบบ Custom Format (-Fc) พร้อมบีบอัดระดับ 6 ด้วย Zstandard
+pg_dump -h "${DB_HOST}" -p "${DB_PORT:-5432}" -U "${DB_BACKUP_USER}" -d "${DB_NAME}" \
+  -Fc --compress=zstd:6 --no-owner --no-privileges \
+  -f "${LOCAL_PATH}"
+
+# 2. ตรวจสอบเบื้องต้นว่าไฟล์ไม่ว่างเปล่าและอ่านสารบัญได้ปกติ
+pg_restore --list "${LOCAL_PATH}" > /dev/null
+
+# 3. อัปโหลดไฟล์ขึ้นแยกพื้นที่จัดเก็บ (Off-site S3 / Cloudflare R2) พร้อมเข้ารหัสฝั่งเซิร์ฟเวอร์
+aws s3 cp "${LOCAL_PATH}" "${S3_BUCKET_URI}" \
+  --storage-class STANDARD_IA \
+  --sse AES256 \
+  --only-show-errors
+
+echo "[$(date -u)] Successfully uploaded backup to ${S3_BUCKET_URI}"
+
+# 4. ลบไฟล์เก่าในเครื่อง Local ที่อายุเกิน 7 วันเพื่อไม่ให้ดิสก์เซิร์ฟเวอร์เต็ม
+find "${BACKUP_DIR}" -type f -name "smart_butcher_*.dump" -mtime +${RETENTION_DAYS} -delete
+
+echo "[$(date -u)] Backup workflow completed cleanly."
+```
+
+### ตัวอย่างที่ 2: สคริปต์ซ้อมกู้คืนข้อมูลอัตโนมัติ (Automated Restore Drill & Data Integrity Check)
+สคริปต์สำหรับรันทุกสัปดาห์เพื่อพิสูจน์ว่าไฟล์ Backup ล่าสุดสามารถกู้คืนกลับมาและมีข้อมูลตารางหลักครบถ้วนจริง:
+
+```bash filename="scripts/weekly_restore_drill.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+DRILL_CONTAINER="butcher-restore-drill-pg16"
+LATEST_DUMP_FILE="$1"
+
+echo "🧪 [Restore Drill] Starting temporary PostgreSQL 16 container..."
+docker run -d --rm \
+  --name "${DRILL_CONTAINER}" \
+  -e POSTGRES_USER=drill_admin \
+  -e POSTGRES_PASSWORD=drill_temp_pass \
+  -e POSTGRES_DB=smart_butcher_drill \
+  postgres:16-alpine
+
+# รอจนกว่า PostgreSQL ใน Container จะพร้อมรับการเชื่อมต่อ
+until docker exec "${DRILL_CONTAINER}" pg_isready -U drill_admin -d smart_butcher_drill; do
+  sleep 1
+done
+
+echo "🔄 [Restore Drill] Restoring backup file: ${LATEST_DUMP_FILE}..."
+docker exec -i "${DRILL_CONTAINER}" \
+  pg_restore -U drill_admin -d smart_butcher_drill --no-owner --no-privileges \
+  < "${LATEST_DUMP_FILE}"
+
+echo "🔍 [Restore Drill] Verifying restored tables and data integrity..."
+VERIFICATION_RESULT=$(docker exec -i "${DRILL_CONTAINER}" \
+  psql -U drill_admin -d smart_butcher_drill -t -A -c "
+    SELECT json_build_object(
+      'categories_count', (SELECT COUNT(*) FROM categories),
+      'products_count', (SELECT COUNT(*) FROM products),
+      'orders_count', (SELECT COUNT(*) FROM orders),
+      'payments_total_amount', COALESCE((SELECT SUM(amount) FROM payments), 0)
+    );
+  ")
+
+echo "✅ [Restore Drill] Verification Passed! Stats: ${VERIFICATION_RESULT}"
+
+# ปิดและลบ Container ชั่วคราวทิ้งทันทีหลังทดสอบเสร็จ
+docker stop "${DRILL_CONTAINER}" > /dev/null
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **สถานที่เก็บไฟล์ Backup** | เก็บไว้ในโฟลเดอร์ `/home/ubuntu/backups` บนเครื่องเดียวกับที่รันฐานข้อมูลเท่านั้น | ส่งไฟล์ขึ้น Off-site Object Storage (S3/R2/GCS) คนละโซนกับเซิร์ฟเวอร์ฐานข้อมูลทันที |
+| **การจัดการข้อผิดพลาดในสคริปต์** | เขียนสคริปต์ Bash โดยไม่ใส่ `set -euo pipefail` พอ `pg_dump` พัง สคริปต์ก็ยังอัปโหลดไฟล์เปล่าขนาด 0 KB ขึ้น S3 | เปิด `set -euo pipefail` เสมอ และรัน `pg_restore --list` ตรวจไฟล์ก่อนอัปโหลดขึ้นคลาวด์ |
+| **การทดสอบการกู้คืน** | ไม่เคยลองนำไฟล์มา Restore เลยตลอด 3 ปี มารู้ตัวอีกทีตอนระบบล่มว่าไฟล์ Backup เสียทุกไฟล์ | ตั้งระบบ Automated Restore Drill ทดสอบกู้คืนลงฐานข้อมูลจำลองอย่างน้อยเดือนละ 1 ครั้งหรือทุกสัปดาห์ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้กฎ 3-2-1 และการซ้อมกู้คืนอัตโนมัติเมื่อ:** ระบบเริ่มเก็บข้อมูลจริงของลูกค้าตั้งแต่วันแรกที่เปิดให้บริการบน Production
+- **ไม่ควรนำไฟล์ Backup ของ Production ไปให้นักพัฒนาใช้บนเครื่อง Local โดยตรง:** เพราะในตาราง `users` และ `orders` มีข้อมูลส่วนบุคคล (PII) ของลูกค้าจริง หากต้องการนำข้อมูลไปใช้ในสภาพแวดล้อม Staging ต้องผ่านกระบวนการปกปิดข้อมูล (Data Masking / Anonymization) ก่อนเสมอ
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ในการเขียนสคริปต์ Bash เพื่อรัน `pg_dump | gzip > backup.sql.gz` ทำไมการใส่บรรทัด `set -euo pipefail` จึงมีความสำคัญระดับวิกฤต?**
+  - **แนวคำตอบ:** โดยค่าเริ่มต้นของ Bash หากคำสั่งในท่อ (`|`) เช่น `pg_dump` ล้มเหลวเพราะรหัสผ่านผิดหรือดิสก์เต็ม แต่คำสั่งตัวสุดท้ายของท่อคือ `gzip` ทำงานสำเร็จ (บีบอัดความว่างเปล่าได้ไฟล์ขนาด 20 ไบต์) Bash จะถือว่าบรรทัดนั้นสำเร็จ (Exit Code 0) และไม่แจ้งเตือนใดๆ การใส่ `set -o pipefail` จะบังคับว่าหากคำสั่งใดคำสั่งหนึ่งในท่อพัง ให้ถือว่าทั้งบรรทัดพังทันทีและส่งสัญญาณแจ้งเตือนทีมวิศวกร
+- **Q2: กฎ 3-2-1 Backup Rule คืออะไร และเราจะประยุกต์ใช้กับฐานข้อมูล PostgreSQL ของระบบ E-Commerce ได้อย่างไร?**
+  - **แนวคำตอบ:** คือการมีข้อมูลอย่างน้อย **3 ชุด** (ฐานข้อมูลจริง 1 ชุด + สำรอง 2 ชุด), เก็บบนสื่อบันทึกที่ต่างกัน **2 ประเภท** (เช่น ดิสก์ NVMe ของเครื่องเซิร์ฟเวอร์ และ Cloud Object Storage อย่าง AWS S3), และมีอย่างน้อย **1 ชุดที่เก็บแยกสถานที่หรือแยก Region** เพื่อป้องกันกรณีที่ Data Center หลักเกิดเพลิงไหม้หรือบัญชีคลาวด์หลักถูกโจมตี
+
+---

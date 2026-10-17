@@ -1,0 +1,25 @@
+---
+title: Anti-patterns
+category: TESTING & QUALITY
+parentTitle: Type Checking
+version: TypeScript 5.x Strict
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การพึ่งพาเฉพาะ SWC/Turbopack โดยไม่รัน `tsc --noEmit`**: เข้าใจผิดว่าการที่โปรเจกต์รัน `next dev` หรือรันเทสต์ผ่านแปลว่าไม่มี Type Error ทั้งที่จริงแล้ว SWC เพียงแค่ตัด Type Annotation ทิ้งไปเฉยๆ โดยไม่ได้ตรวจสอบความถูกต้องของ Type ข้ามไฟล์
+
+---
+
+## 2. Checklist สรุป
+
+- [ ] เปิดใช้งาน `"strict": true`, `"noUncheckedIndexedAccess": true` และ `"exactOptionalPropertyTypes": true` ในไฟล์ `tsconfig.json`
+- [ ] ตั้งค่าสคริปต์ `"typecheck": "tsc --noEmit"` และบังคับรันในทุก Pull Request และ CI Pipeline
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+1. **[Debugging](/docs/testing/debugging)**: เทคนิคการสืบสวนหาต้นตอของบั๊กระดับ Runtime เมื่อโค้ดผ่าน Compile-time Type Check แล้ว
+2. **[TypeScript Guide](/docs/typescript)**: ศึกษาพื้นฐานระบบ Type เชิงลึกและการเขียน Generic Components

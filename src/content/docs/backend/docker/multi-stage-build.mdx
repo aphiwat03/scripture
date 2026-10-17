@@ -1,0 +1,132 @@
+---
+title: Multi-stage Build
+category: BACKEND
+parentTitle: Docker
+version: Docker v27 & Compose v2
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในการสร้างโปรเจกต์ NestJS 11 ด้วย TypeScript และ Prisma ORM เราจำเป็นต้องใช้เครื่องมือจำนวนมากในขั้นตอนการ Build เช่น `@nestjs/cli`, `typescript`, `@types/*` และ Prisma CLI เพื่อคอมไพล์โค้ดเป็น JavaScript (`dist/`) และสร้าง Prisma Client แต่เมื่อนำไปรันจริงบน Production เราต้องการเพียงแค่ไฟล์ใน `dist/`, `node_modules` เฉพาะส่วน `dependencies` (ไม่รวม `devDependencies`) และ Prisma Query Engine เท่านั้น เทคนิค **Multi-stage Dockerfile** ช่วยให้เราแยกขั้นตอนการติดตั้งและคอมไพล์ไว้ใน Stage แรกๆ แล้วคัดลอกเฉพาะผลลัพธ์ที่จำเป็นไปยัง Stage สุดท้ายที่มีขนาดเล็กและปลอดภัย
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+การทำงานของ Multi-stage Build ใน Dockerfile แบ่งออกเป็นลำดับขั้น:
+1. **`deps` Stage**: ติดตั้ง Dependencies ทั้งหมดด้วย `pnpm install --frozen-lockfile` เพื่อให้มั่นใจว่าได้เวอร์ชันตรงกับ Lockfile ทุกประการ
+2. **`builder` Stage**: รับ `node_modules` จาก `deps` มารัน `pnpm prisma generate` (เพื่อสร้าง Type-safe Client และ Query Engine สำหรับสถาปัตยกรรม Linux Alpine) ตามด้วย `pnpm run build` เพื่อสร้างโฟลเดอร์ `dist/` จากนั้นรัน `pnpm prune --prod` เพื่อตัด `devDependencies` ทิ้ง
+3. **`runner` (Production) Stage**: เริ่มต้นจาก Image เปล่าที่สะอาด (`node:22-alpine`) ติดตั้ง `dumb-init` เพื่อจัดการ Signal (`SIGTERM`, `SIGINT`) อย่างถูกต้อง เปลี่ยนไปใช้บัญชีผู้ใช้ `USER node` (Non-root) เพื่อความปลอดภัย และคัดลอกเฉพาะ `dist/`, `node_modules` ที่ Prune แล้ว และ `prisma/` มาใช้งาน
+
+<Callout type="warning" title="ทำไมไม่ควรรัน Node.js เป็น PID 1 หรือด้วยสิทธิ์ root">
+โดยค่าเริ่มต้น Container จะรันด้วยสิทธิ์ `root` ซึ่งหากแอปพลิเคชันมีช่องโหว่ Remote Code Execution ผู้โจมตีจะได้สิทธิ์สูงสุดใน Container ทันที จึงต้องสลับเป็น `USER node` เสมอ นอกจากนี้ การใช้ `dumb-init` ช่วยส่งต่อสัญญาณ `SIGTERM` ไปยังโพรเซส Node.js เพื่อให้ NestJS ทำ Graceful Shutdown (`app.enableShutdownHooks()`) ปิดการเชื่อมต่อ Prisma และรอให้การตัดสต็อกเนื้อที่ค้างอยู่ทำงานจนเสร็จก่อนปิดตัวลง
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การเปิดใช้งาน `enableShutdownHooks()` ใน `src/main.ts` ของ NestJS 11 เพื่อให้ทำงานสอดคล้องกับสัญญาณหยุดการทำงานของ Docker Container
+
+```typescript filename="src/main.ts"
+import { NestFactory } from '@nestjs/core';
+import { ValidationPipe, Logger } from '@nestjs/common';
+import { AppModule } from './app.module';
+
+async function bootstrap(): Promise<void> {
+  const logger = new Logger('Bootstrap');
+  const app = await NestFactory.create(AppModule);
+
+  // เปิดรับสัญญาณ SIGTERM / SIGINT จาก Docker เพื่อให้ Prisma ปิด Connection อย่างปลอดภัย
+  app.enableShutdownHooks();
+
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    }),
+  );
+
+  const port = Number(process.env.PORT ?? 3000);
+  // ต้องผูกกับ 0.0.0.0 เสมอเมื่อรันใน Docker Container เพื่อรับทราฟฟิกจากภายนอก Container
+  await app.listen(port, '0.0.0.0');
+  logger.log(`Smart Butcher Marketplace API is running on port ${port}`);
+}
+
+void bootstrap();
+```
+
+ตัวอย่างที่ 2: ไฟล์ `Dockerfile` แบบ Multi-stage ระดับ Production สำหรับ NestJS 11 + Prisma ORM + `pnpm` บน `node:22-alpine`
+
+```dockerfile filename="Dockerfile"
+# ==========================================
+# Stage 1: Base image พร้อมเปิดใช้งาน pnpm ผ่าน corepack
+# ==========================================
+FROM node:22-alpine AS base
+RUN apk add --no-cache libc6-compat openssl dumb-init
+RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
+WORKDIR /app
+
+# ==========================================
+# Stage 2: ติดตั้ง Dependencies ทั้งหมด (รวม devDependencies สำหรับ Build)
+# ==========================================
+FROM base AS deps
+COPY package.json pnpm-lock.yaml ./
+COPY prisma ./prisma/
+RUN pnpm install --frozen-lockfile
+
+# ==========================================
+# Stage 3: Generate Prisma Client, Build NestJS และตัด devDependencies ออก
+# ==========================================
+FROM base AS builder
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# สร้าง Prisma Client สำหรับ Linux musl (Alpine) และคอมไพล์ TypeScript เป็น dist/
+RUN pnpm prisma generate
+RUN pnpm run build
+
+# ลบ devDependencies ออกจาก node_modules เพื่อลดขนาด Image
+RUN pnpm prune --prod
+
+# ==========================================
+# Stage 4: Production Runner (ขนาดเล็กและรันด้วย Non-root user)
+# ==========================================
+FROM node:22-alpine AS runner
+RUN apk add --no-cache openssl dumb-init
+
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=3000
+
+# ใช้ผู้ใช้ 'node' (UID 1000) ที่มีมาให้ใน Official Node Image แทน root
+USER node
+
+# คัดลอกเฉพาะไฟล์ที่จำเป็นต่อการรันจริงพร้อมกำหนดสิทธิ์เจ้าของไฟล์ให้เป็น node:node
+COPY --chown=node:node --from=builder /app/package.json ./package.json
+COPY --chown=node:node --from=builder /app/node_modules ./node_modules
+COPY --chown=node:node --from=builder /app/dist ./dist
+COPY --chown=node:node --from=builder /app/prisma ./prisma
+
+EXPOSE 3000
+
+# ใช้ dumb-init เป็น Entrypoint เพื่อส่งต่อสัญญาณ SIGTERM ให้ Node.js ทำ Graceful Shutdown
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "dist/main.js"]
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **จำนวน Stage ใน Dockerfile** | เขียน Stage เดียวแล้วสั่ง `pnpm run start:dev` หรือทิ้งซอร์สโค้ด `.ts` และ `devDependencies` ไว้ใน Production Image (ขนาด 800MB+) | ใช้ Multi-stage Build คัดลอกเฉพาะ `dist/` และ Production `node_modules` ไปยัง Stage สุดท้าย (ขนาดเหลือ ~180MB) |
+| **คำสั่ง CMD รันแอปพลิเคชัน** | ใช้ `CMD ["npm", "run", "start:prod"]` ซึ่ง npm จะกลืนสัญญาณ `SIGTERM` ทำให้ Graceful Shutdown ไม่ทำงาน | ใช้ `ENTRYPOINT ["dumb-init", "--"]` ร่วมกับ `CMD ["node", "dist/main.js"]` โดยตรง |
+| **การผูก Network Interface** | สั่ง `app.listen(3000, '127.0.0.1')` ทำให้เข้าถึง API จากนอก Container ไม่ได้เลย | สั่ง `app.listen(port, '0.0.0.0')` เพื่อรับการเชื่อมต่อผ่าน Docker Network Interface |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: สร้าง Image สำหรับนำขึ้นระบบ Staging และ Production ทุกครั้ง เพื่อให้ได้ Image ที่ขนาดเล็ก บูตไว และปลอดภัยสูงสุด
+- **ไม่ควรใช้เมื่อ**: ขณะกำลังเขียนโค้ดแบบ Hot-reload บนเครื่องตัวเองที่ต้องการแก้ไฟล์ปุ๊บเห็นผลปั๊บ ในขั้นพัฒนาอาจรันเฉพาะ PostgreSQL 16 ใน Docker แล้วรัน `pnpm run start:dev` บนเครื่องโฮสต์ หรือแยก Target เฉพาะสำหรับ Development
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมเราต้องติดตั้งแพ็กเกจ `openssl` ใน `node:22-alpine` เมื่อใช้งานร่วมกับ Prisma ORM?
+   - **แนวคำตอบ**: เพราะ Alpine Linux ใช้ไลบรารีมาตรฐาน `musl libc` และตัดแพ็กเกจหลายอย่างออกเพื่อให้ขนาดเล็กที่สุด ในขณะที่ Prisma Query Engine ต้องการไลบรารี `openssl` ของระบบในการสร้างการเชื่อมต่อที่เข้ารหัส (SSL/TLS) ไปยังฐานข้อมูล PostgreSQL หากไม่ติดตั้ง `openssl` ไว้ Prisma อาจโยนข้อผิดพลาดตอนเริ่มต้นทำงาน
+2. **คำถาม**: การใช้ `CMD ["node", "dist/main.js"]` แทน `CMD ["pnpm", "run", "start:prod"]` มีผลต่อการจัดการคำสั่งซื้อ (`Order`) ขณะกำลัง Deploy เวอร์ชันใหม่อย่างไร?
+   - **แนวคำตอบ**: เมื่อระบบทำการ Rolling Update เพื่อเปลี่ยนเป็นเวอร์ชันใหม่ Docker/Orchestrator จะส่งสัญญาณ `SIGTERM` ไปยังโพรเซสหลัก หากใช้ `pnpm` หรือ `npm` หุ้มอยู่อีกชั้น ตัว Package Manager อาจไม่ส่งต่อ `SIGTERM` ไปยังโพรเซส `node` ทำให้หลังจากผ่านไป 10 วินาที Container จะถูกบังคับตัดไฟด้วย `SIGKILL` ส่งผลให้ Transaction การสั่งซื้อเนื้อหรือการอัปเดตสถานะ `Payment` ที่กำลังทำค้างอยู่ถูกตัดกลางคัน แต่การรัน `node dist/main.js` ภายใต้ `dumb-init` จะทำให้ NestJS ได้รับ `SIGTERM` และรอให้ Request ที่ค้างอยู่ทำงานเสร็จอย่างปลอดภัยก่อนปิดตัว
+
+---

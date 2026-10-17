@@ -1,0 +1,127 @@
+---
+title: JWT vs Session
+category: BACKEND
+parentTitle: Authentication
+version: JWT & Passport.js
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในการออกแบบสถาปัตยกรรมระบบยืนยันตัวตน วิศวกรต้องตัดสินใจเลือก 2 มิติที่แยกจากกันคือ:
+1. **รูปแบบของข้อมูลยืนยันตัวตน (Token Format)**: ระหว่าง **Stateful Server Session ID** กับ **Stateless JWT**
+2. **สถานที่จัดเก็บบนฝั่งเบราว์เซอร์ (Browser Storage Mechanism)**: ระหว่าง **`HttpOnly Cookie`** กับ **`localStorage` / `sessionStorage`**
+
+<Callout type="tip" title="แยกแยะรูปแบบ Token ออกจากที่เก็บข้อมูล">
+หลายคนมักเข้าใจผิดว่า ถ้าใช้ Session ต้องเก็บใน Cookie และถ้าใช้ JWT ต้องเก็บใน localStorage เท่านั้น ความจริงแล้วการนำ JWT (ทั้ง Access และ Refresh Token) มาจัดเก็บใน HttpOnly Cookie คือแนวปฏิบัติที่ได้รับความนิยมสูงสุดในระบบ Enterprise สมัยใหม่ เพราะได้ทั้งความเร็วแบบ Stateless ของ JWT และความปลอดภัยจากการป้องกัน XSS ของ HttpOnly Cookie พร้อมกัน!
+</Callout>
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ตารางที่ 1: เปรียบเทียบ JWT (Dual-Token Hybrid) vs Server-side Session
+| มิติการเปรียบเทียบ | JWT (Access 15m + Refresh 7d) | Server-side Session (Redis Store) |
+| :--- | :--- | :--- |
+| **การตรวจสอบทุก Request** | ไม่ต้องคิวรี DB/Redis (ตรวจลายเซ็นด้วย CPU ใน `< 0.5ms`) | ต้องยิงอ่าน Redis ทุก Request เพื่อดึงข้อมูลผู้ใช้ |
+| **การขยายระบบ (Microservices)** | ยอดเยี่ยม บริการย่อยทุกตัวตรวจลายเซ็น JWT ได้เองด้วย Public Key | บริการย่อยทุกตัวต้องเชื่อมต่อเข้าหา Central Redis Cluster ตัวเดียวกัน |
+| **การสั่งแบน/เพิกถอนสิทธิ์ทันที** | ทำได้ทันทีที่ระดับ Refresh Token (หรือใช้ Redis Blacklist ช่วยสำหรับ Access Token) | ทำได้ทันที 100% เพียงลบ Key ออกจาก Redis |
+| **ขนาดข้อมูลใน Header** | ประมาณ `300 - 800 bytes` | เล็กมาก ประมาณ `32 - 64 bytes` (เก็บแค่รหัส Session ID) |
+
+### ตารางที่ 2: เปรียบเทียบการจัดเก็บใน `HttpOnly Cookie` vs `localStorage`
+| มิติความปลอดภัย | `HttpOnly, Secure, SameSite Cookie` | `window.localStorage` / `sessionStorage` |
+| :--- | :--- | :--- |
+| **ความเสี่ยงต่อช่องโหว่ XSS** | **ปลอดภัยสูงมาก**: สคริปต์แปลกปลอมไม่สามารถอ่านค่า Token ออกไปได้ | **เสี่ยงวิกฤต**: แค่มีช่องโหว่ XSS จุดเดียว หรือไลบรารี NPM ติดมัลแวร์ สคริปต์สั่ง `localStorage.getItem('token')` ขโมยไปได้ทันที |
+| **ความเสี่ยงต่อช่องโหว่ CSRF** | มีโอกาสเกิดหากตั้งค่าผิด แต่ป้องกันได้เด็ดขาดด้วย `SameSite=Lax/Strict` + CORS | **ไม่เกิด CSRF**: เพราะเบราว์เซอร์ไม่ส่งค่าใน `localStorage` อัตโนมัติ |
+| **การใช้งานร่วมกับ Next.js SSR** | **ยอดเยี่ยม**: Server Components และ Middleware อ่าน Cookie ได้ตั้งแต่คำขอแรก | **ทำไม่ได้**: Server ของ Next.js ไม่สามารถเข้าถึง `localStorage` ของเบราว์เซอร์ได้ ทำให้หน้าเว็บกะพริบตอนโหลด |
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การอ่าน HttpOnly Cookie ไร้รอยต่อใน Next.js Server Request สู่ NestJS 11 API (พื้นฐาน)
+```typescript filename="src/modules/auth/ssr-auth-verification.controller.ts"
+import { Controller, Get } from '@nestjs/common';
+import { CurrentUser } from './decorators/current-user.decorator';
+import { AuthenticatedUser } from './strategies/jwt.strategy';
+import { PrismaService } from '../../database/prisma.service';
+
+@Controller('auth')
+export class SsrAuthVerificationController {
+  constructor(private readonly prisma: PrismaService) {}
+
+  // Endpoint สำหรับให้ Frontend (Next.js Server Component หรือ TanStack Query)
+  // ดึงข้อมูลโปรไฟล์ปัจจุบันโดยใช้ HttpOnly Cookie ที่แนบมาอัตโนมัติ
+  @Get('me')
+  async getCurrentProfile(@CurrentUser() currentUser: AuthenticatedUser) {
+    const profile = await this.prisma.user.findUniqueOrThrow({
+      where: { id: currentUser.id },
+      select: {
+        id: true,
+        email: true,
+        fullName: true,
+        phoneNumber: true,
+        role: true,
+        createdAt: true,
+      },
+    });
+
+    return {
+      profile,
+      sessionSecurity: {
+        transport: 'HTTP_ONLY_SECURE_COOKIE',
+        xssTokenExtractionProtected: true,
+      },
+    };
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การทำ Hybrid JWT Blacklist สำหรับสั่งยกเลิก Access Token ทันทีเมื่อเกิดเหตุฉุกเฉิน (ขั้นสูง)
+```typescript filename="src/modules/auth/token-revocation-guard.service.ts"
+import { Injectable, UnauthorizedException } from '@nestjs/common';
+
+@Injectable()
+export class TokenRevocationService {
+  // ใน Production จริง ใช้ Redis พร้อมตั้ง TTL เท่ากับเวลาที่เหลือของ Access Token (สูงสุดไม่เกิน 15 นาที)
+  private readonly revokedUserTimestamps = new Map<string, number>();
+
+  // เรียกเมื่อ Admin กดแบนผู้ใช้ หรือเมื่อลูกค้ากดเปลี่ยนรหัสผ่านใหม่
+  revokeAllTokensIssuedBeforeNow(userId: string): void {
+    const currentEpochSeconds = Math.floor(Date.now() / 1000);
+    this.revokedUserTimestamps.set(userId, currentEpochSeconds);
+  }
+
+  // เรียกตรวจสอบสำหรับเส้นทางสำคัญ เช่น การกดชำระเงิน (POST /payments)
+  assertTokenNotRevoked(userId: string, tokenIssuedAtSeconds: number): void {
+    const revokedAfter = this.revokedUserTimestamps.get(userId);
+    if (revokedAfter && tokenIssuedAtSeconds <= revokedAfter) {
+      throw new UnauthorizedException({
+        code: 'TOKEN_IMMEDIATELY_REVOKED',
+        message: 'มีการเปลี่ยนแปลงรหัสผ่านหรือสิทธิ์การใช้งาน กรุณาเข้าสู่ระบบใหม่อีกครั้ง',
+      });
+    }
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/auth/storage-comparison.ts"
+// ❌ ผิด (Anti-pattern): เก็บ Refresh Token อายุ 30 วันไว้ใน localStorage ของเบราว์เซอร์
+export function storeTokensInLocalStorageAntiPattern(accessToken: string, refreshToken: string) {
+  // หากมีสคริปต์โฆษณาหรือ NPM package ใดๆ รันโค้ดได้ แฮกเกอร์จะดูด refreshToken ไปใช้ได้นาน 30 วันทันที!
+  window.localStorage.setItem('access_token', accessToken);
+  window.localStorage.setItem('refresh_token', refreshToken);
+}
+
+// ✅ ถูก (Best Practice): ให้ Backend ตั้งค่าผ่าน Set-Cookie Header ที่มี HttpOnly; Secure; SameSite=Lax/Strict
+// ส่วนฝั่ง Frontend เพียงตั้งค่า fetch(..., { credentials: 'include' }) เบราว์เซอร์จะแนบ Cookie ให้เองอย่างปลอดภัย
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Dual-Token JWT ใน `HttpOnly Cookie` เมื่อ**: พัฒนาเว็บแอปพลิเคชันยุคใหม่ด้วย Next.js (App Router) คู่กับ NestJS API ที่ต้องการทั้งความปลอดภัยจาก XSS, รองรับ Server-Side Rendering (SSR), และขยายระบบเป็นหลายอินสแตนซ์ได้ง่าย
+- **ไม่ควรเก็บ Refresh Token ใน `localStorage` เด็ดขาด**: ไม่ว่าในกรณีใดๆ ของเว็บเบราว์เซอร์ สำหรับแอปมือถือ Native (iOS/Android) ให้เก็บในพื้นที่เข้ารหัสระดับฮาร์ดแวร์อย่าง **iOS Keychain** หรือ **Android EncryptedSharedPreferences / Keystore** เท่านั้น
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ถ้า `HttpOnly Cookie` ป้องกันไม่ให้ JavaScript อ่านค่า Token ออกไปได้ แล้วถ้าเกิดช่องโหว่ XSS บนหน้าเว็บ แฮกเกอร์ยังสามารถทำอันตรายอะไรกับระบบ Authentication ของเราได้บ้าง และเราจะป้องกันอย่างไร?
+   - **แนวคำตอบ**: แม้แฮกเกอร์จะขโมยสตริง Token ออกไปใช้ที่เครื่องของแฮกเกอร์เองไม่ได้ แต่ตราบใดที่เหยื่อยังเปิดหน้าเว็บนั้นอยู่ โค้ด XSS สามารถสั่ง `fetch('/api/v1/orders', { method: 'POST', credentials: 'include' })` เพื่อยิงคำขอในนามของเหยื่อได้ ดังนั้นเราจึงต้องป้องกันเชิงลึก (Defense in Depth) ด้วยการตั้งค่า **Content Security Policy (CSP)ผ่าน Helmet**, ทำ Input Validation & Sanitization, และสำหรับธุรกรรมสำคัญ (เช่น การเปลี่ยนรหัสผ่านหรือโอนเงิน) ให้บังคับยืนยันรหัสผ่านปัจจุบันหรือ OTP ซ้ำอีกครั้ง
+2. **คำถาม**: ทำไมการใช้ `localStorage` เก็บ Token จึงสร้างปัญหาให้กับการทำ Server-Side Rendering (SSR) ใน Next.js?
+   - **แนวคำตอบ**: เพราะในจังหวะที่ผู้ใช้พิมพ์ URL เข้าเว็บครั้งแรก คำขอจะวิ่งไปที่เซิร์ฟเวอร์ของ Next.js เพื่อเรนเดอร์ HTML ซึ่งเซิร์ฟเวอร์ของ Next.js ไม่สามารถอ่านค่าที่อยู่ใน `window.localStorage` บนเครื่องผู้ใช้ได้ (เพราะ `localStorage` มีอยู่เฉพาะบนเบราว์เซอร์เท่านั้น) ทำให้เซิร์ฟเวอร์เรนเดอร์หน้าเว็บเป็นสถานะ "ยังไม่ได้ล็อกอิน" ส่งมาก่อน แล้วพอ JavaScript โหลดเสร็จบนเบราว์เซอร์จึงค่อยเปลี่ยนเป็น "ล็อกอินแล้ว" เกิดอาการหน้าจอกระพริบ (Layout Shift / Auth Flicker) ในขณะที่ `HttpOnly Cookie` จะถูกเบราว์เซอร์ส่งแนบไปกับ HTTP Request แรกสุดให้ Next.js Server อ่านได้ทันที
+
+---

@@ -1,0 +1,135 @@
+---
+title: CAP Theorem
+category: DATABASE
+parentTitle: SQL vs NoSQL
+version: Polyglot Persistence
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+นอกจาก PostgreSQL 16, MongoDB และ Redis แล้ว วิศวกร Fullstack ระดับอาวุโสจำเป็นต้องเข้าใจฐานข้อมูลเฉพาะทางอีก 2 ตัวที่มักพบในสถาปัตยกรรมยุคใหม่ ได้แก่:
+1. **SQLite:** ฐานข้อมูล SQL แบบฝังตัว (Embedded Relational Database) ที่ไม่มีเซิร์ฟเวอร์แยก แต่เก็บฐานข้อมูลทั้งก้อนไว้ใน **ไฟล์เพียงไฟล์เดียวบนดิสก์ (`.sqlite` / `.db`)**
+2. **Elasticsearch (และ OpenSearch / Meilisearch):** เอนจินค้นหาข้อความเต็มรูปแบบ (Distributed Full-Text Search & Analytics Engine) ที่สร้างขึ้นบนไลบรารี Apache Lucene
+
+ควบคู่ไปกับกฎฟิสิกส์พื้นฐานของระบบกระจายตัว (Distributed Systems) ที่เรียกว่า **CAP Theorem (ทฤษฎีบทของ Brewer)** ซึ่งเป็นเข็มทิศในการตัดสินใจเมื่อระบบเครือข่ายเกิดปัญหา
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **SQLite (Serverless Embedded SQL + WAL Mode):**
+   ทำงานอยู่ในโปรเซสเดียวกับแอปพลิเคชันโดยตรง จึงไม่มีความหน่วงของเครือข่าย (Zero Network Latency) เมื่อเปิดโหมด `PRAGMA journal_mode = WAL;` จะอนุญาตให้อ่านข้อมูลพร้อมกันได้รวดเร็วมาก เหมาะกับแอปมือถือ (iOS/Android), โปรแกรม Desktop, อุปกรณ์ Edge/IoT หรือการรัน Unit Testing แต่ **ไม่เหมาะกับระบบเว็บขนาดใหญ่ที่มีหลายเซิร์ฟเวอร์เขียนข้อมูลพร้อมกัน** เพราะล็อกการเขียนระดับไฟล์ทั้งฐานข้อมูล (Single-writer lock)
+2. **Elasticsearch (Inverted Index Architecture):**
+   แทนที่จะเก็บข้อมูลเป็นแถวเหมือนตารางปกติ Elasticsearch จะทำการตัดคำ (Tokenization & Stemming) แล้วสร้างโครงสร้างที่เรียกว่า **Inverted Index (ดัชนีผกผัน - เหมือนดัชนีคำศัพท์ท้ายเล่มหนังสือ)** ที่ระบุว่าคำว่า `"วากิว"` ปรากฏอยู่ในเอกสารหมายเลขใดบ้าง พร้อมคำนวณคะแนนความเกี่ยวข้องด้วยอัลกอริทึม **BM25** ทำให้ค้นหาบทความหรือสินค้าหลายสิบล้านชิ้นพร้อมจัดกลุ่มตัวกรอง (Faceted Search) ได้ในเสี้ยววินาที
+3. **ทฤษฎีบท CAP Theorem (Consistency, Availability, Partition Tolerance):**
+   ทฤษฎีบทระบุว่าในระบบฐานข้อมูลแบบกระจายตัวที่มีหลายโหนดเชื่อมต่อกันผ่านเครือข่าย:
+   - **C (Consistency):** ทุกโหนดต้องมองเห็นข้อมูลชุดเดียวกันที่เป็นปัจจุบันล่าสุดเสมอ (อ่านจากโหนดไหนก็ต้องได้ค่าล่าสุดที่เพิ่งเขียนเสร็จ)
+   - **A (Availability):** ทุกคำขอที่ส่งไปยังโหนดที่ยังไม่ล่ม ต้องได้รับคำตอบกลับมาเสมอ (ห้ามปฏิเสธการทำงาน)
+   - **P (Partition Tolerance):** ระบบยังต้องทำงานต่อไปได้แม้สายสัญญาณเครือข่ายระหว่างโหนดจะขาดออกจากกัน (Network Split / Partition)
+
+   **ความจริงทางวิศวกรรม:** เนื่องจากในโลกความจริง สายเครือข่ายมีโอกาสขาดหรือดีเลย์ได้เสมอ ดังนั้น **P (Partition Tolerance) จึงเป็นสิ่งบังคับที่หลีกเลี่ยงไม่ได้!** เมื่อเกิดสายสัญญาณขาดระหว่างโหนดที่ 1 กับโหนดที่ 2 วิศวกรต้องเลือกระหว่าง:
+   - **เลือก CP (Consistency + Partition Tolerance):** ยอมปฏิเสธการเขียนหรือการอ่านในโหนดที่ถูกตัดขาด เพื่อป้องกันไม่ให้ข้อมูลสต็อกเนื้อหรือยอดเงินขัดแย้งกัน (เช่น PostgreSQL Synchronous Replication, Redis Cluster ส่วนใหญ่, MongoDB ค่าเริ่มต้นแบบ Majority Write)
+   - **เลือก AP (Availability + Partition Tolerance):** ยอมให้ทุกโหนดรับคำสั่งซื้อต่อไปได้แม้มองไม่เห็นกัน แล้วค่อยนำข้อมูลมาหาทางรวมกันทีหลังเมื่อสายสัญญาณกลับมาดี (เช่น Cassandra, DynamoDB โหมด Eventual Consistency)
+
+```text filename="docs/database/sql-vs-nosql.txt"
+       [ เกิดเหตุสายสัญญาณเครือข่ายระหว่าง Node A กับ Node B ขาด! (Network Partition = P) ]
+                                        │
+            ┌───────────────────────────┴───────────────────────────┐
+            ▼                                                       ▼
+  [ ระบบแบบ CP (เช่น ระบบการเงิน / สต็อกเนื้อ) ]            [ ระบบแบบ AP (เช่น ยอดกดไลก์ / ตะกร้าชั่วคราว) ]
+  ยอมหยุดรับคำสั่งในฝั่งที่ขาดการติดต่อ (เสีย A)              ยอมให้ทั้งสองฝั่งเขียนข้อมูลต่อได้ทันที (รักษา A)
+  เพื่อรับประกันว่ายอดเงินและสต็อกถูกต้อง 100% (รักษา C)    แต่ข้อมูลสองฝั่งจะไม่ตรงกันชั่วคราว (เสีย C -> Eventual)
+```
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การทำ Full-Text Search ใน PostgreSQL 16 (`tsvector` + `tsquery` + `pg_trgm`) ก่อนตัดสินใจลงทุนตั้ง Elasticsearch
+สำหรับร้าน **Smart Butcher Marketplace** ที่มีสินค้าเนื้อพรีเมียมหลักพันหรือหลักหมื่นรายการ เราไม่จำเป็นต้องเสียเงินดูแลคลัสเตอร์ Elasticsearch ที่มีราคาแพงและกิน RAM มหาศาล เพราะ PostgreSQL 16 มีระบบ **Full-Text Search (`tsvector`)** และ **Trigram Fuzzy Search (`pg_trgm`)** ในตัวที่เร็วและแม่นยำมากอยู่แล้ว:
+
+```sql filename="01_pg16_builtin_fulltext_search.sql"
+-- เพิ่มคอลัมน์ Generated tsvector ในตาราง products ที่อัปเดตตัวเองอัตโนมัติเมื่อชื่อหรือ SKU เปลี่ยน!
+ALTER TABLE "products"
+ADD COLUMN "search_vector" tsvector
+GENERATED ALWAYS AS (
+    setweight(to_tsvector('english', coalesce("name", '')), 'A') ||
+    setweight(to_tsvector('english', coalesce("sku", '')), 'B')
+) STORED;
+
+-- สร้าง GIN Index บนคอลัมน์ search_vector
+CREATE INDEX "idx_products_search_vector_gin"
+ON "products" USING GIN ("search_vector");
+
+-- ค้นหาสินค้าด้วย Full-Text Search พร้อมจัดอันดับความเกี่ยวข้อง (ts_rank) ใน PostgreSQL 16
+SELECT
+    id,
+    sku,
+    name,
+    price_per_kg,
+    ts_rank("search_vector", websearch_to_tsquery('english', 'wagyu ribeye a5')) AS relevance_score
+FROM "products"
+WHERE "search_vector" @@ websearch_to_tsquery('english', 'wagyu ribeye a5')
+ORDER BY relevance_score DESC
+LIMIT 10;
+```
+
+### ตัวอย่างที่ 2: การควบคุมความเข้มงวดของ Consistency (CP) ใน PostgreSQL 16 สำหรับธุรกรรมการเงิน (`synchronous_commit`)
+ในระดับ Transaction ของการบันทึกการชำระเงิน (`payments`) เราสามารถสั่งบังคับให้ PostgreSQL 16 ยืนยันการเขียนข้อมูลลงดิสก์และ/หรือ Standby Node อย่างเคร่งครัดตามหลัก **CP** เพื่อไม่ให้ข้อมูลการโอนเงินสูญหายแม้เซิร์ฟเวอร์หลักจะไฟดับกะทันหัน:
+
+```typescript filename="src/payments/strict-cp-payment.service.ts"
+import { Injectable } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { Prisma } from '@prisma/client';
+
+@Injectable()
+export class StrictCpPaymentService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async confirmHighValuePayment(
+    orderId: string,
+    amount: Prisma.Decimal,
+    providerTxId: string
+  ) {
+    return this.prisma.$transaction(async (tx) => {
+      // บังคับระดับความทนทานและการซิงค์สูงสุด (CP Guarantee) สำหรับธุรกรรมรับเงินนี้โดยเฉพาะ
+      await tx.$executeRaw`SET LOCAL synchronous_commit = 'on'`;
+
+      const payment = await tx.payment.create({
+        data: {
+          orderId,
+          amount,
+          paymentMethod: 'PROMPTPAY_QR',
+          providerTxId,
+          paidAt: new Date(),
+        },
+      });
+
+      await tx.order.update({
+        where: { id: orderId },
+        data: { status: 'PAID' },
+      });
+
+      return payment;
+    });
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การใช้ SQLite ผิดประเภทงาน** | นำไฟล์ SQLite ไปวางบนเซิร์ฟเวอร์ที่มีหลาย Containers แย่งกันเขียนข้อมูลคำสั่งซื้อพร้อมกันจนเกิด `SQLITE_BUSY: database is locked` | ใช้ SQLite สำหรับ Embedded / Local App / Edge Read-heavy เท่านั้น ส่วนระบบเว็บหลาย Containers ให้ใช้ PostgreSQL 16 |
+| **การตั้ง Elasticsearch เกินความจำเป็น** | มีสินค้าในร้านแค่ 2,000 ชิ้น แต่ลงทุนตั้งคลัสเตอร์ Elasticsearch 3 เครื่องและต้องเขียนโค้ดซิงค์ข้อมูลให้ปวดหัว | ใช้ Full-Text Search (`tsvector` + `pg_trgm`) ใน PostgreSQL 16 ก่อน จนกว่าข้อมูลจะแตะหลักหลายสิบล้านแถวจึงค่อยแยก Elasticsearch |
+| **การเลือก AP กับระบบตัดสต็อก** | ใช้ฐานข้อมูลแบบ AP (Eventual Consistency) ในการตัดสต็อกเนื้อวากิวที่มีชิ้นเดียว ทำให้ลูกค้า 2 คนกดซื้อชิ้นเดียวกันสำเร็จพร้อมกัน (Overselling) | ระบบตัดสต็อกสินค้าและระบบการเงินต้องเลือกสถาปัตยกรรมแบบ **CP (Strong Consistency / ACID)** เสมอ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ SQLite เมื่อ:** สร้างแอปพลิเคชันมือถือ, โปรแกรมติดตั้งบนเครื่องลูกค้า, หรือฐานข้อมูลฝังตัวขนาดเล็กที่รันอยู่ในโหนดเดียว
+- **ควรใช้ Elasticsearch เมื่อ:** ระบบมีข้อมูลข้อความหลายสิบล้านเอกสารที่ต้องการการค้นหาแบบซับซ้อนหลายภาษา การทำ Autocomplete ความเร็วสูง หรือการวิเคราะห์ Log ขนาดใหญ่ (ELK Stack)
+- **ไม่ควรใช้ระบบ Eventual Consistency (AP) กับยอดเงินและจำนวนสินค้าคงคลังเด็ดขาด**
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: จงอธิบายทฤษฎีบท CAP Theorem และตอบว่าทำไมในระบบจริงเราจึงไม่สามารถเลือก CA (ตัด P ทิ้ง) ได้?**
+  - **แนวคำตอบ:** CAP Theorem ระบุว่าระบบฐานข้อมูลแบบกระจายตัวสามารถรับประกันคุณสมบัติได้พร้อมกันเพียง 2 ใน 3 ข้อ ได้แก่ Consistency (ข้อมูลตรงกันทุกโหนด), Availability (ทุกโหนดที่ทำงานอยู่ตอบสนองเสมอ) และ Partition Tolerance (ระบบทำงานต่อได้เมื่อเครือข่ายระหว่างโหนดขาด) ในโลกความเป็นจริง เราไม่สามารถเลือก CA ได้เพราะไม่มีเครือข่ายใดในโลกที่ไม่เคยเกิดปัญหาสายขาดหรือแพ็กเกจสูญหาย ดังนั้นเมื่อเกิด Network Partition (P) ขึ้น เราจึงถูกบังคับให้ต้องตัดสินใจเลือกว่าจะยอมหยุดรับคำขอเพื่อรักษาความถูกต้องของข้อมูล (**CP**) หรือจะยอมรับคำขอต่อไปโดยที่ข้อมูลอาจคลาดเคลื่อนกันชั่วคราว (**AP**)
+- **Q2: สำหรับระบบ E-Commerce ระหว่างฟีเจอร์ "การตัดสต็อกเนื้อวากิวและชำระเงิน" กับฟีเจอร์ "การนับจำนวนคนกดดูหน้าสินค้า (View Counter)" คุณจะเลือกใช้แบบ CP หรือ AP สำหรับแต่ละฟีเจอร์?**
+  - **แนวคำตอบ:**
+    - ฟีเจอร์ **การตัดสต็อกและชำระเงิน** ต้องเป็น **CP (Strong Consistency / ACID)** เท่านั้น เพราะห้ามเกิดการขายเนื้อเกินจำนวนที่มีอยู่จริง และยอดเงินห้ามคลาดเคลื่อนแม้แต่สตางค์เดียว หากโหนดฐานข้อมูลหลักติดต่อไม่ได้ ระบบต้องปฏิเสธการทำรายการแทนที่จะรับเงินมาแบบผิดๆ
+    - ส่วนฟีเจอร์ **การนับยอดวิวสินค้า** สามารถใช้แบบ **AP (Eventual Consistency)** ได้อย่างสบาย เพราะหากยอดคนดูหน้าเว็บอัปเดตช้าไป 2-3 วินาที หรือคลาดเคลื่อนไป 1-2 ครั้งระหว่างซิงค์ข้อมูล ก็ไม่ส่งผลกระทบใดๆ ต่อความถูกต้องทางธุรกิจ แต่ช่วยให้หน้าเว็บโหลดเร็วและไม่ล่ม
+
+---

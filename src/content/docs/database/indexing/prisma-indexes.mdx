@@ -1,0 +1,94 @@
+---
+title: Prisma Indexes
+category: DATABASE
+parentTitle: Indexing
+version: PostgreSQL 16 B-Tree
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในการพัฒนาแอปพลิเคชัน Fullstack ที่ใช้ **Prisma ORM** คู่กับ **PostgreSQL 16** เราต้องจัดการให้โครงสร้าง Index ที่ประกาศในไฟล์ `prisma/schema.prisma` ตรงกับโครงสร้างจริงในฐานข้อมูลเสมอ หากเราไปรันคำสั่ง `CREATE INDEX` ในฐานข้อมูลตรงๆ โดยไม่ประกาศไว้ใน Prisma Schema เมื่อรันคำสั่ง `prisma migrate dev` ในครั้งถัดไป Prisma จะมองว่า Index นั้นเป็นสิ่งแปลกปลอม (Schema Drift) และสร้างไฟล์ Migration สั่ง `DROP INDEX` ทิ้งทันที!
+
+ดังนั้นเราต้องเข้าใจวิธีใช้ Attribute `@unique`, `@@unique`, และ `@@index` ใน Prisma Schema รวมถึงขั้นตอนการปรับแต่งไฟล์ SQL Migration สำหรับฟีเจอร์ขั้นสูงของ PostgreSQL 16
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+Prisma รองรับการกำหนดคุณลักษณะของ Index สำหรับ PostgreSQL 16 ได้อย่างละเอียดผ่าน Schema:
+1. **การระบุชื่อ Index (`map: "..."`):** ช่วยให้ชื่อ Index ในฐานข้อมูลเป็นไปตามมาตรฐาน `idx_<table_name>_<columns>` แทนชื่อที่สร้างอัตโนมัติ
+2. **การกำหนดทิศทางการเรียง (`sort: Desc`):** รองรับการสร้าง Index แบบเรียงจากมากไปน้อย เช่น `@@index([status, createdAt(sort: Desc)])`
+3. **การเลือกชนิดของ Index (`type: Gin | Gist | Hash | BTree`):** รองรับการสร้าง GIN, GiST หรือ Hash Index ได้จากใน `schema.prisma` โดยตรง
+4. **การสร้าง Index บน Production ด้วย `CONCURRENTLY`:** โดยปกติคำสั่ง `CREATE INDEX` มาตรฐานจะล็อกตารางไม่ให้ใคร `INSERT`, `UPDATE`, `DELETE` ได้เลยจนกว่าจะสร้าง Index เสร็จ (ตารางล้านแถวอาจค้างนานหลายสิบวินาที) ในระบบ Production จึงต้องใช้คำสั่ง `CREATE INDEX CONCURRENTLY` ในไฟล์ Migration เสมอ
+
+<Callout type="warning" title="ข้อควรระวังเมื่อใช้ CREATE INDEX CONCURRENTLY กับ Prisma Migrate">
+ใน PostgreSQL คำสั่ง `CREATE INDEX CONCURRENTLY` ไม่สามารถรันอยู่ภายในบล็อก Transaction (`BEGIN ... COMMIT`) ได้ ในขณะที่ Prisma Migrate จะรันไฟล์ `.sql` ภายใน Transaction โดยปริยาย แต่ Prisma มีกลไกตรวจจับอัตโนมัติว่าหากไฟล์ `.sql` ของ Migration นั้นมีคำสั่ง `CREATE INDEX CONCURRENTLY` อยู่ Prisma จะรันไฟล์นั้นแยกออกมาโดยไม่ครอบด้วย Transaction ให้ทันที (จึงควรแยก Migration ที่ทำ `CONCURRENTLY` ออกเป็นไฟล์เดี่ยวๆ เสมอ)
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การประกาศ B-Tree, Composite, และ GIN Index ใน `prisma/schema.prisma`
+แสดงการกำหนด Index ทั้งหมดบนโมเดล `Product` และ `Order` ของระบบ Smart Butcher Marketplace ใน Prisma Schema:
+
+```prisma filename="prisma/schema.prisma"
+model Product {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  categoryId     String   @map("category_id") @db.Uuid
+  sku            String   @unique(map: "uq_products_sku") @db.VarChar(50)
+  name           String   @db.VarChar(200)
+  pricePerKg     Decimal  @map("price_per_kg") @db.Decimal(10, 2)
+  stockQty       Int      @default(0) @map("stock_qty")
+  specifications Json     @default("{}") @db.JsonB
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  category       Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  // 1. B-Tree Index บน Foreign Key
+  @@index([categoryId], map: "idx_products_category_id")
+  // 2. Composite B-Tree Index ตามหลัก ESR (Equality + Range/Sort)
+  @@index([categoryId, isActive, pricePerKg(sort: Asc)], map: "idx_products_cat_active_price")
+  // 3. GIN Index บนคอลัมน์ JSONB
+  @@index([specifications(ops: JsonbPathOps)], type: Gin, map: "idx_products_specs_gin")
+  @@map("products")
+}
+
+model Order {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  orderNumber String   @unique(map: "uq_orders_order_number") @map("order_number") @db.VarChar(30)
+  status      String   @default("PENDING") @db.VarChar(30)
+  totalAmount Decimal  @map("total_amount") @db.Decimal(12, 2)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // Composite Index สำหรับดึงประวัติออเดอร์ของลูกค้าเรียงจากล่าสุดไปเก่าสุด
+  @@index([userId, status, createdAt(sort: Desc)], map: "idx_orders_user_status_created")
+  @@map("orders")
+}
+```
+
+### ตัวอย่างที่ 2: การสร้าง Migration แบบ `CONCURRENTLY`, Partial Index และ Covering Index สำหรับระบบจริง
+เมื่อต้องการเพิ่ม Index บนตาราง `orders` ที่มีข้อมูลอยู่แล้วบน Production โดยไม่ให้ระบบหยุดชะงัก เราใช้คำสั่ง `npx prisma migrate dev --create-only --name add_orders_concurrent_index` แล้วปรับไฟล์ SQL ดังนี้:
+
+```sql filename="prisma/migrations/20261017090000_add_orders_concurrent_index/migration.sql"
+-- สร้าง Composite Index บนตารางขนาดใหญ่แบบไม่บล็อกการสั่งซื้อของลูกค้า (Zero-Downtime)
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_orders_user_status_created
+ON orders (user_id, status, created_at DESC);
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การสร้าง Index บน Production** | รัน `CREATE INDEX` ปกติบนตารางที่มีข้อมูลหลายล้านแถวในเวลาทำการ ทำให้การ `INSERT`/`UPDATE` ค้างทั้งระบบ | ใช้ `CREATE INDEX CONCURRENTLY` เสมอเมื่อสร้าง Index ใหม่บนตารางที่มีผู้ใช้งานอยู่บน Production |
+| **การจัดการ Index นอก Prisma** | แอบรันคำสั่ง SQL สร้าง Index เองในฐานข้อมูลโดยไม่อัปเดตไฟล์ `schema.prisma` | ประกาศ `@@index` ใน `schema.prisma` และจัดการผ่านระบบ Migration เพื่อให้ทีมและ CI/CD มีโครงสร้างตรงกันเสมอ |
+| **การละเลย Foreign Key Index ใน Prisma** | คิดว่าเมื่อประกาศ `@relation(fields: [categoryId], ...)` แล้ว Prisma จะสร้าง Index ให้เอง | ใน PostgreSQL ต้องเขียน `@@index([categoryId])` ในโมเดลลูกด้วยตัวเองเสมอ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `@@index` ใน Prisma Schema เมื่อ:** สร้าง B-Tree, Hash, GIN หรือ GiST Index มาตรฐานที่ Prisma รองรับไวยากรณ์อย่างสมบูรณ์
+- **ควรใช้ Custom SQL Migration (`--create-only`) ควบคู่กันเมื่อ:** ต้องการสร้าง `CREATE INDEX CONCURRENTLY` บนตารางที่มีข้อมูลจำนวนมากอยู่แล้ว หรือต้องการใช้ฟีเจอร์เฉพาะของ PostgreSQL เช่น Partial Index (`WHERE ...`) และ Covering Index (`INCLUDE (...)`)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: เกิดอะไรขึ้นหากเรารันคำสั่ง `CREATE INDEX CONCURRENTLY` บน Production แล้วเกิดข้อผิดพลาดขึ้นกลางคัน (เช่น เซิร์ฟเวอร์ตัดการเชื่อมต่อหรือเจอข้อมูลซ้ำในกรณี `UNIQUE`) และเราต้องแก้ไขอย่างไร?**
+  - **แนวคำตอบ:** เมื่อ `CREATE INDEX CONCURRENTLY` ล้มเหลวกลางคัน PostgreSQL จะทิ้งโครงสร้าง Index ที่สร้างไม่เสร็จไว้ในสถานะ **`INVALID`** (สามารถเห็นได้เมื่อรันคำสั่ง `\d ชื่อตาราง` ใน `psql` จะมีคำว่า `INVALID` ต่อท้าย) ซึ่ง Index ที่ Invalid นี้จะไม่ถูกนำไปใช้ในการค้นหา `SELECT` แต่ยังสร้างภาระให้ตารางตอน `INSERT`/`UPDATE` อยู่! วิธีแก้ไขคือต้องสั่งลบออกด้วย `DROP INDEX CONCURRENTLY ชื่อ_index;` (หรือสั่ง `REINDEX INDEX CONCURRENTLY ชื่อ_index;`) แล้วจึงแก้ไขสาเหตุและสร้างใหม่อีกครั้ง
+- **Q2: เมื่อประกาศ `@relation` ใน Prisma Schema สำหรับ PostgreSQL ทำไม Prisma จึงไม่สร้าง Index บน Foreign Key ให้อัตโนมัติเหมือนตอนสร้าง `@id` หรือ `@unique`?**
+  - **แนวคำตอบ:** เพราะใน PostgreSQL การประกาศ `PRIMARY KEY` หรือ `UNIQUE` constraint จะบังคับให้ตัว Database Engine สร้าง B-Tree Index ให้อัตโนมัติอยู่แล้วในระดับ SQL แต่สำหรับการประกาศ `FOREIGN KEY` constraint ตัว PostgreSQL ไม่ได้สร้าง Index ให้อัตโนมัติ ดังนั้นนักพัฒนาจึงต้องระบุ `@@index([foreignKeyField])` ลงในโมเดลของ Prisma อย่างชัดเจนเพื่อให้ Prisma สร้างคำสั่ง `CREATE INDEX` ในไฟล์ Migration
+
+---

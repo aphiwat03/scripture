@@ -1,0 +1,287 @@
+---
+title: Auth Upload Test
+category: TESTING & QUALITY
+parentTitle: Backend Testing
+version: NestJS Testing & Supertest
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในระบบ Production ของ Smart Butcher Marketplace มีจุดเสี่ยงสำคัญ 3 ประการที่ต้องได้รับการคุ้มครองด้วยเทสต์เสมอ:
+1. **[Authentication & Authorization](/docs/backend/authentication):** การตรวจสอบ JWT Bearer Token และสิทธิ์ในการจัดการข้อมูลร้านค้า (เช่น เฉพาะ `BUTCHER` เท่านั้นที่เพิ่มรายการเนื้อวากิวใหม่ได้)
+2. **[DTO Validation](/docs/backend/security):** การใช้ `ValidationPipe` ร่วมกับ `class-validator` และ `class-transformer` เพื่อคัดกรองข้อมูลขาเข้า (เช่น ห้ามตั้งราคาเนื้อติดลบ, ห้ามส่งฟิลด์แปลกปลอมเข้ามาทำ Mass Assignment Attack ด้วย `whitelist: true` และ `forbidNonWhitelisted: true`)
+3. **[File Upload ด้วย Multer](/docs/backend/file-upload):** การอัปโหลดไฟล์รูปภาพลายไขมันเนื้อ (Marbling Photo) หรือใบรับรองสายพันธุ์วากิว (Certificate of Authenticity) ซึ่งต้องตรวจสอบทั้งขนาดไฟล์และชนิดไฟล์ (MIME Type) ผ่าน Multipart/form-data
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+- **`ValidationPipe` Lifecycle:** เมื่อเปิดใช้งาน `transform: true` ตัว `class-transformer` จะแปลง Plain JSON Object จาก HTTP Body ให้กลายเป็นอินสแตนซ์ของคลาส DTO ก่อน จากนั้น `class-validator` จะตรวจสอบตาม Decorator ที่ระบุไว้ หากไม่ผ่านจะโยน `BadRequestException` พร้อมรายการข้อความผิดพลาดทันทีก่อนถึง Controller
+- **Supertest Multipart Streaming:** เมธอด `.field('key', 'value')` และ `.attach('file', buffer, 'filename.jpg')` ของ Supertest จะสร้าง HTTP Request แบบ `multipart/form-data` พร้อม Boundary Header ที่ถูกต้องและส่งผ่าน `FileInterceptor` (Multer) ของ NestJS เข้าไปในหน่วยความจำ (`memoryStorage`) โดยที่เราไม่ต้องสร้างไฟล์ขยะลงฮาร์ดดิสก์จริงขณะรันเทสต์
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1 (พื้นฐาน): การทดสอบ DTO Validation (`ValidationPipe`) และ JWT Authentication Flow
+ตัวอย่างการทดสอบสร้างสินค้าเนื้อวากิวที่ตรวจสอบทั้ง Bearer Token และกฎความถูกต้องของ DTO (ราคา, คะแนน BMS และการป้องกันฟิลด์แปลกปลอม):
+
+```typescript filename="test/auth-and-dto-validation.e2e-spec.ts"
+import { Test, TestingModule } from '@nestjs/testing';
+import {
+  INestApplication,
+  Controller,
+  Post,
+  Body,
+  UseGuards,
+  CanActivate,
+  ExecutionContext,
+  UnauthorizedException,
+  ValidationPipe,
+  Module,
+} from '@nestjs/common';
+import { IsString, IsNumber, Min, Max, IsNotEmpty } from 'class-validator';
+import request from 'supertest';
+
+export class CreateWagyuProductDto {
+  @IsString()
+  @IsNotEmpty()
+  sku!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  name!: string;
+
+  @IsNumber()
+  @Min(100, { message: 'wagyu price per kg must be at least 100 THB' })
+  pricePerKg!: number;
+
+  @IsNumber()
+  @Min(1)
+  @Max(12, { message: 'BMS marbling score cannot exceed 12' })
+  bmsScore!: number;
+}
+
+class JwtAuthGuard implements CanActivate {
+  canActivate(context: ExecutionContext): boolean {
+    const req = context.switchToHttp().getRequest<{ headers: Record<string, string | undefined> }>();
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer valid-butcher-jwt')) {
+      throw new UnauthorizedException('Invalid or missing butcher access token');
+    }
+    return true;
+  }
+}
+
+@Controller('api/v1/admin/products')
+class AdminProductController {
+  @Post()
+  @UseGuards(JwtAuthGuard)
+  createProduct(@Body() dto: CreateWagyuProductDto): { id: string } & CreateWagyuProductDto {
+    return {
+      id: 'prod-wagyu-new',
+      ...dto,
+    };
+  }
+}
+
+@Module({
+  controllers: [AdminProductController],
+})
+class AdminProductTestModule {}
+
+describe('Authentication & DTO Validation (Supertest)', () => {
+  let app: INestApplication;
+
+  beforeAll(async () => {
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      imports: [AdminProductTestModule],
+    }).compile();
+
+    app = moduleRef.createNestApplication();
+    app.useGlobalPipes(
+      new ValidationPipe({
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        transform: true,
+      }),
+    );
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('should return 401 Unauthorized when Bearer token is missing', async () => {
+    await request(app.getHttpServer())
+      .post('/api/v1/admin/products')
+      .send({
+        sku: 'WAGYU-A5-01',
+        name: 'Kobe Ribeye',
+        pricePerKg: 5500,
+        bmsScore: 10,
+      })
+      .expect(401);
+  });
+
+  it('should return 400 when wagyu price is negative or BMS score exceeds 12', async () => {
+    const response = await request(app.getHttpServer())
+      .post('/api/v1/admin/products')
+      .set('Authorization', 'Bearer valid-butcher-jwt')
+      .send({
+        sku: 'WAGYU-A5-01',
+        name: 'Kobe Ribeye',
+        pricePerKg: -1500,
+        bmsScore: 15,
+      })
+      .expect(400);
+
+    expect(response.body.message).toEqual(
+      expect.arrayContaining([
+        'wagyu price per kg must be at least 100 THB',
+        'BMS marbling score cannot exceed 12',
+      ]),
+    );
+  });
+
+  it('should return 400 when unwhitelisted property is injected into payload', async () => {
+    const response = await request(app.getHttpServer())
+      .post('/api/v1/admin/products')
+      .set('Authorization', 'Bearer valid-butcher-jwt')
+      .send({
+        sku: 'WAGYU-A5-01',
+        name: 'Kobe Ribeye',
+        pricePerKg: 5500,
+        bmsScore: 10,
+        isAdminApproved: true, // ฟิลด์แปลกปลอมที่ไม่ได้อยู่ใน DTO
+      })
+      .expect(400);
+
+    expect(response.body.message).toContain('property isAdminApproved should not exist');
+  });
+});
+```
+
+### ตัวอย่างที่ 2 (ขั้นสูง): การทดสอบอัปโหลดไฟล์ใบรับรองเนื้อวากิว (Multer + `ParseFilePipe`) ด้วย `Buffer`
+ตัวอย่างการใช้ `.attach()` และ `.field()` ของ Supertest เพื่อทดสอบการอัปโหลดไฟล์ใบรับรองสายพันธุ์เนื้อวากิว โดยตรวจสอบทั้งชนิดไฟล์ (`FileTypeValidator`) และขนาดไฟล์สูงสุด (`MaxFileSizeValidator`):
+
+```typescript filename="test/wagyu-certificate-upload.e2e-spec.ts"
+import { Test, TestingModule } from '@nestjs/testing';
+import {
+  INestApplication,
+  Controller,
+  Post,
+  UseInterceptors,
+  UploadedFile,
+  Body,
+  ParseFilePipe,
+  MaxFileSizeValidator,
+  FileTypeValidator,
+  Module,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import request from 'supertest';
+
+@Controller('api/v1/certificates')
+class CertificateUploadController {
+  @Post('upload')
+  @UseInterceptors(FileInterceptor('certificateFile'))
+  uploadWagyuCertificate(
+    @UploadedFile(
+      new ParseFilePipe({
+        validators: [
+          new MaxFileSizeValidator({ maxSize: 1024 * 50 }), // จำกัดขนาดไม่เกิน 50 KB สำหรับเทสต์
+          new FileTypeValidator({ fileType: /(jpg|jpeg|png|pdf)$/ }),
+        ],
+      }),
+    )
+    file: Express.Multer.File,
+    @Body('cattleTraceabilityId') cattleTraceabilityId: string,
+  ): {
+    cattleTraceabilityId: string;
+    originalName: string;
+    mimeType: string;
+    sizeBytes: number;
+  } {
+    return {
+      cattleTraceabilityId,
+      originalName: file.originalname,
+      mimeType: file.mimetype,
+      sizeBytes: file.size,
+    };
+  }
+}
+
+@Module({
+  controllers: [CertificateUploadController],
+})
+class CertificateUploadTestModule {}
+
+describe('Wagyu Certificate File Upload with Multer (Supertest)', () => {
+  let app: INestApplication;
+
+  beforeAll(async () => {
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      imports: [CertificateUploadTestModule],
+    }).compile();
+
+    app = moduleRef.createNestApplication();
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('should return 201 and file metadata when uploading valid PNG certificate under size limit', async () => {
+    const fakePngBuffer = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+
+    const response = await request(app.getHttpServer())
+      .post('/api/v1/certificates/upload')
+      .field('cattleTraceabilityId', 'JP-KOBE-99887766')
+      .attach('certificateFile', fakePngBuffer, {
+        filename: 'kobe-pedigree-cert.png',
+        contentType: 'image/png',
+      })
+      .expect(201);
+
+    expect(response.body).toEqual({
+      cattleTraceabilityId: 'JP-KOBE-99887766',
+      originalName: 'kobe-pedigree-cert.png',
+      mimeType: 'image/png',
+      sizeBytes: fakePngBuffer.length,
+    });
+  });
+
+  it('should return 400 Bad Request when uploaded file exceeds maximum allowed size', async () => {
+    // สร้าง Buffer ขนาด 60 KB ซึ่งเกินลิมิต 50 KB ที่ตั้งไว้
+    const oversizedBuffer = Buffer.alloc(1024 * 60, 'a');
+
+    await request(app.getHttpServer())
+      .post('/api/v1/certificates/upload')
+      .field('cattleTraceabilityId', 'JP-KOBE-99887766')
+      .attach('certificateFile', oversizedBuffer, {
+        filename: 'huge-scan.png',
+        contentType: 'image/png',
+      })
+      .expect(400);
+  });
+});
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การอัปโหลดไฟล์ในเทสต์** | อ่านไฟล์รูปภาพขนาดใหญ่จากฮาร์ดดิสก์จริงและบันทึกไฟล์ลงโฟลเดอร์ `./uploads` จริงจนพื้นที่ CI เต็ม | ใช้ `Buffer.from(...)` ส่งผ่าน `.attach()` ในหน่วยความจำ และ Mock บริการอัปโหลดขึ้น Cloud Storage (เช่น S3 / Cloudflare R2) |
+| **การทดสอบ DTO Validation** | เขียนเทสต์แต่เคสที่ส่งข้อมูลถูก (Happy Path) โดยไม่เคยทดสอบเคสที่ส่งชนิดข้อมูลผิดหรือส่งฟิลด์เกิน | เขียนเทสต์ยืนยันว่า `whitelist: true` และ `forbidNonWhitelisted: true` บล็อกฟิลด์แปลกปลอมและคืน HTTP 400 จริง |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ:** ทดสอบทุก Endpoint ที่เปิดรับข้อมูลจากผู้ใช้ภายนอก (POST, PUT, PATCH), Endpoint ที่มีการจำกัดสิทธิ์ตาม Role และ Endpoint ที่รับไฟล์ Multipart/form-data
+- **ไม่ควรใช้เมื่อ:** ไม่ควรเชื่อมต่อไปยัง OAuth Provider ภายนอกจริง (เช่น Google / Line Login API จริง) ในระหว่างรันเทสต์ ให้ใช้การสร้าง JWT Token สำหรับเทสต์ด้วย `JwtService.sign()` หรือ Override Guard แทน
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ในการเขียนเทสต์สำหรับระบบที่มี Authentication เราควรเลือกใช้ `overrideGuard(JwtAuthGuard)` หรือส่ง Header `.set('Authorization', 'Bearer ...')` จริง?**
+  - *แนวคำตอบ:* ควรใช้ทั้งสองแนวทางตามวัตถุประสงค์ของเทสต์:
+    1. มีชุดทดสอบเฉพาะสำหรับ **Authentication Flow** ที่ไม่ Override Guard เพื่อพิสูจน์ว่า `JwtStrategy`, การตรวจสอบวันหมดอายุของ Token และการคืนค่า `401 Unauthorized` ทำงานถูกต้องจริง
+    2. สำหรับเทสต์ฟีเจอร์ทางธุรกิจอื่นๆ (เช่น การคำนวณส่วนลดหรือการค้นหาสินค้า) สามารถใช้ `.overrideGuard()` หรือสร้าง Helper ฟังก์ชัน `getTestAuthHeader(user)` ที่ Sign Token ด้วย Test Secret เพื่อลดความซ้ำซ้อนและทำให้เทสต์รันเร็วขึ้น
+- **Q2: ทำไมการใช้ `.send({ file: ... })` จึงไม่สามารถใช้ทดสอบ `@UseInterceptors(FileInterceptor('file'))` ของ Multer ได้?**
+  - *แนวคำตอบ:* เพราะ `.send({...})` ของ Supertest จะส่งข้อมูลด้วย Header `Content-Type: application/json` ในขณะที่ Multer จะทำงานเฉพาะเมื่อตรวจพบ Header `Content-Type: multipart/form-data` เท่านั้น จึงต้องใช้เมธอด `.attach('fieldName', buffer, options)` ร่วมกับ `.field('key', 'value')` เพื่อให้ Supertest สร้าง Multipart Stream ที่ถูกต้อง
+
+---

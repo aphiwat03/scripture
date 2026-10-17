@@ -1,0 +1,156 @@
+---
+title: Module System
+category: BACKEND
+parentTitle: Node.js
+version: Node.js 22 LTS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ระบบโมดูลเปรียบเหมือนการจัดระเบียบตู้เก็บเนื้อและอุปกรณ์ในร้าน **Smart Butcher Marketplace**:
+- **CommonJS (CJS):** ระบบดั้งเดิมของ Node.js (`require` / `module.exports`) เปรียบเหมือนการเดินไปหยิบมีดจากตู้ตอนที่ต้องการใช้งานทันที (Synchronous) รันโค้ดถึงบรรทัดไหนก็โหลดไฟล์นั้นตอน Runtime
+- **ECMAScript Modules (ESM):** ระบบมาตรฐานสากลของโลก JavaScript (`import` / `export`) เปรียบเหมือนการจัดทำผังรายการอุปกรณ์ทั้งหมดตั้งแต่ก่อนเปิดร้าน (Static Analysis) ระบบรู้ล่วงหน้าว่าไฟล์ไหนจำเป็น ไฟล์ไหนไม่ได้ใช้งาน ทำให้สามารถตัดโค้ดส่วนเกินทิ้งได้ (Tree-Shaking)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **การโหลดและ Parsing:**
+   - **CommonJS:** โหลดแบบ Synchronous อ่านไฟล์จากดิสก์ Execute โค้ดทันที และเก็บผลลัพธ์ในหน่วยความจำแคช (`require.cache`) ไม่รองรับ Top-level await ในตัว
+   - **ESM:** แบ่งเป็น 3 ขั้นตอน:
+     1. *Construction (Parsing):* สแกนหาไฟล์ วิเคราะห์ dependency graph และทำ Static validation
+     2. *Instantiation:* จองพื้นที่หน่วยความจำสำหรับทุก `export` และสร้างตัวชี้เชื่อมโยง (Live Bindings)
+     3. *Evaluation:* รันโค้ดจริงเพื่อเติมค่าลงในหน่วยความจำ รองรับ **Top-level await**
+2. **การตั้งค่าใน Node.js:**
+   - กำหนด `"type": "module"` ในไฟล์ `package.json` เพื่อให้ไฟล์ `.js` ทั้งหมดทำงานเป็น ESM
+   - ใช้ส่วนขยายไฟล์ `.mjs` สำหรับ ESM และ `.cjs` สำหรับ CommonJS
+3. **การเข้ากันได้ (Interop Patterns):**
+   - ใน ESM จะไม่มีตัวแปร Global ของ CJS เช่น `__dirname`, `__filename`, `exports`, `module`, `require`
+   - ต้องใช้ `import.meta.url` ร่วมกับฟังก์ชัน `fileURLToPath` จาก `node:url` แทน (หรือใช้ `import.meta.dirname` ใน Node.js v20.11.0+)
+
+| คุณสมบัติ | CommonJS (CJS) | ECMAScript Modules (ESM) |
+| :--- | :--- | :--- |
+| **คำสั่งโหลดโมดูล** | `const pkg = require('./pkg')` | `import pkg from './pkg'` หรือ `import()` |
+| **คำสั่งส่งออกโมดูล** | `module.exports = { ... }` | `export const ...` หรือ `export default ...` |
+| **กลไกการโหลด** | Synchronous, Runtime evaluation | Asynchronous, Static analysis & compilation |
+| **Tree-Shaking** | ทำไม่ได้ หรือทำได้ยากมาก | รองรับสมบูรณ์แบบโดย Bundler |
+| **Top-Level Await** | ไม่รองรับ (ต้องห่อใน async IIFE) | รองรับได้ทันทีในระดับ root ของโมดูล |
+| **การอ้างอิงตำแหน่งไฟล์** | มี `__dirname` และ `__filename` | ใช้ `import.meta.url` หรือ `import.meta.dirname` |
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การประกาศ Meat Catalog Module ด้วย ESM และ Top-level await
+```typescript filename="src/modules/meat-catalog.esm.ts"
+// สภาพแวดล้อม: "type": "module" ใน package.json
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// 1. จำลองการแทนที่ __dirname ใน ESM
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+export interface MeatCut {
+  sku: string;
+  category: 'BEEF' | 'PORK' | 'POULTRY';
+  titleTh: string;
+  pricePerKg: number;
+}
+
+console.log(`[Catalog Module] โหลดโมดูลเนื้อสัตว์จากไดเรกทอรี: ${__dirname}`);
+
+// 2. จำลองการเชื่อมต่อ Database Cache ด้วย Top-level await
+async function initMeatPriceCache(): Promise<Map<string, number>> {
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      const cache = new Map<string, number>();
+      cache.set('BEEF_WAGYU_A5', 4500);
+      cache.set('BEEF_ANGUS_RIBEYE', 1800);
+      cache.set('PORK_KUROBUTA_BELLY', 450);
+      resolve(cache);
+    }, 50);
+  });
+}
+
+// 3. Top-level await: ทำงานก่อนที่โมดูลอื่นที่ import ไฟล์นี้จะเริ่มประมวลผล
+export const priceCache = await initMeatPriceCache();
+
+export function getMeatPrice(sku: string): number {
+  const price = priceCache.get(sku);
+  if (!price) throw new Error(`ไม่พบราคาสำหรับเนื้อรหัส ${sku}`);
+  return price;
+}
+```
+
+### ตัวอย่างที่ 2: Dynamic Import โหลด Payment Driver ปลั๊กอินตามเงื่อนไข (Plugin Architecture)
+```typescript filename="src/modules/payment-dispatcher.ts"
+export interface PaymentDriver {
+  pay(orderId: string, amountThb: number): Promise<{ success: boolean; refId: string }>;
+}
+
+export async function processButcherPayment(
+  provider: 'omise' | 'stripe' | 'promptpay',
+  orderId: string,
+  amountThb: number
+) {
+  let driver: PaymentDriver;
+
+  // โหลด Driver เฉพาะที่ถูกเรียกใช้งานเท่านั้น ช่วยลด Memory Footprint
+  switch (provider) {
+    case 'omise': {
+      const { OmiseDriver } = await import('./drivers/omise.driver.js');
+      driver = new OmiseDriver();
+      break;
+    }
+    case 'stripe': {
+      const { StripeDriver } = await import('./drivers/stripe.driver.js');
+      driver = new StripeDriver();
+      break;
+    }
+    case 'promptpay': {
+      const { PromptPayDriver } = await import('./drivers/promptpay.driver.js');
+      driver = new PromptPayDriver();
+      break;
+    }
+    default:
+      throw new Error(`ไม่รองรับระบบชำระเงิน: ${provider}`);
+  }
+
+  return await driver.pay(orderId, amountThb);
+}
+```
+
+## 4. ผิด vs ถูก (Anti-patterns & Best Practices)
+
+### ❌ โค้ดที่ผิด: เรียกใช้ `__dirname` ในไฟล์ ESM โดยตรง ทำให้เกิด ReferenceError
+```javascript filename="bad-esm-path.js"
+// ในไฟล์ package.json ระบุ "type": "module"
+import fs from 'node:fs';
+import path from 'node:path';
+
+// ผิด: ใน ESM ไม่มีตัวแปร __dirname รันแล้วแอปจะแคชทันที:
+// ReferenceError: __dirname is not defined in ES module scope
+const certificatePath = path.join(__dirname, 'certs', 'butcher-halal.crt');
+const cert = fs.readFileSync(certificatePath);
+```
+
+### ✅ โค้ดที่ถูก: ใช้ `import.meta.dirname` หรือ `fileURLToPath`
+```javascript filename="good-esm-path.js"
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// ถูกต้องสำหรับ Node.js 20.11+ หรือ Node 22:
+const dir = import.meta.dirname ?? path.dirname(fileURLToPath(import.meta.url));
+
+const certificatePath = path.join(dir, 'certs', 'butcher-halal.crt');
+const cert = fs.readFileSync(certificatePath);
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้:** โปรเจกต์ใหม่ทั้งหมดของ Node.js (v20/v22+), Next.js, NestJS ยุคใหม่ รวมถึงไลบรารีสมัยใหม่ที่เป็น ESM-only (เช่น `chalk` v5, `node-fetch` v3)
+- **ไม่ควรใช้:** หลีกเลี่ยงการผสมผสาน CJS และ ESM สเปะสปะในโฟลเดอร์เดียวกันโดยไม่มี build tool ช่วย เพราะจะทำให้เกิดปัญหาเรื่อง default export interop
+
+## 6. คำถามสัมภาษณ์ (Interview Questions)
+- **Q1: ทำไม ESM จึงสามารถทำ Tree-shaking ได้อย่างมีประสิทธิภาพ แต่ CommonJS ทำไม่ได้?**
+  - *คำตอบ:* เพราะโครงสร้าง `import`/`export` ของ ESM เป็นแบบ Static Structure ตัวคอมไพเลอร์สามารถวิเคราะห์ความสัมพันธ์ของโมดูลได้ตั้งแต่ก่อนรันโค้ดจริง (Parse Time) จึงระบุได้อย่างแน่นอนว่าฟังก์ชันไหนไม่มีการเรียกใช้ ในขณะที่ `require()` ของ CommonJS เป็น Dynamic เรียกตอนไหนหรือใส่ตัวแปรใน path ก็ได้ ทำให้เครื่องมือไม่สามารถฟันธงได้ว่าจะมีการเรียกใช้โค้ดส่วนนั้นหรือไม่
+- **Q2: หากกำลังรันโปรเจกต์ที่เป็น ESM แต่จำเป็นต้องโหลดไลบรารีเก่าที่เป็น CommonJS และไม่มี named export จะต้องเขียนโค้ดอย่างไร?**
+  - *คำตอบ:* ให้ใช้ Default Import เช่น `import cjsPackage from 'legacy-cjs-package';` แล้วดึงคุณสมบัติออกมาจาก default object หรือใช้ฟังก์ชัน `createRequire` จาก `node:module` เช่น `const require = createRequire(import.meta.url); const legacy = require('legacy-cjs-package');`
+
+---

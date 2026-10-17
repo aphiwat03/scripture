@@ -1,0 +1,131 @@
+---
+title: CASE NULL Handling
+category: DATABASE
+parentTitle: SQL
+version: SQL:2023 & PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในการตัดเกรดเนื้อวัว เราต้องจำแนกเกรดเนื้อตามคะแนนลายไขมันหินอ่อน (Marbling Score) หรือระยะเวลาการบ่มดรายเอจ:
+- **`CASE` Expression**: เปรียบเสมือนคำสั่ง `if-else` ในภาษาเขียนโปรแกรม ใช้เปลี่ยนค่าข้อมูลหรือจัดกลุ่มข้อมูลใหม่ตามเงื่อนไขที่กำหนด
+- **`NULL` ใน SQL**: ไม่ใช่เลข 0 และไม่ใช่สตริงว่าง `""` แต่หมายถึง **"ไม่ทราบค่า" (Unknown / Missing Data)** เช่น สลิปการโอนเงินที่ลูกค้ายังไม่ได้อัปโหลดขึ้นระบบ
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **ระบบตรรกะ 3 สถานะ (Three-Valued Logic - 3VL)**:
+   ในภาษา SQL ค่าความจริงมี 3 สถานะคือ `TRUE`, `FALSE`, และ **`UNKNOWN`**
+   - เมื่อนำสิ่งใดไปเปรียบเทียบกับ `NULL` เช่น `price = NULL` หรือแม้แต่ `NULL = NULL` ผลลัพธ์ที่ได้จะไม่ใช่ `TRUE` แต่จะได้ค่า **`UNKNOWN`**
+   - เงื่อนไขใน `WHERE` clause จะอนุญาตให้แถวข้อมูลผ่านได้ก็ต่อเมื่อผลลัพธ์เป็น **`TRUE` เท่านั้น** หากผลลัพธ์เป็น `FALSE` หรือ `UNKNOWN` ข้อมูลจะถูกคัดทิ้งทันที
+   - ดังนั้นการเขียน `WHERE slip_url = NULL` จึงไม่มีวันดึงข้อมูลขึ้นมาได้เลย ต้องใช้คำสั่ง `WHERE slip_url IS NULL` เท่านั้น!
+
+2. **รูปแบบของ CASE Expression**:
+   - **Simple CASE**: เปรียบเทียบความเท่ากันของนิพจน์เดียว: `CASE status WHEN 'PAID' THEN 1 ELSE 0 END`
+   - **Searched CASE**: รองรับเงื่อนไขบูลีนที่ซับซ้อน: `CASE WHEN price > 3000 AND stock > 0 THEN 'VIP' END`
+3. **ฟังก์ชันจัดการค่า NULL มาตรฐาน**:
+   - `COALESCE(val1, val2, ...)`: คืนค่าที่ไม่ใช่ NULL ตัวแรกจากรายการที่ส่งเข้าไป
+   - `NULLIF(val1, val2)`: คืนค่าเป็น `NULL` หากค่า `val1 == val2` (มีประโยชน์อย่างยิ่งในการป้องกัน Error **Division by Zero**)
+
+## 3. ตารางค่าความจริงของ Three-Valued Logic (3VL)
+
+| Expression | ผลลัพธ์ | ผลกระทบต่อเงื่อนไข WHERE |
+| :--- | :--- | :--- |
+| `TRUE AND UNKNOWN` | **UNKNOWN** | ไม่ผ่าน (ถูกคัดทิ้ง) |
+| `FALSE AND UNKNOWN` | **FALSE** | ไม่ผ่าน (ถูกคัดทิ้ง) |
+| `TRUE OR UNKNOWN` | **TRUE** | **ผ่านเงื่อนไข** |
+| `FALSE OR UNKNOWN` | **UNKNOWN** | ไม่ผ่าน (ถูกคัดทิ้ง) |
+| `NOT (UNKNOWN)` | **UNKNOWN** | ไม่ผ่าน (ถูกคัดทิ้ง) |
+| `NULL = NULL` | **UNKNOWN** | ไม่ผ่าน (ถูกคัดทิ้ง) |
+| `NULL IS NULL` | **TRUE** | **ผ่านเงื่อนไข** |
+
+## 4. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การตัดเกรดสินค้าเนื้อพรีเมียมด้วย Searched CASE Expression
+จำแนกความพรีเมียมของชิ้นเนื้อตามระยะเวลาการบ่มดรายเอจและระดับราคาต่อกิโลกรัม:
+
+```sql filename="sql/sql.sql"
+-- จัดหมวดหมู่ระดับพรีเมียมของเนื้อตามเงื่อนไขทางธุรกิจ
+SELECT 
+    id,
+    sku,
+    name,
+    price_per_kg,
+    dry_aged_days,
+    CASE 
+        WHEN dry_aged_days >= 60 THEN 'Ultra-Aged Collector'
+        WHEN dry_aged_days >= 30 THEN 'Master Butcher Aged'
+        WHEN price_per_kg >= 4000.00 THEN 'Japanese Purebred Prime'
+        ELSE 'Everyday Gourmet'
+    END AS premium_tier
+FROM products
+ORDER BY dry_aged_days DESC, price_per_kg DESC;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| id | sku | name | price_per_kg | dry_aged_days | premium_tier |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 3 | TOMAHAWK-DA60-PRM | 60-Day Dry-Aged Tomahawk Prime | 3600.00 | 60 | Ultra-Aged Collector |
+| 2 | ANGUS-DA45-TBONE | 45-Day Dry-Aged Black Angus T-Bone | 2800.00 | 45 | Master Butcher Aged |
+| 1 | WAGYU-A5-RIB | Miyazaki Wagyu A5 Ribeye | 4500.00 | 0 | Japanese Purebred Prime |
+| 4 | AUS-WAGYU-MB9-TEND | Australian Wagyu Tenderloin MB9+ | 3900.00 | 0 | Everyday Gourmet |
+
+### ตัวอย่างที่ 2: การทำ Conditional Aggregation (Pivot) และป้องกัน Division by Zero ด้วย `NULLIF`
+สรุปยอดขายแยกคอลัมน์ตามวิธีชำระเงินในแถวเดียว พร้อมคำนวณราคาเฉลี่ยต่อหน่วยอย่างปลอดภัย:
+
+```sql filename="sql/sql.sql"
+-- Pivot ข้อมูลยอดชำระเงินตามช่องทาง พร้อมป้องกันข้อผิดพลาดกรณีหารด้วยศูนย์
+SELECT 
+    o.status AS order_status,
+    COUNT(o.id) AS total_orders,
+    
+    -- รวมยอดเฉพาะการจ่ายด้วย CREDIT_CARD
+    COALESCE(SUM(p.amount) FILTER (WHERE p.method = 'CREDIT_CARD'), 0.00) AS credit_card_total,
+    
+    -- รวมยอดเฉพาะการจ่ายด้วย PROMPTPAY
+    COALESCE(SUM(p.amount) FILTER (WHERE p.method = 'PROMPTPAY'), 0.00) AS promptpay_total,
+    
+    -- ป้องกัน Division by Zero: หาก total_orders เป็น 0 ฟังก์ชัน NULLIF จะเปลี่ยนเป็น NULL ทำให้ผลลัพธ์เป็น NULL ไม่แครช
+    ROUND(SUM(o.total_amount) / NULLIF(COUNT(o.id), 0), 2) AS avg_order_value
+FROM orders o
+LEFT JOIN payments p ON o.id = p.order_id
+GROUP BY o.status;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| order_status | total_orders | credit_card_total | promptpay_total | avg_order_value |
+| :--- | :--- | :--- | :--- | :--- |
+| COMPLETED | 2 | 13500.00 | 5600.00 | 9550.00 |
+| PENDING | 1 | 0.00 | 10800.00 | 10800.00 |
+| CANCELLED | 1 | 0.00 | 0.00 | 2800.00 |
+
+## 5. ผิด vs ถูก (Anti-patterns & Best Practices)
+
+### ❌ โค้ดที่ผิด: ใช้ `= NULL` หรือ `!= NULL` ในการตรวจสอบค่าว่าง
+```sql filename="sql/sql.sql"
+-- ผิด: นิพจน์ slip_url = NULL ได้ UNKNOWN เสมอ คำสั่งนี้จะคืนค่าว่างเปล่า (0 แถว) เสมอ!
+SELECT order_id, amount 
+FROM payments 
+WHERE slip_url = NULL;
+```
+
+### ✅ โค้ดที่ถูก: ใช้ `IS NULL` หรือ `IS NOT NULL` เสมอ
+```sql filename="sql/sql.sql"
+-- ถูกต้อง: ใช้ IS NULL เพื่อตรวจสอบการมีอยู่ของค่าว่างตามมาตรฐาน SQL
+SELECT order_id, amount 
+FROM payments 
+WHERE slip_url IS NULL;
+```
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `CASE`:** เมื่อต้องการแปลงรหัสสถานะเป็นข้อความที่เข้าใจง่าย, ทำ Conditional Aggregation (Pivot), หรือจัดกลุ่มตัวเลขเป็นเกรด
+- **ควรใช้ `COALESCE`:** เมื่อต้องการกำหนดค่า Default ให้กับคอลัมน์ที่เป็น NULL เพื่อป้องกันข้อผิดพลาดใน Application
+- **ควรใช้ `NULLIF`:** เมื่อทำตัวหารทางคณิตศาสตร์ เพื่อป้องกันปัญหา Fatal Error: Division by zero
+
+## 7. คำถามสัมภาษณ์ (Interview Questions)
+- **Q1: เหตุใดคำสั่ง `SELECT * FROM products WHERE price_per_kg <> 2000` จึงไม่ดึงรายการสินค้าที่ `price_per_kg` เป็น `NULL` ออกมาด้วย?**
+  - *คำตอบ:* เพราะเมื่อแถวใดมีค่า `price_per_kg` เป็น `NULL` นิพจน์ `NULL <> 2000` จะได้ผลลัพธ์เป็น **`UNKNOWN`** ตามหลัก Three-Valued Logic และเนื่องจากกลไกของ `WHERE` จะดึงเฉพาะแถวที่เงื่อนไขประเมินค่าเป็น `TRUE` เท่านั้น แถวที่มีค่าเป็น NULL จึงหลุดออกจากผลลัพธ์ หากต้องการรวมแถวที่เป็น NULL ต้องระบุเพิ่มเป็น `WHERE price_per_kg <> 2000 OR price_per_kg IS NULL`
+- **Q2: ไวยากรณ์ `FILTER (WHERE ...)` ใน Aggregate Function ของ PostgreSQL มีข้อดีเหนือกว่าการเขียน `CASE WHEN ... THEN ... END` ดั้งเดิมอย่างไร?**
+  - *คำตอบ:* `FILTER (WHERE ...)` เป็นมาตรฐาน SQL:2003 ที่ PostgreSQL รองรับ ซึ่งมีความชัดเจนทางความหมาย (Declarative Semantic) สูงกว่า ทำให้อ่านโค้ดได้ง่ายและเป็นธรรมชาติกว่า นอกจากนี้ในระดับ Execution Engine ตัวคำนวณ Aggregate จะข้ามแถวที่ไม่ตรงเงื่อนไขของ Filter ไปทันทีโดยไม่ต้องส่งค่า `NULL` หรือ `0` เข้าไปคำนวณในฟังก์ชันซ้ำซ้อนเหมือนการเขียน CASE
+
+---

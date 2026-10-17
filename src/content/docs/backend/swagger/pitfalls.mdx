@@ -1,0 +1,48 @@
+---
+title: Anti-patterns
+category: BACKEND
+parentTitle: Swagger
+version: OpenAPI 3.1 & NestJS Swagger
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การ Import `PartialType`, `PickType`, `OmitType` ผิดแพ็กเกจ**:
+   การดึงมาจาก `@nestjs/mapped-types` แทนที่จะเป็น `@nestjs/swagger` ทำให้ฟิลด์ทั้งหมดหายไปจากหน้าเอกสาร Swagger UI
+2. **การส่งคืน Prisma Model ออกทาง Controller โดยตรงโดยไม่มี Response DTO**:
+   นอกจากจะทำให้ Swagger ไม่รู้โครงสร้าง Response (แสดงเป็น `{}`) แล้ว ยังเสี่ยงต่อการเผลอส่งข้อมูลความลับ เช่น `passwordHash` หรือ `slipStoragePath` ภายในออกไปหา Client
+3. **การลืมระบุ `{ type: [ItemDto] }` สำหรับฟิลด์ที่เป็น Array (เมื่อไม่ได้เปิด CLI Plugin)**:
+   ทำให้ Swagger รู้แค่ว่าเป็น Array แต่ไม่รู้โครงสร้างของสมาชิกภายใน Array
+4. **การเปิดหน้า Swagger UI ทิ้งไว้บน Production โดยไม่มีการป้องกัน**:
+   ช่วยให้ผู้โจมตีสามารถสำรวจทุก Endpoint, พารามิเตอร์ และโครงสร้างข้อมูลของระบบได้อย่างง่ายดาย
+5. **การตั้งชื่อ Security Scheme ใน `DocumentBuilder` ไม่ตรงกับ `@ApiBearerAuth()`**:
+   ทำให้ปุ่ม Authorize ใน Swagger UI ไม่แนบ JWT Token ไปกับ HTTP Request ตอนกดทดสอบ
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+- [ ] ตั้งค่า `DocumentBuilder` และ `SwaggerModule.setup()` หลังจากเรียก `app.setGlobalPrefix()` แล้วเสมอ
+- [ ] ปิดการเข้าถึงหน้า Swagger UI ในโหมด Production (`NODE_ENV === 'production'`) หรือจำกัดสิทธิ์การเข้าถึงอย่างรัดกุม
+- [ ] เปิดใช้งาน `persistAuthorization: true` ใน `swaggerOptions` เพื่อความสะดวกในการทดสอบของทีมพัฒนา
+- [ ] ใช้ `PartialType`, `PickType`, `OmitType` จากแพ็กเกจ `@nestjs/swagger` เสมอ
+- [ ] เปิดใช้งาน `@nestjs/swagger` CLI Plugin ใน `nest-cli.json` พร้อม `"classValidatorShim": true` และ `"introspectComments": true`
+- [ ] ตรวจสอบให้ชื่อใน `.addBearerAuth(..., 'jwt-access')` ตรงกับ `@ApiBearerAuth('jwt-access')` ทุกจุด
+- [ ] กำหนด `@ApiConsumes('multipart/form-data')` และ `@ApiBody` สำหรับทุก Endpoint ที่มีการอัปโหลดไฟล์
+- [ ] สร้างสคริปต์ Export `openapi.json` เพื่อนำไปใช้สร้าง Type-safe Client ให้ฝั่ง Frontend
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อจัดทำเอกสาร OpenAPI/Swagger ที่ได้มาตรฐานและเชื่อมโยงกับทีม Frontend เรียบร้อยแล้ว แนะนำให้ศึกษาต่อในหัวข้อต่อไปนี้:
+
+1. **หลักการออกแบบ RESTful API และ Validation**: ทบทวนมาตรฐานการออกแบบ URI, HTTP Status Codes และการตรวจข้อมูลด้วย DTO ที่ [REST API](/docs/backend/rest-api) และ [Validation](/docs/backend/validation)
+2. **การยืนยันตัวตนและการอัปโหลดไฟล์**: ดูรายละเอียดเบื้องหลังการทำงานของ JWT, Cookie และการรับไฟล์ด้วย Multer ที่ [Authentication](/docs/backend/authentication) และ [File Upload](/docs/backend/file-upload)
+3. **การผสานความสามารถด้าน AI เข้าสู่ระบบ Backend**: ศึกษาการนำ Groq SDK (Llama 3.1 8B) มาสร้างฟีเจอร์อัจฉริยะพร้อมทำเอกสาร API ต่อได้ที่ [AI Integration](/docs/backend/ai-integration)
+4. **การตรวจสอบชนิดข้อมูลและการทดสอบระบบ**: เรียนรู้การใช้ TypeScript ตรวจจับข้อผิดพลาดและการเขียน E2E Test ทดสอบตามสัญญา API ที่ [Debugging & Type Checking](/docs/testing/type-checking) และ [Backend Testing](/docs/testing/backend-testing)

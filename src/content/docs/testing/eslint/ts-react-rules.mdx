@@ -1,0 +1,264 @@
+---
+title: TS React Rules
+category: TESTING & QUALITY
+parentTitle: ESLint
+version: ESLint 9 (Flat Config)
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การติดตั้ง ESLint โดยใช้เพียงค่าเริ่มต้น (`recommended` ของ JavaScript ธรรมดา) แทบไม่ต่างอะไรกับการไม่มีเกราะป้องกันในโปรเจกต์ TypeScript และ React ยุคใหม่
+
+ในระบบ **Smart Butcher Marketplace** ที่มีทั้งการจัดการสถานะตะกร้าสินค้าเนื้อพรีเมียมบนฝั่ง Frontend (Next.js 16 / React 19) และการประมวลผลธุรกรรมการเงินฝั่ง Backend เราจำเป็นต้องเปิดใช้งานกฎเหล็ก 2 กลุ่มหลัก:
+1. **Type-Aware TypeScript Rules (`@typescript-eslint`)**:
+   - `no-floating-promises`: บังคับให้ทุก Promise ต้องมี `await`, `.then/.catch` หรือระบุ `void` อย่างจงใจ
+   - `no-misused-promises`: ป้องกันการส่ง Async Function เข้าไปในที่ที่ไม่ได้รอรับ Promise (เช่น ส่งเข้า `Array.prototype.forEach` หรือ Event Handler โดยไม่จัดการ Error)
+   - `no-explicit-any` และ `no-unsafe-assignment`: ปิดช่องโหว่ไม่ให้นักพัฒนาแอบใช้ `any`
+   - `consistent-type-imports`: บังคับใช้ `import type { ... }` สำหรับการนำเข้าเฉพาะ Type เพื่อช่วยให้ Bundler ตัดโค้ดส่วนเกินออกได้ทันที
+2. **React & React Hooks Rules (`eslint-plugin-react-hooks`)**:
+   - `react-hooks/rules-of-hooks`: บังคับให้เรียกใช้ Hooks ที่ระดับบนสุดของ Component เท่านั้น ห้ามเรียกใน `if` หรือ `for`
+   - `react-hooks/exhaustive-deps`: ตรวจสอบ Dependency Array ของ `useEffect`, `useMemo` และ `useCallback` เพื่อป้องกันปัญหา **Stale Closure** (เช่น ลูกค้าเปลี่ยนน้ำหนักเนื้อในตะกร้าแล้ว แต่ฟังก์ชันกดสั่งซื้อยังคำนวณด้วยน้ำหนักเก่า)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+- **การตรวจจับ Stale Closure ของ `exhaustive-deps`**: ปลั๊กอินจะวิเคราะห์ Scope ของฟังก์ชัน Callback ที่ส่งเข้าไปใน `useEffect` หรือ `useCallback` โดยดูว่ามีตัวแปรหรือ Props ใดบ้างที่ถูกอ้างอิงภายในฟังก์ชันแต่ไม่ได้ถูกใส่ไว้ใน Dependency Array หากขาดตัวแปรใดไป เมื่อ Component Re-render ฟังก์ชันเดิมจะยังคงจำค่าตัวแปรจาก Render รอบเก่าไว้ใน Closure
+- **การตรวจจับ `no-misused-promises`**: อาศัยข้อมูล Contextual Typing จาก TypeScript Compiler เพื่อดูว่าฟังก์ชันปลายทางที่รับ Callback คาดหวัง Return Type เป็น `void` หรือ `Promise<void>` หากปลายทางต้องการ `void` (เช่น `items.forEach(...)`) แต่เราส่ง `async (item) => { ... }` เข้าไป โค้ดจะทำงานแบบขนานโดยไม่มีใครรอและไม่สามารถดักจับ Exception ด้วย `try/catch` ด้านนอกได้เลย
+
+<Callout type="warning" title="อันตรายของการส่ง async function เข้าไปใน Array.forEach">
+Array.prototype.forEach ไม่ได้ถูกออกแบบมาให้รอ Promise เมื่อคุณส่ง async function เข้าไปใน forEach ลูปจะยิงคำสั่งทั้งหมดพร้อมกันแล้วจบการทำงานทันทีโดยไม่รอให้เสร็จ และหากเกิด Error ข้างในจะกลายเป็น Unhandled Promise Rejection ทันที ให้ใช้ for...of คู่กับ await หรือใช้ Promise.all(items.map(...)) แทนเสมอ
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1 (ระดับพื้นฐาน): การบังคับใช้ `consistent-type-imports` และการจัดการ Promise อย่างปลอดภัยในบริการชำระเงิน
+โค้ดตัวอย่างที่ปฏิบัติตามกฎ `@typescript-eslint/consistent-type-imports`, `@typescript-eslint/no-floating-promises` และ `@typescript-eslint/no-misused-promises` อย่างเคร่งครัด
+
+```typescript filename="src/services/batch-payment-reconciler.ts"
+// ใช้ import type ตามกฎ @typescript-eslint/consistent-type-imports
+import type { Order, Payment } from './order-checkout.service';
+
+export interface ReconciliationSummary {
+  verifiedOrderIds: string[];
+  totalVerifiedAmount: number;
+  failedOrderIds: string[];
+}
+
+export interface BankSettlementClient {
+  verifyTransaction(paymentId: string): Promise<boolean>;
+}
+
+export class BatchPaymentReconciler {
+  constructor(private readonly bankClient: BankSettlementClient) {}
+
+  async reconcileDailyPayments(
+    orders: readonly Order[],
+    paymentsByOrderId: ReadonlyMap<string, Payment>,
+  ): Promise<ReconciliationSummary> {
+    const verifiedOrderIds: string[] = [];
+    const failedOrderIds: string[] = [];
+    let totalVerifiedAmount = 0;
+
+    // ใช้ for...of แทน forEach เพื่อรองรับ await อย่างถูกต้องตามกฎ no-misused-promises
+    for (const order of orders) {
+      const payment = paymentsByOrderId.get(order.id);
+      if (!payment || payment.status !== 'COMPLETED') {
+        failedOrderIds.push(order.id);
+        continue;
+      }
+
+      const isConfirmedByBank = await this.bankClient.verifyTransaction(
+        payment.id,
+      );
+
+      if (isConfirmedByBank) {
+        verifiedOrderIds.push(order.id);
+        totalVerifiedAmount += payment.amount;
+      } else {
+        failedOrderIds.push(order.id);
+      }
+    }
+
+    return {
+      verifiedOrderIds,
+      totalVerifiedAmount,
+      failedOrderIds,
+    };
+  }
+}
+```
+
+### ตัวอย่างที่ 2 (ระดับ Production): React Component สำหรับเลือกน้ำหนักเนื้อและคำนวณราคาที่ไร้ปัญหา Stale Closure
+Component ฝั่ง Next.js 16 ที่ปฏิบัติตามกฎ `react-hooks/rules-of-hooks` และ `react-hooks/exhaustive-deps` อย่างครบถ้วน พร้อมจัดการ Async Event Handler อย่างถูกวิธี
+
+```tsx filename="src/components/butcher/SteakCustomCutConfigurator.tsx"
+'use client';
+
+import { useState, useMemo, useCallback } from 'react';
+import type { Product, User } from '../../domain/butcher-pricing';
+import type { OrderItem } from '../../services/order-checkout.service';
+
+export interface SteakCustomCutConfiguratorProps {
+  product: Product;
+  currentUser: User;
+  onAddItemToOrder: (item: OrderItem) => Promise<void>;
+}
+
+export function SteakCustomCutConfigurator({
+  product,
+  currentUser,
+  onAddItemToOrder,
+}: SteakCustomCutConfiguratorProps) {
+  const [weightKg, setWeightKg] = useState<number>(0.5);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // ระบุ dependencies ครบทุกตัวตามกฎ react-hooks/exhaustive-deps
+  const calculatedSubtotal = useMemo((): number => {
+    const rawPrice = product.pricePerKg * weightKg;
+    const vipDiscounted = currentUser.isVip ? rawPrice * 0.9 : rawPrice;
+    return Math.round(vipDiscounted);
+  }, [product.pricePerKg, weightKg, currentUser.isVip]);
+
+  const handleConfirmCut = useCallback(async (): Promise<void> => {
+    setErrorMessage(null);
+    setIsSubmitting(true);
+
+    try {
+      const newOrderItem: OrderItem = {
+        id: `cut-${product.id}-${String(Date.now())}`,
+        productId: product.id,
+        weightKg,
+        unitPricePerKg: product.pricePerKg,
+        subtotal: calculatedSubtotal,
+      };
+
+      await onAddItemToOrder(newOrderItem);
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : 'ไม่สามารถเพิ่มรายการเนื้อได้';
+      setErrorMessage(message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  }, [product.id, product.pricePerKg, weightKg, calculatedSubtotal, onAddItemToOrder]);
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+      <h3 className="text-lg font-semibold text-slate-900">{product.name}</h3>
+      <p className="mt-1 text-sm text-slate-600">
+        บ่มดรายเอจ {product.dryAgedDays} วัน | ราคา {product.pricePerKg.toLocaleString()} บาท/กก.
+      </p>
+
+      <div className="mt-4 flex items-center gap-4">
+        <label htmlFor="weight-input" className="text-sm font-medium text-slate-700">
+          น้ำหนักที่ต้องการ (กก.):
+        </label>
+        <input
+          id="weight-input"
+          type="number"
+          min={0.3}
+          max={product.stockKg}
+          step={0.1}
+          value={weightKg}
+          onChange={(e) => {
+            setWeightKg(Number(e.target.value));
+          }}
+          className="w-28 rounded-md border border-slate-300 px-3 py-1.5 text-right"
+        />
+      </div>
+
+      <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-4">
+        <span className="text-base font-bold text-emerald-700">
+          ราคารวมสุทธิ: {calculatedSubtotal.toLocaleString()} บาท
+        </span>
+
+        {/* ใช้ void นำหน้าการเรียก async function ใน onClick เพื่อให้ผ่านกฎ no-misused-promises */}
+        <button
+          type="button"
+          disabled={isSubmitting}
+          onClick={() => {
+            void handleConfirmCut();
+          }}
+          className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+        >
+          {isSubmitting ? 'กำลังบันทึก...' : 'สั่งตัดเนื้อชิ้นนี้'}
+        </button>
+      </div>
+
+      {errorMessage ? (
+        <p className="mt-3 text-sm font-medium text-red-600" role="alert">
+          {errorMessage}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```tsx filename="src/components/butcher/HooksAndPromises.compare.tsx"
+import { useEffect } from 'react';
+import type { OrderItem } from '../../services/order-checkout.service';
+
+// ❌ ผิด (Anti-pattern): ปิดคำเตือน exhaustive-deps ด้วย eslint-disable และใช้ async ใน forEach
+export function BadOrderSync({
+  items,
+  discountRate,
+  syncItem,
+}: {
+  items: OrderItem[];
+  discountRate: number;
+  syncItem: (item: OrderItem, rate: number) => Promise<void>;
+}) {
+  useEffect(() => {
+    // 1. ผิดกฎ no-misused-promises: forEach ไม่รอ async function
+    items.forEach(async (item) => {
+      await syncItem(item, discountRate);
+    });
+    // 2. ปิดกฎ exhaustive-deps ทำให้เมื่อ discountRate เปลี่ยน โค้ดยังคงใช้ค่าเก่า (Stale Closure)!
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items]);
+
+  return null;
+}
+
+// ✅ ถูก (Best Practice): ระบุ dependency ครบทุกตัว และใช้ Promise.all ร่วมกับ void อย่างชัดเจน
+export function GoodOrderSync({
+  items,
+  discountRate,
+  syncItem,
+}: {
+  items: OrderItem[];
+  discountRate: number;
+  syncItem: (item: OrderItem, rate: number) => Promise<void>;
+}) {
+  useEffect(() => {
+    async function runSync(): Promise<void> {
+      await Promise.all(
+        items.map((item) => syncItem(item, discountRate)),
+      );
+    }
+
+    void runSync();
+  }, [items, discountRate, syncItem]);
+
+  return null;
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+- **ควรเปิดเป็นระดับ `"error"` เสมอสำหรับ**: `@typescript-eslint/no-floating-promises`, `@typescript-eslint/no-misused-promises`, `@typescript-eslint/no-explicit-any`, `react-hooks/rules-of-hooks` และ `react-hooks/exhaustive-deps`
+- **ไม่ควรใช้**: ห้ามใช้คอมเมนต์ `// eslint-disable-next-line react-hooks/exhaustive-deps` เพื่อซ่อนคำเตือนโดยไม่ได้ปรับโครงสร้างโค้ดด้วย `useCallback`, `useMemo` หรือ `useEffectEvent` เพราะจะสร้างบั๊กที่หาสาเหตุยากมากเมื่อ State เปลี่ยนแปลง
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+
+**Q1: ทำไม ESLint กฎ `@typescript-eslint/no-misused-promises` จึงแจ้งเตือนเมื่อเราเขียน `<button onClick={handleSubmitAsync}>` ทั้งที่โค้ดรันได้ปกติ?**
+- **แนวคำตอบ**: เพราะ Event Handler `onClick` ของ React DOM มีชนิดข้อมูลของฟังก์ชันตอบกลับเป็น `() => void` ซึ่ง React ไม่ได้ทำการ `await` หรือผูก `.catch()` ให้กับ Promise ที่คืนค่าออกมาจาก `onClick` หากภายใน `handleSubmitAsync` เกิด Exception ที่ไม่ได้ดักจับไว้ จะกลายเป็น Unhandled Promise Rejection ทันที วิธีแก้ไขที่ถูกต้องคือการดัก `try/catch` ภายในฟังก์ชันให้เรียบร้อยแล้วเรียกผ่าน Wrapper `onClick={() => { void handleSubmitAsync(); }}`
+
+**Q2: กฎ `@typescript-eslint/consistent-type-imports` ช่วยเพิ่มประสิทธิภาพการ Build ของทั้ง Next.js และ NestJS ได้อย่างไร?**
+- **แนวคำตอบ**: เมื่อเราแยกการนำเข้าด้วย `import type { Product } from './models'` เครื่องมือ Transpiler ยุคใหม่ เช่น SWC หรือ esbuild สามารถลบบรรทัดนั้นทิ้งได้ทันทีแบบไฟล์ต่อไฟล์ (Single-file Transpilation) โดยไม่ต้องเสียเวลาเปิดอ่านไฟล์ปลายทางเพื่อดูว่า `Product` เป็น Interface หรือเป็น Class จริงใน Runtime และยังช่วยป้องกันปัญหา Circular Dependency ระหว่างโมดูลใน NestJS ได้อีกด้วย
+
+---

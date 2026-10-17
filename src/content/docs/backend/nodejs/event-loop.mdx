@@ -1,0 +1,210 @@
+---
+title: Event Loop
+category: BACKEND
+parentTitle: Node.js
+version: Node.js 22 LTS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ลองจินตนาการถึงเคาน์เตอร์ขายเนื้อของ **Smart Butcher Marketplace** หากร้านมีพนักงานรับออเดอร์เพียงคนเดียว (Single-threaded JavaScript Engine) แต่มีลูกค้ายืนรอคิวเป็นร้อยคน:
+- **แบบ Blocking (ดั้งเดิม):** พนักงานรับคำสั่งซื้อเนื้อวากิว A5 จากลูกค้าคนที่ 1 แล้วเดินเข้าไปในห้องเย็นเพื่อแล่เนื้อและบรรจุแพ็กเกจด้วยตัวเองเป็นเวลา 10 นาที ลูกค้าคนที่ 2-100 ต้องยืนรอจนกว่าลูกค้าคนแรกจะได้รับของ ทำให้ระบบช้าและเกิดคอขวดมหาศาล
+- **แบบ Non-blocking (Node.js):** พนักงานรับออเดอร์คนที่ 1 จดรายการลงบิล แล้วส่งต่อให้ทีมแล่เนื้อหลังร้าน (libuv Thread Pool / OS Kernel) จากนั้นพนักงานหันมารับคำสั่งซื้อของลูกค้าคนที่ 2, 3, 4 ทันที เมื่อทีมหลังร้านแล่เนื้อเสร็จ จะกดกริ่งเรียก (Callback / Event) ให้พนักงานหน้าร้านส่งมอบเนื้อให้ลูกค้าคนนั้นในจังหวะที่มือว่าง
+
+Node.js ใช้สถาปัตยกรรม **Single-threaded Event-driven Non-blocking I/O** ทำให้เซิร์ฟเวอร์เครื่องเดียวสามารถรองรับการเชื่อมต่อพร้อมกัน (Concurrent Connections) ได้หลายหมื่น Connection โดยใช้ทรัพยากรหน่วยความจำต่ำกว่าเซิร์ฟเวอร์แบบ Multi-threaded แบบดั้งเดิม (เช่น Apache หรือ Java Thread-per-request) อย่างมาก
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+สถาปัตยกรรมภายในของ Node.js ประกอบด้วยส่วนสำคัญ 4 ส่วน:
+1. **V8 Engine:** รับผิดชอบคอมไพล์โค้ด JavaScript เป็น Machine Code และจัดการ **Call Stack** (LIFO) กับ Memory Heap
+2. **libuv (C Library):** จัดการ **Event Loop**, Task Queues, และ **libuv Thread Pool** (ขนาดเริ่มต้น 4 Threads ควบคุมผ่านตัวแปร `UV_THREADPOOL_SIZE`) สำหรับงานที่ OS ไม่รองรับ Asynchronous แท้จริง เช่น File I/O (`fs`), DNS lookups (`dns.lookup`), และ CPU-bound crypto/zlib operations
+3. **OS Kernel:** จัดการ Network I/O (TCP, UDP, HTTP) ผ่าน System Call ที่เป็น Non-blocking ระดับ OS (เช่น `epoll` บน Linux, `kqueue` บน macOS, `IOCP` บน Windows)
+4. **Queue Hierarchy:**
+   - **Microtask Queue:** มีลำดับความสำคัญสูงสุด ถูกเคลียร์ทันทีหลังจาก Call Stack ว่าง ก่อนจะเปลี่ยน Phase ของ Event Loop แบ่งเป็น:
+     1. `process.nextTick` Queue (รันก่อนเสมอ)
+     2. Promise Microtask Queue (คำสั่ง `.then()`, `.catch()`, `await`)
+   - **Macrotask Queue:** แบ่งออกเป็น 6 Phase ที่ Event Loop วนซ้ำตามลำดับ:
+
+| Phase ใน Event Loop | สิ่งที่เกิดขึ้นใน Phase นี้ | ตัวอย่าง Callback |
+| :--- | :--- | :--- |
+| **1. Timers** | ตรวจสอบและประมวลผล Callbacks ของตัวจับเวลาที่หมดเวลาแล้ว | `setTimeout()`, `setInterval()` |
+| **2. Pending Callbacks** | รัน I/O Callbacks ที่ถูกเลื่อนมาจากการวนรอบก่อนหน้า | Network socket errors เช่น `ECONNREFUSED` |
+| **3. Idle, Prepare** | ใช้เฉพาะการทำงานภายในของ libuv เอง | ภายในระบบ libuv (Internal use only) |
+| **4. Poll** | ดึงเหตุการณ์ I/O ใหม่, ประมวลผล I/O callbacks, และบล็อกรอหากไม่มีงานอื่น | อ่านข้อมูลไฟล์, รับ Request ใหม่เข้ามาทาง Socket |
+| **5. Check** | รัน Callback ที่ถูกสั่งงานโดยเฉพาะให้ทำหลังช่วง Poll ทันที | `setImmediate()` |
+| **6. Close Callbacks** | รัน Callback เมื่อ Connection หรือ Resource ปิดตัวลง | `socket.on('close', ...)`, `dbStream.on('close')` |
+
+```text filename="docs/backend/nodejs.txt"
+   ┌───────────────────────────┐
+┌─>│          Timers           │ (setTimeout, setInterval)
+│  └─────────────┬─────────────┘
+│  ┌─────────────┴─────────────┐
+│  │     Pending Callbacks     │ (TCP/Socket level errors)
+│  └─────────────┬─────────────┘
+│  ┌─────────────┴─────────────┐
+│  │       Idle, Prepare       │ (libuv internal)
+│  └─────────────┬─────────────┘
+│  ┌─────────────┴─────────────┐
+│  │           Poll            │ (Retrieve new I/O events, execute I/O callbacks)
+│  └─────────────┬─────────────┘
+│  ┌─────────────┴─────────────┐
+│  │           Check           │ (setImmediate callbacks)
+│  └─────────────┬─────────────┘
+│  ┌─────────────┴─────────────┐
+│  │      Close Callbacks      │ (socket.destroy(), stream cleanup)
+└──┴───────────────────────────┘
+   * ระหว่างรอยต่อทุก Phase: เคลียร์ process.nextTick -> Promise Microtasks จนเกลี้ยง *
+```
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: ลำดับการประมวลผล Event Loop ในระบบออกใบเสร็จคำสั่งซื้อเนื้อ
+ตัวอย่างนี้แสดงลำดับการทำงานของ Call Stack, Microtask (`nextTick`, `Promise`), และ Macrotask (`setTimeout`, `setImmediate`, `fs.readFile`):
+
+```typescript filename="src/event-loop-order-demo.ts"
+import fs from 'node:fs';
+
+console.log('1. [Call Stack] สตาร์ทระบบรับออเดอร์ Smart Butcher Marketplace');
+
+// 1. Timer Macrotask
+setTimeout(() => {
+  console.log('7. [Timers Phase] ตัวจับเวลาแจ้งเตือน: ออเดอร์เนื้อริบอายครบ 30 นาที');
+}, 0);
+
+// 2. Check Macrotask
+setImmediate(() => {
+  console.log('8. [Check Phase] setImmediate: พิมพ์สติกเกอร์บาร์โค้ดเนื้อวากิว');
+});
+
+// 3. I/O Poll Phase
+fs.readFile(__filename, () => {
+  console.log('9. [Poll Phase] I/O Callback: อ่านบันทึกสต็อกเนื้อจากฮาร์ดดิสก์เสร็จสิ้น');
+
+  // ใน I/O Callback: setImmediate จะถูกประมวลผลก่อน setTimeout(..., 0) เสมอ
+  setImmediate(() => {
+    console.log('10. [Check Phase ภายใน I/O] ตัดยอดสต็อกเนื้อออกจากระบบทันที');
+  });
+
+  setTimeout(() => {
+    console.log('11. [Timers Phase ภายใน I/O] ส่ง SMS ยืนยันให้ลูกค้า Butcher');
+  }, 0);
+});
+
+// 4. Microtask: Promise
+Promise.resolve().then(() => {
+  console.log('4. [Microtask: Promise] ตรวจสอบวงเงินบัตรเครดิตของ User สำเร็จ');
+});
+
+// 5. Microtask: process.nextTick (ทำงานก่อน Promise เสมอ)
+process.nextTick(() => {
+  console.log('2. [Microtask: nextTick] ตรวจสอบสถานะการล็อกอินของ Butcher Customer');
+});
+
+process.nextTick(() => {
+  console.log('3. [Microtask: nextTick] สำรองคิวสินค้าเนื้อเทนเดอร์ลอยน์ในหน่วยความจำ');
+});
+
+// 6. Microtask ซ้อนใน Promise
+Promise.resolve().then(() => {
+  console.log('5. [Microtask: Promise 2] ดึงประวัติส่วนลดสมาชิก Smart Butcher');
+  process.nextTick(() => {
+    console.log('6. [Microtask: nextTick ซ้อน] อัปเดตคะแนนสะสม Butcher Rewards');
+  });
+});
+
+console.log('--- จบการลงทะเบียนคำสั่ง synchronous บน Call Stack ---');
+```
+
+### ตัวอย่างที่ 2: การปรับจูน libuv Thread Pool สำหรับงาน Crypto Hashing ของรหัสผ่าน User
+งานคำนวณทางคณิตศาสตร์ เช่น การแฮชรหัสผ่านลูกค้าด้วย `crypto.pbkdf2` หรือ `bcrypt` จะถูกส่งไปรันบน libuv Thread Pool หากมีงานเข้ามาเกินขนาด Thread Pool งานที่เหลือจะต้องเข้าคิวรอ:
+
+```typescript filename="src/threadpool-tuning.ts"
+// ตั้งค่า UV_THREADPOOL_SIZE ก่อนโหลดโมดูล crypto หรือรัน Node
+// (ปกติควรกำหนดผ่าน Environment Variable: UV_THREADPOOL_SIZE=8 node app.js)
+process.env.UV_THREADPOOL_SIZE = '4';
+
+import crypto from 'node:crypto';
+
+interface ButcherCustomerCredentials {
+  userId: string;
+  passwordPlain: string;
+}
+
+const customersToHash: ButcherCustomerCredentials[] = [
+  { userId: 'usr_001', passwordPlain: 'WagyuLover2026!' },
+  { userId: 'usr_002', passwordPlain: 'RibeyeMaster#99' },
+  { userId: 'usr_003', passwordPlain: 'KurobutaKing$$' },
+  { userId: 'usr_004', passwordPlain: 'TenderloinTender@1' },
+  { userId: 'usr_005', passwordPlain: 'SirloinSpecial*8' },
+  { userId: 'usr_006', passwordPlain: 'TomahawkSteak!!' },
+];
+
+console.log(`เริ่มแฮชรหัสผ่าน User จำนวน ${customersToHash.length} รายการ (Thread Pool = 4)`);
+const startTime = Date.now();
+
+customersToHash.forEach((customer, index) => {
+  const hashStart = Date.now();
+  // pbkdf2 แบบ async จะส่งงานลง libuv Thread Pool
+  crypto.pbkdf2(customer.passwordPlain, 'salt_smart_butcher', 100_000, 64, 'sha512', (err, derivedKey) => {
+    if (err) throw err;
+    const duration = Date.now() - hashStart;
+    const totalElapsed = Date.now() - startTime;
+    console.log(
+      `[Task ${index + 1}] User: ${customer.userId} แฮชสำเร็จใน ${duration}ms (เวลารวมตั้งแต่เริ่ม: ${totalElapsed}ms)`
+    );
+  });
+});
+```
+
+## 4. ผิด vs ถูก (Anti-patterns & Best Practices)
+
+### ❌ โค้ดที่ผิด: บล็อก Event Loop ด้วยการอ่านไฟล์แบบ Synchronous ใน Request Handler
+```typescript filename="bad-order-export.ts"
+import fs from 'node:fs';
+import http from 'node:http';
+
+// ผิดมหันต์: fs.readFileSync บล็อก V8 Call Stack ทั้งหมด
+// ขณะที่กำลังอ่านไฟล์ประวัติออเดอร์ขนาด 50MB ลูกค้าคนอื่นที่ต้องการสั่งซื้อเนื้อจะโหลดหน้าเว็บไม่ได้เลย!
+http.createServer((req, res) => {
+  if (req.url === '/api/orders/export-sync') {
+    const hugeHistoryData = fs.readFileSync('/data/butcher-orders-2025.csv', 'utf-8');
+    res.writeHead(200, { 'Content-Type': 'text/csv' });
+    res.end(hugeHistoryData);
+  }
+}).listen(3000);
+```
+
+### ✅ โค้ดที่ถูก: ใช้ Asynchronous Stream ส่งข้อมูลออกไปทีละ Chunk
+```typescript filename="good-order-export.ts"
+import fs from 'node:fs';
+import http from 'node:http';
+
+// ถูกต้อง: fs.createReadStream ทำงานแบบ Non-blocking และส่งข้อมูลแบบ Streaming
+// ไม่สะสมไฟล์ทั้งก้อนใน RAM และไม่บล็อกการสั่งซื้อของลูกค้ารายอื่น
+http.createServer((req, res) => {
+  if (req.url === '/api/orders/export-stream') {
+    res.writeHead(200, { 'Content-Type': 'text/csv' });
+    const fileStream = fs.createReadStream('/data/butcher-orders-2025.csv');
+    fileStream.pipe(res);
+
+    fileStream.on('error', (error) => {
+      console.error('เกิดข้อผิดพลาดในการ Stream ไฟล์ออเดอร์:', error);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'ไม่สามารถดาวน์โหลดไฟล์ได้' }));
+      }
+    });
+  }
+}).listen(3000);
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้:** ระบบ REST API, WebSockets, Real-time Dashboard คำสั่งซื้อ, การสตรีมไฟล์เนื้อสดหรือใบเสร็จ, ระบบที่ต้องติดต่อ Microservices หรือ Database จำนวนมากพร้อมๆ กัน
+- **ไม่ควรใช้:** งานประมวลผล CPU-bound หนักๆ บน Main Thread เช่น การตัดต่อวิดีโอตรวจสอบความสดของเนื้อ, การเทรนโมเดล AI จำแนกลายหินอ่อนของเนื้อ (Marbling score) หากจำเป็นต้องทำบน Node.js ให้แยกออกไปทำบน **Worker Threads** (`worker_threads`) หรือส่งต่อไปยัง Background Worker Service (เช่น Python Service หรือ Go)
+
+## 6. คำถามสัมภาษณ์ (Interview Questions)
+- **Q1: `process.nextTick()` ต่างจาก `setImmediate()` อย่างไร และทำงานในจังหวะไหน?**
+  - *คำตอบ:* `process.nextTick()` ไม่ได้อยู่ใน Phase ใดของ Event Loop เลย แต่อยู่ใน **Microtask Queue** พิเศษ ซึ่งจะถูกรันทันทีที่การทำงานปัจจุบันบน Call Stack จบลง ก่อนที่ Event Loop จะก้าวข้ามไป Phase ถัดไป ส่วน `setImmediate()` อยู่ใน **Check Phase** ของ Event Loop ซึ่งจะถูกรันหลังจาก Poll Phase จบลงในรอบการหมุนของ Event Loop
+- **Q2: หากรันงานคำนวณเข้ารหัสรหัสผ่านพร้อมกัน 8 คำสั่ง บนเครื่องที่มี 8 CPU Cores โดยไม่ตั้งค่าอะไรเพิ่มเติม ทำไม 4 คำสั่งแรกจึงเสร็จพร้อมกัน แล้ว 4 คำสั่งหลังจึงเริ่มทำงาน?**
+  - *คำตอบ:* เพราะค่าเริ่มต้นของ libuv Thread Pool (`UV_THREADPOOL_SIZE`) คือ **4 Threads** แม้เครื่องจะมี 8 Cores งาน Crypto ที่เกิน 4 งานแรกจะต้องรอในคิวของ libuv จนกว่า Thread ใน Pool จะว่าง หากต้องการใช้ครบทั้ง 8 Cores ต้องตั้งค่า `UV_THREADPOOL_SIZE=8` ก่อนเริ่มกระบวนการ Node.js
+
+---

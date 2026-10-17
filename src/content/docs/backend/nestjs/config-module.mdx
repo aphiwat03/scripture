@@ -1,0 +1,124 @@
+---
+title: ConfigModule
+category: BACKEND
+parentTitle: NestJS 11
+version: NestJS 11
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด
+ตามหลักการของ **Twelve-Factor App** ซอฟต์แวร์ที่ดีจะต้องแยกส่วนการตั้งค่า (Configuration) ออกจากโค้ดของแอปพลิเคชันอย่างเด็ดขาด ค่าความลับต่างๆ เช่น รหัสผ่านฐานข้อมูล, API Key สำหรับตัดบัตรเครดิต, หรือพอร์ตของเซิร์ฟเวอร์ จะต้องถูกโหลดเข้ามาผ่าน **Environment Variables (`.env`)**
+
+ใน NestJS โมดูล `@nestjs/config` ถูกสร้างขึ้นมาเพื่อจัดการเรื่องนี้โดยเฉพาะ และในระดับ Enterprise เราจำเป็นต้องมีกระบวนการ **Fail-Fast** คือหากค่าคอนฟิกสำคัญขาดหายไป หรือมีรูปแบบผิดพลาด (เช่น พอร์ตไม่ใช่ตัวเลข) เซิร์ฟเวอร์จะต้องหยุดทำงานทันทีตั้งแต่ขั้นตอนเริ่มระบบ (Booting) ไม่ใช่ปล่อยให้รันไปแล้วไปพังตอนลูกค้ากำลังจะกดจ่ายเงินค่าเนื้อสเต็ก
+
+## 2. หลักการเบื้องหลัง
+`ConfigModule` ทำงานเป็น Dynamic Module ที่ใช้แพ็กเกจ `dotenv` ในการอ่านไฟล์ `.env` เข้าสู่ `process.env` ของ Node.js
+- สามารถกำหนด Schema Validation ด้วยไลบรารียอดนิยมอย่าง **Joi** หรือ **Zod**
+- มี `ConfigService` ให้เรา Inject เข้าไปอ่านค่าใน Service ใดๆ ได้อย่างปลอดภัย
+- รองรับการทำ Custom Configuration Files ที่รวมค่าคอนฟิกเป็นหมวดหมู่ (Namespacing)
+
+## 3. ตัวอย่างโค้ด
+
+### ตัวอย่างที่ 1: การใช้ Zod เพื่อทำ Environment Schema Validation (Fail-Fast)
+```typescript filename="src/config/env.validation.ts"
+import { z } from 'zod';
+
+export const envSchema = z.object({
+  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  PORT: z.coerce.number().default(3000),
+  DATABASE_URL: z.string().url({ message: 'DATABASE_URL ต้องเป็น Connection String ที่ถูกต้อง' }),
+  JWT_SECRET: z.string().min(32, { message: 'JWT_SECRET ต้องมีความยาวอย่างน้อย 32 ตัวอักษรเพื่อความปลอดภัย' }),
+  BUTCHER_TAX_RATE: z.coerce.number().min(0).max(1).default(0.07),
+  ENABLE_FLASH_SALE: z.enum(['true', 'false']).transform((v) => v === 'true'),
+});
+
+export type EnvConfig = z.infer<typeof envSchema>;
+
+export function validateEnv(config: Record<string, unknown>): EnvConfig {
+  const result = envSchema.safeParse(config);
+
+  if (!result.success) {
+    console.error('❌ ตรวจพบความผิดพลาดในการตั้งค่า Environment Variables:');
+    console.error(JSON.stringify(result.error.format(), null, 2));
+    throw new Error('การตั้งค่าระบบไม่สมบูรณ์ เซิร์ฟเวอร์ปฏิเสธการเริ่มทำงาน');
+  }
+
+  return result.data;
+}
+```
+
+```typescript filename="src/app.module.ts"
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { validateEnv } from './config/env.validation';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true, // ทำให้ ConfigService ใช้งานได้ทั่วทั้งแอปพลิเคชันโดยไม่ต้อง import ซ้ำ
+      validate: validateEnv, // ทำงานแบบ Fail-Fast ตั้งแต่วินาทีแรกที่เริ่มระบบ
+      envFilePath: [`.env.${process.env.NODE_ENV || 'development'}`, '.env'],
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+### ตัวอย่างที่ 2: การอ่านค่าผ่าน `ConfigService` อย่างปลอดภัยใน Service
+```typescript filename="src/modules/payment/payment-gateway.service.ts"
+import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+
+@Injectable()
+export class PaymentGatewayService {
+  private readonly jwtSecret: string;
+  private readonly taxRate: number;
+
+  constructor(private readonly configService: ConfigService) {
+    // ดึงค่าคอนฟิกพร้อม Type Hint ที่แม่นยำ
+    this.jwtSecret = this.configService.getOrThrow<string>('JWT_SECRET');
+    this.taxRate = this.configService.get<number>('BUTCHER_TAX_RATE', 0.07);
+  }
+
+  calculateTax(amount: number): number {
+    return Math.round(amount * this.taxRate);
+  }
+}
+```
+
+## 4. ผิด vs ถูก
+
+```typescript filename="src/nestjs.ts"
+// ❌ ผิด: เรียกใช้ process.env กระจัดกระจายอยู่ทั่วโค้ดเบสโดยไม่มีการตรวจสอบ
+@Injectable()
+export class BadOrderService {
+  charge() {
+    // ❌ หากลืมใส่ตัวแปรนี้ใน .env เซิร์ฟเวอร์จะคืนค่า undefined และคำนวณบิลพังเงียบๆ (Silent Bug)
+    const secret = process.env.PAYMENT_GATEWAY_KEY;
+    const port = Number(process.env.PORT); 
+  }
+}
+```
+
+```typescript filename="src/nestjs.ts"
+// ✅ ถูก: โหลดค่าผ่าน ConfigService ที่ผ่านกระบวนการ Validation มาเรียบร้อยแล้ว
+@Injectable()
+export class GoodOrderService {
+  constructor(private readonly configService: ConfigService) {}
+
+  charge() {
+    // ✅ getOrThrow จะหยุดการทำงานทันทีหากตัวแปรนี้หายไป พร้อมทั้งมี Type ปลอดภัย
+    const secret = this.configService.getOrThrow<string>('PAYMENT_GATEWAY_KEY');
+  }
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ ConfigModule**: ตั้งแต่วันแรกที่สร้างโปรเจกต์ และต้องเปิดใช้งาน Schema Validation (Zod หรือ Joi) เสมอ
+- **ไม่ควร Hardcode ความลับ**: ห้ามเขียน API Key, Secret Token, หรือ Database Credentials ลงในโค้ด TypeScript เด็ดขาด
+
+## 6. คำถามสัมภาษณ์
+**ถาม**: แนวคิด "Fail-Fast Configuration Validation" มีประโยชน์อย่างไรต่อกระบวนการทำ CI/CD Deployment ของระบบ Enterprise?
+**ตอบ**: ช่วยป้องกันไม่ให้ Container ที่ขาด Environment Variables ที่สำคัญ ถูก Deploy ขึ้นสู่ Production ระบบจะหยุดการทำงานตั้งแต่ขั้นตอน Booting ทำให้ระบบ Orchestrator (เช่น Kubernetes หรือ Docker Swarm) ตรวจพบว่า Health Check ไม่ผ่าน และยกเลิกการ Rollout ทันที ทำให้ระบบเดิมยังคงให้บริการลูกค้าได้อย่างต่อเนื่องโดยไม่เกิด Downtime
+
+---

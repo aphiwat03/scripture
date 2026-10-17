@@ -1,0 +1,116 @@
+---
+title: Short Transaction
+category: DATABASE
+parentTitle: Transactions
+version: PostgreSQL 16 & Prisma $tx
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ใน PostgreSQL 16 ทุกๆ คำสั่ง SQL จะทำงานอยู่ภายใต้ Transaction เสมอ หากเราไม่ได้สั่ง `BEGIN` ด้วยตัวเอง PostgreSQL จะทำงานในโหมด **Autocommit** คือครอบ `BEGIN` ก่อนเริ่มคำสั่งและสั่ง `COMMIT` ทันทีที่คำสั่งนั้นทำงานเสร็จ แต่เมื่อเราเปิด Transaction ด้วยตัวเองเพื่อทำหลายขั้นตอน กฎเหล็กด้านสถาปัตยกรรมที่สำคัญที่สุดคือ **"Keep Transactions as Short as Possible (ออกแบบ Transaction ให้สั้นและจบเร็วที่สุด)"**
+
+ศัตรูตัวร้ายที่สุดของฐานข้อมูล Production คือสถานะที่เรียกว่า **`idle in transaction`** ซึ่งหมายถึงแอปพลิเคชันได้สั่งเปิด `BEGIN` ไปแล้ว และรันคำสั่ง SQL ไปบางส่วน (ทำให้ถือครอง Row Locks และ Snapshot ไว้) แต่กลับหยุดนิ่งไม่ยอมส่งคำสั่งถัดไปและไม่ยอมสั่ง `COMMIT` หรือ `ROLLBACK` เสียที เพราะมัวแต่ไปรอเรียก External API (เช่น รอตัดบัตรเครดิตผ่าน Stripe/Omise หรือรอส่งอีเมล/อัปโหลดรูปภาพ)!
+
+```mermaid filename="docs/database/transactions-diagram.mmd"
+sequenceDiagram
+    participant App as Backend API
+    participant DB as PostgreSQL 16
+    participant Ext as Payment Gateway / Email API
+    Note over App,DB: ❌ ผิดมหันต์: เรียก External API ภายใน Database Transaction
+    App->>DB: BEGIN; UPDATE products SET stock_qty = stock_qty - 1;
+    Note right of DB: แถวสินค้าถูกล็อกค้างไว้! (สถานะ: idle in transaction)
+    App->>Ext: HTTP POST /charge (รอเครือข่ายภายนอกนาน 3-10 วินาที...)
+    Ext-->>App: ตอบกลับ 200 OK
+    App->>DB: COMMIT;
+    Note over App,DB: ✅ ถูกต้อง: แยก Network I/O ออกนอก Database Transaction
+    App->>DB: Transaction ที่ 1: จองสต็อกและสร้างออเดอร์สถานะ PENDING (ใช้เวลา 2ms แล้ว COMMIT ทันที!)
+    App->>Ext: HTTP POST /charge (ไม่มีการถือ Lock ใน DB เลย)
+    Ext-->>App: ตอบกลับ 200 OK
+    App->>DB: Transaction ที่ 2: บันทึก payments และเปลี่ยนสถานะเป็น PAID (ใช้เวลา 2ms แล้ว COMMIT!)
+```
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ทำไมการเปิด Transaction ค้างไว้นานแค่ 5-10 วินาที จึงทำให้ฐานข้อมูลทั้งระบบล่มได้?
+1. **Row Locks Contention:** ทันทีที่คำสั่ง `UPDATE products SET stock_qty = ...` รันเสร็จ แถวของสินค้านั้นจะถูกล็อก (`FOR NO KEY UPDATE`) ไปจนกว่าจะสั่ง `COMMIT` หากเราไปรอเรียก API ภายนอกนาน 5 วินาที ลูกค้าคนอื่นๆ ที่กดซื้อสินค้าชิ้นเดียวกันจะค้างเติ่งต่อคิวรอ Lock จนลามไปสู่การกิน Connection Pool เต็มทั้งระบบ
+2. **Autovacuum Blocked (Xmin Horizon Stalled):** ตราบใดที่มี Transaction เปิดค้างอยู่ กระบวนการ Autovacuum จะไม่สามารถลบ Dead Tuples ที่เกิดขึ้นหลังจากที่ Transaction นั้นเริ่มต้นได้เลยทั่วทั้งฐานข้อมูล
+3. **Connection Pool Starvation:** ในระบบที่ใช้ PgBouncer โหมด `transaction pooling` ตัว Connection ของฐานข้อมูลจะถูกยึดไว้กับ Client นั้นตลอดเวลาที่อยู่ในบล็อก `BEGIN ... COMMIT` และไม่สามารถสลับไปให้ Request อื่นยืมใช้ได้
+
+เพื่อปกป้องฐานข้อมูล PostgreSQL 16 จึงมีพารามิเตอร์ป้องกันตัวเอง 3 ตัวที่ควรตั้งค่าไว้เสมอ:
+- `statement_timeout`: ยกเลิกคิวรีเดี่ยวๆ ที่รันนานเกินกำหนด (เช่น `10s`)
+- `lock_timeout`: ยกเลิกคำสั่งที่ต้องรอคิว Lock นานเกินกำหนด (เช่น `3s`) เพื่อไม่ให้คิวรอสะสมเป็นลูกโซ่
+- `idle_in_transaction_session_timeout`: ตัดและ Rollback Transaction ที่เปิดค้างไว้เฉยๆ โดยไม่ส่งคำสั่งเข้ามานานเกินกำหนด (เช่น `15s`)
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การตั้งค่า Safety Timeouts ใน PostgreSQL 16 เพื่อป้องกัน Transaction ค้าง
+กำหนดเพดานเวลาความปลอดภัยให้กับ Role ของแอปพลิเคชันหรือระดับฐานข้อมูล เพื่อป้องกันไม่ให้บั๊กในโค้ดฝั่ง Backend ล็อกฐานข้อมูลค้าง:
+
+```sql filename="sql/07_configure_transaction_safety_timeouts.sql"
+-- ตั้งค่าเพดานเวลาป้องกันตัวเองให้กับฐานข้อมูล smart_butcher_db บน Production
+-- 1. หากเปิด BEGIN ทิ้งไว้โดยไม่ส่งคำสั่งใหม่เกิน 15 วินาที ให้ Rollback และตัด Session ทันที
+ALTER DATABASE smart_butcher_db SET idle_in_transaction_session_timeout = '15s';
+
+-- 2. หากคำสั่งใดต้องรอคิว Lock จาก Transaction อื่นนานเกิน 3 วินาที ให้ยกเลิกคำสั่งนั้นทันที (Fail Fast)
+ALTER DATABASE smart_butcher_db SET lock_timeout = '3s';
+
+-- 3. หากคิวรีเดี่ยวๆ รันนานเกิน 10 วินาที ให้ยกเลิกเพื่อคืนทรัพยากร CPU
+ALTER DATABASE smart_butcher_db SET statement_timeout = '10s';
+```
+
+### ตัวอย่างที่ 2: การจัดลำดับคำสั่งภายใน Transaction (เรียงคำสั่งที่ล็อกแถวเข้มข้นไว้ท้ายสุด!)
+ภายใน Transaction เดียวกัน เราควรรันคำสั่ง `SELECT` หรือ `INSERT` ลงตารางของตัวเองก่อน แล้วนำคำสั่ง `UPDATE` ที่ต้องไปล็อกแถวที่ใช้ร่วมกัน (Shared Hot Rows เช่น การตัดสต็อก `products`) **ไว้เป็นคำสั่งสุดท้ายก่อน `COMMIT`** เพื่อบีบระยะเวลาถือครอง Lock บนแถวสินค้านั้นให้สั้นที่สุดระดับไมโครวินาที:
+
+```sql filename="sql/08_optimize_lock_duration_inside_tx.sql"
+BEGIN;
+
+-- ขั้นที่ 1: INSERT ข้อมูลลงตาราง orders และ order_items ก่อน (เป็นการสร้างแถวใหม่ ไม่ได้ไปบล็อกลูกค้าคนอื่น)
+INSERT INTO orders (id, user_id, order_number, status, subtotal_amount, total_amount, shipping_address)
+VALUES (
+    'f3333333-3333-3333-3333-333333333333',
+    'a1111111-1111-1111-1111-111111111111',
+    'ORD-20261017-0003',
+    'PENDING',
+    5200.00,
+    5200.00,
+    '{"recipient": "คุณนภา", "address": "อารีย์ กรุงเทพฯ"}'::jsonb
+);
+
+INSERT INTO order_items (order_id, product_id, product_name_snapshot, product_sku_snapshot, quantity, unit_price)
+VALUES (
+    'f3333333-3333-3333-3333-333333333333',
+    '8e94fae4-18df-4158-b34e-6e8ebdc5fca1',
+    'Miyazaki Wagyu A5 Striploin',
+    'WGY-MIYA-A5-STRIP',
+    1,
+    5200.00
+);
+
+-- ขั้นที่ 2: วางคำสั่ง UPDATE ตาราง products (ซึ่งเป็น Hot Row ที่คนแย่งกันซื้อ) ไว้บรรทัดสุดท้ายติดกับ COMMIT!
+-- ทำให้แถวสินค้านี้ถูกล็อกเพียงเสี้ยวของมิลลิวินาทีก่อนที่ COMMIT จะปลดล็อกทันที!
+UPDATE products
+SET stock_qty = stock_qty - 1,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = '8e94fae4-18df-4158-b34e-6e8ebdc5fca1';
+
+COMMIT;
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การเรียก API ภายนอกใน Transaction** | เรียก Payment Gateway, ส่งอีเมล, หรืออัปโหลดไฟล์ S3 อยู่ข้างในบล็อก Transaction | แยกเป็น Pattern 2 เฟส (บันทึกสถานะ `PENDING` แล้ว `COMMIT` ก่อน -> เรียก API -> เปิด Transaction ใหม่อัปเดตผลลัพธ์) |
+| **ลำดับการรันคำสั่งใน Transaction** | สั่ง `UPDATE products` ล็อกสินค้ายอดฮิตไว้บรรทัดแรก แล้วค่อยไปรันคำสั่งคำนวณและ `INSERT` อีก 10 ตาราง | รันคำสั่งเตรียมข้อมูลและ `INSERT` ตารางที่ไม่แย่งกับใครก่อน แล้วสั่ง `UPDATE` แถวที่มีการแย่งชิงสูงไว้ท้ายสุดก่อน `COMMIT` |
+| **การไม่ตั้งค่า Timeout ป้องกัน** | ปล่อยค่า `idle_in_transaction_session_timeout = 0` (ไม่จำกัดเวลา) ตามค่าเริ่มต้น | ตั้งค่า `idle_in_transaction_session_timeout` และ `lock_timeout` เสมอเพื่อป้องกันระบบค้างทั้งลูกโซ่ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรตั้งค่า `idle_in_transaction_session_timeout` และ `lock_timeout` เมื่อ:** นำระบบขึ้นสู่สภาพแวดล้อม Staging และ Production ทุกครั้ง
+- **ไม่ควรรันงานประมวลผลชุดใหญ่หรือรอคำตอบจากผู้ใช้ภายใน Transaction เมื่อ:** งานนั้นใช้เวลานานเกิน 1-2 วินาที โดยควรเปลี่ยนไปใช้ตารางคิวงาน (Outbox Pattern / Background Job Queue) แทน
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ทำไมการวางคำสั่ง `UPDATE products SET stock_qty = stock_qty - 1` ไว้เป็นคำสั่งสุดท้ายก่อน `COMMIT` จึงช่วยให้ระบบรองรับผู้ใช้งานพร้อมกัน (Throughput) ได้สูงกว่าการวางไว้เป็นคำสั่งแรกของ Transaction?**
+  - **แนวคำตอบ:** เพราะใน PostgreSQL การล็อกแถวข้อมูล (`Row-level Lock`) จะเริ่มขึ้นทันทีที่รันคำสั่ง `UPDATE` นั้น และจะถูกถือครองไว้ไปจนกว่าจะถึงคำสั่ง `COMMIT` (ไม่ได้ปลดล็อกทันทีที่รันบรรทัด `UPDATE` เสร็จ) หากใน Transaction มีทั้งหมด 5 คำสั่ง คำสั่งละ 2ms (รวม 10ms) การเอา `UPDATE products` ไว้บรรทัดแรกจะทำให้แถวสินค้านั้นถูกล็อกนานถึง **10ms** (รับได้แค่ 100 ออเดอร์/วินาที) แต่ถ้าย้าย `UPDATE products` มาไว้บรรทัดที่ 5 ติดกับ `COMMIT` แถวสินค้านั้นจะถูกล็อกเพียงแค่ **2ms สุดท้าย** เท่านั้น ทำให้รองรับออเดอร์พร้อมกันบนสินค้าตัวเดียวกันได้เพิ่มขึ้นถึง 5 เท่า (500 ออเดอร์/วินาที)!
+- **Q2: สถานะ `idle in transaction` ในตาราง `pg_stat_activity` หมายถึงอะไร และแตกต่างจากสถานะ `idle` ปกติอย่างไร?**
+  - **แนวคำตอบ:** สถานะ `idle` ปกติ หมายถึง Connection ที่ว่างอยู่เฉยๆ ไม่ได้เปิด Transaction ค้างไว้ (ปลอดภัยและไม่ถือครอง Lock ใดๆ) ส่วนสถานะ `idle in transaction` หมายถึง Connection ที่แอปพลิเคชันสั่ง `BEGIN` เปิด Transaction ไปแล้วและอาจรันคำสั่งล็อกแถวไปแล้ว แต่ขณะนี้หยุดนิ่งไม่ได้ส่งคำสั่ง SQL ใดๆ เข้ามาเพิ่มและยังไม่ยอมสั่ง `COMMIT`/`ROLLBACK` ซึ่งเป็นสถานะที่อันตรายมากเพราะบล็อกทั้ง Transaction อื่นและบล็อก Autovacuum
+
+---

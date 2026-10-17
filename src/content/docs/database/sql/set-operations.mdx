@@ -1,0 +1,139 @@
+---
+title: Set Operations
+category: DATABASE
+parentTitle: SQL
+version: SQL:2023 & PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในระบบบัญชีและการตลาดของ **Smart Butcher Marketplace** เรามักต้องนำข้อมูลจากหลายชุดมาผสานรวมหรือเปรียบเทียบกันตามทฤษฎีเซต (Set Theory):
+- **`UNION` / `UNION ALL`**: รวมสายธารข้อมูล เช่น รวมรายการรับเงินค่าเนื้อสดและรายการค่าจัดส่งเข้าเป็นบัญชีรายรับเดียว
+- **`INTERSECT`**: หาข้อมูลส่วนที่ทับซ้อนกัน เช่น หาชิ้นเนื้อที่ลูกค้าระดับ Gold และลูกค้าระดับ Platinum นิยมสั่งซื้อเหมือนกัน
+- **`EXCEPT`**: หาข้อมูลที่มีในเซตแรกแต่ไม่มีในเซตที่สอง เช่น ค้นหาลูกค้าที่เคยสั่งเนื้อวากิว แต่ **ไม่เคย** สั่งเนื้อดรายเอจเลย เพื่อทำแคมเปญส่งคูปองทดลองชิม
+
+## 2. กฎเกณฑ์และหลักการเบื้องหลัง (Under the Hood)
+1. **กฎของ Set Operations**:
+   - จำนวนคอลัมน์ของทุก Query ต้องเท่ากันทุกประการ
+   - ชนิดข้อมูล (Data Types) ของคอลัมน์ในตำแหน่งเดียวกันต้องเข้ากันได้ (Type Compatible) เช่น NUMERIC รวมกับ INTEGER ได้
+   - ชื่อคอลัมน์ของผลลัพธ์สุดท้ายจะยึดตาม **Query แรกสุด** เท่านั้น
+2. **UNION vs UNION ALL (ความแตกต่างด้านประสิทธิภาพ)**:
+   - `UNION ALL`: นำข้อมูลทั้งสองชุดมาต่อท้ายกันตรงๆ โดยไม่มีการตรวจสอบข้อมูลซ้ำ ประสิทธิภาพสูงมาก ($O(N)$) แทบไม่เปลือง CPU และ Memory
+   - `UNION`: ทำการต่อข้อมูลเสร็จแล้ว **ต้องคัดข้อมูลที่ซ้ำกันทิ้ง (Deduplication)** โดย PostgreSQL ต้องส่งข้อมูลไปเข้า HashAggregate หรือ Unique / Sort Node ($O(N \log N)$) หากข้อมูลมีขนาดใหญ่จะล้นหน่วยความจำ `work_mem` และถูกเทลง Disk (Spill to Disk) ทำให้ช้าลงหลายสิบเท่า
+
+```text filename="docs/database/sql.txt"
++─────────────────────────────────────────────────────────────+
+|               การเปรียบเทียบ SET OPERATIONS                |
++─────────────────────────────────────────────────────────────+
+| เซต A: [ วากิว A5, ดรายเอจ 45 วัน, ทีโบน ]                  |
+| เซต B: [ ทีโบน, โทมาฮอว์ก, สไตรปลอยน์ ]                    |
++─────────────────────────────────────────────────────────────+
+| A UNION ALL B:                                              |
+| -> [ วากิว A5, ดรายเอจ 45 วัน, ทีโบน, ทีโบน, โทมาฮอว์ก, สไตรปลอยน์ ] (6 แถว) |
++─────────────────────────────────────────────────────────────+
+| A UNION B (ตัดซ้ำ):                                         |
+| -> [ วากิว A5, ดรายเอจ 45 วัน, ทีโบน, โทมาฮอว์ก, สไตรปลอยน์ ] (5 แถว)        |
++─────────────────────────────────────────────────────────────+
+| A INTERSECT B (ส่วนร่วม):                                   |
+| -> [ ทีโบน ] (1 แถว)                                        |
++─────────────────────────────────────────────────────────────+
+| A EXCEPT B (มีใน A แต่ไม่มีใน B):                           |
+| -> [ วากิว A5, ดรายเอจ 45 วัน ] (2 แถว)                     |
++─────────────────────────────────────────────────────────────+
+```
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสร้างสมุดบัญชีรายรับรวม (Cash Inflow Ledger) ด้วย `UNION ALL`
+รวมรายการเงินเข้าจากช่องทางชำระเงินปกติในตาราง `payments` เข้ากับรายการเติมเงินเครดิตกระเป๋าเงินล่วงหน้าของลูกค้า:
+
+```sql filename="sql/sql.sql"
+-- รวมรายการกระแสเงินสดรับเข้าทั้งหมดด้วย UNION ALL เพื่อประสิทธิภาพสูงสุด
+SELECT 
+    'ORDER_PAYMENT' AS transaction_type,
+    order_id::text AS reference_no,
+    amount,
+    method AS payment_channel,
+    created_at AS transaction_time
+FROM payments
+WHERE status = 'PAID'
+
+UNION ALL
+
+SELECT 
+    'STORE_CREDIT_TOPUP' AS transaction_type,
+    'TOPUP-' || id::text AS reference_no,
+    amount,
+    'PROMPTPAY' AS payment_channel,
+    created_at AS transaction_time
+FROM payments
+WHERE status = 'VERIFYING' -- รายการรอตรวจสอบเงินเข้า
+
+ORDER BY transaction_time DESC;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| transaction_type | reference_no | amount | payment_channel | transaction_time |
+| :--- | :--- | :--- | :--- | :--- |
+| STORE_CREDIT_TOPUP | TOPUP-3 | 10800.00 | PROMPTPAY | 2026-10-10 18:50:00+07 |
+| ORDER_PAYMENT | 2 | 5600.00 | PROMPTPAY | 2026-10-05 14:20:00+07 |
+| ORDER_PAYMENT | 1 | 13500.00 | CREDIT_CARD | 2026-10-01 10:35:00+07 |
+
+### ตัวอย่างที่ 2: การใช้ `EXCEPT` หาชิ้นเนื้อที่ขายดีในกลุ่มลูกค้ารายย่อย แต่ไม่เคยถูกสั่งซื้อโดยลูกค้าระดับองค์กร
+ค้นหารหัสสินค้าเนื้อที่มีการสั่งซื้อจากลูกค้าทั่วไป (`role = 'customer'`) แต่ **ไม่เคยถูกซื้อ** จากลูกค้าระดับผู้ดูแลหรือเชฟมืออาชีพ:
+
+```sql filename="sql/sql.sql"
+-- ค้นหาสินค้าที่มียอดสั่งซื้อจากลูกค้ารายย่อย แต่ไม่เคยถูกซื้อโดยลูกค้า VIP/Admin
+SELECT DISTINCT oi.product_id
+FROM order_items oi
+INNER JOIN orders o ON oi.order_id = o.id
+INNER JOIN users u ON o.user_id = u.id
+WHERE u.role = 'customer'
+
+EXCEPT
+
+SELECT DISTINCT oi.product_id
+FROM order_items oi
+INNER JOIN orders o ON oi.order_id = o.id
+INNER JOIN users u ON o.user_id = u.id
+WHERE u.role = 'admin';
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| product_id |
+| :--- |
+| 1 |
+| 2 |
+
+## 4. ผิด vs ถูก (Anti-patterns & Best Practices)
+
+### ❌ โค้ดที่ผิด: ใช้ `UNION` เสมอโดยความเคยชิน ทั้งที่ข้อมูลทั้งสองฝั่งไม่มีทางซ้ำกัน
+```sql filename="sql/sql.sql"
+-- ผิด: ตาราง logs แยกตามเดือน ไม่มีข้อมูลชนกันอยู่แล้ว การใช้ UNION ทำให้เสียเวลา Sort และ Deduplicate
+SELECT log_date, message FROM system_logs_2026_09
+UNION
+SELECT log_date, message FROM system_logs_2026_10;
+```
+
+### ✅ โค้ดที่ถูก: ใช้ `UNION ALL` เป็นค่าตั้งต้นเสมอ เว้นแต่จำเป็นต้องกำจัดข้อมูลซ้ำจริง
+```sql filename="sql/sql.sql"
+-- ถูกต้อง: UNION ALL รันได้ทันทีโดยไม่ต้อง Sort ข้อมูล ประหยัดหน่วยความจำและ CPU มหาศาล
+SELECT log_date, message FROM system_logs_2026_09
+UNION ALL
+SELECT log_date, message FROM system_logs_2026_10;
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `UNION ALL`:** เมื่อต้องการรวมข้อมูลจากหลายตารางที่มีโครงสร้างเหมือนกัน (เช่น ตาราง Partition รายเดือน, Audit Log)
+- **ควรใช้ `EXCEPT` / `INTERSECT`:** ในการวิเคราะห์พฤติกรรมลูกค้าเชิงการตลาด (Cohort Analysis)
+- **หลีกเลี่ยง `UNION` บนตารางขนาดมหึมา:** หากจำเป็นต้องตัดข้อมูลซ้ำและข้อมูลมีขนาดใหญ่ ควรตรวจสอบว่าสามารถใช้เงื่อนไข `WHERE` กรองข้อมูลให้ไม่ซ้ำตั้งแต่แรกได้หรือไม่
+
+## 6. คำถามสัมภาษณ์ (Interview Questions)
+- **Q1: ในการทำงานของคำสั่ง `UNION` ตำแหน่งของคำสั่ง `ORDER BY` ต้องวางไว้ตรงจุดไหน และมีผลกับชุดข้อมูลอย่างไร?**
+  - *คำตอบ:* คำสั่ง `ORDER BY` จะต้องวางไว้ที่ **ท้ายสุดของ Query ทั้งหมด** (หลัง Query สุดท้าย) โดยจะทำการจัดเรียงผลลัพธ์ของเซตรวมทั้งหมดในขั้นตอนสุดท้าย หากเราต้องการเรียงลำดับเฉพาะใน Query ย่อยแต่ละตัวก่อนที่จะนำมารวมกัน จะต้องครอบ Query ย่อยนั้นด้วยวงเล็บคู่กับ `LIMIT`
+- **Q2: หากรันคำสั่ง `UNION` ระหว่างสองตารางที่มีขนาดตารางละ 5 ล้านแถว แล้วเซิร์ฟเวอร์เกิดปัญหา I/O ชะงักและหน่วงอย่างรุนแรง ปัญหาน่าจะเกิดจากอะไร และตั้งค่าพารามิเตอร์ใดเพื่อบรรเทาปัญหา?**
+  - *คำตอบ:* เกิดจากกระบวนการ Deduplication ของ `UNION` ซึ่งต้องจัดเรียงหรือแฮชข้อมูลรวม 10 ล้านแถว หากขนาดข้อมูลเกินพารามิเตอร์ **`work_mem`** ของ PostgreSQL ตัว Engine จะต้องเทข้อมูลชั่วคราวออกไปเขียนลง Disk Storage (Spill to temporary disk files) ส่งผลให้เกิด Disk I/O คอขวดรุนแรง ทางแก้คือ 1) เปลี่ยนไปใช้ `UNION ALL` หากไม่ต้องการตัดข้อมูลซ้ำ หรือ 2) เพิ่มขนาด `work_mem` ชั่วคราวใน Session นั้นด้วยคำสั่ง `SET work_mem = '256MB';`
+
+---

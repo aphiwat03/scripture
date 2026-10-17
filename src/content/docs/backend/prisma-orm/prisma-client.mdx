@@ -1,0 +1,257 @@
+---
+title: Prisma Client
+category: BACKEND
+parentTitle: Prisma ORM
+version: Prisma 6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+**Prisma Client** ช่วยให้เราเขียนคำสั่งจัดการข้อมูล (CRUD), การกรองข้อมูลซับซ้อน (`where`), การเลือกเฉพาะคอลัมน์ที่ต้องใช้ (`select`), การดึงตารางที่เกี่ยวข้อง (`include`), และการคำนวณทางสถิติ (`aggregate`, `groupBy`) ได้ด้วย TypeScript Object ที่มี Auto-completion และ Type Inference ระดับลึก
+
+สิ่งสำคัญที่ทำให้โค้ดระดับ Senior แตกต่างจากระดับเริ่มต้น คือ:
+1. **ไม่ดึงทุกคอลัมน์เกินจำเป็น (Avoid Over-fetching)**: ใช้ `select` เพื่อระบุเฉพาะฟิลด์ที่ต้องส่งออกไปยัง API เสมอ
+2. **การสกัด Type อัตโนมัติด้วย `Prisma.<Model>GetPayload` หรือ `Prisma.validator`**: แทนที่จะเขียน Interface ซ้ำซ้อนด้วยมือ เราสามารถสกัด Return Type ที่ตรงกับ `select` หรือ `include` ของเราได้ 100%
+3. **การคำนวณยอดรวมในฐานข้อมูลด้วย `aggregate` และ `groupBy`**: แทนที่จะดึง `Order` นับหมื่นแถวมาวนลูป `.reduce()` ใน Node.js
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อเราเรียกใช้ `prisma.product.findMany({ select: { id: true, name: true } })` Prisma จะสร้างคำสั่ง SQL `SELECT "id", "name" FROM "products"` แทนที่จะเป็น `SELECT *` ช่วยลดปริมาณข้อมูลที่ส่งผ่านเครือข่ายระหว่าง PostgreSQL กับ Node.js (Network I/O) และลดการจองหน่วยความจำใน V8 Heap อย่างมหาศาล โดยเฉพาะเมื่อตารางนั้นมีคอลัมน์ขนาดใหญ่ เช่น `description` (`TEXT`) หรือ `metadata` (`JSONB`)
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การทำ Type-safe Select, Include และ Dynamic Filtering สำหรับแคตตาล็อกเนื้อ (พื้นฐาน)
+```typescript filename="src/modules/products/products-prisma.repository.ts"
+import { Injectable } from '@nestjs/common';
+import { Prisma, MeatGrade } from '@prisma/client';
+import { PrismaService } from '../../database/prisma.service';
+
+// 1. นิยามโครงสร้าง Select มาตรฐานและสกัด Type ออกมาโดยอัตโนมัติ
+export const productCatalogSelect = {
+  id: true,
+  sku: true,
+  name: true,
+  grade: true,
+  marblingScore: true,
+  dryAgedDays: true,
+  pricePerKgThb: true,
+  stockWeightGrams: true,
+  category: {
+    select: {
+      id: true,
+      name: true,
+      slug: true,
+    },
+  },
+} satisfies Prisma.ProductSelect;
+
+// Type นี้จะมีเฉพาะฟิลด์ที่ระบุใน productCatalogSelect เท่านั้น แม่นยำ 100%
+export type ProductCatalogItem = Prisma.ProductGetPayload<{
+  select: typeof productCatalogSelect;
+}>;
+
+export interface CatalogFilterParams {
+  search?: string;
+  categorySlug?: string;
+  grades?: MeatGrade[];
+  minPriceThb?: number;
+  maxPriceThb?: number;
+  onlyInStock?: boolean;
+  page: number;
+  limit: number;
+}
+
+@Injectable()
+export class ProductsPrismaRepository {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async searchCatalog(params: CatalogFilterParams): Promise<{
+    items: ProductCatalogItem[];
+    totalItems: number;
+  }> {
+    // 2. สร้างเงื่อนไขการกรองแบบ Type-safe ด้วย Prisma.ProductWhereInput
+    const where: Prisma.ProductWhereInput = {
+      isAvailable: true,
+      deletedAt: null,
+      ...(params.onlyInStock ? { stockWeightGrams: { gt: 0 } } : {}),
+      ...(params.categorySlug
+        ? { category: { slug: params.categorySlug } }
+        : {}),
+      ...(params.grades && params.grades.length > 0
+        ? { grade: { in: params.grades } }
+        : {}),
+      ...(params.minPriceThb !== undefined || params.maxPriceThb !== undefined
+        ? {
+            pricePerKgThb: {
+              ...(params.minPriceThb !== undefined
+                ? { gte: new Prisma.Decimal(params.minPriceThb) }
+                : {}),
+              ...(params.maxPriceThb !== undefined
+                ? { lte: new Prisma.Decimal(params.maxPriceThb) }
+                : {}),
+            },
+          }
+        : {}),
+      ...(params.search
+        ? {
+            OR: [
+              { name: { contains: params.search, mode: 'insensitive' } },
+              { sku: { contains: params.search, mode: 'insensitive' } },
+            ],
+          }
+        : {}),
+    };
+
+    const skip = (params.page - 1) * params.limit;
+
+    // 3. รันคำสั่งดึงรายการและนับจำนวนทั้งหมดพร้อมกัน
+    const [items, totalItems] = await Promise.all([
+      this.prisma.product.findMany({
+        where,
+        select: productCatalogSelect,
+        orderBy: [{ marblingScore: 'desc' }, { id: 'asc' }],
+        skip,
+        take: params.limit,
+      }),
+      this.prisma.product.count({ where }),
+    ]);
+
+    return { items, totalItems };
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การทำ Aggregation และ GroupBy สำหรับ Dashboard วิเคราะห์ยอดขายเนื้อพรีเมียม (ขั้นสูง)
+```typescript filename="src/modules/analytics/butcher-analytics.service.ts"
+import { Injectable } from '@nestjs/common';
+import { OrderStatus } from '@prisma/client';
+import { PrismaService } from '../../database/prisma.service';
+
+@Injectable()
+export class ButcherAnalyticsService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  // คำนวณสถิติภาพรวมยอดขายในช่วงวันที่กำหนดโดยใช้ PostgreSQL Aggregate Functions
+  async getRevenueSummary(startDate: Date, endDate: Date) {
+    const completedStatuses: OrderStatus[] = [
+      OrderStatus.PAID,
+      OrderStatus.PREPARING_CUT,
+      OrderStatus.SHIPPED,
+      OrderStatus.DELIVERED,
+    ];
+
+    const [orderStats, cutStyleBreakdown] = await Promise.all([
+      // 1. คำนวณ SUM, AVG, MAX, COUNT ของใบสั่งซื้อในระดับฐานข้อมูล
+      this.prisma.order.aggregate({
+        where: {
+          status: { in: completedStatuses },
+          createdAt: { gte: startDate, lte: endDate },
+        },
+        _sum: {
+          subtotalThb: true,
+          coldShippingFeeThb: true,
+          grandTotalThb: true,
+        },
+        _avg: {
+          grandTotalThb: true,
+        },
+        _max: {
+          grandTotalThb: true,
+        },
+        _count: {
+          id: true,
+        },
+      }),
+
+      // 2. จัดกลุ่ม (GROUP BY) ตามรูปแบบการหั่นเนื้อ (cutStyle) เพื่อดูว่าลูกค้าสั่งแบบไหนมากที่สุด
+      this.prisma.orderItem.groupBy({
+        by: ['cutStyle'],
+        where: {
+          order: {
+            status: { in: completedStatuses },
+            createdAt: { gte: startDate, lte: endDate },
+          },
+        },
+        _sum: {
+          weightGrams: true,
+          lineTotalThb: true,
+        },
+        _count: {
+          id: true,
+        },
+        having: {
+          weightGrams: {
+            _sum: { gt: 1000 }, // กรองเฉพาะรูปแบบการหั่นที่มียอดสั่งรวมเกิน 1 กิโลกรัม
+          },
+        },
+        orderBy: {
+          _sum: {
+            lineTotalThb: 'desc',
+          },
+        },
+      }),
+    ]);
+
+    return {
+      period: {
+        fromIso: startDate.toISOString(),
+        toIso: endDate.toISOString(),
+      },
+      totalOrders: orderStats._count.id,
+      totalRevenueThb: Number(orderStats._sum.grandTotalThb ?? 0),
+      averageOrderValueThb: Number(orderStats._avg.grandTotalThb ?? 0),
+      highestOrderValueThb: Number(orderStats._max.grandTotalThb ?? 0),
+      popularCutStyles: cutStyleBreakdown.map((row) => ({
+        cutStyle: row.cutStyle,
+        orderItemCount: row._count.id,
+        totalWeightKg: (row._sum.weightGrams ?? 0) / 1000,
+        totalSalesThb: Number(row._sum.lineTotalThb ?? 0),
+      })),
+    };
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/users/select-include-comparison.ts"
+// ❌ ผิด (Anti-pattern): ดึงข้อมูล User โดยไม่ระบุ select ทำให้ passwordHash ถูกดึงขึ้นมาจาก DB ทุกครั้ง และใช้ select คู่กับ include ในระดับเดียวกัน (Error!)
+export async function getUserAntiPattern(prisma: any, userId: string) {
+  // 1. ถ้าไม่ใส่ select ฟิลด์ passwordHash จะติดมาในหน่วยความจำและเสี่ยงหลุดออกไปทาง API
+  // 2. Prisma ไม่อนุญาตให้ใส่ทั้ง select และ include ในอ็อบเจกต์ระดับเดียวกัน
+  return prisma.user.findUnique({ where: { id: userId } });
+}
+
+// ✅ ถูก (Best Practice): ใช้ select ระบุเฉพาะฟิลด์ที่ปลอดภัย และซ้อน select ของตารางลูกไว้ข้างในได้เลย
+export async function getUserBestPractice(prisma: any, userId: string) {
+  return prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      email: true,
+      fullName: true,
+      role: true,
+      orders: {
+        select: {
+          id: true,
+          orderNumber: true,
+          grandTotalThb: true,
+        },
+        take: 5,
+        orderBy: { createdAt: 'desc' },
+      },
+    },
+  });
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `select` แทน `include` เมื่อ**: ทำงานกับตารางที่มีข้อมูลความลับ (เช่น `User` ที่มี `passwordHash`) หรือตารางที่มีคอลัมน์ขนาดใหญ่ เพื่อให้มั่นใจว่าดึงเฉพาะคอลัมน์ที่ต้องใช้จริงเท่านั้น
+- **ไม่ควรดึงข้อมูลด้วย `findMany` เพื่อมานับจำนวนหรือหาผลรวมใน JavaScript**: ให้ใช้ `prisma.<model>.count()`, `aggregate()`, หรือ `groupBy()` เพื่อให้ PostgreSQL คำนวณให้เสร็จตั้งแต่ใน Engine ของฐานข้อมูลเสมอ
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไม Prisma จึงไม่อนุญาตให้เราใช้ `select` และ `include` พร้อมกันในระดับเดียวกันของคิวรี และเราจะแก้ปัญหานี้ได้อย่างไรหากต้องการเลือกบางฟิลด์ของตารางแม่พร้อมดึงบางฟิลด์ของตารางลูก?
+   - **แนวคำตอบ**: เพราะ `include` มีความหมายว่า *"ดึงคอลัมน์ทั้งหมดของตารางแม่ (`SELECT *`) แล้วแถมตารางลูกที่ระบุมาด้วย"* ในขณะที่ `select` มีความหมายว่า *"ดึงเฉพาะคอลัมน์ที่ระบุเป็น `true` เท่านั้น"* ทั้งสองคำสั่งจึงขัดแย้งกันเอง วิธีแก้คือให้ใช้ `select` เป็นตัวหลัก แล้วซ้อน `select` ย่อยเข้าไปในชื่อฟิลด์ Relation ของตารางลูก (Nested `select`) ได้เลย
+2. **คำถาม**: ประโยชน์ของการใช้ `satisfies Prisma.ProductSelect` ร่วมกับ `Prisma.ProductGetPayload` คืออะไร?
+   - **แนวคำตอบ**: การใช้ `satisfies Prisma.ProductSelect` ช่วยให้ TypeScript ตรวจสอบว่าเราพิมพ์ชื่อฟิลด์ในอ็อบเจกต์ `select` ถูกต้องตาม Schema โดยไม่ทำให้ Type กว้างเกินไป (Preserves literal types `true`) และเมื่อส่งต่อให้ `Prisma.ProductGetPayload<{ select: typeof ... }>` เราจะได้ Type ของผลลัพธ์ที่มีเฉพาะฟิลด์ที่เราเลือกจริงๆ หากวันหน้าเราเพิ่มหรือลดฟิลด์ใน `select` ตัว Type ของฟังก์ชันทั้งหมดจะอัปเดตตามโดยอัตโนมัติ
+
+---

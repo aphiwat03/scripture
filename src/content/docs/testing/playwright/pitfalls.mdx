@@ -1,0 +1,63 @@
+---
+title: Anti-patterns
+category: TESTING & QUALITY
+parentTitle: Playwright
+version: Playwright v1.49
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **Hardcoded Sleeps (`page.waitForTimeout`):**
+   - **ปัญหา:** การใส่ `await page.waitForTimeout(5000)` เพื่อรอให้หน้าเว็บโหลดเสร็จ ทำให้เทสต์ช้าโดยไม่จำเป็น และยังพังทันทีเมื่อสภาพแวดล้อม CI ช้ากว่าปกติเพียงเล็กน้อย
+   - **วิธีแก้:** ลบ `waitForTimeout` ออกทั้งหมด และใช้ Web-First Assertions (`await expect(locator).toBeVisible()`) ซึ่งจะทำงานต่อทันทีที่ Element พร้อม
+2. **Brittle CSS / XPath Selectors (ผูกติดกับโครงสร้าง HTML หรือคลาส Tailwind):**
+   - **ปัญหา:** การใช้ `page.locator('div.flex.items-center > button:nth-child(3)')` ซึ่งพังทุกครั้งที่มีการปรับดีไซน์หรือเพิ่มปุ่มใหม่
+   - **วิธีแก้:** ใช้ `page.getByRole()`, `page.getByLabel()` และการกรองด้วย `.filter({ hasText: '...' })` ตามหลัก Accessibility
+3. **Interdependent Tests (เทสต์ข้อที่ 2 ต้องพึ่งพาผลลัพธ์จากเทสต์ข้อที่ 1):**
+   - **ปัญหา:** เทสต์ข้อที่ 1 สร้างคำสั่งซื้อเนื้อวากิว แล้วเทสต์ข้อที่ 2 เข้าไปกดยกเลิกคำสั่งซื้อนั้น เมื่อสั่งรันแบบ `fullyParallel: true` หรือรันเฉพาะข้อที่ 2 เดี่ยวๆ เทสต์จะพังทันที
+   - **วิธีแก้:** ทำให้ทุก Test Case มีความเป็นอิสระสมบูรณ์ (Self-contained) โดยเตรียมข้อมูลตั้งต้นของตัวเองใน `beforeEach` ผ่าน API Seeding
+4. **Testing Everything Through E2E (สร้าง Ice-Cream Cone Anti-pattern):**
+   - **ปัญหา:** เขียนเทสต์ตรวจสอบการกรอกอีเมลผิดรูปแบบ 15 เคสผ่าน Playwright E2E จนไปป์ไลน์ CI ใช้เวลารันนานครึ่งชั่วโมง
+   - **วิธีแก้:** ย้ายการทดสอบ Validation Rules ย่อยๆ ลงไปไว้ที่ Unit Test (Jest) และ Component Test (React Testing Library) แล้วสงวน Playwright E2E ไว้สำหรับ Critical User Journeys และ `async` Server Components
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+ก่อนนำชุดทดสอบ Playwright E2E ของระบบ **Smart Butcher Marketplace** ขึ้นใช้งานจริงบน Production CI/CD ให้ตรวจสอบรายการต่อไปนี้:
+
+- [ ] **Zero `waitForTimeout`:** ไม่มีคำสั่ง `page.waitForTimeout()` หลงเหลืออยู่ในโค้ดเทสต์ ทุกการรอใช้ Web-First Assertions (`await expect(locator)...`)
+- [ ] **Auth `storageState` Configured:** มีการใช้ Setup Project เพื่อบันทึกสถานะการล็อกอินลงใน `playwright/.auth/` (และเพิ่มโฟลเดอร์นี้ใน `.gitignore` แล้ว)
+- [ ] **Page Object Model (POM):** หน้าจอหลักที่มีการโต้ตอบซับซ้อน (Catalog, Product Customization, Checkout) ถูกแยกเป็นคลาส POM ที่ดูแลรักษาง่าย
+- [ ] **Test Isolation & Seeding:** แต่ละเทสต์สามารถรันแยกเดี่ยวๆ หรือรันขนาน (`fullyParallel: true`) ได้โดยไม่กวนข้อมูลกัน
+- [ ] **Trace on First Retry:** ตั้งค่า `trace: 'on-first-retry'` และอัปโหลด `playwright-report` เป็น Artifact บน GitHub Actions เพื่อให้ทีมสามารถเปิดดู Trace Viewer ย้อนหลังได้เมื่อเทสต์ล้มเหลว
+- [ ] **Cross-Browser & Mobile Coverage:** มีการทดสอบเส้นทางสั่งซื้อหลักทั้งบน Desktop Chromium และ Mobile WebKit (Safari)
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อคุณเชี่ยวชาญการเขียนชุดทดสอบ E2E ด้วย Playwright ร่วมกับ Next.js 16 แล้ว คุณได้ก้าวสู่การมีทักษะด้าน Automated Testing ครบทั้ง 3 เลเยอร์ของ Testing Pyramid ขอแนะนำให้ศึกษาต่อในเรื่องการรักษาคุณภาพโค้ดและระบบอัตโนมัติบน CI/CD ดังนี้:
+
+<Callout type="tip" title="ยกระดับไปสู่ระบบ Quality Gate อัตโนมัติเต็มรูปแบบ">
+ชุดทดสอบที่ยอดเยี่ยมทั้ง Unit, Integration, Frontend และ E2E จะทรงพลังที่สุดเมื่อถูกผูกเข้ากับระบบตรวจสอบคุณภาพโค้ดอัตโนมัติ (ESLint, Prettier, TypeScript Type-checking) และทำงานอัตโนมัติในทุกๆ Commit และ Pull Request ด้วย Git Hooks และ GitHub Actions CI
+</Callout>
+
+- **การรักษาคุณภาพโค้ด, การดีบัก และไปป์ไลน์ CI/CD:**
+  - [ESLint & Prettier](/docs/testing/eslint) — การตั้งค่ากฎตรวจสอบคุณภาพโค้ดและป้องกันการเขียนเทสต์ผิดหลักการ
+  - [Git Hooks & CI](/docs/testing/git-hooks) — การใช้ Husky, lint-staged และ GitHub Actions รันชุดทดสอบอัตโนมัติ
+  - [Debugging & Type Checking](/docs/testing/type-checking) — เทคนิคการวิเคราะห์บั๊กเชิงลึกและการตรวจสอบ Type Safety ทั้งระบบ
+- **ทบทวนเลเยอร์การทดสอบอื่นๆ ในกลุ่ม TESTING & QUALITY:**
+  - [Testing Fundamentals](/docs/testing/fundamentals) — ภาพรวมกลยุทธ์ Testing Pyramid และการเลือกใช้ Test Doubles
+  - [Jest](/docs/testing/jest) — พื้นฐาน Test Runner, Matchers และการทำ Mocking
+  - [Backend Testing](/docs/testing/backend-testing) — การทดสอบ NestJS 11 และ REST API ด้วย Supertest
+  - [Frontend Testing](/docs/testing/frontend-testing) — การทดสอบ React 19 Components, Hooks และ MSW
+- **สถาปัตยกรรมระบบที่เชื่อมต่อกับ E2E Testing:**
+  - [Next.js](/docs/nextjs) — การทำงานของ App Router, Server Components และ Middleware
+  - [Authentication](/docs/backend/authentication) — ระบบยืนยันตัวตน, Cookies และ JWT ที่ใช้ร่วมกับ `storageState`
+  - [Docker](/docs/backend/docker) — การรันสภาพแวดล้อมฐานข้อมูลและบริการทั้งหมดสำหรับทดสอบ E2E

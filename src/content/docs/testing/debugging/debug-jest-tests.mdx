@@ -1,0 +1,161 @@
+---
+title: Debug Jest Tests
+category: TESTING & QUALITY
+parentTitle: Debugging
+version: Node Inspector & DevTools
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+เมื่อชุดทดสอบ Jest หรือ Vitest ล้มเหลวในลอจิกที่ซับซ้อน (เช่น การคำนวณราคารวมของ `OrderItem` หลายชิ้นพร้อมหักส่วนลดตามลำดับขั้นแล้วตัวเลขคลาดเคลื่อนไป 1 บาท) การใส่ `console.log()` ไปเรื่อยๆ เป็นวิธีที่เสียเวลาและทำให้โค้ดสกปรก
+
+วิธีระดับมืออาชีพคือการเชื่อมต่อ **VS Code Built-in Debugger** เข้ากับกระบวนการรันเทสต์ของ Jest โดยตรงเพื่อ:
+- ปัก **Breakpoint (จุดสีแดง)** หรือ **Conditional Breakpoint** (หยุดเฉพาะเมื่อ `item.productId === 'prod-kobe-a5'`)
+- สำรวจค่าตัวแปรทั้งหมดในหน้าต่าง **Variables & Watch** แบบสดๆ
+- กด **Step Over (`F10`)**, **Step Into (`F11`)** เพื่อเดินดูการทำงานทีละบรรทัด
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+โดยค่าเริ่มต้น Jest จะแตก **Worker Processes (หรือ Worker Threads)** หลายตัวออกมารันไฟล์เทสต์แบบขนานกันเพื่อความเร็ว แต่เมื่อเราต้องการแนบ V8 Debugger เข้าไปวิเคราะห์ทีละบรรทัด การมีหลายโปรเซสทำงานพร้อมกันจะทำให้พอร์ต Inspector ชนกันและเกิด Timeout
+
+ดังนั้นในการ Debug ชุดทดสอบของ Jest เราจึงต้องส่งแฟล็กสำคัญ 2 ตัวเสมอ:
+1. **`--runInBand` (หรือ `-i`)**: บังคับให้ Jest รันเทสต์ทั้งหมดใน **Single Process เดียวกัน** (โปรเซสหลักตัวเดียว) ทำให้ VS Code Debugger จับสัญญาณ Breakpoint ได้แม่นยำ 100%
+2. **`--watchAll=false` และระบุพาธไฟล์ปัจจุบัน (`${fileBasename}`)**: เพื่อรันเฉพาะไฟล์เทสต์ที่เรากำลังเปิดดูอยู่เพียงไฟล์เดียว
+
+<Callout type="note" title="การป้องกันปัญหา Jest Timeout ขณะหยุดดูค่าที่ Breakpoint">
+เวลาที่คุณหยุดโค้ดค้างไว้ที่ Breakpoint เพื่อนั่งอ่านค่าตัวแปรเกิน 5 วินาที Jest อาจตัดจบเทสต์นั้นทันทีเพราะคิดว่าเทสต์ค้าง (Default timeout = 5000ms) ในโหมด Debug คุณสามารถตั้งค่า jest.setTimeout(300000) หรือส่งพารามิเตอร์ --testTimeout=300000 ในไฟล์ launch.json เพื่อมีเวลาตรวจสอบตัวแปรได้อย่างสบายใจ
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1 (ระดับพื้นฐาน): การตั้งค่า `.vscode/launch.json` สำหรับกดปุ่ม Debug ไฟล์เทสต์ Jest ปัจจุบันได้ในคลิกเดียว
+ไฟล์ตั้งค่า VS Code Debugger ที่ส่ง `--runInBand` และ `--testTimeout=300000` ให้กับไฟล์เทสต์ที่กำลังเปิดใช้งานอยู่
+
+```json filename=".vscode/launch.json"
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Current Jest Test File",
+      "type": "node",
+      "request": "launch",
+      "runtimeArgs": [
+        "--inspect-brk",
+        "${workspaceRoot}/node_modules/.bin/jest",
+        "${fileBasename}",
+        "--runInBand",
+        "--watchAll=false",
+        "--testTimeout=300000"
+      ],
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+    }
+  ]
+}
+```
+
+### ตัวอย่างที่ 2 (ระดับ Production): ชุดทดสอบการจัดสรรสต็อกเนื้อหลายรายการพร้อมการคำนวณภาษีที่ใช้ Breakpoint สืบหาจุดปัดเศษผิดพลาด
+โค้ดบริการและเทสต์ที่แสดงจุดวาง Breakpoint เพื่อตรวจสอบสถานะของ `Order`, `OrderItem`, `Product` และ `Payment` ในแต่ละรอบของลูป
+
+```typescript filename="src/services/butcher-tax-allocator.spec.ts"
+import type { OrderItem, Product } from '../domain/strict-payment-Guard';
+
+export interface TaxAllocationItemResult {
+  orderItemId: string;
+  netAmount: number;
+  vatAmount: number;
+  grossAmount: number;
+}
+
+export function allocateOrderVat7Percent(
+  items: readonly OrderItem[],
+  productsById: ReadonlyMap<string, Product>,
+): TaxAllocationItemResult[] {
+  return items.map((item): TaxAllocationItemResult => {
+    const product = productsById.get(item.productId);
+    if (!product) {
+      throw new Error(`ไม่พบรหัสเนื้อ ${item.productId}`);
+    }
+
+    const netAmount = Math.round(product.pricePerKg * item.weightKg);
+    // จุดที่เหมาะแก่การปัก Conditional Breakpoint: item.weightKg === 0.35
+    const vatAmount = Math.round(netAmount * 0.07 * 100) / 100;
+    const grossAmount = Number((netAmount + vatAmount).toFixed(2));
+
+    return {
+      orderItemId: item.id,
+      netAmount,
+      vatAmount,
+      grossAmount,
+    };
+  });
+}
+
+describe('allocateOrderVat7Percent (Debugging with --runInBand)', () => {
+  const tenderloin: Product = {
+    id: 'prod-tenderloin-chilled',
+    categoryId: 'cat-chilled',
+    name: 'Australian Grain-Fed Tenderloin',
+    sku: 'AUS-TEN-01',
+    pricePerKg: 2350,
+    stockKg: 10,
+  };
+
+  const catalog = new Map<string, Product>([[tenderloin.id, tenderloin]]);
+
+  it('calculates exact VAT 7% and gross amount for custom fractional weights', () => {
+    const items: OrderItem[] = [
+      {
+        id: 'item-01',
+        productId: tenderloin.id,
+        weightKg: 0.35, // 2350 * 0.35 = 822.5 -> ปัดเป็น 823 บาท
+        subtotal: 823,
+      },
+    ];
+
+    const results = allocateOrderVat7Percent(items, catalog);
+    const firstResult = results[0];
+
+    expect(firstResult).toBeDefined();
+    expect(firstResult?.netAmount).toBe(823);
+    expect(firstResult?.vatAmount).toBe(57.61);
+    expect(firstResult?.grossAmount).toBe(880.61);
+  });
+});
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/services/test-debugging.compare.ts"
+import type { OrderItem } from '../domain/strict-payment-Guard';
+
+// ❌ ผิด (Anti-pattern): โรย console.log เต็มโค้ดจริงเพื่อดูค่าตัวแปรตอนรันเทสต์ แล้วลืมลบทิ้งก่อน Commit
+export function sumOrderItemsBad(items: readonly OrderItem[]): number {
+  let total = 0;
+  for (const item of items) {
+    console.log('DEBUG item:', item); // ทำลายความสะอาดของโค้ดและทำให้ CI Log รก
+    total += item.subtotal;
+  }
+  console.log('DEBUG total:', total);
+  return total;
+}
+
+// ✅ ถูก (Best Practice): รักษาโค้ดให้สะอาด แล้วใช้ VS Code Breakpoint / Logpoint ร่วมกับ --runInBand
+export function sumOrderItemsGood(items: readonly OrderItem[]): number {
+  return items.reduce((acc, item) => acc + item.subtotal, 0);
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+- **ควรใช้ `--runInBand` เมื่อ**: รันเทสต์ผ่าน Debugger ในเครื่อง Local หรือเมื่อรันบน CI Container ที่มีจำนวน vCPU จำกัด (เช่น 1–2 vCPUs) เพื่อลด Overhead ในการสร้าง Worker Processes
+- **ไม่ควรใช้**: ไม่ควรใส่คีย์เวิร์ด `debugger;` ค้างไว้ในซอร์สโค้ดแล้ว Commit ขึ้น Git (ESLint กฎ `no-debugger` จะช่วยบล็อกเรื่องนี้ให้อัตโนมัติ) ให้ปัก Breakpoint ผ่าน UI ของ VS Code แทน
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+
+**Q1: Logpoint ใน VS Code Debugger คืออะไร และมีข้อดีเหนือกว่าการเขียน `console.log()` ในโค้ดอย่างไร?**
+- **แนวคำตอบ**: Logpoint (จุดสีชมพูรูปสี่เหลี่ยมข้าวหลามตัดในแถบเลขบรรทัดของ VS Code) ช่วยให้เราสั่งพิมพ์ค่าตัวแปรออกทาง Debug Console ได้โดย **ไม่ต้องแก้ไขไฟล์ซอร์สโค้ดแม้แต่ตัวอักษรเดียว** ไม่ต้องรอคอมไพล์ใหม่ และไม่มีความเสี่ยงที่จะเผลอ Commit โค้ด `console.log` หลุดขึ้นไปยัง Git Repository
+
+---

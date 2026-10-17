@@ -1,0 +1,118 @@
+---
+title: Supabase Backup
+category: DATABASE
+parentTitle: Backup
+version: pg_dump & WAL PITR
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ทีมพัฒนายุคใหม่จำนวนมากเลือกใช้ **Supabase** ซึ่งเป็นแพลตฟอร์ม Managed PostgreSQL 16 ที่ช่วยลดภาระการดูแลเซิร์ฟเวอร์ลงได้มหาศาล แต่ความเข้าใจผิดที่อันตรายที่สุดของนักพัฒนาคือการคิดว่า **"ขึ้นชื่อว่าอยู่บน Cloud แปลว่าเขามีระบบสำรองข้อมูลให้เราฟรีทุกแพ็กเกจอยู่แล้ว"**
+
+ในความเป็นจริง นโยบายการสำรองข้อมูลของแพลตฟอร์มคลาวด์ขึ้นอยู่กับระดับแพ็กเกจ (Pricing Tier) ที่เราเลือกใช้อย่างเคร่งครัด โดยเฉพาะแพ็กเกจ **Free Tier ที่ไม่มีการทำ Database Backup อัตโนมัติให้ผู้ใช้งานเรียกคืนได้เองเลย!**
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+การทำงานของระบบสำรองข้อมูลบน Supabase แบ่งออกเป็น 3 ระดับตามสถาปัตยกรรมเบื้องหลัง:
+1. **Free Plan (ไม่มี User-accessible Backups):**
+   Supabase ไม่ได้สร้าง Daily Backup ให้ผู้ใช้ดาวน์โหลดในหน้า Dashboard และหากโปรเจกต์ไม่มีการใช้งานติดต่อกัน 7 วัน โปรเจกต์จะถูกสั่งหยุดทำงานชั่วคราว (Paused) หากผู้ใช้ต้องการความอุ่นใจบน Free Tier จะต้องตั้งเวลา **GitHub Actions** เพื่อรัน `pg_dump` ดึงข้อมูลออกมาเก็บเอง
+2. **Pro Plan (Daily Automated Backups):**
+   ระบบจะทำการถ่ายสำเนาฐานข้อมูลรายวันเก็บย้อนหลังให้ **7 วัน** (เหมาะกับระบบที่ยอมรับ RPO สูงสุดไม่เกิน 24 ชั่วโมงได้) สำหรับฐานข้อมูลขนาดไม่เกิน 15 GB จะเป็น Logical Backup ที่ดาวน์โหลดไฟล์ออกมาได้ แต่หากเกิน 15 GB ระบบจะสลับไปใช้ Physical Snapshot ระดับดิสก์อัตโนมัติ
+3. **Pro Plan + PITR Add-on / Team / Enterprise (Point-in-Time Recovery):**
+   ใช้สถาปัตยกรรม **WAL-G** เบื้องหลังในการส่งไฟล์ Physical Base Backup และสตรีมไฟล์ WAL ขึ้นสู่ Object Storage อย่างต่อเนื่องทุกๆ 2 นาที ช่วยให้ผู้ดูแลระบบของ **Smart Butcher Marketplace** สามารถเลื่อนแถบเวลาในหน้า Dashboard เพื่อย้อนฐานข้อมูลกลับไปที่ **วินาทีใดก็ได้** ย้อนหลัง 7 ถึง 28 วัน
+
+### ตารางสรุปเปรียบเทียบระบบ Backup ของ Supabase แยกตามแพ็กเกจ
+
+| คุณสมบัติการสำรองข้อมูล | Free Tier | Pro Tier (มาตรฐาน) | Pro Tier + PITR Add-on |
+| :--- | :--- | :--- | :--- |
+| **Daily Automated Backup** | ❌ ไม่มีให้ใช้งาน | ✅ มี (เก็บย้อนหลัง 7 วัน) | ✅ มี (เป็น Physical Base Backup) |
+| **Point-in-Time Recovery (PITR)** | ❌ ไม่มี | ❌ ไม่มี | ✅ ย้อนเวลาได้ระดับวินาที (RPO ~2 นาที) |
+| **การดาวน์โหลดไฟล์ Backup ออกมาเอง** | ต้องรัน `pg_dump` เองผ่าน CLI / CI | ดาวน์โหลดได้จาก Dashboard (ถ้า DB < 15GB) | ต้องสั่ง `pg_dump` แยกหากต้องการไฟล์ `.dump` |
+| **ความเหมาะสมกับ Smart Butcher** | ใช้เฉพาะช่วงพัฒนาและทดสอบเท่านั้น | เหมาะกับช่วงเปิดตัวร้านแรกๆ | **แนะนำสำหรับ Production ที่มีคำสั่งซื้อต่อเนื่อง** |
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การใช้ `pg_dump` ดึงข้อมูลจาก Supabase Cloud ลงมาสำรองไว้ด้วยตัวเอง
+เมื่อต้องการดึงข้อมูลจาก Supabase ด้วย `pg_dump` เราควรเชื่อมต่อผ่าน **Session Pooler (พอร์ต 5432 บนโฮสต์ pooler)** หรือ **Direct Connection (IPv6)** ไม่ควรดึงผ่าน Transaction Pooler (พอร์ต 6543):
+
+```bash filename="supabase_manual_dump.sh"
+# กำหนด Connection String ของ Supabase (ใช้พอร์ต 5432 Session Mode หรือ Direct Connection)
+export SUPABASE_DB_URL="postgresql://postgres.projectref:YourStrongPassword@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres"
+
+# สำรองเฉพาะ Schema 'public' (ที่เป็นตารางของร้าน Smart Butcher ไม่ปนกับตารางระบบภายในของ Supabase เช่น auth/storage)
+pg_dump "${SUPABASE_DB_URL}" \
+  --schema=public \
+  -Fc --compress=zstd:5 \
+  --no-owner --no-privileges \
+  -f smart_butcher_supabase_public_$(date +%Y%m%d).dump
+```
+
+### ตัวอย่างที่ 2: GitHub Actions ตั้งเวลาสำรองฐานข้อมูล Supabase อัตโนมัติทุกคืน (ช่วยชีวิตโปรเจกต์ Free / Pro Tier)
+เวิร์กโฟลว์นี้จะตื่นขึ้นมาทุกวันเวลา 03:00 น. (เวลาไทย) เพื่อดึงข้อมูลจาก Supabase มาเก็บเป็นไฟล์สำรองโดยอัตโนมัติ:
+
+```yaml filename=".github/workflows/supabase-nightly-backup.yml"
+name: Nightly Supabase Database Backup
+
+on:
+  schedule:
+    # รันทุกวันเวลา 20:00 UTC (ตรงกับ 03:00 น. เวลาประเทศไทย)
+    - cron: '0 20 * * *'
+  workflow_dispatch: # อนุญาตให้กดรันด้วยมือได้ทันทีก่อนทำ Migration สำคัญ
+
+jobs:
+  backup-supabase:
+    name: Dump Public Schema & Upload to S3/Artifact
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install PostgreSQL 16 Client Tools
+        run: |
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16
+
+      - name: Run pg_dump on Supabase public schema
+        env:
+          SUPABASE_DIRECT_URL: ${{ secrets.SUPABASE_DIRECT_URL }}
+        run: |
+          TIMESTAMP=$(date -u +"%Y%m%d_%H%M%S")
+          FILENAME="smart_butcher_${TIMESTAMP}.dump"
+          pg_dump "$SUPABASE_DIRECT_URL" \
+            --schema=public \
+            -Fc --no-owner --no-privileges \
+            -f "$FILENAME"
+          echo "BACKUP_FILE=$FILENAME" >> $GITHUB_ENV
+
+      - name: Verify Backup Archive Integrity
+        run: pg_restore --list "${{ env.BACKUP_FILE }}"
+
+      - name: Upload Encrypted Backup Artifact (Retention 14 Days)
+        uses: actions/upload-artifact@v4
+        with:
+          name: supabase-db-backup-${{ github.run_id }}
+          path: ${{ env.BACKUP_FILE }}
+          retention-days: 14
+```
+
+<Callout type="tip" title="ทำไมตอนใช้ pg_dump กับ Supabase จึงควรระบุ --schema=public?">
+ภายในฐานข้อมูลของ Supabase มี Schema ระบบที่แพลตฟอร์มสร้างและดูแลเองอยู่จำนวนมาก เช่น `auth`, `storage`, `realtime`, `supabase_functions` และ `extensions` หากเราสั่ง `pg_dump` ทั้งฐานข้อมูลโดยไม่ระบุ `--schema=public` เวลานำไฟล์ไป `pg_restore` ลงโปรเจกต์ใหม่มักจะติดปัญหา Permission Denied บน Schema ระบบเหล่านั้น การระบุ `--schema=public` (หรือแยกดึงเฉพาะข้อมูลใน `auth.users` ด้วย `--data-only`) จะทำให้การกู้คืนตารางธุรกิจของเราราบรื่นที่สุด
+</Callout>
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การนำ Free Tier ขึ้น Production** | ใช้แพ็กเกจ Free Tier รันระบบขายจริงโดยไม่ทำสคริปต์ Backup แยก พอข้อมูลพังก็ไม่มีจุดให้กู้คืนเลย | อัปเกรดเป็น Pro Tier (และเปิด PITR เมื่อยอดขายสูง) หรือตั้งเวลา GitHub Actions ทำ Backup นอกคลาวด์ทุกคืน |
+| **การสำรองไฟล์รูปภาพเนื้อสเต๊ก** | เข้าใจผิดว่าการ Backup ฐานข้อมูลของ Supabase จะสำรองไฟล์รูปภาพใน Supabase Storage ให้ด้วย | ทราบชัดเจนว่า Database Backup เก็บเฉพาะข้อมูลตารางใน Postgres ส่วนไฟล์รูปใน Storage ต้องสำรองแยกต่างหาก |
+| **การดึง Backup ทั้งคลัสเตอร์** | สั่ง `pg_dump` ดึงทุก Schema ของ Supabase แล้วพยายามทับใส่โปรเจกต์ใหม่จนพังเพราะติดสิทธิ์ `supabase_admin` | ระบุ `--schema=public --no-owner --no-privileges` เพื่อสำรองและกู้คืนเฉพาะตารางของแอปพลิเคชันอย่างสะอาด |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรเปิดใช้งาน PITR Add-on บน Supabase เมื่อ:** ระบบ **Smart Butcher Marketplace** มีคำสั่งซื้อและการโอนเงินเข้ามาตลอดทั้งวัน และไม่สามารถยอมให้ข้อมูลระหว่างวันสูญหายได้หากเกิดอุบัติเหตุ
+- **ไม่ควรพึ่งพาเพียงระบบ Backup ภายในบัญชีคลาวด์เดียว 100%:** แม้จะใช้แพ็กเกจ Pro หรือเปิด PITR แล้ว ก็ยังควรมีสคริปต์ดึงไฟล์ `.dump` ออกมาเก็บแยกไว้ที่คลังสำรองภายนอกสัปดาห์ละครั้ง (Off-provider Backup) เผื่อกรณีบัญชีหลักถูกระงับหรือเกิดเหตุขัดข้องระดับผู้ให้บริการ
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: หากโปรเจกต์ของคุณใช้ Supabase และเก็บไฟล์รูปภาพเนื้อวากิวไว้ใน Supabase Storage เวลาที่คุณกด Restore Database จาก Daily Backup รูปภาพที่ถูกลบไปจะกลับมาด้วยหรือไม่ เพราะเหตุใด?**
+  - **แนวคำตอบ:** รูปภาพที่ถูกลบไปแล้วจะไม่กลับมา เพราะระบบ Database Backup ของ Supabase สำรองเฉพาะข้อมูลใน PostgreSQL (ซึ่งใน Schema `storage.objects` เก็บเพียงแค่ Metadata และชื่อพาธของไฟล์เท่านั้น) ส่วนตัวไฟล์ไบนารีของรูปภาพจริงๆ ถูกจัดเก็บแยกอยู่ในระบบ Object Storage (S3) ดังนั้นหากต้องการป้องกันไฟล์รูปภาพสูญหาย ต้องทำการซิงค์ไฟล์จาก Bucket ออกไปสำรองแยกต่างหาก
+- **Q2: ทำไมในการรัน `pg_dump` กับฐานข้อมูลบน Supabase เราถึงไม่ควรเชื่อมต่อผ่านพอร์ต 6543 (Transaction Pooler)?**
+  - **แนวคำตอบ:** เพราะพอร์ต 6543 ทำงานในโหมด Transaction Pooling ซึ่งถูกออกแบบมาสำหรับคิวรีสั้นๆ ที่สลับการเชื่อมต่อทันทีหลังจบแต่ละ Transaction ในขณะที่ `pg_dump` ต้องเปิด Transaction ที่ถือ Snapshot ยาวนานต่อเนื่องและมีการตั้งค่า Session Parameters เฉพาะตัว จึงควรเชื่อมต่อผ่านพอร์ต 5432 (Session Mode หรือ Direct Connection) เสมอ
+
+---

@@ -1,0 +1,166 @@
+---
+title: Process Errors
+category: BACKEND
+parentTitle: Node.js
+version: Node.js 22 LTS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เซิร์ฟเวอร์ของร้าน **Smart Butcher Marketplace** ต้องเปิดให้บริการตลอด 24 ชั่วโมง หากมีข้อผิดพลาดที่ไม่คาดคิดเกิดขึ้น:
+- ปล่อยให้เซิร์ฟเวอร์แครชเฉยๆ ทำให้ลูกค้าที่กำลังเลือกซื้อเนื้อไม่สามารถเข้าใช้งานได้
+- หรือดักจับ Error แล้วพยายามฝืนรันต่อทั้งที่หน่วยความจำภายในอาจเสียหายไปแล้ว (เช่น ยอดเงินในบัญชีไม่ตรงกับฐานข้อมูล)
+- ทางออกที่ถูกต้องคือ **Graceful Shutdown**: หยุดรับคำสั่งซื้อใหม่ เคลียร์งานที่ค้างอยู่ในมือให้เสร็จ บันทึกข้อมูลลงฐานข้อมูล ปิดการเชื่อมต่ออย่างสุภาพ แล้วให้ระบบ Process Manager (เช่น PM2 หรือ Kubernetes) ชุบชีวิตเซิร์ฟเวอร์ตัวใหม่ขึ้นมาแทนทันที
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **Unhandled Errors Categories:**
+   - **`uncaughtException`:** เกิดขึ้นเมื่อมี Error แบบ Synchronous หลุดออกจาก Call Stack โดยไม่มีบล็อก `try/catch` มารับ
+   - **`unhandledRejection`:** เกิดขึ้นเมื่อมี Promise ที่ถูก reject แต่ไม่มีคำสั่ง `.catch()` หรือบล็อก `try/catch` ในฟังก์ชัน async
+2. **OS Signals (สัญญาณสื่อสารระหว่างระบบปฏิบัติการและ Process):**
+   - **`SIGINT` (Signal Interrupt):** มักส่งมาจากแป้นพิมพ์ เช่น เมื่อ Developer กด `Ctrl + C` ใน Terminal
+   - **`SIGTERM` (Signal Terminate):** สัญญาณขอให้ปิดตัวลงอย่างสุภาพจาก Orchestrator เช่น Docker หรือ Kubernetes ก่อนที่ Pod จะถูกทำลาย
+   - **`SIGKILL` (Signal Kill - Signal 9):** คำสั่งบังคับฆ่า Process ทันที ไม่สามารถดักจับหรือทำ Cleanup ได้
+3. **Graceful Shutdown Pattern (วงจรการปิดระบบอย่างสุภาพ):**
+   ```text filename="docs/backend/nodejs.txt"
+   [รับสัญญาณ SIGTERM / SIGINT]
+              │
+              ▼
+   1. หยุดรับ HTTP Request ใหม่ (server.close())
+              │
+              ▼
+   2. ปล่อยให้ In-flight Requests ทำงานจนจบ (Drain Connections)
+              │
+              ▼
+   3. ปิดการเชื่อมต่อ Database (Prisma/PostgreSQL), Redis, Message Queue
+              │
+              ▼
+   4. ตั้ง Timeout เผื่อฉุกเฉิน (เช่น 10 วินาที) หากงานค้างนานเกินไปให้บังคับปิด
+              │
+              ▼
+   5. สั่ง process.exit(0) อย่างสมบูรณ์
+   ```
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การดักจับ Global Unhandled Errors พร้อม Structured Logging
+```typescript filename="src/global-error-handlers.ts"
+export function registerGlobalErrorHandlers() {
+  // ดักจับ Unhandled Promise Rejection
+  process.on('unhandledRejection', (reason: unknown, promise: Promise<unknown>) => {
+    console.error('🚨 [Unhandled Rejection] ตรวจพบ Promise ที่ไม่มีตัวรับ Error:');
+    if (reason instanceof Error) {
+      console.error(`ข้อความ Error: ${reason.message}`);
+      console.error(`Stack: ${reason.stack}`);
+    } else {
+      console.error('สาเหตุ:', reason);
+    }
+    // คำแนะนำของ Node.js: ในอนาคต Unhandled Rejection จะบังคับปิดโปรเซสอัตโนมัติ
+  });
+
+  // ดักจับ Uncaught Exception
+  process.on('uncaughtException', (error: Error) => {
+    console.error('🔥 [FATAL: Uncaught Exception] เกิดข้อผิดพลาดร้ายแรงที่ไม่ได้จัดการ:');
+    console.error(`ข้อความ: ${error.message}`);
+    console.error(`Stack: ${error.stack}`);
+
+    // สำคัญมาก: เมื่อเกิด uncaughtException สภาพแวดล้อมของโปรเซสถือว่าไม่น่าไว้วางใจอีกต่อไป
+    // ต้องเริ่มกระบวนการปิดตัวลงทันที (ห้ามฝืนรันต่อ!)
+    console.error('เซิร์ฟเวอร์จะปิดตัวลงเพื่อความปลอดภัยของข้อมูลธุรกรรม...');
+    process.exit(1);
+  });
+}
+```
+
+### ตัวอย่างที่ 2: ระบบ Graceful Shutdown สมบูรณ์แบบสำหรับ Smart Butcher Server
+```typescript filename="src/graceful-shutdown.ts"
+import http from 'node:http';
+
+// จำลอง Database Client ของ Smart Butcher
+const mockDatabase = {
+  close: async () => {
+    console.log('[Database] กำลังตัดการเชื่อมต่อ PostgreSQL Connection Pool...');
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    console.log('[Database] ปิด Connection Pool สำเร็จ ปลอดภัย 100%');
+  },
+};
+
+export function setupGracefulShutdown(server: http.Server) {
+  let isShuttingDown = false;
+
+  async function shutdown(signal: string) {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+
+    console.log(`\n🛑 ได้รับสัญญาณ [${signal}] กำลังเริ่มกระบวนการ Graceful Shutdown...`);
+
+    // 1. ตั้ง Hard Timeout เผื่อว่ามี Request ค้างแล้วไม่ยอมจบ
+    const forceExitTimer = setTimeout(() => {
+      console.error('⚠️ บังคับปิดระบบเนื่องจากใช้เวลาเกินขีดจำกัด 10 วินาที (Force Exit)');
+      process.exit(1);
+    }, 10_000);
+    forceExitTimer.unref(); // ป้องกันไม่ให้ timer นี้ขวางการปิดโปรเซส
+
+    // 2. หยุดรับ HTTP Request ใหม่เข้ามาที่ร้าน
+    server.close(async (err) => {
+      if (err) {
+        console.error('เกิดข้อผิดพลาดขณะปิด HTTP Server:', err);
+        process.exit(1);
+      }
+      console.log('✅ [HTTP Server] ปิดรับทราฟฟิกใหม่ และเคลียร์ Request ที่ค้างอยู่เสร็จสิ้น');
+
+      // 3. ปิดการเชื่อมต่อฐานข้อมูลและ External Queues
+      try {
+        await mockDatabase.close();
+        console.log('✅ [Clean Exit] ข้อมูลสินค้าและคำสั่งซื้อทั้งหมดถูกบันทึกอย่างปลอดภัย');
+        process.exit(0); // จบการทำงานปกติ รหัส 0
+      } catch (dbErr) {
+        console.error('❌ ข้อผิดพลาดขณะปิดฐานข้อมูล:', dbErr);
+        process.exit(1);
+      }
+    });
+  }
+
+  // ดักฟังสัญญาณจาก OS
+  process.on('SIGTERM', () => shutdown('SIGTERM (Kubernetes/Docker)'));
+  process.on('SIGINT', () => shutdown('SIGINT (Ctrl+C)'));
+}
+```
+
+## 4. ผิด vs ถูก (Anti-patterns & Best Practices)
+
+### ❌ โค้ดที่ผิด: ดัก `uncaughtException` แล้วปล่อยผ่านเพื่อให้เซิร์ฟเวอร์รันต่อเรื่อยๆ
+```typescript filename="bad-exception-swallow.ts"
+// ผิดมหันต์: การดักจับแล้วไม่สั่ง process.exit()
+// เมื่อเกิด uncaughtException ตัวแปรในหน่วยความจำอาจอยู่ในสถานะครึ่งๆ กลางๆ (เช่น ตัดสต็อกเนื้อแล้วแต่ยังไม่ได้ตัดเงิน)
+// การปล่อยให้รันต่อไปจะทำให้ข้อมูลในระบบผิดพลาดร้ายแรงขึ้นเรื่อยๆ
+process.on('uncaughtException', (err) => {
+  console.log('ช่างมัน รันต่อไปเรื่อยๆ:', err.message);
+  // ไม่สั่ง process.exit()
+});
+```
+
+### ✅ โค้ดที่ถูก: บันทึก Log อย่างละเอียด ทำ Cleanup สั้นๆ แล้วสั่ง `process.exit(1)`
+```typescript filename="good-exception-exit.ts"
+process.on('uncaughtException', async (err) => {
+  console.error('[CRITICAL FAILURE]', err);
+  // บันทึก Log ฉุกเฉินลง External Monitoring (เช่น Sentry หรือ Datadog)
+  try {
+    await sendAlertToPagerDuty(err);
+  } finally {
+    // ออกจากโปรเซสทันที แล้วปล่อยให้ Docker / Kubernetes รีสตาร์ต Container ใหม่
+    process.exit(1);
+  }
+});
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้:** การติดตั้ง Graceful Shutdown และ Signal Handlers เป็นสิ่งจำเป็นอย่างยิ่งใน Production Application ทุกตัวที่รันบน Docker, Kubernetes, AWS ECS หรือ PM2
+- **ไม่ควรใช้:** ห้ามใช้ `uncaughtException` หรือ `unhandledRejection` เป็นเครื่องมือทดแทนการเขียน Error Handling ปกติ (ต้องเขียน `try/catch` ในระดับ Controller และ Service เสมอ)
+
+## 6. คำถามสัมภาษณ์ (Interview Questions)
+- **Q1: ทำไมเอกสารทางการของ Node.js จึงแนะนำอย่างจริงจังให้ปิด Process ทันที (`process.exit(1)`) หลังเกิดเหตุการณ์ `uncaughtException`?**
+  - *คำตอบ:* เพราะ `uncaughtException` หมายถึงโปรแกรมทำงานในจุดที่ไม่คาดคิด ส่งผลให้ Application State ในหน่วยความจำอาจอยู่ในสภาวะ Corrupted (เสียหายหรือไม่สอดคล้องกัน) เช่น Socket ค้าง, Resource ปิดไม่สมบูรณ์ หรือตัวแปรถูกแก้ไขไปครึ่งเดียว การฝืนรันต่อไปจะทำให้เกิดบั๊กแบบลูกโซ่และอาจทำให้ข้อมูลธุรกรรมของลูกค้าสูญหาย
+- **Q2: สัญญาณ `SIGTERM` และ `SIGKILL` มีความแตกต่างกันอย่างไรในการทำ Deployment บน Kubernetes?**
+  - *คำตอบ:* `SIGTERM` เป็นสัญญาณแจ้งเตือนล่วงหน้าเพื่อให้ Process ทำ Graceful Shutdown (ปิดการเชื่อมต่อ DB, ตอบกลับ Request เดิมให้เสร็จ) ภายในระยะเวลา Grace Period (ค่าเริ่มต้น 30 วินาทีบน K8s) หากครบเวลาแล้ว Process ยังไม่ยอมปิด Kubernetes จะส่งสัญญาณ `SIGKILL` ซึ่งเป็นคำสั่งเด็ดขาดของ OS ในการทำลาย Process ทันทีโดยไม่สามารถดักจับหรือสั่ง Cleanup โค้ดใดๆ ได้
+
+---

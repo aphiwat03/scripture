@@ -879,7 +879,7 @@ export const NAV_GROUPS: NavGroup[] = [
   // 2. หมวด BACKEND
   {
     title: 'BACKEND',
-    color: '#34c759', // Apple Green
+    color: '#34c759',
     items: [
       {
         title: 'Node.js',
@@ -887,35 +887,35 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'Event Loop',
-            href: '/docs/backend/nodejs#1-event-loop-และ-non-blocking-io',
+            href: '/docs/backend/nodejs/event-loop',
           },
           {
             title: 'Async Await',
-            href: '/docs/backend/nodejs#2-asyncawait-และ-promise',
+            href: '/docs/backend/nodejs/async-await',
           },
           {
             title: 'Module System',
-            href: '/docs/backend/nodejs#3-module-system-esm-vs-commonjs',
+            href: '/docs/backend/nodejs/module-system',
           },
           {
             title: 'Package Scripts',
-            href: '/docs/backend/nodejs#4-npm-pnpm-และ-packagejson',
+            href: '/docs/backend/nodejs/package-scripts',
           },
           {
             title: 'Env Variables',
-            href: '/docs/backend/nodejs#5-environment-variables-env',
+            href: '/docs/backend/nodejs/env-variables',
           },
           {
             title: 'HTTP Server',
-            href: '/docs/backend/nodejs#6-การทำงานของ-http-server',
+            href: '/docs/backend/nodejs/http-server',
           },
           {
             title: 'Process Errors',
-            href: '/docs/backend/nodejs#7-process-และ-error-ที่ไม่ได้จัดการ-unhandled-errors',
+            href: '/docs/backend/nodejs/process-errors',
           },
           {
             title: 'Anti-patterns',
-            href: '/docs/backend/nodejs#ข้อผิดพลาดที่พบบ่อย-anti-patterns',
+            href: '/docs/backend/nodejs/pitfalls',
           },
         ],
       },
@@ -925,43 +925,63 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'Architecture',
-            href: '/docs/backend/nestjs#1-สถาปัตยกรรมและเหตุผลที่ออกแบบแบบนี้-เทียบกับ-express',
+            href: '/docs/backend/nestjs/architecture',
           },
           {
             title: 'Modules',
-            href: '/docs/backend/nestjs#2-modules-กล่องประกอบระบบและ-encapsulation',
+            href: '/docs/backend/nestjs/modules',
           },
           {
             title: 'Controllers',
-            href: '/docs/backend/nestjs#3-controllers-จัดการ-http-request-และ-routing',
+            href: '/docs/backend/nestjs/controllers',
           },
           {
             title: 'Providers Services',
-            href: '/docs/backend/nestjs#4-providers-และ-services-business-logic-layer',
+            href: '/docs/backend/nestjs/providers-services',
           },
           {
             title: 'Dependency Inject',
-            href: '/docs/backend/nestjs#5-dependency-injection-di-และ-inversion-of-control-ioc',
+            href: '/docs/backend/nestjs/dependency-injection',
           },
           {
             title: 'Request Lifecycle',
-            href: '/docs/backend/nestjs#6-ลำดับการทำงานของ-request-lifecycle-request-pipeline',
+            href: '/docs/backend/nestjs/request-lifecycle',
           },
           {
-            title: 'Middleware Guards',
-            href: '/docs/backend/nestjs#7-middleware-ประตูด่านแรกของ-request',
+            title: 'Middleware',
+            href: '/docs/backend/nestjs/middleware',
           },
           {
-            title: 'Pipes Interceptors',
-            href: '/docs/backend/nestjs#9-pipes-การตรวจสอบและแปลงข้อมูล-validation-transformation',
+            title: 'Guards',
+            href: '/docs/backend/nestjs/guards',
+          },
+          {
+            title: 'Pipes',
+            href: '/docs/backend/nestjs/pipes',
+          },
+          {
+            title: 'Interceptors',
+            href: '/docs/backend/nestjs/interceptors',
           },
           {
             title: 'Exception Filters',
-            href: '/docs/backend/nestjs#11-exception-filters-การจัดการ-error-แบบรวมศูนย์',
+            href: '/docs/backend/nestjs/exception-filters',
           },
           {
-            title: 'Config Structure',
-            href: '/docs/backend/nestjs#12-configmodule-และ-environment-configuration',
+            title: 'ConfigModule',
+            href: '/docs/backend/nestjs/config-module',
+          },
+          {
+            title: 'Feature Structure',
+            href: '/docs/backend/nestjs/feature-structure',
+          },
+          {
+            title: 'Enterprise Logging',
+            href: '/docs/backend/nestjs/enterprise-logging',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/backend/nestjs/pitfalls',
           },
         ],
       },
@@ -971,31 +991,35 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'HTTP Idempotency',
-            href: '/docs/backend/rest-api#1-http-methods-และ-idempotency',
+            href: '/docs/backend/rest-api/http-idempotency',
           },
           {
             title: 'Status Codes',
-            href: '/docs/backend/rest-api#2-http-status-codes-ที่ใช้จริงในระบบ-production',
+            href: '/docs/backend/rest-api/status-codes',
           },
           {
             title: 'Resource URL',
-            href: '/docs/backend/rest-api#3-การตั้งชื่อ-resource-และออกแบบ-url-structure',
+            href: '/docs/backend/rest-api/resource-url',
           },
           {
             title: 'Response Envelope',
-            href: '/docs/backend/rest-api#4-มาตรฐานรูปแบบ-response-และ-error-envelope',
+            href: '/docs/backend/rest-api/response-envelope',
           },
           {
             title: 'Pagination Filter',
-            href: '/docs/backend/rest-api#5-pagination-filtering-sorting-และ-searching',
+            href: '/docs/backend/rest-api/pagination-filter',
           },
           {
             title: 'Versioning CORS',
-            href: '/docs/backend/rest-api#6-api-versioning-cors-และความต่างระหว่าง-put-vs-patch',
+            href: '/docs/backend/rest-api/versioning-cors',
           },
           {
             title: 'Frontend Contract',
-            href: '/docs/backend/rest-api#7-การออกแบบ-api-contract-ให้ฝั่ง-frontend-ใช้งานง่าย',
+            href: '/docs/backend/rest-api/frontend-contract',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/backend/rest-api/pitfalls',
           },
         ],
       },
@@ -1005,27 +1029,31 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'Prisma Schema',
-            href: '/docs/backend/prisma-orm#1-โครงสร้าง-prisma-schema-models-field-types-และ-enums',
+            href: '/docs/backend/prisma-orm/prisma-schema',
           },
           {
             title: 'Model Relations',
-            href: '/docs/backend/prisma-orm#2-การออกแบบความสัมพันธ์-relations-1-1-1-n-m-n',
+            href: '/docs/backend/prisma-orm/model-relations',
           },
           {
             title: 'Prisma Client',
-            href: '/docs/backend/prisma-orm#3-การใช้งาน-prisma-client-crud-filter-select-include-aggregation',
+            href: '/docs/backend/prisma-orm/prisma-client',
           },
           {
             title: 'Transactions',
-            href: '/docs/backend/prisma-orm#4-การจัดการ-transactions-ด้วย-transaction-และการป้องกัน-race-condition',
+            href: '/docs/backend/prisma-orm/transactions',
           },
           {
-            title: 'ORM Query Seeding',
-            href: '/docs/backend/prisma-orm#5-ปัญหา-n1-query-ใน-orm-raw-queries-อย่างปลอดภัย-และ-seeding',
+            title: 'N1 Query Fix',
+            href: '/docs/backend/prisma-orm/n1-query-fix',
           },
           {
             title: 'PrismaService',
-            href: '/docs/backend/prisma-orm#6-สถาปัตยกรรม-prismaservice-ใน-nestjs-11-และการเชื่อมต่อผ่าน-driver-pg',
+            href: '/docs/backend/prisma-orm/prisma-service',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/backend/prisma-orm/pitfalls',
           },
         ],
       },
@@ -1035,27 +1063,31 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'Auth Flow Bcrypt',
-            href: '/docs/backend/authentication#1-สถาปัตยกรรม-end-to-end-auth-flow-และการ-hash-รหัสผ่านด้วย-bcrypt',
+            href: '/docs/backend/authentication/auth-flow-bcrypt',
           },
           {
             title: 'JWT HttpOnly',
-            href: '/docs/backend/authentication#2-กลไก-jwt-access-token-refresh-token-และการตั้งค่า-httponly-cookie',
+            href: '/docs/backend/authentication/jwt-httponly',
           },
           {
             title: 'Passport Guard',
-            href: '/docs/backend/authentication#3-passportjs-strategies-local-jwt-และ-authguard-ใน-nestjs-11',
+            href: '/docs/backend/authentication/passport-guard',
           },
           {
             title: 'RBAC Decorator',
-            href: '/docs/backend/authentication#4-role-based-access-control-rbac-และ-custom-currentuser-decorator',
+            href: '/docs/backend/authentication/rbac-decorator',
           },
           {
             title: 'Token Rotation',
-            href: '/docs/backend/authentication#5-refresh-token-rotation-ระบบ-logout-และการเพิกถอนสิทธิ์',
+            href: '/docs/backend/authentication/token-rotation',
           },
           {
             title: 'JWT vs Session',
-            href: '/docs/backend/authentication#6-เปรียบเทียบ-jwt-vs-session-และ-cookie-vs-localstorage',
+            href: '/docs/backend/authentication/jwt-vs-session',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/backend/authentication/pitfalls',
           },
         ],
       },
@@ -1065,27 +1097,31 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'OWASP Top 10',
-            href: '/docs/backend/security#1-owasp-top-10-สำหรับระบบ-api-สมัยใหม่',
+            href: '/docs/backend/security/owasp-top-10',
           },
           {
             title: 'XSS CSRF Defense',
-            href: '/docs/backend/security#2-การป้องกัน-xss-csrf-และความเชื่อมโยงกับ-cookie-security',
+            href: '/docs/backend/security/xss-csrf-defense',
           },
           {
             title: 'Helmet CORS',
-            href: '/docs/backend/security#3-การตั้งค่า-helmet-และ-cors-ร่วมกับ-credentials',
+            href: '/docs/backend/security/helmet-cors',
           },
           {
             title: 'Rate Limiting',
-            href: '/docs/backend/security#4-rate-limiting-และป้องกัน-brute-force-ด้วย-nestjsthrottler',
+            href: '/docs/backend/security/rate-limiting',
           },
           {
             title: 'BOLA IDOR Guard',
-            href: '/docs/backend/security#5-object-level-authorization-ป้องกันปัญหา-bola-idor',
+            href: '/docs/backend/security/bola-idor-guard',
           },
           {
             title: 'Secrets Audit',
-            href: '/docs/backend/security#6-การจัดการ-secrets-data-sanitization-และตรวจสอบช่องโหว่ด้วย-npm-audit',
+            href: '/docs/backend/security/secrets-audit',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/backend/security/pitfalls',
           },
         ],
       },
@@ -1095,27 +1131,31 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'ValidationPipe',
-            href: '/docs/backend/validation#1-สถาปัตยกรรม-dto-และ-global-validationpipe-ใน-nestjs-11',
+            href: '/docs/backend/validation/validation-pipe',
           },
           {
             title: 'Class Validator',
-            href: '/docs/backend/validation#2-decorators-ที่ใช้บ่อยของ-class-validator-และการปรับแต่งข้อความภาษาไทย',
+            href: '/docs/backend/validation/class-validator',
           },
           {
             title: 'Nested Transform',
-            href: '/docs/backend/validation#3-nested-validation-และการแปลงชนิดข้อมูลด้วย-class-transformer-type',
+            href: '/docs/backend/validation/nested-transform',
           },
           {
             title: 'Exclude Expose',
-            href: '/docs/backend/validation#4-การซ่อนข้อมูลอ่อนไหวในขาออกด้วย-exclude-expose-และ-classserializerinterceptor',
+            href: '/docs/backend/validation/exclude-expose',
           },
           {
             title: 'Mapped Types',
-            href: '/docs/backend/validation#5-mapped-types-partialtype-picktype-omittype-และการสร้าง-custom-validator',
+            href: '/docs/backend/validation/mapped-types',
           },
           {
             title: 'Validator vs Zod',
-            href: '/docs/backend/validation#6-เปรียบเทียบ-class-validator-backend-กับ-zod-frontend',
+            href: '/docs/backend/validation/validator-vs-zod',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/backend/validation/pitfalls',
           },
         ],
       },
@@ -1125,23 +1165,27 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'Multer Pipeline',
-            href: '/docs/backend/file-upload#1-สถาปัตยกรรม-end-to-end-file-upload-flow-ด้วย-multer-ใน-nestjs-11',
+            href: '/docs/backend/file-upload/multer-pipeline',
           },
           {
             title: 'Magic Number',
-            href: '/docs/backend/file-upload#2-การตรวจสอบความถูกต้องของไฟล์ด้วย-parsefilepipe-และ-magic-number',
+            href: '/docs/backend/file-upload/magic-number',
           },
           {
             title: 'Supabase Storage',
-            href: '/docs/backend/file-upload#3-การอัปโหลดไฟล์ขึ้น-supabase-storage-และการตั้งชื่อไฟล์ไม่ให้ซ้ำ',
+            href: '/docs/backend/file-upload/supabase-storage',
           },
           {
             title: 'Signed URLs',
-            href: '/docs/backend/file-upload#4-public-vs-private-buckets-signed-urls-และการจัดการสลิปโอนเงินอย่างปลอดภัย',
+            href: '/docs/backend/file-upload/signed-urls',
           },
           {
             title: 'Orphan Cleanup',
-            href: '/docs/backend/file-upload#5-การซิงค์และลบไฟล์ขยะ-orphaned-files-cleanup-เมื่อลบข้อมูลในฐานข้อมูล',
+            href: '/docs/backend/file-upload/orphan-cleanup',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/backend/file-upload/pitfalls',
           },
         ],
       },
@@ -1151,23 +1195,27 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'Docker Concepts',
-            href: '/docs/backend/docker#1-แนวคิดหลักของ-docker-image-container-volume-network',
+            href: '/docs/backend/docker/docker-concepts',
           },
           {
             title: 'Multi-stage Build',
-            href: '/docs/backend/docker#2-การเขียน-multi-stage-dockerfile-สำหรับ-nestjs-11-ระดับ-production',
+            href: '/docs/backend/docker/multi-stage-build',
           },
           {
             title: 'Docker Compose',
-            href: '/docs/backend/docker#3-การประกอบระบบด้วย-docker-compose-nestjs-postgresql-16',
+            href: '/docs/backend/docker/docker-compose',
           },
           {
             title: 'Volumes Health',
-            href: '/docs/backend/docker#4-การจัดการ-persistent-volumes-environment-variables-secrets-และ-healthcheck',
+            href: '/docs/backend/docker/volumes-health',
           },
           {
             title: 'Network Debug',
-            href: '/docs/backend/docker#5-การเชื่อมต่อเครือข่ายระหว่าง-container-และคำสั่ง-cli-สำหรับ-debug',
+            href: '/docs/backend/docker/network-debug',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/backend/docker/pitfalls',
           },
         ],
       },
@@ -1177,23 +1225,27 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'SwaggerModule',
-            href: '/docs/backend/swagger#1-การติดตั้งและตั้งค่า-swaggermodule-openapi-ใน-nestjs-11',
+            href: '/docs/backend/swagger/swagger-module',
           },
           {
             title: 'API Decorators',
-            href: '/docs/backend/swagger#2-การใช้-decorators-หลัก-apitags-apioperation-apiproperty-apiresponse',
+            href: '/docs/backend/swagger/api-decorators',
           },
           {
             title: 'CLI Plugin',
-            href: '/docs/backend/swagger#3-การเปิดใช้งาน-nestjs-swagger-cli-plugin-เพื่อลดโค้ดซ้ำซ้อน',
+            href: '/docs/backend/swagger/cli-plugin',
           },
           {
             title: 'Security Schemes',
-            href: '/docs/backend/swagger#4-การกำหนด-security-schemes-สำหรับ-jwt-bearer-และ-httponly-cookie',
+            href: '/docs/backend/swagger/security-schemes',
           },
           {
             title: 'Codegen Client',
-            href: '/docs/backend/swagger#5-การทำงานร่วมกับทีม-frontend-และการ-generate-typescript-client-อัตโนมัติ',
+            href: '/docs/backend/swagger/codegen-client',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/backend/swagger/pitfalls',
           },
         ],
       },
@@ -1203,23 +1255,27 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'Groq SDK Setup',
-            href: '/docs/backend/ai-integration#1-สถาปัตยกรรมการเรียกใช้-llm-จากฝั่ง-backend-อย่างปลอดภัยด้วย-groq-sdk',
+            href: '/docs/backend/ai-integration/groq-sdk-setup',
           },
           {
             title: 'GroqService',
-            href: '/docs/backend/ai-integration#2-การออกแบบ-groqservice-ใน-nestjs-11-และการจัดการ-api-key',
+            href: '/docs/backend/ai-integration/groq-service',
           },
           {
             title: 'Prompt Design',
-            href: '/docs/backend/ai-integration#3-prompt-engineering-system-user-prompt-และ-structured-json-output',
+            href: '/docs/backend/ai-integration/prompt-design',
           },
           {
             title: 'Rate Limit Cost',
-            href: '/docs/backend/ai-integration#4-การจัดการ-timeout-rate-limit-token-cost-control-และ-streaming',
+            href: '/docs/backend/ai-integration/rate-limit-cost',
           },
           {
             title: 'Prompt Security',
-            href: '/docs/backend/ai-integration#5-การป้องกัน-prompt-injection-พื้นฐานและการเก็บ-audit-log',
+            href: '/docs/backend/ai-integration/prompt-security',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/backend/ai-integration/pitfalls',
           },
         ],
       },
@@ -1229,7 +1285,7 @@ export const NAV_GROUPS: NavGroup[] = [
   // 3. หมวด DATABASE
   {
     title: 'DATABASE',
-    color: '#f59e0b', // Amber / Gold
+    color: '#af52de',
     items: [
       {
         title: 'PostgreSQL 16',
@@ -1237,31 +1293,35 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'RDBMS Comparison',
-            href: '/docs/database/postgresql#1-postgresql-คืออะไรและเปรียบเทียบกับฐานข้อมูลอื่น',
+            href: '/docs/database/postgresql/rdbms-comparison',
           },
           {
             title: 'Process MVCC',
-            href: '/docs/database/postgresql#2-สถาปัตยกรรมพื้นฐานของ-postgresql-process-architecture-และ-mvcc',
+            href: '/docs/database/postgresql/process-mvcc',
           },
           {
             title: 'Data Types',
-            href: '/docs/database/postgresql#3-ชนิดข้อมูลที่ใช้จริงในงาน-production-data-types',
+            href: '/docs/database/postgresql/data-types',
           },
           {
             title: 'Constraints',
-            href: '/docs/database/postgresql#4-constraints-และ-data-integrity-การรักษาความถูกต้องของข้อมูล',
+            href: '/docs/database/postgresql/constraints',
           },
           {
             title: 'Schema Roles',
-            href: '/docs/database/postgresql#5-schema-และ-role-permissions-security-isolation',
+            href: '/docs/database/postgresql/schema-roles',
           },
           {
             title: 'Extensions',
-            href: '/docs/database/postgresql#6-postgresql-extensions-ที่มักใช้ในงานจริง',
+            href: '/docs/database/postgresql/extensions',
           },
           {
             title: 'psql CLI Tools',
-            href: '/docs/database/postgresql#7-เครื่องมือบริหารจัดการและคำสั่ง-psql-ที่ใช้บ่อย',
+            href: '/docs/database/postgresql/psql-cli-tools',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/database/postgresql/pitfalls',
           },
         ],
       },
@@ -1271,39 +1331,51 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'SELECT Filtering',
-            href: '/docs/database/sql#1-การดึงข้อมูลพื้นฐาน-select-where-order-by-limit-offset',
+            href: '/docs/database/sql/select-filtering',
           },
           {
             title: 'DML RETURNING',
-            href: '/docs/database/sql#2-การจัดการข้อมูลและการคืนค่า-insert-update-delete-และ-returning',
+            href: '/docs/database/sql/dml-returning',
           },
           {
             title: 'SQL JOINs',
-            href: '/docs/database/sql#3-join-ทุกแบบพร้อมภาพประกอบและความเข้าใจลึกซึ้ง',
+            href: '/docs/database/sql/sql-joins',
           },
           {
             title: 'GROUP BY Having',
-            href: '/docs/database/sql#4-การจัดกลุ่มและฟังก์ชันคำนวณ-group-by-having-และ-aggregate-functions',
+            href: '/docs/database/sql/group-by-having',
           },
           {
             title: 'Subquery CTE',
-            href: '/docs/database/sql#5-subquery-และ-common-table-expressions-cte-with',
+            href: '/docs/database/sql/subquery-cte',
           },
           {
             title: 'Set Operations',
-            href: '/docs/database/sql#6-การรวมชุดข้อมูล-union-intersect-except',
+            href: '/docs/database/sql/set-operations',
           },
           {
             title: 'Window Functions',
-            href: '/docs/database/sql#7-window-functions-ฟังก์ชันหน้าต่างเพื่อการวิเคราะห์ข้อมูลขั้นสูง',
+            href: '/docs/database/sql/window-functions',
           },
           {
             title: 'CASE NULL Handling',
-            href: '/docs/database/sql#8-ตรรกะเงื่อนไขและการจัดการค่าว่าง-case-expression-และ-null-handling',
+            href: '/docs/database/sql/case-null-handling',
+          },
+          {
+            title: 'Date Time Queries',
+            href: '/docs/database/sql/date-time-queries',
+          },
+          {
+            title: 'Full-Text Search',
+            href: '/docs/database/sql/full-text-search',
           },
           {
             title: 'UPSERT Conflict',
-            href: '/docs/database/sql#11-upsert-insert-on-conflict-do-update-do-nothing',
+            href: '/docs/database/sql/upsert-conflict',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/database/sql/pitfalls',
           },
         ],
       },
@@ -1313,31 +1385,35 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'ER Diagram',
-            href: '/docs/database/database-design#1-กระบวนการออกแบบจากโจทย์ธุรกิจสู่-er-diagram-และโครงสร้างตาราง',
+            href: '/docs/database/database-design/er-diagram',
           },
           {
             title: 'Table Relations',
-            href: '/docs/database/database-design#2-ความสัมพันธ์ของข้อมูล-1-1-1-n-m-n-พร้อม-junction-table',
+            href: '/docs/database/database-design/table-relations',
           },
           {
             title: 'Normalization',
-            href: '/docs/database/database-design#3-normalization-1nf-ถึง-3nf-และจังหวะที่ควรทำ-denormalization',
+            href: '/docs/database/database-design/normalization',
           },
           {
             title: 'Primary Keys',
-            href: '/docs/database/database-design#4-การเลือก-primary-key-auto-incrementidentity-vs-uuid-v4v7-และมาตรฐานการตั้งชื่อ',
+            href: '/docs/database/database-design/primary-keys',
           },
           {
             title: 'Money Snapshot',
-            href: '/docs/database/database-design#5-การเก็บข้อมูลการเงิน-snapshot-ราคาในออเดอร์-และ-state-machine-ของสถานะ',
+            href: '/docs/database/database-design/money-snapshot',
           },
           {
             title: 'Soft Delete Audit',
-            href: '/docs/database/database-design#6-soft-delete-timestamps-createdatupdatedat-และ-audit-log',
+            href: '/docs/database/database-design/soft-delete-audit',
           },
           {
             title: 'Full Schema',
-            href: '/docs/database/database-design#7-พิมพ์เขียว-schema-ระบบ-smart-butcher-marketplace-ฉบับสมบูรณ์',
+            href: '/docs/database/database-design/full-schema',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/database/database-design/pitfalls',
           },
         ],
       },
@@ -1347,27 +1423,31 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'B-Tree Mechanics',
-            href: '/docs/database/indexing#1-กลไกการทำงานของ-b-tree-index-และเหตุผลที่ทำให้ค้นหาข้อมูลได้เร็ว',
+            href: '/docs/database/indexing/b-tree-mechanics',
           },
           {
             title: 'Index Types',
-            href: '/docs/database/indexing#2-ชนิดของ-index-ใน-postgresql-16-b-tree-hash-gin-gist',
+            href: '/docs/database/indexing/index-types',
           },
           {
             title: 'Composite Index',
-            href: '/docs/database/indexing#3-composite-index-และกฎลำดับคอลัมน์-leftmost-prefix-rule',
+            href: '/docs/database/indexing/composite-index',
           },
           {
             title: 'Partial Covering',
-            href: '/docs/database/indexing#4-unique-index-partial-index-และ-covering-index-include',
+            href: '/docs/database/indexing/partial-covering',
           },
           {
             title: 'Write Cost',
-            href: '/docs/database/indexing#5-ต้นทุนของ-index-ต่อการเขียนข้อมูล-write-amplification-และเกณฑ์การเลือกสร้าง',
+            href: '/docs/database/indexing/write-cost',
           },
           {
             title: 'Prisma Indexes',
-            href: '/docs/database/indexing#6-การแมป-index-กับ-prisma-schema-unique-index-และกรณีศึกษาจริง',
+            href: '/docs/database/indexing/prisma-indexes',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/database/indexing/pitfalls',
           },
         ],
       },
@@ -1377,27 +1457,31 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'EXPLAIN ANALYZE',
-            href: '/docs/database/query-performance#1-การวิเคราะห์-execution-plan-ด้วย-explain-และ-explain-analyze',
+            href: '/docs/database/query-performance/explain-analyze',
           },
           {
             title: 'Solving N1 Queries',
-            href: '/docs/database/query-performance#2-ปัญหา-n1-query-ในระดับ-sql-และวิธีแก้ไขอย่างถูกจุด',
+            href: '/docs/database/query-performance/solving-n1-queries',
           },
           {
             title: 'Keyset Pagination',
-            href: '/docs/database/query-performance#3-การทำ-pagination-ประสิทธิภาพสูง-offset-vs-keysetcursor-pagination',
+            href: '/docs/database/query-performance/keyset-pagination',
           },
           {
             title: 'Slow Query Logs',
-            href: '/docs/database/query-performance#4-การค้นหา-slow-queries-ด้วย-pgstatstatements-และ-log-configuration',
+            href: '/docs/database/query-performance/slow-query-logs',
           },
           {
             title: 'VACUUM Autovacuum',
-            href: '/docs/database/query-performance#5-กลไก-vacuum-analyze-และการทำงานของ-autovacuum-ใน-postgresql-16',
+            href: '/docs/database/query-performance/vacuum-autovacuum',
           },
           {
             title: 'Query Tuning',
-            href: '/docs/database/query-performance#6-เทคนิคการปรับจูน-query-ที่ช้าทีละขั้นพร้อมผลลัพธ์เปรียบเทียบก่อนและหลัง',
+            href: '/docs/database/query-performance/query-tuning',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/database/query-performance/pitfalls',
           },
         ],
       },
@@ -1407,23 +1491,27 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'ACID Properties',
-            href: '/docs/database/transactions#1-คุณสมบัติ-acid-อธิบายผ่านกระบวนการสั่งซื้อและตัดสต็อกจริง',
+            href: '/docs/database/transactions/acid-properties',
           },
           {
             title: 'BEGIN COMMIT',
-            href: '/docs/database/transactions#2-การควบคุม-transaction-ด้วย-begin-commit-rollback-และ-savepoint',
+            href: '/docs/database/transactions/begin-commit',
           },
           {
             title: 'Isolation Levels',
-            href: '/docs/database/transactions#3-ระดับการแยกตัวของ-transaction-isolation-levels-และปรากฏการณ์ข้อมูลเพี้ยน',
+            href: '/docs/database/transactions/isolation-levels',
           },
           {
             title: 'Short Transaction',
-            href: '/docs/database/transactions#4-พฤติกรรมค่าเริ่มต้นของ-postgresql-16-และการออกแบบ-transaction-ให้สั้นที่สุด',
+            href: '/docs/database/transactions/short-transaction',
           },
           {
             title: 'Prisma Transaction',
-            href: '/docs/database/transactions#5-ความเชื่อมโยงระหว่าง-sql-transaction-กับ-prisma-transaction',
+            href: '/docs/database/transactions/prisma-transaction',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/database/transactions/pitfalls',
           },
         ],
       },
@@ -1433,23 +1521,27 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'Race Conditions',
-            href: '/docs/database/concurrency#1-ปัญหาการแย่งชิงข้อมูลพร้อมกัน-race-conditions-ในระบบ-e-commerce',
+            href: '/docs/database/concurrency/race-conditions',
           },
           {
             title: 'Row Locking',
-            href: '/docs/database/concurrency#2-กลไกการล็อกข้อมูล-select-for-update-row-locks-และ-advisory-locks',
+            href: '/docs/database/concurrency/row-locking',
           },
           {
             title: 'Optimistic Lock',
-            href: '/docs/database/concurrency#3-pessimistic-locking-vs-optimistic-locking-version-column',
+            href: '/docs/database/concurrency/optimistic-lock',
           },
           {
             title: 'Deadlock Defense',
-            href: '/docs/database/concurrency#4-สาเหตุการเกิด-deadlock-และเทคนิคการป้องกันในระดับสถาปัตยกรรม',
+            href: '/docs/database/concurrency/deadlock-defense',
           },
           {
             title: 'Idempotency Keys',
-            href: '/docs/database/concurrency#5-การทำ-idempotency-ป้องกันการกดสั่งซื้อหรือตัดเงินซ้ำและการทดสอบ-race-condition',
+            href: '/docs/database/concurrency/idempotency-keys',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/database/concurrency/pitfalls',
           },
         ],
       },
@@ -1459,27 +1551,31 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'Why Migrations',
-            href: '/docs/database/migrations#1-ทำไมต้องใช้-database-migration-แทนการแก้ไขฐานข้อมูลโดยตรง',
+            href: '/docs/database/migrations/why-migrations',
           },
           {
             title: 'Prisma Migrate',
-            href: '/docs/database/migrations#2-กลไก-prisma-migrate-migrate-dev-migrate-deploy-migrate-reset-และ-db-push',
+            href: '/docs/database/migrations/prisma-migrate',
           },
           {
             title: 'Failed Migration',
-            href: '/docs/database/migrations#3-การตรวจสอบไฟล์-sql-ที่สร้างขึ้นและการกู้คืนเมื่อ-migration-ล้มเหลว',
+            href: '/docs/database/migrations/failed-migration',
           },
           {
             title: 'Zero Downtime',
-            href: '/docs/database/migrations#4-เทคนิค-zero-downtime-schema-evolution-เปลี่ยนโครงสร้างโดยข้อมูลไม่สูญหาย',
+            href: '/docs/database/migrations/zero-downtime',
           },
           {
             title: 'Team Workflow',
-            href: '/docs/database/migrations#5-การบริหารจัดการ-migration-ข้ามสภาพแวดล้อม-devstagingprod-และการทำงานเป็นทีม',
+            href: '/docs/database/migrations/team-workflow',
           },
           {
             title: 'Database Seeding',
-            href: '/docs/database/migrations#6-seeding-การเตรียมข้อมูลตั้งต้นแบบ-idempotent-แยกตามสภาพแวดล้อม',
+            href: '/docs/database/migrations/database-seeding',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/database/migrations/pitfalls',
           },
         ],
       },
@@ -1489,23 +1585,27 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'pg_dump Restore',
-            href: '/docs/database/backup#1-การทำ-backup-และ-restore-ด้วย-pgdump-pgrestore-และ-psql',
+            href: '/docs/database/backup/pg-dump-restore',
           },
           {
             title: 'Docker Backup',
-            href: '/docs/database/backup#2-การสำรองและกู้คืนข้อมูล-postgresql-16-ที่รันอยู่บน-docker-container',
+            href: '/docs/database/backup/docker-backup',
           },
           {
             title: 'Logical vs PITR',
-            href: '/docs/database/backup#3-เปรียบเทียบ-logical-backup-vs-physical-backup-และแนวคิด-pitr',
+            href: '/docs/database/backup/logical-vs-pitr',
           },
           {
             title: 'Restore Drills',
-            href: '/docs/database/backup#4-กลยุทธ์ตั้งเวลา-backup-อัตโนมัติ-การแยกพื้นที่จัดเก็บ-และการซ้อมกู้คืนข้อมูล',
+            href: '/docs/database/backup/restore-drills',
           },
           {
             title: 'Supabase Backup',
-            href: '/docs/database/backup#5-ระบบ-backup-ของ-supabase-และข้อจำกัดของแพ็กเกจ-free-tier',
+            href: '/docs/database/backup/supabase-backup',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/database/backup/pitfalls',
           },
         ],
       },
@@ -1515,19 +1615,23 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'Least Privilege',
-            href: '/docs/database/security#1-การจัดการ-roles-และสิทธิ์ตามหลัก-least-privilege-แยก-role-แอปและ-migration',
+            href: '/docs/database/security/least-privilege',
           },
           {
             title: 'SSL TLS Secrets',
-            href: '/docs/database/security#2-การเข้ารหัสการเชื่อมต่อด้วย-ssltls-และการเก็บรักษา-connection-string',
+            href: '/docs/database/security/ssl-tls-secrets',
           },
           {
             title: 'SQL Injection',
-            href: '/docs/database/security#3-กลไกป้องกัน-sql-injection-ด้วย-parameterized-queries-ในระดับฐานข้อมูล',
+            href: '/docs/database/security/sql-injection',
           },
           {
             title: 'Network PDPA',
-            href: '/docs/database/security#4-การปกป้องข้อมูลอ่อนไหว-การจำกัดเครือข่าย-network-isolation-และกฎหมาย-pdpa',
+            href: '/docs/database/security/network-pdpa',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/database/security/pitfalls',
           },
         ],
       },
@@ -1537,23 +1641,27 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'Connection Cost',
-            href: '/docs/database/connection-pooling#1-ต้นทุนของการสร้าง-connection-ใน-postgresql-process-per-connection',
+            href: '/docs/database/connection-pooling/connection-cost',
           },
           {
             title: 'Pool Size Formula',
-            href: '/docs/database/connection-pooling#2-กลไกการทำงานของ-connection-pool-และสูตรคำนวณ-pool-size-ที่เหมาะสม',
+            href: '/docs/database/connection-pooling/pool-size-formula',
           },
           {
             title: 'Prisma Pool Limit',
-            href: '/docs/database/connection-pooling#3-ปัญหา-too-many-connections-และการตั้งค่า-connection-limit-ใน-prisma',
+            href: '/docs/database/connection-pooling/prisma-pool-limit',
           },
           {
             title: 'PgBouncer Modes',
-            href: '/docs/database/connection-pooling#4-สถาปัตยกรรม-pgbouncer-session-mode-vs-transaction-mode-และ-serverless',
+            href: '/docs/database/connection-pooling/pgbouncer-modes',
           },
           {
             title: 'pg_stat_activity',
-            href: '/docs/database/connection-pooling#5-การตรวจสอบและวิเคราะห์-connection-ที่เปิดใช้งานด้วย-pgstatactivity',
+            href: '/docs/database/connection-pooling/pg-stat-activity',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/database/connection-pooling/pitfalls',
           },
         ],
       },
@@ -1563,23 +1671,27 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'Managed Postgres',
-            href: '/docs/database/supabase#1-สถาปัตยกรรมของ-supabase-ในฐานะ-managed-postgresql-แพลตฟอร์ม',
+            href: '/docs/database/supabase/managed-postgres',
           },
           {
             title: 'Direct vs Pooler',
-            href: '/docs/database/supabase#2-การเชื่อมต่อ-supabase-ร่วมกับ-prisma-direct-connection-vs-supavisor-pooler',
+            href: '/docs/database/supabase/direct-vs-pooler',
           },
           {
             title: 'Pooler Modes',
-            href: '/docs/database/supabase#3-ความแตกต่างของ-transaction-mode-และ-session-mode-ใน-connection-pooler',
+            href: '/docs/database/supabase/pooler-modes',
           },
           {
             title: 'Row Level Security',
-            href: '/docs/database/supabase#4-แนวคิดและการทำงานของ-row-level-security-rls-แบบสรุป',
+            href: '/docs/database/supabase/row-level-security',
           },
           {
             title: 'Free Tier Limits',
-            href: '/docs/database/supabase#5-ข้อควรระวังในการใช้งานจริง-free-tier-pausing-ขีดจำกัด-และการเลือก-region',
+            href: '/docs/database/supabase/free-tier-limits',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/database/supabase/pitfalls',
           },
         ],
       },
@@ -1589,23 +1701,27 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'Relational vs NoSQL',
-            href: '/docs/database/sql-vs-nosql#1-เปรียบเทียบสถาปัตยกรรม-sql-relational-vs-nosql-non-relational',
+            href: '/docs/database/sql-vs-nosql/relational-vs-nosql',
           },
           {
             title: 'MongoDB Use Cases',
-            href: '/docs/database/sql-vs-nosql#2-เมื่อไหร่ควรเลือกใช้-mongodb-document-database',
+            href: '/docs/database/sql-vs-nosql/mongodb-use-cases',
           },
           {
             title: 'Redis Caching',
-            href: '/docs/database/sql-vs-nosql#3-การใช้-redis-สำหรับ-caching-session-queue-และ-rate-limiting',
+            href: '/docs/database/sql-vs-nosql/redis-caching',
           },
           {
             title: 'CAP Theorem',
-            href: '/docs/database/sql-vs-nosql#4-ฐานข้อมูลเฉพาะทางที่ควรรู้จัก-sqlite-elasticsearch-และทฤษฎีบท-cap-theorem',
+            href: '/docs/database/sql-vs-nosql/cap-theorem',
           },
           {
             title: 'Polyglot Strategy',
-            href: '/docs/database/sql-vs-nosql#5-แนวคิด-polyglot-persistence-และเหตุผลที่ระบบร้านค้าเลือก-postgresql-16',
+            href: '/docs/database/sql-vs-nosql/polyglot-strategy',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/database/sql-vs-nosql/pitfalls',
           },
         ],
       },
@@ -1615,7 +1731,7 @@ export const NAV_GROUPS: NavGroup[] = [
   // 4. หมวด TESTING & QUALITY
   {
     title: 'TESTING & QUALITY',
-    color: '#af52de', // Apple Purple
+    color: '#ff9500',
     items: [
       {
         title: 'Testing Fundamentals',
@@ -1623,35 +1739,39 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'Cost of Bugs',
-            href: '/docs/testing/fundamentals#1-ทำไมต้องเขียนเทสต์และต้นทุนของ-bug-the-cost-of-software-defects',
+            href: '/docs/testing/fundamentals/cost-of-bugs',
           },
           {
             title: 'Testing Pyramid',
-            href: '/docs/testing/fundamentals#2-testing-pyramid-และ-testing-trophy',
+            href: '/docs/testing/fundamentals/testing-pyramid',
           },
           {
             title: 'AAA Pattern',
-            href: '/docs/testing/fundamentals#3-หลักการเขียนเทสต์ที่ดี-aaa-pattern-และ-behavior-driven',
+            href: '/docs/testing/fundamentals/aaa-pattern',
           },
           {
             title: 'Test Doubles',
-            href: '/docs/testing/fundamentals#4-test-doubles-mock-stub-spy-fake-dummy-ต่างกันอย่างไร',
+            href: '/docs/testing/fundamentals/test-doubles',
           },
           {
             title: 'TDD Workflow',
-            href: '/docs/testing/fundamentals#5-test-driven-development-tdd-แบบเข้าใจง่าย',
+            href: '/docs/testing/fundamentals/tdd-workflow',
           },
           {
             title: 'Code Coverage',
-            href: '/docs/testing/fundamentals#6-code-coverage-และทำไม-100-จึงไม่ใช่เป้าหมายสูงสุด',
+            href: '/docs/testing/fundamentals/code-coverage',
           },
           {
             title: 'What to Test',
-            href: '/docs/testing/fundamentals#7-สิ่งที่ควรเทสต์และสิ่งที่ไม่ควรเทสต์-what-to-test-vs-what-not-to-test',
+            href: '/docs/testing/fundamentals/what-to-test',
           },
           {
             title: 'Flaky Tests',
-            href: '/docs/testing/fundamentals#8-flaky-test-คืออะไรและวิธีรับมือ',
+            href: '/docs/testing/fundamentals/flaky-tests',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/testing/fundamentals/pitfalls',
           },
         ],
       },
@@ -1661,39 +1781,51 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'Test Structure',
-            href: '/docs/testing/jest#1-โครงสร้างพื้นฐานของชุดทดสอบ-describe-ittest-nesting-suites',
+            href: '/docs/testing/jest/test-structure',
           },
           {
             title: 'Jest Matchers',
-            href: '/docs/testing/jest#2-jest-matchers-ครบวงจร-tobe-toequal-tothrow-tohavebeencalledwith',
+            href: '/docs/testing/jest/jest-matchers',
           },
           {
             title: 'Setup Teardown',
-            href: '/docs/testing/jest#3-setup-และ-teardown-lifecycle-beforeall-beforeeach-aftereach-afterall',
+            href: '/docs/testing/jest/setup-teardown',
           },
           {
             title: 'Async Promises',
-            href: '/docs/testing/jest#4-การทดสอบ-async-code-promises-asyncawait-rejections',
+            href: '/docs/testing/jest/async-promises',
           },
           {
             title: 'Mock Functions',
-            href: '/docs/testing/jest#5-mock-functions-jestfn-และ-jestspyon',
+            href: '/docs/testing/jest/mock-functions',
           },
           {
             title: 'Mock Modules',
-            href: '/docs/testing/jest#6-mock-modules-jestmock-และ-dependency-interception',
+            href: '/docs/testing/jest/mock-modules',
           },
           {
             title: 'Fake Timers',
-            href: '/docs/testing/jest#7-fake-timers-และการควบคุมเวลา-jestusefaketimers',
+            href: '/docs/testing/jest/fake-timers',
           },
           {
             title: 'Snapshots',
-            href: '/docs/testing/jest#8-snapshot-testing-เมื่อไหร่ควรใช้และเมื่อไหร่ไม่ควรใช้',
+            href: '/docs/testing/jest/snapshots',
+          },
+          {
+            title: 'Jest TS Config',
+            href: '/docs/testing/jest/jest-ts-config',
+          },
+          {
+            title: 'CLI Watch Mode',
+            href: '/docs/testing/jest/cli-watch-mode',
           },
           {
             title: 'Jest vs Vitest',
-            href: '/docs/testing/jest#11-เปรียบเทียบ-jest-vs-vitest-แบบสรุป-เมื่อไหร่ควรเลือกตัวไหน',
+            href: '/docs/testing/jest/jest-vs-vitest',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/testing/jest/pitfalls',
           },
         ],
       },
@@ -1703,27 +1835,31 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'TestingModule DI',
-            href: '/docs/testing/backend-testing#1-โครงสร้างการทดสอบใน-nestjs-11-และการทำงานของ-testcreatetestingmodule',
+            href: '/docs/testing/backend-testing/testing-module-di',
           },
           {
             title: 'Service Unit Test',
-            href: '/docs/testing/backend-testing#2-การเขียน-unit-test-สำหรับ-service-โดยการ-mock-prismaservice',
+            href: '/docs/testing/backend-testing/service-unit-test',
           },
           {
             title: 'Controller Guards',
-            href: '/docs/testing/backend-testing#3-การเขียน-unit-test-สำหรับ-controller-guard-pipe-และ-interceptor',
+            href: '/docs/testing/backend-testing/controller-guards',
           },
           {
             title: 'Supertest E2E',
-            href: '/docs/testing/backend-testing#4-การทำ-integration-และ-e2e-testing-ด้วย-supertest',
+            href: '/docs/testing/backend-testing/supertest-e2e',
           },
           {
             title: 'Auth Upload Test',
-            href: '/docs/testing/backend-testing#5-การทดสอบ-authentication-flow-dto-validation-และการอัปโหลดไฟล์ด้วย-multer',
+            href: '/docs/testing/backend-testing/auth-upload-test',
           },
           {
             title: 'Test DB Isolation',
-            href: '/docs/testing/backend-testing#6-การจัดการฐานข้อมูลสำหรับเทสต์-การ-mock-บริการภายนอก-และทดสอบ-race-condition',
+            href: '/docs/testing/backend-testing/test-db-isolation',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/testing/backend-testing/pitfalls',
           },
         ],
       },
@@ -1733,131 +1869,181 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           {
             title: 'RTL Philosophy',
-            href: '/docs/testing/frontend-testing#1-ปรัชญาของ-react-testing-library-และการตั้งค่าใน-nextjs-16-react-19',
+            href: '/docs/testing/frontend-testing/rtl-philosophy',
           },
           {
             title: 'Query Priority',
-            href: '/docs/testing/frontend-testing#2-กลยุทธ์การเลือกใช้-queries-getby-queryby-findby-และลำดับความสำคัญด้าน-a11y',
+            href: '/docs/testing/frontend-testing/query-priority',
           },
           {
             title: 'User Event Forms',
-            href: '/docs/testing/frontend-testing#3-การจำลองพฤติกรรมผู้ใช้ด้วย-user-event-และการทดสอบฟอร์ม-react-hook-form-zod',
+            href: '/docs/testing/frontend-testing/user-event-forms',
           },
           {
             title: 'Hooks Query Store',
-            href: '/docs/testing/frontend-testing#4-การทดสอบ-custom-hooks-tanstack-query-v5-และ-zustand-store',
+            href: '/docs/testing/frontend-testing/hooks-query-store',
           },
           {
             title: 'MSW API Mocking',
-            href: '/docs/testing/frontend-testing#5-การจำลอง-api-ด้วย-msw-mock-service-worker-และทดสอบ-toast-dialog',
+            href: '/docs/testing/frontend-testing/msw-api-mocking',
           },
           {
             title: 'RSC Testing',
-            href: '/docs/testing/frontend-testing#6-ข้อจำกัดการทดสอบ-async-server-components-และแนวทางการใช้-e2e-ทดแทน',
+            href: '/docs/testing/frontend-testing/rsc-testing',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/testing/frontend-testing/pitfalls',
           },
         ],
       },
       {
-        title: 'E2E Testing',
-        href: '/docs/testing/e2e-playwright',
+        title: 'Playwright',
+        href: '/docs/testing/playwright',
         children: [
           {
             title: 'Playwright Setup',
-            href: '/docs/testing/e2e-playwright#1-บทบาทของ-e2e-testing-และการติดตั้ง-playwright-ร่วมกับ-nextjs-16',
+            href: '/docs/testing/playwright/playwright-setup',
           },
           {
             title: 'Locators Waiting',
-            href: '/docs/testing/e2e-playwright#2-กลไก-locators-auto-waiting-และ-web-first-assertions',
+            href: '/docs/testing/playwright/locators-waiting',
           },
           {
             title: 'Checkout Flow',
-            href: '/docs/testing/e2e-playwright#3-การเขียนเทสต์-critical-user-journey-ของระบบร้านค้าและการแชร์-login-ด้วย-storagestate',
+            href: '/docs/testing/playwright/checkout-flow',
           },
           {
             title: 'Page Object Model',
-            href: '/docs/testing/e2e-playwright#4-สถาปัตยกรรม-page-object-model-pom-การจัดการ-test-database-และ-network-interception',
+            href: '/docs/testing/playwright/page-object-model',
           },
           {
             title: 'Trace Viewer CI',
-            href: '/docs/testing/e2e-playwright#5-การ-debug-ด้วย-trace-viewer-การรันบน-ci-และเปรียบเทียบ-playwright-vs-cypress',
+            href: '/docs/testing/playwright/trace-viewer-ci',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/testing/playwright/pitfalls',
           },
         ],
       },
       {
-        title: 'ESLint Prettier',
-        href: '/docs/testing/eslint-prettier',
+        title: 'ESLint',
+        href: '/docs/testing/eslint',
         children: [
           {
             title: 'Linter vs Format',
-            href: '/docs/testing/eslint-prettier#1-แยกบทบาทระหว่าง-eslint-code-quality-และ-prettier-code-formatting',
+            href: '/docs/testing/eslint/linter-vs-format',
           },
           {
             title: 'Flat Config',
-            href: '/docs/testing/eslint-prettier#2-การตั้งค่า-eslint-flat-config-eslintconfigmjs-สำหรับ-nextjs-16-และ-nestjs-11',
+            href: '/docs/testing/eslint/flat-config',
           },
           {
             title: 'TS React Rules',
-            href: '/docs/testing/eslint-prettier#3-กฎสำคัญของ-typescript-eslint-และ-react-hooks-ที่ต้องเปิดใช้งาน',
+            href: '/docs/testing/eslint/ts-react-rules',
           },
           {
+            title: 'Anti-patterns',
+            href: '/docs/testing/eslint/pitfalls',
+          },
+        ],
+      },
+      {
+        title: 'Prettier',
+        href: '/docs/testing/prettier',
+        children: [
+          {
             title: 'Prettier Tailwind',
-            href: '/docs/testing/eslint-prettier#4-การผสาน-prettier-eslint-config-prettier-และ-prettier-plugin-tailwindcss',
+            href: '/docs/testing/prettier/prettier-tailwind',
           },
           {
             title: 'Scripts Monorepo',
-            href: '/docs/testing/eslint-prettier#5-การตั้งค่า-npm-scripts-vs-code-format-on-save-และมาตรฐานใน-monorepo',
+            href: '/docs/testing/prettier/scripts-monorepo',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/testing/prettier/pitfalls',
           },
         ],
       },
       {
-        title: 'Git Hooks CI',
-        href: '/docs/testing/git-hooks-ci',
+        title: 'Git Hooks',
+        href: '/docs/testing/git-hooks',
         children: [
           {
             title: 'Husky lint-staged',
-            href: '/docs/testing/git-hooks-ci#1-การดักจับคุณภาพโค้ดก่อน-commit-ด้วย-husky-และ-lint-staged',
+            href: '/docs/testing/git-hooks/husky-lint-staged',
           },
           {
             title: 'Commit Standard',
-            href: '/docs/testing/git-hooks-ci#2-มาตรฐานข้อความ-commit-ด้วย-conventional-commits',
+            href: '/docs/testing/git-hooks/commit-standard',
           },
           {
-            title: 'GitHub Actions',
-            href: '/docs/testing/git-hooks-ci#3-การออกแบบ-github-actions-ci-pipeline-install-lint-type-check-test-build',
-          },
-          {
-            title: 'Postgres CI E2E',
-            href: '/docs/testing/git-hooks-ci#4-การรัน-postgresql-16-service-container-และ-playwright-e2e-บน-github-actions',
-          },
-          {
-            title: 'Branch Protection',
-            href: '/docs/testing/git-hooks-ci#5-การตั้งค่า-branch-protection-rules-github-secrets-และ-status-badges',
+            title: 'Anti-patterns',
+            href: '/docs/testing/git-hooks/pitfalls',
           },
         ],
       },
       {
-        title: 'Debug Type Check',
-        href: '/docs/testing/debugging-type-checking',
+        title: 'GitHub Actions',
+        href: '/docs/testing/github-actions',
         children: [
           {
-            title: 'Strict Type Check',
-            href: '/docs/testing/debugging-type-checking#1-type-checking-ในฐานะปราการด่านแรก-tsc---noemit-และ-strict-mode',
+            title: 'CI Pipeline',
+            href: '/docs/testing/github-actions/ci-pipeline',
           },
           {
+            title: 'Postgres CI E2E',
+            href: '/docs/testing/github-actions/postgres-ci-e2e',
+          },
+          {
+            title: 'Branch Protection',
+            href: '/docs/testing/github-actions/branch-protection',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/testing/github-actions/pitfalls',
+          },
+        ],
+      },
+      {
+        title: 'Type Checking',
+        href: '/docs/testing/type-checking',
+        children: [
+          {
+            title: 'Strict Mode tsc',
+            href: '/docs/testing/type-checking/strict-mode-tsc',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/testing/type-checking/pitfalls',
+          },
+        ],
+      },
+      {
+        title: 'Debugging',
+        href: '/docs/testing/debugging',
+        children: [
+          {
             title: 'Debug Jest Tests',
-            href: '/docs/testing/debugging-type-checking#2-เทคนิคการ-debug-ชุดทดสอบ-jest-ที่ล้มเหลว---runinband-vs-code-debugger',
+            href: '/docs/testing/debugging/debug-jest-tests',
           },
           {
             title: 'Debug Fullstack',
-            href: '/docs/testing/debugging-type-checking#3-การ-debug-ฝั่ง-backend-nestjs-11-inspector-และฝั่ง-frontend-nextjs-16-react-devtools',
+            href: '/docs/testing/debugging/debug-fullstack',
           },
           {
             title: 'Stack Trace Bug',
-            href: '/docs/testing/debugging-type-checking#4-ศิลปะการอ่าน-stack-trace-และกระบวนการ-reproduce-bug-ด้วยการเขียนเทสต์นำ',
+            href: '/docs/testing/debugging/stack-trace-bug',
           },
           {
             title: 'Logging Audit',
-            href: '/docs/testing/debugging-type-checking#5-การออกแบบ-structured-logging-และการตรวจสอบช่องโหว่ด้วย-npm-audit',
+            href: '/docs/testing/debugging/logging-audit',
+          },
+          {
+            title: 'Anti-patterns',
+            href: '/docs/testing/debugging/pitfalls',
           },
         ],
       },

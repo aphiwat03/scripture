@@ -1,0 +1,104 @@
+---
+title: Prisma Migrate
+category: DATABASE
+parentTitle: Migrations
+version: Prisma Migrate & Zero-Downtime
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+Prisma มีชุดคำสั่งจัดการโครงสร้างฐานข้อมูลหลายตัว ซึ่งถูกออกแบบมาสำหรับ "ช่วงชีวิตของการพัฒนา" ที่แตกต่างกันอย่างสิ้นเชิง หากเปรียบกับร้าน **Smart Butcher Marketplace**:
+- `prisma db push` เปรียบเหมือน **"การจัดวางผังร้านจำลองด้วยกล่องลังกระดาษ"** เพื่อดูพื้นที่คร่าวๆ รวดเร็ว ไม่ต้องจดบันทึกประวัติ แต่ไม่เหมาะกับร้านจริง
+- `prisma migrate dev` เปรียบเหมือน **"การออกแบบพิมพ์เขียวห้องเย็นในห้องทดลอง"** ที่มีการสร้างห้องจำลอง (Shadow Database) มาเทียบกับพิมพ์เขียวเดิม เพื่อออกใบสั่งงานก่อสร้าง (`migration.sql`)
+- `prisma migrate deploy` เปรียบเหมือน **"วิศวกรนำใบสั่งงานก่อสร้างที่อนุมัติแล้วไปสร้างจริงที่สาขา Production"** โดยอ่านเฉพาะใบงานที่ยังไม่เคยทำ ห้ามทุบตึกทิ้งเด็ดขาด
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เบื้องหลังการทำงานของ Prisma Migrate อาศัยกลไกสำคัญ 2 ส่วนใน PostgreSQL 16:
+
+1. **ตารางควบคุมสถานะ `_prisma_migrations`:**
+   เมื่อรัน Prisma Migrate ครั้งแรก ระบบจะสร้างตารางชื่อ `_prisma_migrations` ใน Schema `public` โดยมีคอลัมน์สำคัญได้แก่:
+   - `id`: รหัส UUID ของการรัน
+   - `checksum`: ค่าแฮช **SHA-256** ที่คำนวณจากเนื้อหาภายในไฟล์ `migration.sql` เพื่อตรวจจับว่ามีใครแอบแก้ไขไฟล์ Migration ย้อนหลังหรือไม่
+   - `migration_name`: ชื่อโฟลเดอร์ Migration เช่น `20261017010000_init_butcher_schema`
+   - `started_at` และ `finished_at`: เวลาที่เริ่มรันและรันเสร็จสิ้น (หาก `finished_at` เป็น `NULL` และมี `logs` แสดงว่า Migration นั้นพังกลางคัน)
+   - `applied_steps_count`: จำนวนขั้นตอนที่รันสำเร็จ
+
+2. **กลไก Shadow Database (ใช้เฉพาะตอนรัน `migrate dev`):**
+   ในการคำนวณว่านักพัฒนาแก้ไขอะไรไปบ้างใน `schema.prisma` Prisma จะแอบสร้างฐานข้อมูลชั่วคราวขึ้นมาอีกก้อนหนึ่งเรียกว่า **Shadow Database** จากนั้นนำไฟล์ `migration.sql` เก่าทั้งหมดในโฟลเดอร์ `prisma/migrations` ไปรันใส่ Shadow Database เพื่อสร้าง "โครงสร้างปัจจุบันตามประวัติไฟล์" แล้วจึงนำมาเปรียบเทียบ (Diff) กับไฟล์ `schema.prisma` ล่าสุด เพื่อสร้างไฟล์ `migration.sql` ใบใหม่ขึ้นมา ก่อนจะลบหรือล้าง Shadow Database ทิ้ง
+
+### ตารางเปรียบเทียบคำสั่ง Prisma Schema Management
+
+| คำสั่ง | สร้างไฟล์ `.sql` หรือไม่ | ใช้ Shadow DB หรือไม่ | ความเสี่ยงข้อมูลสูญหาย | สภาพแวดล้อมที่เหมาะสม |
+| :--- | :--- | :--- | :--- | :--- |
+| `npx prisma db push` | ไม่สร้าง | ไม่ใช้ | สูง (อาจเตือนให้ล้างตารางถ้าแก้ชนิดข้อมูลขัดแย้งกัน) | Rapid Prototyping / ทดลองโครงสร้างระยะสั้นบนเครื่องตัวเอง |
+| `npx prisma migrate dev` | สร้างไฟล์ใหม่ | ใช้ | สูง (หากเกิด Drift จะถามเพื่อสั่ง Reset ล้างฐานข้อมูล) | Local Development เท่านั้น |
+| `npx prisma migrate reset` | ไม่สร้าง (รันของเดิมซ้ำ) | ไม่ใช้ | **100% (ทิ้งตารางทั้งหมดแล้วสร้างใหม่ + รัน Seed)** | Local Development / การเตรียมฐานข้อมูลก่อนรัน Integration Test |
+| `npx prisma migrate deploy` | ไม่สร้าง (รันเฉพาะไฟล์ที่มี) | ไม่ใช้ | ต่ำ (รันเฉพาะไฟล์ที่ยังไม่ถูกบันทึกใน `_prisma_migrations`) | **Staging และ Production (CI/CD Pipeline)** |
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การตั้งค่า Shadow Database URL และคำสั่งใช้งานในแต่ละสภาพแวดล้อม
+เมื่อใช้งานบนสภาพแวดล้อมที่สิทธิ์การสร้างฐานข้อมูลใหม่ถูกจำกัด เราสามารถกำหนด `shadowDatabaseUrl` แยกไว้ใน `schema.prisma` ได้:
+
+```prisma filename="prisma/schema.prisma"
+datasource db {
+  provider          = "postgresql"
+  url               = env("DATABASE_URL")
+  directUrl         = env("DIRECT_URL")
+  shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
+}
+```
+
+```bash filename="terminal_commands.sh"
+# 1. ช่วงทดลองไอเดียใหม่บนเครื่อง Local แบบเร็วๆ (ยังไม่ต้องการสร้างไฟล์ประวัติ)
+npx prisma db push
+
+# 2. เมื่อโครงสร้างนิ่งแล้ว สั่งสร้างไฟล์ Migration บนเครื่อง Local พร้อมตั้งชื่อให้สื่อความหมาย
+npx prisma migrate dev --name add_orders_and_payments_tables
+
+# 3. ล้างข้อมูลเครื่อง Local ทั้งหมดเพื่อเรียง Migration ใหม่ตั้งแต่ไฟล์แรกและรัน Seed อัตโนมัติ
+npx prisma migrate reset
+
+# 4. คำสั่งเดียวที่อนุญาตให้รันบน Staging และ Production ผ่าน CI/CD
+npx prisma migrate deploy
+```
+
+### ตัวอย่างที่ 2: การตรวจสอบประวัติและ Checksum ในตาราง `_prisma_migrations` ด้วย SQL
+วิศวกรสามารถตรวจสอบสถานะการรัน Migration ใน PostgreSQL 16 ได้โดยตรงผ่านตารางระบบของ Prisma:
+
+```sql filename="inspect_prisma_migrations.sql"
+-- ตรวจสอบประวัติการรัน Migration ล่าสุด 10 รายการในระบบ Smart Butcher
+SELECT
+    migration_name,
+    substring(checksum, 1, 12) AS short_checksum,
+    started_at,
+    finished_at,
+    EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000 AS duration_ms,
+    applied_steps_count,
+    rolled_back_at
+FROM public._prisma_migrations
+ORDER BY started_at DESC
+LIMIT 10;
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **คำสั่งใน CI/CD Production** | ใส่ `npx prisma migrate dev` หรือ `npx prisma db push --accept-data-loss` ในสคริปต์ Production | ใช้ `npx prisma migrate deploy` เท่านั้นในสคริปต์ Deployment สำหรับ Staging และ Production |
+| **การแก้ไขไฟล์ที่รันไปแล้ว** | เข้าไปแก้ไฟล์ `migration.sql` เก่าที่ถูก Push ขึ้น Git และรันบน Staging ไปแล้ว ทำให้ Checksum ไม่ตรงกัน | ห้ามแก้ไขไฟล์ Migration ที่ถูกแชร์เข้ากิ่งหลักแล้ว หากต้องการแก้ไขให้สร้าง Migration ใบใหม่มาทับเสมอ |
+| **การเชื่อมต่อตอนทำ Migration** | รัน `prisma migrate deploy` ผ่าน Connection Pooler (เช่น PgBouncer โหมด Transaction) ทำให้คำสั่งค้าง | กำหนด `directUrl` ใน `schema.prisma` ให้ชี้ตรงไปยัง PostgreSQL Port 5432 สำหรับการรัน Migration เสมอ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `prisma db push` เมื่อ:** กำลังขึ้นโปรเจกต์วันแรกๆ ที่ตารางเปลี่ยนทุกๆ 5 นาที และยังไม่มีข้อมูลสำคัญใดๆ
+- **ควรใช้ `prisma migrate dev` เมื่อ:** พัฒนาฟีเจอร์บนเครื่อง Local เสร็จเรียบร้อยและต้องการสร้างไฟล์ `.sql` เพื่อเตรียมเปิด Pull Request
+- **ควรใช้ `prisma migrate deploy` เมื่อ:** นำโค้ดขึ้นทดสอบบนเซิร์ฟเวอร์ Staging หรือใช้งานจริงบน Production
+- **ไม่ควรใช้ `migrate dev` หรือ `db push` บน Production เด็ดขาด:** เพราะคำสั่งเหล่านี้ไม่ได้ออกแบบมาเพื่อรักษาข้อมูลเดิมและอาจสั่ง Drop ตารางหรือสร้างฐานข้อมูลจำลองโดยไม่ได้รับอนุญาต
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: Shadow Database ใน Prisma Migrate คืออะไร และทำไม `prisma migrate deploy` ถึงไม่ต้องใช้ Shadow Database?**
+  - **แนวคำตอบ:** Shadow Database คือฐานข้อมูลชั่วคราวที่ `prisma migrate dev` สร้างขึ้นเพื่อรันไฟล์ Migration เก่าทั้งหมด แล้วนำโครงสร้างที่ได้ไปเปรียบเทียบ (Diff) กับไฟล์ `schema.prisma` ปัจจุบันเพื่อตรวจหาความเปลี่ยนแปลงและสร้างไฟล์ `migration.sql` ใบใหม่ ส่วน `prisma migrate deploy` ไม่ต้องใช้ Shadow Database เพราะหน้าที่ของมันไม่ใช่การสร้างไฟล์ใหม่ แต่เป็นการอ่านไฟล์ `migration.sql` ที่มีอยู่แล้วในโฟลเดอร์ไปเทียบกับตาราง `_prisma_migrations` แล้วรันเฉพาะไฟล์ที่ยังไม่เคยรันเท่านั้น
+- **Q2: จะเกิดอะไรขึ้นหากนักพัฒนาแอบเข้าไปแก้ไขอักษรในไฟล์ `migration.sql` เก่าที่เคยรันบนเครื่องเพื่อนร่วมทีมไปแล้ว?**
+  - **แนวคำตอบ:** ค่าแฮช SHA-256 ของไฟล์นั้นจะเปลี่ยนไป ไม่ตรงกับค่า `checksum` ที่บันทึกอยู่ในตาราง `_prisma_migrations` เมื่อเพื่อนร่วมทีมหรือระบบ CI รันคำสั่ง Migration ครั้งถัดไป Prisma จะตรวจพบว่าไฟล์ประวัติถูกดัดแปลง (Modified migration after it has been applied) และจะหยุดการทำงานทันทีเพื่อป้องกันปัญหา Schema ไม่ตรงกัน
+
+---

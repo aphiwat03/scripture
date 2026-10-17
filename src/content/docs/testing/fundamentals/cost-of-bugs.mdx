@@ -1,0 +1,279 @@
+---
+title: Cost of Bugs
+category: TESTING & QUALITY
+parentTitle: Testing Fundamentals
+version: Testing Pyramid & TDD
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด
+การเขียนชุดทดสอบอัตโนมัติ (Automated Testing) ไม่ใช่ "ภาระงานที่เพิ่มขึ้นหลังเขียนฟีเจอร์เสร็จ" แต่คือ **เครื่องมือกำกับและรับประกันคุณภาพการลงทุนทางวิศวกรรม (Engineering Investment Protection)**
+
+ในระบบระดับองค์กรอย่าง **Smart Butcher Marketplace** (แพลตฟอร์มจำหน่ายเนื้อพรีเมียมและเนื้อดรายเอจออนไลน์) บั๊กไม่ใช่แค่ความผิดพลาดบนหน้าจอ แต่สร้างความสูญเสียทางการเงินโดยตรง เช่น:
+- ระบบตัดสต็อกเนื้อดรายเอจ A5 Wagyu ผิดพลาด ทำให้รับออร์เดอร์เกินสต็อกที่มีบ่มไว้จริง 45 วัน (เนื้อมีสต็อกจำกัด ไม่สามารถผลิตเพิ่มได้ทันที)
+- ฟังก์ชันคำนวณราคาปัดเศษสตางค์ผิดเมื่อตัดแต่งความหนาพิเศษ (Custom Cut Thickness) ส่งผลให้ขาดทุนสะสมในทุกๆ คำสั่งซื้อ
+
+```mermaid filename="docs/testing/fundamentals-diagram.mmd"
+flowchart LR
+    Coding["1. ขณะเขียนโค้ด (IDE)<br/>ต้นทุน: 1x ($)"] --> PR["2. Pull Request (CI)<br/>ต้นทุน: 5x ($$)"]
+    PR --> Staging["3. Staging / QA<br/>ต้นทุน: 15x ($$$)"]
+    Staging --> Prod["4. Production Failure<br/>ต้นทุน: 100x ($$$$$)"]
+
+    style Coding fill:#dcfce7,stroke:#16a34a,color:#14532d
+    style PR fill:#fef9c3,stroke:#ca8a04,color:#713f12
+    style Staging fill:#ffedd5,stroke:#ea580c,color:#7c2d12
+    style Prod fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+```
+
+## 2. หลักการเบื้องหลัง: เส้นโค้งต้นทุนของโบห์ม (Boehm's Cost of Change Curve)
+Barry Boehm (ผู้เชี่ยวชาญด้านวิศวกรรมซอฟต์แวร์ระดับตำนาน) ได้นิยาม **Relative Cost of Fixing Defects**:
+1. **Coding Phase (1x)**: นักพัฒนาพิมพ์โค้ดแล้ว Unit Test ในเครื่องแจ้งเตือนทันที ใช้เวลาแก้ไม่ถึง 30 วินาที
+2. **Pull Request / Review Phase (5x)**: เกิด Context Switching ต้องรอ CI รัน แจ้งเตือนเพื่อนร่วมทีม รีวิวซ้ำ และ Re-deploy
+3. **Staging / QA Phase (15x)**: ทีม QA พบข้อผิดพลาด ต้องเปิด Ticket บันทึกขั้นตอน Reproduce, นักพัฒนาต้องดึงงานปัจจุบันลงเพื่อสลับกลับมาแก้
+4. **Production Crash (30x - 100x+)**: เกิด Data Corruption ในฐานข้อมูล, ต้อง Rollback เวอร์ชันฉุกเฉิน, กระทบความเชื่อมั่นของลูกค้า, เกิดค่าปรับทางกฎหมายหรือชดเชยสินค้า
+
+การมีชุดทดสอบที่รวดเร็วและครอบคลุมเป็นหัวใจของ **Continuous Delivery (CD)** ทำให้ทีมสามารถ Refactor โค้ดเก่า, อัปเกรดเวอร์ชันไลบรารี, หรือปรับแต่งสถาปัตยกรรมระบบได้ด้วยความมั่นใจ 100% ว่าฟังก์ชันเดิมจะไม่พัง (No Regression)
+
+---
+
+## 3. ตัวอย่างโค้ด: การตรวจจับข้อผิดพลาดในระดับ Unit Test
+
+### โดเมนโมเดลร่วม: Smart Butcher Marketplace Core Interfaces
+```typescript filename="domain/models.ts"
+// domain/models.ts
+export type UserRole = 'CUSTOMER' | 'BUTCHER' | 'ADMIN';
+
+export interface User {
+  id: string;
+  email: string;
+  fullName: string;
+  role: UserRole;
+  isVip: boolean;
+}
+
+export type CutType = 'RIBEYE' | 'TENDERLOIN' | 'STRIPLOIN';
+
+export interface Product {
+  id: string;
+  name: string;
+  sku: string;
+  pricePerKg: number;
+  stockQty: number; // ปริมาณเนื้อคงเหลือในสต็อก (กิโลกรัม)
+  dryAgedDays: number;
+  isActive: boolean;
+}
+
+export interface OrderItem {
+  id: string;
+  productId: string;
+  cutType: CutType;
+  thicknessCm: number;
+  unitPrice: number;
+  quantity: number; // จำนวนชิ้น
+  subtotal: number;
+}
+```
+
+### ตัวอย่างที่ 1 (ระดับพื้นฐาน): ตรวจสอบเงื่อนไขการตัดแต่งเนื้อสเต็กดรายเอจ
+```typescript filename="services/butcher-validator.ts"
+// services/butcher-validator.ts
+export class InvalidCutSpecificationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidCutSpecificationError';
+  }
+}
+
+export function validateSteakCutThickness(cutType: CutType, thicknessCm: number): boolean {
+  // กฎทางธุรกิจ: ชิ้นเนื้อสเต็กต้องมีความหนาระหว่าง 2.0 ซม. ถึง 6.0 ซม. เพื่อคงความชุ่มฉ่ำขณะย่าง
+  if (thicknessCm < 2.0) {
+    throw new InvalidCutSpecificationError(
+      `ความหนา ${thicknessCm} ซม. บางเกินไปสำหรับสเต็กพรีเมียม (ขั้นต่ำ 2.0 ซม.)`
+    );
+  }
+  if (thicknessCm > 6.0) {
+    throw new InvalidCutSpecificationError(
+      `ความหนา ${thicknessCm} ซม. หนาเกินไปสำหรับมาตรฐานกระทะครัวเรือน (สูงสุด 6.0 ซม.)`
+    );
+  }
+  return true;
+}
+```
+
+```typescript filename="tests/unit/butcher-validator.spec.ts"
+// tests/unit/butcher-validator.spec.ts
+import { validateSteakCutThickness, InvalidCutSpecificationError } from '../../services/butcher-validator';
+
+describe('validateSteakCutThickness', () => {
+  it('should accept valid standard steak thickness of 3.5 cm', () => {
+    // Act & Assert
+    expect(validateSteakCutThickness('RIBEYE', 3.5)).toBe(true);
+  });
+
+  it('should throw InvalidCutSpecificationError when thickness is below 2.0 cm threshold', () => {
+    // Act & Assert
+    expect(() => validateSteakCutThickness('STRIPLOIN', 1.5)).toThrow(
+      InvalidCutSpecificationError
+    );
+    expect(() => validateSteakCutThickness('STRIPLOIN', 1.5)).toThrow(
+      'ความหนา 1.5 ซม. บางเกินไปสำหรับสเต็กพรีเมียม (ขั้นต่ำ 2.0 ซม.)'
+    );
+  });
+
+  it('should throw InvalidCutSpecificationError when thickness exceeds 6.0 cm threshold', () => {
+    // Act & Assert
+    expect(() => validateSteakCutThickness('TENDERLOIN', 7.0)).toThrow(
+      InvalidCutSpecificationError
+    );
+  });
+});
+```
+
+### ตัวอย่างที่ 2 (ระดับธุรกิจขั้นสูง): คำนวณส่วนลด VIP และค่าบริการดรายเอจพิเศษ ป้องกันความเสียหายทางการเงิน
+```typescript filename="services/pricing-engine.ts"
+// services/pricing-engine.ts
+export interface PricingCalculationResult {
+  baseAmount: number;
+  agingSurcharge: number;
+  vipDiscountAmount: number;
+  finalTotal: number;
+}
+
+export function calculateCustomSteakPrice(
+  product: Product,
+  quantityKg: number,
+  buyer: User
+): PricingCalculationResult {
+  if (quantityKg <= 0) {
+    throw new Error('ปริมาณเนื้อต้องมากกว่า 0 กิโลกรัม');
+  }
+  if (quantityKg > product.stockQty) {
+    throw new Error(`สต็อกไม่เพียงพอ: สต็อกเหลือ ${product.stockQty} กก. แต่ร้องขอ ${quantityKg} กก.`);
+  }
+
+  const baseAmount = Number((product.pricePerKg * quantityKg).toFixed(2));
+
+  // ค่าบริการบ่มพิเศษ: หากบ่มเกิน 30 วัน มีค่าห้องควบคุมความชื้น 150 บาทต่อกิโลกรัม
+  const agingSurcharge = product.dryAgedDays > 30 ? Number((150 * quantityKg).toFixed(2)) : 0;
+
+  // สิทธิพิเศษลูกค้า VIP: รับส่วนลด 10% จากยอดรวมก่อนคิดค่าบริการบ่ม
+  const vipDiscountAmount = buyer.isVip ? Number((baseAmount * 0.10).toFixed(2)) : 0;
+
+  const finalTotal = Number((baseAmount + agingSurcharge - vipDiscountAmount).toFixed(2));
+
+  return {
+    baseAmount,
+    agingSurcharge,
+    vipDiscountAmount,
+    finalTotal,
+  };
+}
+```
+
+```typescript filename="tests/unit/pricing-engine.spec.ts"
+// tests/unit/pricing-engine.spec.ts
+import { calculateCustomSteakPrice } from '../../services/pricing-engine';
+import { Product, User } from '../../domain/models';
+
+describe('calculateCustomSteakPrice', () => {
+  const mockA5Ribeye: Product = {
+    id: 'prod-wagyu-a5',
+    name: 'Miyazaki Wagyu A5 Ribeye',
+    sku: 'WAGYU-A5-RIB',
+    pricePerKg: 3500,
+    stockQty: 10,
+    dryAgedDays: 45, // เกิน 30 วัน -> ต้องคิดค่า surcharge
+    isActive: true,
+  };
+
+  const vipCustomer: User = {
+    id: 'usr-vip-001',
+    email: 'executive@meatlover.com',
+    fullName: 'Somchai ButcherKing',
+    role: 'CUSTOMER',
+    isVip: true,
+  };
+
+  const standardCustomer: User = {
+    id: 'usr-std-002',
+    email: 'guest@foodie.com',
+    fullName: 'Jane Doe',
+    role: 'CUSTOMER',
+    isVip: false,
+  };
+
+  it('should calculate correct total with aging surcharge and VIP 10% discount', () => {
+    // 2 kg * 3,500 = 7,000 base
+    // Surcharge: 2 kg * 150 = 300
+    // VIP discount: 10% of 7,000 = 700
+    // Final: 7,000 + 300 - 700 = 6,600
+    const result = calculateCustomSteakPrice(mockA5Ribeye, 2, vipCustomer);
+
+    expect(result).toEqual({
+      baseAmount: 7000,
+      agingSurcharge: 300,
+      vipDiscountAmount: 700,
+      finalTotal: 6600,
+    });
+  });
+
+  it('should not apply VIP discount for non-VIP customer', () => {
+    const result = calculateCustomSteakPrice(mockA5Ribeye, 2, standardCustomer);
+
+    expect(result.vipDiscountAmount).toBe(0);
+    expect(result.finalTotal).toBe(7300); // 7000 + 300
+  });
+
+  it('should prevent placing order when requested quantity exceeds available stock', () => {
+    expect(() => calculateCustomSteakPrice(mockA5Ribeye, 12, vipCustomer)).toThrow(
+      'สต็อกไม่เพียงพอ: สต็อกเหลือ 10 กก. แต่ร้องขอ 12 กก.'
+    );
+  });
+});
+```
+
+---
+
+## 4. ผิด vs ถูก: การทดสอบความถูกต้องของระบบ
+
+```typescript filename="src/fundamentals.spec.ts"
+// ❌ ผิด: ทดสอบแบบไร้ทิศทาง ขาด Assertion หรือทดสอบแต่ "Happy path" ลืมเคสขอบเขต (Boundary)
+it('should test butcher calculation', () => {
+  const result = calculateCustomSteakPrice(mockA5Ribeye, 2, vipCustomer);
+  // ไม่ assert ค่าเฉพาะเจาะจง หรือ assert แค่ว่ามีค่ากลับมา
+  expect(result).toBeDefined();
+  // บั๊กปัดเศษเงินติดลบ หรือคิดสูตรส่วนลดผิดจะไม่ถูกตรวจจับเลย!
+});
+
+// ✅ ถูก: ตรวจสอบความถูกต้องของตัวเลขทุกฟิลด์ พร้อม Boundary Conditions (0, ค่าติดลบ, สต็อกหมด)
+it('should calculate precision cents accurately and prevent negative quantity', () => {
+  expect(() => calculateCustomSteakPrice(mockA5Ribeye, -1, vipCustomer)).toThrow(
+    'ปริมาณเนื้อต้องมากกว่า 0 กิโลกรัม'
+  );
+
+  const precisionResult = calculateCustomSteakPrice(
+    { ...mockA5Ribeye, pricePerKg: 1999.99 },
+    1.25,
+    vipCustomer
+  );
+  // 1999.99 * 1.25 = 2499.9875 -> ปัดทศนิยม 2 ตำแหน่งเป็น 2499.99
+  expect(precisionResult.baseAmount).toBe(2499.99);
+});
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้**: กับทุกโมดูลที่มี Business Logic กฎทางการเงิน, การตัดสต็อก, การให้สิทธิพิเศษ, และ State Machine ในการสั่งซื้อ
+- **ไม่ควรใช้**: กับโค้ดทดลองชั่วคราว (Throwaway Spike หรือ Proof of Concept) ที่ยังไม่แน่ชัดเรื่องโครงสร้างและพร้อมทิ้งใน 24 ชั่วโมง
+
+---
+
+## 6. คำถามสัมภาษณ์งานระดับ Senior
+**คำถาม**: *"หากผู้บริหารบอกว่า 'เราต้องรีบเปิดตัวฟีเจอร์ Butcher Marketplace ภายใน 2 สัปดาห์ การเขียนเทสต์ทำให้เสียเวลา ให้ตัดงานเทสต์ออกไปก่อน' คุณจะมีวิธีอธิบายและรับมืออย่างไร?"*
+
+**แนวคำตอบระดับ Senior**:
+> "การละเว้นเทสต์ไม่ได้ลดเวลาการส่งมอบจริง แต่เป็นการ **กู้ยืมหนี้ทางเทคนิค (Technical Debt)** ด้วยอัตราดอกเบี้ยทบต้นมหาศาล ตาม Boehm's Curve บั๊กที่พบในวัน Launching บน Production มีต้นทุนการแก้สูงกว่าตอนเขียนโค้ดถึง 30-100 เท่า อีกทั้งทำให้ทั้งทีมต้องหยุดพัฒนาฟีเจอร์ใหม่เพื่อมา Firefighting และกู้ข้อมูลสต็อกเนื้อที่เสียหาย
+> กลยุทธ์ที่ผมเสนอคือ **Risk-based Testing**: เราจะไม่เขียนเทสต์คลุมทุกอย่าง 100% แต่เราจะปกป้อง **Critical Path** ด้วย Unit Tests ทันทีเฉพาะส่วน Financial Calculation, Stock Reservation, และ Payment State เพื่อให้เรา Release งานได้เร็วโดยไม่มีความเสี่ยงด้านการเงิน"
+
+---

@@ -1,0 +1,199 @@
+---
+title: Async Promises
+category: TESTING & QUALITY
+parentTitle: Jest
+version: Jest v29 & ts-jest
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในระบบ **Smart Butcher Marketplace** การดำเนินการหลายอย่างเกิดขึ้นแบบ Asynchronous:
+- การส่งคำสั่งตัดเนื้อไปยังหน้าจอเขียงช่างแล่เนื้อ (Message Queue)
+- การยืนยันสลิปโอนเงินและการตัดยอดบัตรเครดิตผ่าน Payment Gateway
+- การคำนวณอายุและน้ำหนักเนื้อดรายเอจที่ต้องดึงประวัติจากฐานข้อมูล
+
+ในการเขียนเทสต์ หากเราไม่ "รอ" (await) ให้คำสัญญา (Promise) ทำงานเสร็จสิ้นก่อน ตัว Test Runner จะด่วนสรุปผลลัพธ์ว่าเทสต์ผ่านไปแล้ว ส่งผลให้เกิด **False Positive** (เทสต์เขียว ทั้งที่ระบบมีบั๊กซ่อนอยู่) หรือเกิด **Unhandled Promise Rejection** กลางอากาศหลังจากเทสต์จบไปแล้ว
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+Jest ตระหนักถึง Promise เมื่อฟังก์ชันใน `it` หรือ `test` มีการ `return` ค่า Promise หรือใช้คีย์เวิร์ด `async`:
+1. **Async/Await Engine:** เมื่อฟังก์ชันถูกประกาศเป็น `async () => { ... }` ตัว JavaScript V8 Engine จะคืนค่าเป็น Promise อัตโนมัติ Jest จะหยุดรอให้ Promise ดังกล่าว Settled (Resolved หรือ Rejected) จึงจะปิดเคสการทดสอบ
+2. **`resolves` และ `rejects` Unwrap Matchers:** Jest มีตัวช่วยแกะกล่อง Promise ในตัว:
+   - `await expect(promise).resolves.toBe(expected)`
+   - `await expect(promise).rejects.toThrow(ExpectedError)`
+   เบื้องหลังคือ Jest จะผูก `.then()` และ `.catch()` เข้ากับ Promise ดังกล่าว แล้วนำค่าที่คลี่ออกมาได้ส่งต่อเข้าสู่กระบวนการ Assert ตามปกติ
+3. **เลิกใช้ `done` Callback:** ในอดีต Jest รองรับการส่งพารามิเตอร์ `(done) => { ... done(); }` แต่ในโมเดิร์น TypeScript รูปแบบนี้ถือเป็น Anti-pattern เพราะเสี่ยงต่อการลืมเรียก `done()` ทำให้เทสต์ติด Timeout และไม่รองรับ Type Safety เท่ากับ `async/await`
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การทดสอบ Async Order Processing ที่คืนค่า Promise สำเร็จ
+การสร้างคำสั่งซื้อเนื้อและบันทึกลงระบบคลาวด์:
+
+```typescript filename="src/services/async-order.service.spec.ts"
+export interface CreateOrderDto {
+  userId: string;
+  items: Array<{ productId: string; cutType: string; quantity: number }>;
+}
+
+export interface OrderConfirmation {
+  orderId: string;
+  orderNo: string;
+  status: 'PENDING' | 'CONFIRMED';
+  estimatedPreparationMinutes: number;
+}
+
+export class OrderProcessingService {
+  async processCustomerOrder(dto: CreateOrderDto): Promise<OrderConfirmation> {
+    if (dto.items.length === 0) {
+      throw new Error('Order must contain at least one meat item');
+    }
+
+    // จำลอง I/O Network Delay ในการบันทึกลงระบบ
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    return {
+      orderId: 'ord-uuid-2026',
+      orderNo: 'ORD-2026-8899',
+      status: 'CONFIRMED',
+      estimatedPreparationMinutes: 45, // เวลาเตรียมแล่เนื้อและแพ็กสุญญากาศ
+    };
+  }
+}
+
+describe('OrderProcessingService - Async Resolves', () => {
+  const service = new OrderProcessingService();
+
+  // แบบที่ 1: มาตรฐานที่ดีที่สุด (Async / Await ตรงไปตรงมา)
+  it('should successfully process and confirm order using direct async/await', async () => {
+    const dto: CreateOrderDto = {
+      userId: 'usr-customer-01',
+      items: [{ productId: 'prd-angus-ribeye', cutType: 'RIBEYE', quantity: 2 }],
+    };
+
+    const confirmation = await service.processCustomerOrder(dto);
+
+    expect(confirmation.status).toBe('CONFIRMED');
+    expect(confirmation.estimatedPreparationMinutes).toBe(45);
+    expect(confirmation.orderNo).toMatch(/^ORD-2026-\d{4}$/);
+  });
+
+  // แบบที่ 2: ใช้ Jest .resolves Matcher Unwrap
+  it('should resolve order confirmation using Jest unwrap matcher', async () => {
+    const dto: CreateOrderDto = {
+      userId: 'usr-customer-02',
+      items: [{ productId: 'prd-wagyu-striploin', cutType: 'STRIPLOIN', quantity: 1 }],
+    };
+
+    await expect(service.processCustomerOrder(dto)).resolves.toMatchObject({
+      status: 'CONFIRMED',
+      estimatedPreparationMinutes: 45,
+    });
+  });
+});
+```
+
+### ตัวอย่างที่ 2: การทดสอบ Rejection เมื่อชำระเงินไม่สำเร็จ
+การดักจับข้อผิดพลาดเมื่อบัตรเครดิตถูกปฏิเสธ หรือวงเงินไม่เพียงพอในการชำระค่าเนื้อพรีเมียม:
+
+```typescript filename="src/services/payment-rejection.spec.ts"
+export class PaymentDeclinedException extends Error {
+  constructor(public readonly reasonCode: string, message: string) {
+    super(message);
+    this.name = 'PaymentDeclinedException';
+  }
+}
+
+export interface PaymentRequest {
+  orderId: string;
+  amount: number;
+  cardNumber: string;
+}
+
+export class PaymentGatewayService {
+  async chargeCreditCard(req: PaymentRequest): Promise<{ transactionId: string }> {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    // จำลองบัตรที่มียอดเงินไม่พอ
+    if (req.cardNumber.endsWith('0000')) {
+      throw new PaymentDeclinedException(
+        'INSUFFICIENT_FUNDS',
+        'Your credit card has insufficient funds for this luxury meat purchase'
+      );
+    }
+
+    return { transactionId: 'txn-mock-9988' };
+  }
+}
+
+describe('PaymentGatewayService - Async Rejections', () => {
+  const paymentService = new PaymentGatewayService();
+
+  it('should cleanly catch rejection using await expect().rejects.toThrow()', async () => {
+    const failingRequest: PaymentRequest = {
+      orderId: 'ord-099',
+      amount: 4500,
+      cardNumber: '4111-2222-3333-0000', // บัตรวงเงินไม่พอ
+    };
+
+    // ต้องมี await ด้านหน้า expect เสมอเพื่อรอให้ Promise Reject
+    await expect(paymentService.chargeCreditCard(failingRequest)).rejects.toThrow(
+      PaymentDeclinedException
+    );
+
+    // ตรวจสอบข้อความ Error Message ใน Rejection
+    await expect(paymentService.chargeCreditCard(failingRequest)).rejects.toThrow(
+      'Your credit card has insufficient funds for this luxury meat purchase'
+    );
+  });
+
+  it('should inspect custom error properties through try/catch assertion pattern', async () => {
+    const failingRequest: PaymentRequest = {
+      orderId: 'ord-100',
+      amount: 8900,
+      cardNumber: '4111-2222-3333-0000',
+    };
+
+    // บังคับว่าต้องมี Assertion ทำงานอย่างน้อย 2 จุด (ป้องกันกรณีลืมโยน Error แล้วเทสต์ผ่านลอยๆ)
+    expect.assertions(2);
+
+    try {
+      await paymentService.chargeCreditCard(failingRequest);
+    } catch (err) {
+      const error = err as PaymentDeclinedException;
+      expect(error.name).toBe('PaymentDeclinedException');
+      expect(error.reasonCode).toBe('INSUFFICIENT_FUNDS');
+    }
+  });
+});
+```
+
+## 4. ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+### ❌ สิ่งที่ผิด: ลืมใส่ `await` หน้า `expect(...).rejects.toThrow()`
+```typescript filename="src/jest.spec.ts"
+it('should reject invalid card', () => {
+  // อันตรายระดับวิกฤต: ฟังก์ชันใน it ไม่ได้เป็น async และไม่มี await
+  // บรรทัดนี้จะส่งคืน Promise ที่ลอยค้างอยู่ เทสต์นี้จะ "ผ่านฉลุยเสมอ" 
+  // แม้ฟังก์ชันข้างในจะไม่ได้โยน Error ออกมาก็ตาม! (Silent False Positive)
+  expect(paymentService.chargeCreditCard(badReq)).rejects.toThrow();
+});
+```
+
+### ✅ สิ่งที่ถูก: เติม `async` ที่ Callback และใส่ `await` หน้า `expect` เสมอ
+```typescript filename="src/jest.spec.ts"
+it('should reject invalid card', async () => {
+  // ปลอดภัยและถูกต้อง 100%: Jest จะหยุดรอให้เกิด Rejection จริง
+  await expect(paymentService.chargeCreditCard(badReq)).rejects.toThrow();
+});
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `expect.assertions(n)`:** เมื่อเขียนเทสต์แบบ `try/catch` หรือมีเงื่อนไข Callback เพื่อรับประกันว่าจะไม่มีกรณีที่โค้ดหลุดข้ามบล็อก `catch` ไปโดยที่ไม่มีการตรวจสอบผลลัพธ์
+- **ไม่ควรใช้ `done` Callback:** ในโปรเจกต์ใหม่ทุกกรณี ให้แปลงเป็น Promise และใช้ `async/await` แทนทั้งหมด
+
+## 6. คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: อะไรคืออันตรายของการเขียน `expect(async () => await service.pay()).rejects.toThrow()` และไวยากรณ์ที่ถูกต้องคืออะไร?**
+  - *แนวคำตอบ:* การส่ง `async () => ...` เข้า `expect()` จะทำให้ค่าที่ `expect()` ได้รับเป็นฟังก์ชัน (Function Reference) ไม่ใช่ Promise ตัว matcher `.rejects` ของ Jest ต้องการ **Promise Object** โดยตรง ดังนั้นเมื่อเราครอบด้วยฟังก์ชัน ตัว Jest จะประเมินผิดพลาด ไวยากรณ์ที่ถูกต้องคือต้องส่ง Promise เข้าไปตรงๆ: `await expect(service.pay()).rejects.toThrow()`
+- **Q2: หากในระบบมี Async Operation ที่ค้างอยู่ (เช่น Unhandled Background Job) แล้วทำให้เกิดข้อความ "Cannot log after tests are done" แก้ไขอย่างไร?**
+  - *แนวคำตอบ:* ข้อความนี้เกิดขึ้นเมื่อมีโค้ด Asynchronous (เช่น Background Task หรือ Logging) ยังทำงานอยู่หลังจากที่ฟังก์ชันใน `it()` จบไปแล้ว และ Jest ได้ทำลาย Environment ของ Worker ทิ้งไปแล้ว การแก้ปัญหาคือต้องตามหา Background Task นั้น แล้วทำให้ระบบรอจนกระทั่ง Task นั้นเสร็จสิ้นอย่างสมบูรณ์ (`await task`) หรือทำการ Mock Background Service นั้นเพื่อไม่ให้มีการเตะ Event หลุดออกไปนอก Lifecycle ของการทดสอบ
+
+---

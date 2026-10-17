@@ -1,0 +1,28 @@
+---
+title: Anti-patterns
+category: TESTING & QUALITY
+parentTitle: Git Hooks
+version: Husky 9 + lint-staged
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การรันงานหนักใน `pre-commit` Hook**: การใส่ `npm run build` หรือรัน E2E Test ทั้งชุดใน `.husky/pre-commit` ทำให้นักพัฒนาต้องรอนานหลายนาทีจนทุกคนหันไปใช้ `--no-verify`
+2. **การส่งชื่อไฟล์ต่อท้าย `tsc --noEmit` ใน `lint-staged`**: ทำให้ TypeScript Compiler เพิกเฉยต่อการตั้งค่าใน `tsconfig.json` ทั้งหมด
+
+---
+
+## 2. Checklist สรุป
+
+- [ ] ติดตั้ง **Husky v9** (`"prepare": "husky"`) และกำหนด `.husky/pre-commit` ให้รัน `npx lint-staged`
+- [ ] ใน `lint-staged.config.mjs` ใช้ฟังก์ชัน `() => 'tsc --noEmit'` เพื่อให้ TypeScript อ่านไฟล์ `tsconfig.json` เสมอ
+- [ ] ติดตั้ง **Commitlint** ใน `.husky/commit-msg` เพื่อบังคับใช้รูปแบบ **Conventional Commits** พร้อมกำหนด Scope ตามโมดูลของระบบ
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+1. **[GitHub Actions](/docs/testing/github-actions)**: ส่งต่อโค้ดที่ผ่าน Git Hooks ในเครื่องขึ้นไปตรวจบน Cloud CI Pipeline
+2. **[ESLint](/docs/testing/eslint)**: การตั้งค่ากฎ Linter ที่ทำงานร่วมกับ lint-staged
+3. **[Prettier](/docs/testing/prettier)**: จัดรูปแบบไฟล์ที่ถูก Stage ก่อน Commit อัตโนมัติ

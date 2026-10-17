@@ -1,0 +1,122 @@
+---
+title: Soft Delete Audit
+category: DATABASE
+parentTitle: Database Design
+version: Relational Modeling
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในระบบ Production การจัดการวงจรชีวิตของข้อมูลและการตรวจสอบย้อนหลังประกอบด้วย 3 กลไกสำคัญ:
+1. **Timestamps (`created_at` และ `updated_at`):** ทุกตารางต้องมีคอลัมน์บันทึกเวลาที่สร้างและเวลาที่แก้ไขล่าสุด โดยต้องใช้ชนิดข้อมูล **`TIMESTAMPTZ` (`TIMESTAMP WITH TIME ZONE`)** เสมอ เพื่อให้ PostgreSQL แปลงและจัดเก็บเวลาเป็นมาตรฐาน **UTC** ภายในเครื่อง ป้องกันปัญหาเวลาเพี้ยนเมื่อเซิร์ฟเวอร์หรือผู้ใช้อยู่คนละเขตเวลา
+2. **Soft Delete (`deleted_at`):** แทนที่จะสั่ง `DELETE FROM products WHERE id = ...` ซึ่งทำให้ข้อมูลหายไปจากฐานข้อมูลถาวร (Hard Delete) เราใช้การอัปเดตคอลัมน์ `deleted_at = CURRENT_TIMESTAMP` แทน เพื่อซ่อนข้อมูลนั้นออกจากหน้าเว็บปกติ แต่ยังคงรักษาแถวข้อมูลไว้ให้ตารางประวัติคำสั่งซื้อ (`order_items`) อ้างอิง Foreign Key ต่อไปได้โดยไม่พัง
+3. **Audit Log (ประวัติการเปลี่ยนแปลงข้อมูล):** เมื่อมีการแก้ไขข้อมูลสำคัญ เช่น พนักงานเปลี่ยนราคาเนื้อ Miyazaki Wagyu จาก 5,000 บาท เป็น 500 บาท ลำพังแค่ `updated_at` จะบอกได้แค่ว่า "แก้เมื่อไหร่" แต่บอกไม่ได้ว่า "ค่าเดิมคืออะไร ใครเป็นคนแก้ และแก้เป็นอะไร" จึงต้องมีตาราง `audit_logs` คอยดักเก็บ Snapshot ก่อนและหลังการแก้ไข (`old_data`, `new_data`) ทุกครั้ง
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อเรานำ **Soft Delete** มาใช้งาน จะเกิดผลกระทบสำคัญต่อ **Unique Constraint** ทันที!
+ตัวอย่างเช่น ตาราง `products` มีคอลัมน์ `sku VARCHAR(50) UNIQUE` หากพนักงานสร้างสินค้า `sku = 'WGY-A5-001'` แล้วต่อมาสั่ง Soft Delete (`deleted_at IS NOT NULL`) เมื่อพนักงานต้องการสร้างสินค้าใหม่โดยใช้รหัส `sku = 'WGY-A5-001'` อีกครั้ง ระบบจะโยน Error ว่าข้อมูลซ้ำ เพราะ Unique Constraint ปกติจะตรวจเช็คทุกแถวรวมถึงแถวที่ถูก Soft Delete ไปแล้วด้วย
+
+ทางแก้ระดับ Production ใน PostgreSQL 16 คือการใช้ **Partial Unique Index** โดยใส่เงื่อนไข `WHERE deleted_at IS NULL` เพื่อให้ฐานข้อมูลบังคับความไม่ซ้ำเฉพาะแถวที่ยังมีชีวิตอยู่เท่านั้น!
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การทำ Soft Delete คู่กับ Partial Unique Index และการอัปเดต `updated_at` อัตโนมัติ
+แสดงวิธีจัดการตาราง `products` ให้รองรับการลบแบบ Soft Delete โดยไม่ทำให้รหัส `sku` หรือ ` email` ติดล็อกถาวร:
+
+```sql filename="sql/11_soft_delete_and_timestamps.sql"
+-- ฟังก์ชันกลางสำหรับอัปเดตคอลัมน์ updated_at อัตโนมัติทุกครั้งที่มีการแก้ไขแถว
+CREATE OR REPLACE FUNCTION set_updated_at_timestamp()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TABLE catalog_products (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    category_id UUID NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+    sku VARCHAR(50) NOT NULL, -- ไม่ใส่ UNIQUE ตรงนี้ แต่จะใช้ Partial Unique Index ด้านล่างแทน
+    name VARCHAR(200) NOT NULL,
+    price_per_kg NUMERIC(10, 2) NOT NULL CHECK (price_per_kg > 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMPTZ -- ถ้าเป็น NULL แปลว่ายังไม่ถูกลบ (Active)
+);
+
+-- สร้าง Partial Unique Index: บังคับว่า SKU ห้ามซ้ำกัน เฉพาะสินค้าที่ยังไม่ถูก Soft Delete เท่านั้น
+CREATE UNIQUE INDEX uq_catalog_products_sku_active
+ON catalog_products (sku)
+WHERE deleted_at IS NULL;
+
+-- ผูก Trigger อัปเดตเวลาแก้ไขล่าสุด
+CREATE TRIGGER trg_catalog_products_updated_at
+BEFORE UPDATE ON catalog_products
+FOR EACH ROW EXECUTE FUNCTION set_updated_at_timestamp();
+```
+
+### ตัวอย่างที่ 2: ระบบ Audit Log อัตโนมัติด้วย `JSONB` สำหรับติดตามการแก้ไขราคาและสต็อก
+สร้างตาราง `audit_logs` และ Trigger ที่บันทึกทั้งข้อมูลเก่า (`old_record`) และข้อมูลใหม่ (`new_record`) ทุกครั้งที่มีการเปลี่ยนแปลงในตารางสำคัญ:
+
+```sql filename="sql/12_automated_audit_log_trigger.sql"
+CREATE TABLE audit_logs (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    table_name VARCHAR(100) NOT NULL,
+    record_id UUID NOT NULL,
+    operation VARCHAR(10) NOT NULL CHECK (operation IN ('INSERT', 'UPDATE', 'DELETE')),
+    old_values JSONB,
+    new_values JSONB,
+    changed_by VARCHAR(100) DEFAULT current_setting('app.current_user_id', true),
+    changed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_audit_logs_table_record ON audit_logs(table_name, record_id);
+
+CREATE OR REPLACE FUNCTION record_audit_log()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO audit_logs (table_name, record_id, operation, old_values, new_values)
+        VALUES (TG_TABLE_NAME, NEW.id, 'INSERT', NULL, to_jsonb(NEW));
+        RETURN NEW;
+    ELSIF TG_OP = 'UPDATE' THEN
+        -- บันทึกเฉพาะเมื่อข้อมูลมีการเปลี่ยนแปลงจริงเท่านั้น
+        IF to_jsonb(OLD) IS DISTINCT FROM to_jsonb(NEW) THEN
+            INSERT INTO audit_logs (table_name, record_id, operation, old_values, new_values)
+            VALUES (TG_TABLE_NAME, NEW.id, 'UPDATE', to_jsonb(OLD), to_jsonb(NEW));
+        END IF;
+        RETURN NEW;
+    ELSIF TG_OP = 'DELETE' THEN
+        INSERT INTO audit_logs (table_name, record_id, operation, old_values, new_values)
+        VALUES (TG_TABLE_NAME, OLD.id, 'DELETE', to_jsonb(OLD), NULL);
+        RETURN OLD;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+-- นำ Audit Trigger ไปผูกกับตารางสินค้าและตารางการชำระเงิน
+CREATE TRIGGER trg_audit_catalog_products
+AFTER INSERT OR UPDATE OR DELETE ON catalog_products
+FOR EACH ROW EXECUTE FUNCTION record_audit_log();
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **ชนิดข้อมูลเวลา** | ใช้ `TIMESTAMP` (ไม่มี Time zone) ทำให้เวลาคลาดเคลื่อนเมื่อย้ายเซิร์ฟเวอร์หรือรันบน Docker ที่เป็น UTC | ใช้ `TIMESTAMPTZ` (`TIMESTAMP WITH TIME ZONE`) กับทุกคอลัมน์ที่เก็บจุดของเวลาเสมอ |
+| **การใช้ Soft Delete พร่ำเพรื่อ** | ใส่ `deleted_at` ในทุกตารางแม้แต่ตาราง Junction Table เล็กๆ หรือตาราง Session ทำให้คิวรีทุกอันต้องคอยเช็ค `WHERE deleted_at IS NULL` | ใช้ Soft Delete เฉพาะตาราง Master Data ที่ถูกอ้างอิงโดยประวัติธุรกรรม (เช่น `users`, `products`, `categories`) |
+| **การทำ Unique กับ Soft Delete** | ใช้คอลัมน์ `is_deleted BOOLEAN` คู่กับ `UNIQUE(email)` ปกติ ทำให้ผู้ใช้ที่ลบบัญชีไปแล้วสมัครใหม่ด้วยอีเมลเดิมไม่ได้ | ใช้ `deleted_at TIMESTAMPTZ` คู่กับ Partial Unique Index `WHERE deleted_at IS NULL` |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Soft Delete เมื่อ:** ข้อมูลนั้นเป็นข้อมูลหลักที่มีตารางอื่นอ้างอิงถึง (เช่น สินค้าที่เคยขายไปแล้ว หรือพนักงานที่ลาออกไปแล้วแต่มีชื่ออยู่ในใบเบิกของ) หรือต้องการให้ผู้ใช้กู้คืนข้อมูลที่เผลอลบไปได้ภายในระยะเวลาที่กำหนด
+- **ไม่ควรใช้ Soft Delete เมื่อ:** กฎหมายคุ้มครองข้อมูลส่วนบุคคล (เช่น PDPA / GDPR Right to be Forgotten) บังคับให้ต้องลบหรือทำ Anonymization ข้อมูลส่วนบุคคลของลูกค้าออกจากระบบอย่างถาวร หรือเป็นตารางชั่วคราว مثل ตะกร้าสินค้า (`cart_items`) และรหัส OTP
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ใน PostgreSQL ชนิดข้อมูล `TIMESTAMP` กับ `TIMESTAMPTZ` ใช้พื้นที่จัดเก็บต่างกันหรือไม่ และทำงานต่างกันอย่างไร?**
+  - **แนวคำตอบ:** ทั้งสองชนิดใช้พื้นที่จัดเก็บ **8 Bytes เท่ากันทุกประการ**! ความแตกต่างคือ `TIMESTAMP` จะตัดข้อมูล Time zone ทิ้งและเก็บค่าตัวเลขวันเวลาตามที่ส่งเข้ามาดื้อๆ ในขณะที่ `TIMESTAMPTZ` จะแปลงเวลาที่รับเข้ามาจาก Time zone ใดๆ ให้กลายเป็นเวลา **UTC** ก่อนบันทึกลงดิสก์ และเมื่อดึงข้อมูลออกมาแสดงผลจะแปลงกลับเป็น Time zone ของ Session นั้นๆ ให้โดยอัตโนมัติ จึงปลอดภัยต่อระบบที่ทำงานข้ามภูมิภาค
+- **Q2: หากเราใช้ Database Trigger ในการทำ Audit Log แล้วต้องการรู้ว่า `user_id` ของแอดมินคนไหนในแอป NestJS/Prisma เป็นคนสั่งแก้ไขข้อมูล เราจะส่งค่า `user_id` จากแอปเข้ามายัง Trigger ได้อย่างไร?**
+  - **แนวคำตอบ:** สามารถส่งผ่าน Session Configuration Parameter ของ PostgreSQL ภายใน Transaction เดียวกันได้โดยรันคำสั่ง `SET LOCAL app.current_user_id = 'uuid-ของแอดมิน';` ก่อนรันคำสั่ง `UPDATE` จากนั้นในฟังก์ชัน Trigger ให้ดึงค่าด้วย `current_setting('app.current_user_id', true)` คำสั่ง `SET LOCAL` จะมีผลเฉพาะใน Transaction นั้นและล้างค่าทิ้งอัตโนมัติเมื่อจบ Transaction จึงปลอดภัยแม้ใช้งานร่วมกับ Connection Pool
+
+---

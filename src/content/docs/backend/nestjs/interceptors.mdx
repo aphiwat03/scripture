@@ -1,0 +1,160 @@
+---
+title: Interceptors
+category: BACKEND
+parentTitle: NestJS 11
+version: NestJS 11
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด
+ลองนึกภาพ "ผู้ตรวจสอบคุณภาพและบรรจุภัณฑ์" ของร้าน Smart Butcher ก่อนที่เนื้อจะถูกส่งมอบให้ลูกค้าในถุงกระดาษแบรนด์เนมหรูหรา:
+- ขาไป (ก่อนทำอาหาร): ผู้ตรวจสอบกดจับเวลาว่าเชฟเริ่มทำเมนูนี้ตั้งแต่กี่โมง
+- ขากลับ (หลังทำอาหารเสร็จ): ผู้ตรวจสอบนำจานสเต็กที่เชฟทำเสร็จ มาจัดเรียงลงในกล่องแพ็กเกจจิ้งมาตรฐานเดียวกันของร้าน พร้อมพิมพ์ตราประทับเวลาและระบุสถานะความสำเร็จแนบไปด้วย
+
+ใน NestJS **Interceptor** คือการประยุกต์ใช้แนวคิด **Aspect-Oriented Programming (AOP)** โดยใช้พลังของ **RxJS (Reactive Extensions for JavaScript)** ทำให้เราสามารถดักฟังและแปลงข้อมูลได้ทั้ง "ก่อนเข้าสู่ Handler" และ "หลังออกจาก Handler"
+
+## 2. หลักการเบื้องหลัง
+คลาส Interceptor จะต้องอิมพลีเมนต์อินเทอร์เฟซ `NestInterceptor` ซึ่งมีเมธอด:
+```typescript filename="src/common/interceptors/logging.interceptor.ts"
+import { Injectable, NestInterceptor, ExecutionContext, CallHandler } from '@nestjs/common';
+import { Observable } from 'rxjs';
+
+@Injectable()
+export class LoggingInterceptor implements NestInterceptor {
+  intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
+    return next.handle();
+  }
+}
+```
+- โค้ดที่เขียนก่อนคำสั่ง `next.handle()` จะถูกรันในฝั่ง **Pre-controller**
+- คำสั่ง `next.handle()` จะทำการส่งต่อการประมวลผลไปยัง Route Handler และคืนค่าออกมาเป็น **RxJS Observable**
+- เราสามารถใช้ RxJS Operators เช่น `map()`, `tap()`, `catchError()`, `timeout()` เพื่อดัดแปลงผลลัพธ์ในฝั่ง **Post-controller**
+
+## 3. ตัวอย่างโค้ด
+
+### ตัวอย่างที่ 1: Response Transform Interceptor ห่อหุ้มโครงสร้างข้อมูลแบบ Enterprise
+```typescript filename="src/common/interceptors/transform-response.interceptor.ts"
+import {
+  Injectable,
+  NestInterceptor,
+  ExecutionContext,
+  CallHandler,
+} from '@nestjs/common';
+import { Observable } from 'rxjs';
+import { map } from 'rxjs/operators';
+
+export interface StandardResponse<T> {
+  success: boolean;
+  statusCode: number;
+  timestamp: string;
+  data: T;
+}
+
+@Injectable()
+export class TransformResponseInterceptor<T>
+  implements NestInterceptor<T, StandardResponse<T>> {
+  intercept(
+    context: ExecutionContext,
+    next: CallHandler
+  ): Observable<StandardResponse<T>> {
+    const ctx = context.switchToHttp();
+    const response = ctx.getResponse();
+
+    // ดักจับข้อมูลที่ส่งออกจาก Controller แล้วนำมาห่อหุ้มใน Standard Envelope
+    return next.handle().pipe(
+      map((data) => ({
+        success: true,
+        statusCode: response.statusCode,
+        timestamp: new Date().toISOString(),
+        data: data ?? null,
+      }))
+    );
+  }
+}
+```
+
+### ตัวอย่างที่ 2: Performance Benchmark & Global Timeout Interceptor
+```typescript filename="src/common/interceptors/timeout-benchmark.interceptor.ts"
+import {
+  Injectable,
+  NestInterceptor,
+  ExecutionContext,
+  CallHandler,
+  RequestTimeoutException,
+} from '@nestjs/common';
+import { Observable, throwError, TimeoutError } from 'rxjs';
+import { catchError, timeout, tap } from 'rxjs/operators';
+
+@Injectable()
+export class TimeoutBenchmarkInterceptor implements NestInterceptor {
+  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
+    const now = Date.now();
+    const req = context.switchToHttp().getRequest();
+    const method = req.method;
+    const url = req.url;
+
+    return next.handle().pipe(
+      // 1. ตัดการเชื่อมต่อทันทีหากระบบคิดเงินหรือค้นหาเนื้อใช้เวลานานเกิน 5 วินาที
+      timeout(5000),
+      // 2. ดักจับกรณีเกิด TimeoutError แล้วแปลงเป็น HTTP 408 Request Timeout
+      catchError((err) => {
+        if (err instanceof TimeoutError) {
+          return throwError(
+            () =>
+              new RequestTimeoutException(
+                `การประมวลผลคำสั่งซื้อล่าช้าเกินกำหนด (เกิน 5000ms)`
+              )
+          );
+        }
+        return throwError(() => err);
+      }),
+      // 3. บันทึกระยะเวลาการประมวลผลจริงลงใน Console
+      tap(() => {
+        const duration = Date.now() - now;
+        console.log(`[SmartButcher Performance] ${method} ${url} - ใช้เวลา ${duration}ms`);
+      })
+    );
+  }
+}
+```
+
+## 4. ผิด vs ถูก
+
+```typescript filename="src/nestjs.ts"
+// ❌ ผิด: Format โครงสร้าง JSON แยกในแต่ละ Controller เอง
+@Controller('products')
+export class BadProductController {
+  @Get()
+  getProducts() {
+    const items = this.service.findAll();
+    // ❌ ผิด: ต้องมาคอยเขียน { success: true, data: items } ซ้ำๆ ทุก Method หากมี 100 endpoints ก็ต้องเขียน 100 รอบ
+    return {
+      status: 'ok',
+      payload: items,
+      time: Date.now(),
+    };
+  }
+}
+```
+
+```typescript filename="src/nestjs.ts"
+// ✅ ถูก: ให้ Controller คืนค่า Pure Domain Data แล้วใช้ Interceptor ห่อหุ้มที่ Global Layer
+@Controller('products')
+export class GoodProductController {
+  @Get()
+  getProducts() {
+    // ✅ ส่งคืน Raw Array ได้ทันที Interceptor จะห่อ { success: true, data: ... } ให้เองโดยอัตโนมัติ
+    return this.service.findAll();
+  }
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Interceptor**: ทำ Standard Response Wrapping, การจับเวลา Execution Time, การตัด Timeout, การแคชข้อมูล (In-memory / Redis Cache), การทำ Audit Log หลังการทำงานสำเร็จ
+- **ไม่ควรใช้ Interceptor**: สำหรับการตรวจสอบสิทธิ์หรือความปลอดภัย (ควรใช้ Guard) หรือตรวจสอบความถูกต้องของฟิลด์ใน Request Body (ควรใช้ Pipe)
+
+## 6. คำถามสัมภาษณ์
+**ถาม**: RxJS เข้ามามีบทบาทอย่างไรในสถาปัตยกรรมของ NestJS Interceptors และอะไรคือข้อดีเมื่อเทียบกับการใช้ Middleware ธรรมดา?
+**ตอบ**: RxJS ช่วยให้ Interceptor สามารถจัดการกับ Asynchronous Stream และ Event-driven Response ได้อย่างยืดหยุ่น การใช้ Operators เช่น `map()`, `catchError()`, `retry()` หรือ `timeout()` ทำให้เราสามารถดัดแปลงข้อมูลขากลับ (Outgoing Response) หรือสั่งยกเลิกงานที่ค้างนานได้อย่างง่ายดาย ซึ่ง Middleware ดั้งเดิมไม่สามารถทำสิ่งนี้ได้อย่างสะดวก
+
+---

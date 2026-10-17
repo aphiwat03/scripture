@@ -1,0 +1,28 @@
+---
+title: Anti-patterns
+category: TESTING & QUALITY
+parentTitle: Prettier
+version: Prettier 3
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การวาง `eslint-config-prettier` ผิดลำดับ**: หากไม่ได้วางไว้ท้ายสุดของอาร์เรย์ใน `eslint.config.mjs` กฎการจัดหน้าเดิมของ ESLint จะยังคงทำงานและตีกับ Prettier
+2. **การไม่กำหนด `endOfLine: "lf"`**: ทำให้ทีมที่ใช้ Windows และ macOS ร่วมกันเกิด Git Diff ท่วมทั้งไฟล์จากอักขระ `CRLF` vs `LF`
+
+---
+
+## 2. Checklist สรุป
+
+- [ ] ติดตั้ง `eslint-config-prettier` และวางไว้เป็นออบเจกต์ **ลำดับสุดท้ายเสมอ** ในไฟล์ `eslint.config.mjs`
+- [ ] ติดตั้ง `prettier-plugin-tailwindcss` ไว้ท้ายสุดของอาร์เรย์ `plugins` ใน `.prettierrc.json` พร้อมระบุ `tailwindFunctions: ["clsx", "cn", "cva"]`
+- [ ] กำหนด `"endOfLine": "lf"` ใน `.prettierrc.json` และตั้งค่า `.vscode/settings.json` ให้ทำ Format on Save อัตโนมัติ
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+1. **[ESLint](/docs/testing/eslint)**: แยกบทบาทระหว่างการจัดหน้าโค้ดกับการตรวจสอบ Code Quality
+2. **[Git Hooks](/docs/testing/git-hooks)**: รัน `prettier --write` อัตโนมัติในขั้นตอน pre-commit
+3. **[Tailwind CSS](/docs/tailwind)**: การใช้งาน Utility Classes ร่วมกับ Prettier Plugin

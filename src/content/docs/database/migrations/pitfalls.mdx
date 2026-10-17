@@ -1,0 +1,69 @@
+---
+title: Anti-patterns
+category: DATABASE
+parentTitle: Migrations
+version: Prisma Migrate & Zero-Downtime
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การรัน `prisma db push` หรือ `prisma migrate dev` บนฐานข้อมูล Production**
+   - **สาเหตุ:** นักพัฒนาเข้าใจผิดว่าคำสั่งเหล่านี้ใช้ซิงค์ตารางได้เหมือนกันทุกที่
+   - **ผลกระทบ:** คำสั่งเหล่านี้อาจพยายามสร้าง Shadow Database หรือแจ้งเตือนให้รีเซ็ตล้างข้อมูลทั้งฐานข้อมูล ส่งผลให้ข้อมูลคำสั่งซื้อหายทั้งหมด
+   - **วิธีแก้:** ล็อกสคริปต์ CI/CD ให้รันเฉพาะ `npx prisma migrate deploy` เท่านั้น
+
+2. **การปล่อยให้ Prisma สร้างคำสั่ง `DROP COLUMN` + `ADD COLUMN` เวลาเปลี่ยนชื่อฟิลด์**
+   - **สาเหตุ:** เปลี่ยนชื่อฟิลด์ใน `schema.prisma` แล้วกดรันทันทีโดยไม่เปิดดูไฟล์ `migration.sql`
+   - **ผลกระทบ:** ข้อมูลเดิมในคอลัมน์นั้นถูกลบทิ้ง 100%
+   - **วิธีแก้:** ใช้คำสั่ง `npx prisma migrate dev --create-only` แล้วเข้าไปแก้ไฟล์ SQL ให้เป็น `ALTER TABLE ... RENAME COLUMN ... TO ...`
+
+3. **การรัน Migration ผ่าน Connection Pooler (เช่น PgBouncer โหมด Transaction)**
+   - **สาเหตุ:** ใช้ `DATABASE_URL` ตัวเดียวที่มีพารามิเตอร์ `?pgbouncer=true` ในการรันทั้งแอปพลิเคชันและ Migration
+   - **ผลกระทบ:** Prisma Migrate ต้องใช้ Session-level Advisory Lock (`pg_advisory_lock`) เพื่อป้องกันการรันซ้ำซ้อน ซึ่งในโหมด Transaction Pooling การเชื่อมต่อจะถูกสลับไปมาหลังจบแต่ละคำสั่ง ทำให้ล็อกค้างหรือรันไม่ผ่าน
+   - **วิธีแก้:** กำหนด `directUrl = env("DIRECT_URL")` ใน `schema.prisma` ให้ชี้ไปยังพอร์ตตรงของ PostgreSQL (เช่น 5432) เสมอ
+
+4. **การแก้ไขหรือลบไฟล์ `migration.sql` ที่ถูก Merge เข้ากิ่งหลักไปแล้ว**
+   - **สาเหตุ:** นักพัฒนาต้องการแก้ชนิดข้อมูลนิดหน่อย เลยแอบไปแก้ไฟล์ Migration เก่าแทนการสร้างไฟล์ใหม่
+   - **ผลกระทบ:** ค่า SHA-256 Checksum ในตาราง `_prisma_migrations` บนเครื่อง Staging/Production จะไม่ตรงกับไฟล์ใน Git ทำให้ไปป์ไลน์พังทันที
+   - **วิธีแก้:** มองไฟล์ Migration ที่ Merge แล้วเป็นสิ่งที่ไม่สามารถแก้ไขย้อนหลังได้ (Immutable) หากต้องการเปลี่ยนโครงสร้างให้สร้าง Migration ใบใหม่เสมอ
+
+5. **การใส่ `await prisma.table.deleteMany()` ไว้ในไฟล์ `seed.ts` โดยไม่มีเงื่อนไขป้องกัน**
+   - **สาเหตุ:** นักพัฒนาเขียนเพื่อความสะดวกในการล้างข้อมูลเก่าบนเครื่องตัวเองก่อนใส่ข้อมูลใหม่
+   - **ผลกระทบ:** หากมีใครเผลอรัน `npx prisma db seed` บนสภาพแวดล้อมจริง ข้อมูลทั้งหมดจะถูกลบทิ้งทันที
+   - **วิธีแก้:** เขียนสคริปต์ Seed แบบ Idempotent ด้วย `upsert` และตรวจเช็ค `process.env.NODE_ENV !== 'production'` ก่อนใส่ข้อมูลทดสอบเสมอ
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+ก่อนเปิด Pull Request หรือสั่ง Deploy การเปลี่ยนแปลงฐานข้อมูลของระบบ **Smart Butcher Marketplace** ให้ตรวจสอบตามรายการต่อไปนี้ทุกครั้ง:
+
+- [ ] **Create-Only Inspection:** ใช้ `--create-only` และเปิดอ่านไฟล์ `migration.sql` ทุกบรรทัดแล้วว่าไม่มีคำสั่ง `DROP TABLE` หรือ `DROP COLUMN` ที่ไม่ได้ตั้งใจ
+- [ ] **Lock Timeout Protection:** ในไฟล์ Migration ที่แก้ตารางขนาดใหญ่ มีการใส่ `SET lock_timeout = '3s';` หรือ `'5s'` ป้องกันการบล็อกคิวรีหน้าร้านค้างยาวนาน
+- [ ] **Zero-Downtime Safe:** การเพิ่ม Constraint บนตารางใหญ่ใช้เทคนิค `NOT VALID` ตามด้วย `VALIDATE CONSTRAINT` และการลบคอลัมน์ถูกแยกไว้ทำหลังจากโค้ดเวอร์ชันใหม่เลิกใช้งานคอลัมน์นั้นแล้ว
+- [ ] **Direct URL Configured:** ตั้งค่า `directUrl` ใน `schema.prisma` สำหรับรัน Migration โดยไม่ผ่าน Connection Pooler
+- [ ] **CI Validation Passed:** รัน `prisma migrate diff --exit-code` ใน CI เพื่อยืนยันว่า `schema.prisma` ตรงกับโฟลเดอร์ `prisma/migrations` 100%
+- [ ] **Pre-Deploy Backup:** มีการตรวจสอบว่าฐานข้อมูล Production มี Backup ล่าสุดพร้อมใช้งานก่อนรัน `prisma migrate deploy`
+- [ ] **Idempotent Seed:** สคริปต์ `prisma/seed.ts` ใช้ `upsert` หรือ `skipDuplicates: true` และแยกข้อมูลทดสอบออกจาก Production อย่างชัดเจน
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อคุณเข้าใจกระบวนการเปลี่ยนแปลงโครงสร้างฐานข้อมูลอย่างปลอดภัยแล้ว ขั้นตอนต่อไปที่วิศวกรฐานข้อมูลต้องเตรียมพร้อมคือการสำรองและกู้คืนข้อมูลเผื่อเกิดเหตุไม่คาดฝัน:
+
+<Callout type="tip" title="เส้นทางการศึกษาต่อสำหรับระบบฐานข้อมูลระดับ Production">
+1. **การสำรองและกู้คืนข้อมูลเมื่อเกิดภัยพิบัติ:**  
+   👉 **[Backup](/docs/database/backup)** — เจาะลึกการทำ Backup ด้วย `pg_dump`, `pg_restore`, การกู้คืนข้อมูลบน Docker และการทำ Point-in-Time Recovery (PITR)
+
+2. **การรักษาความปลอดภัยและการจำกัดสิทธิ์ Role ของ Migration:**  
+   👉 **[Security](/docs/database/security)** — เรียนรู้การแยก Role ระหว่างผู้ใช้แอปพลิเคชันปกติกับผู้ใช้ที่มีสิทธิ์รัน DDL Migration ตามหลัก Least Privilege
+
+3. **การตั้งค่าการเชื่อมต่อและใช้งาน Prisma ORM เชิงลึก:**  
+   👉 **[Prisma ORM](/docs/backend/prisma-orm)** และ **[Connection Pooling](/docs/database/connection-pooling)** — ศึกษากลไกของ `url` คู่กับ `directUrl` และการใช้งาน Prisma Client ในฝั่ง Backend
+</Callout>

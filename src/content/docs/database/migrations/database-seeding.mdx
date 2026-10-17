@@ -1,0 +1,177 @@
+---
+title: Database Seeding
+category: DATABASE
+parentTitle: Migrations
+version: Prisma Migrate & Zero-Downtime
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+หลังจากสร้างโครงสร้างตารางเปล่าๆ เสร็จแล้ว ระบบร้านค้าเนื้อ **Smart Butcher Marketplace** จะยังไม่สามารถเปิดทำงานได้หากไม่มีข้อมูลตั้งต้น (Master Data) เช่น หมวดหมู่เนื้อมาตรฐาน (Wagyu, Dry-Aged, Grass-Fed) หรือบัญชีผู้ดูแลระบบคนแรก
+
+กระบวนการใส่ข้อมูลตั้งต้นนี้เรียกว่า **Database Seeding** ซึ่งกฎเหล็กที่สำคัญที่สุดของการเขียนสคริปต์ Seed คือต้องมีคุณสมบัติ **Idempotency (การทำงานซ้ำได้โดยผลลัพธ์เหมือนเดิม)** ไม่ว่าเราจะเผลอรันคำสั่ง `npx prisma db seed` ซ้ำกัน 1 ครั้ง หรือ 100 ครั้ง ข้อมูลหมวดหมู่เนื้อต้องไม่ถูกสร้างซ้ำซ้อน และไม่โยน Error `Unique constraint failed` ออกมา
+
+นอกจากนี้ ข้อมูลที่ใช้ Seed ต้องถูกแบ่งแยกตามสภาพแวดล้อม (`NODE_ENV`) อย่างชัดเจน:
+- **Production:** ใส่เฉพาะข้อมูลตั้งต้นของระบบที่จำเป็นต้องมีจริงๆ (System Master Data / Lookup Categories) เท่านั้น ห้ามใส่สินค้าตัวอย่างหรือบัญชีทดสอบรหัสผ่านเดาง่ายเด็ดขาด
+- **Development / Staging:** ใส่ทั้งข้อมูลตั้งต้นของระบบ และข้อมูลจำลอง (Mock Products, Test Users, Sample Orders) เพื่อให้นักพัฒนาและ QA ใช้ทดสอบหน้าเว็บได้ทันที
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **การทำงานของ `prisma.model.upsert()`:**
+   คำสั่ง `upsert` ของ Prisma จะตรวจสอบว่ามีแถวที่ตรงกับเงื่อนไข `where` (ซึ่งต้องเป็นคอลัมน์ที่เป็น `@id` หรือ `@unique` เช่น `slug` หรือ `sku`) อยู่หรือไม่ หากยังไม่มีจะทำการ `INSERT` (`create`) แต่หากมีอยู่แล้วจะทำการ `UPDATE` (`update`) ข้อมูลให้เป็นปัจจุบัน ใน PostgreSQL เวอร์ชันใหม่ Prisma จะแปลงคำสั่งนี้ให้ใช้ `INSERT ... ON CONFLICT DO UPDATE` ในระดับฐานข้อมูลซึ่งปลอดภัยจากปัญหา Race Condition
+2. **การทำงานของ `createMany({ skipDuplicates: true })`:**
+   เมื่อต้องการเพิ่มข้อมูลตั้งต้นจำนวนมากรวดเดียว การใช้ `skipDuplicates: true` จะสั่งให้ Prisma สร้างคำสั่ง SQL `INSERT INTO ... VALUES (...), (...) ON CONFLICT DO NOTHING;` ของ PostgreSQL 16 ซึ่งหากพบข้อมูลที่มี Unique Key ซ้ำอยู่แล้วจะข้ามแถวนั้นไปอย่างรวดเร็วโดยไม่เกิด Error
+3. **การผูกสคริปต์เข้ากับวงจรชีวิตของ Prisma:**
+   เมื่อกำหนดค่า `"prisma": { "seed": "tsx prisma/seed.ts" }` ในไฟล์ `package.json` Prisma จะรันสคริปต์นี้ให้อัตโนมัติทุกครั้งที่สั่ง `npx prisma migrate reset` หรือเมื่อเราสั่ง `npx prisma db seed` ด้วยตัวเอง
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การตั้งค่า `package.json` เพื่อเรียกใช้สคริปต์ Seed ด้วย TypeScript (`tsx`)
+กำหนดคำสั่งรันสคริปต์ Seed ในไฟล์ `package.json` ของโปรเจกต์:
+
+```json filename="package.json"
+{
+  "name": "smart-butcher-marketplace",
+  "version": "1.0.0",
+  " prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "scripts": {
+    "db:migrate:dev": "prisma migrate dev",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "db:seed": "prisma db seed"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.20.0"
+  },
+  "devDependencies": {
+    "prisma": "^5.20.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
+```
+
+### ตัวอย่างที่ 2: สคริปต์ `prisma/seed.ts` แบบ Idempotent แยกตามสภาพแวดล้อม (`NODE_ENV`)
+สคริปต์ด้านล่างใช้ `upsert` สำหรับหมวดหมู่หลักที่ต้องมีทุกสภาพแวดล้อม และแยกการสร้างสินค้าเนื้อวากิวจำลองไว้เฉพาะเมื่อไม่ได้รันบน Production:
+
+```typescript filename="prisma/seed.ts"
+import { PrismaClient, Prisma } from '@prisma/client';
+
+const prisma = new PrismaClient();
+
+// 1. ข้อมูล Master Categories ที่ต้องมีในทุกสภาพแวดล้อม (รวมถึง Production)
+const MASTER_CATEGORIES = [
+  { name: 'Japanese A5 Wagyu', slug: 'japanese-a5-wagyu' },
+  { name: '45-Day Dry-Aged Beef', slug: '45-day-dry-aged-beef' },
+  { name: 'Australian Grass-Fed', slug: 'australian-grass-fed' },
+  { name: 'Artisanal Sausages & Burgers', slug: 'artisanal-sausages-burgers' },
+];
+
+async function seedMasterCategories() {
+  console.log('🥩 Seeding master categories (Idempotent)...');
+
+  for (const cat of MASTER_CATEGORIES) {
+    await prisma.category.upsert({
+      where: { slug: cat.slug },
+      update: { name: cat.name },
+      create: {
+        name: cat.name,
+        slug: cat.slug,
+      },
+    });
+  }
+}
+
+// 2. ข้อมูลสินค้าจำลองสำหรับสภาพแวดล้อม Development และ Staging เท่านั้น
+async function seedDevelopmentCatalog() {
+  console.log('🧪 Seeding development sample products for Smart Butcher...');
+
+  const wagyuCategory = await prisma.category.findUniqueOrThrow({
+    where: { slug: 'japanese-a5-wagyu' },
+  });
+
+  const dryAgedCategory = await prisma.category.findUniqueOrThrow({
+    where: { slug: '45-day-dry-aged-beef' },
+  });
+
+  const sampleProducts: Prisma.ProductCreateManyInput[] = [
+    {
+      categoryId: wagyuCategory.id,
+      sku: 'SB-WAGYU-RIBEYE-A5',
+      name: 'Miyazaki Wagyu A5 Ribeye Steak',
+      marblingScore: 12,
+      pricePerKg: new Prisma.Decimal('6800.00'),
+      stockWeightGr: 15000,
+    },
+    {
+      categoryId: wagyuCategory.id,
+      sku: 'SB-WAGYU-STRIPLOIn-A5',
+      name: 'Kagoshima Wagyu A5 Striploin',
+      marblingScore: 11,
+      pricePerKg: new Prisma.Decimal('6200.00'),
+      stockWeightGr: 12000,
+    },
+    {
+      categoryId: dryAgedCategory.id,
+      sku: 'SB-DRY45-TOMAHAWK',
+      name: '45-Day Dry-Aged Black Angus Tomahawk',
+      marblingScore: 5,
+      pricePerKg: new Prisma.Decimal('3900.00'),
+      stockWeightGr: 25000,
+    },
+  ];
+
+  // ใช้ skipDuplicates เพื่อแปลงเป็น INSERT ... ON CONFLICT DO NOTHING ใน PostgreSQL 16
+  const result = await prisma.product.createMany({
+    data: sampleProducts,
+    skipDuplicates: true,
+  });
+
+  console.log(`✅ Inserted ${result.count} new sample products (duplicates skipped).`);
+}
+
+async function main() {
+  const currentEnv = process.env.NODE_ENV || 'development';
+  console.log(`🚀 Running database seed for environment: [${currentEnv}]`);
+
+  // รันข้อมูลตั้งต้นหลักเสมอไม่ว่าจะอยู่สภาพแวดล้อมใด
+  await seedMasterCategories();
+
+  // ป้องกันการนำข้อมูลจำลองขึ้นสู่ฐานข้อมูล Production เด็ดขาด
+  if (currentEnv !== 'production') {
+    await seedDevelopmentCatalog();
+  } else {
+    console.log('🔒 Production environment detected: Skipping mock catalog data.');
+  }
+}
+
+main()
+  .then(async () => {
+    await prisma.$disconnect();
+  })
+  .catch(async (error) => {
+    console.error('❌ Database seed failed:', error);
+    await prisma.$disconnect();
+    process.exit(1);
+  });
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **วิธีการเขียนคำสั่งเพิ่มข้อมูล** | ใช้ `prisma.category.create()` ธรรมดา พอรันครั้งที่สองก็พังเพราะ `Unique constraint failed` | ใช้ `upsert()` หรือ `createMany({ skipDuplicates: true })` เพื่อให้รันซ้ำกี่ครั้งก็ได้ผลลัพธ์เดิม |
+| **การจัดการข้อมูลเดิมใน Seed** | ใส่ `await prisma.product.deleteMany()` ไว้บรรทัดแรกของไฟล์ `seed.ts` โดยไม่เช็ค `NODE_ENV` | ห้ามสั่ง `deleteMany()` ในไฟล์ Seed หากต้องการล้างข้อมูลบน Local ให้ใช้ `prisma migrate reset` แทน |
+| **การแยกสภาพแวดล้อม** | รันข้อมูลสินค้าปลอมและผู้ใช้ทดสอบ `admin@test.com` รหัสผ่าน `123456` ขึ้นไปบน Production | แยกฟังก์ชัน Master Data ออกจาก Mock Data โดยตรวจสอบค่า `process.env.NODE_ENV` อย่างรัดกุม |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Database Seeding เมื่อ:** ต้องการเตรียมข้อมูลอ้างอิงพื้นฐานของระบบ (Lookup Tables, Default Categories, System Roles) และต้องการสร้างชุดข้อมูลจำลองให้นักพัฒนาเริ่มต้นทำงานบนเครื่องใหม่ได้ภายในคำสั่งเดียว
+- **ไม่ควรใช้ไฟล์ `seed.ts` แทนการทำ Data Migration ของข้อมูลจริงบน Production:** หากต้องการแปลงค่าข้อมูลของลูกค้าที่มีอยู่แล้วบน Production ให้เขียนเป็นคำสั่ง SQL ภายในไฟล์ `migration.sql` (เพื่อให้ถูกบันทึกและควบคุมลำดับในตาราง `_prisma_migrations` เพียงครั้งเดียว) แทนการใส่ไว้ใน `seed.ts`
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: คำว่า Idempotent ในบริบทของ Database Seeding หมายความว่าอย่างไร และใน PostgreSQL เราใช้คำสั่ง SQL ใดเพื่อรับประกันคุณสมบัตินี้?**
+  - **แนวคำตอบ:** Idempotent หมายถึงการที่สคริปต์สามารถถูกรันซ้ำกี่ครั้งก็ได้โดยที่สถานะของข้อมูลในฐานข้อมูลยังคงถูกต้องเหมือนกับการรันครั้งแรก ไม่เกิดข้อมูลซ้ำซ้อนและไม่เกิดข้อผิดพลาด ใน PostgreSQL 16 เราใช้ไวยากรณ์ `INSERT INTO ... VALUES (...) ON CONFLICT (unique_column) DO UPDATE SET ...` (ซึ่งตรงกับ `prisma.upsert`) หรือ `ON CONFLICT DO NOTHING` (ซึ่งตรงกับ `skipDuplicates: true`)
+- **Q2: ทำไมการแปลงข้อมูลเก่าของลูกค้าบน Production (Data Migration) ถึงควรเขียนอยู่ในไฟล์ `migration.sql` หรือสคริปต์เฉพาะกิจ แทนที่จะเขียนไว้ใน `prisma/seed.ts`?**
+  - **แนวคำตอบ:** เพราะไฟล์ `migration.sql` มีกลไกการติดตามสถานะในตาราง `_prisma_migrations` ซึ่งรับประกันว่าจะถูกรันเพียงครั้งเดียวตามลำดับเวลาที่ถูกต้องคู่กับการเปลี่ยนโครงสร้างตาราง ในขณะที่ `seed.ts` ไม่มีการบันทึกประวัติการรันและถูกออกแบบมาให้ใช้เตรียมข้อมูลตั้งต้นของระบบเท่านั้น
+
+---

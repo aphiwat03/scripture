@@ -1,0 +1,73 @@
+---
+title: Anti-patterns
+category: DATABASE
+parentTitle: PostgreSQL 16
+version: PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+ในการออกแบบและบริหารจัดการ PostgreSQL 16 สำหรับระบบ Enterprise ระดับ Senior Backend มักพบ Anti-patterns สำคัญดังต่อไปนี้:
+
+### 1. ละเลยการสร้าง Index บน Foreign Key Columns
+- **พฤติกรรม:** สร้าง `REFERENCES parent_table(id)` แต่ไม่ได้สั่ง `CREATE INDEX idx_fk ON child_table(fk_column)`
+- **ผลกระทบ:** เมื่อเกิดการลบ (`DELETE`) หรืออัปเดต (`UPDATE`) แถวในตารางแม่ PostgreSQL จะต้องกวาดอ่านตารางลูกแบบ **Sequential Scan เต็มตาราง** เพื่อตรวจสอบความถูกต้อง ซึ่งทำให้ตารางลูกถูกล็อกนานขึ้น และทำให้แอปพลิเคชันค้างเมื่อตารางเริ่มมีข้อมูลหลักแสนแถว
+- **แนวทางแก้ไข:** สร้าง B-Tree Index บนทุก Foreign Key Column เป็นมาตรฐานตั้งต้นเสมอ
+
+### 2. การสั่ง `SELECT *` กับตารางที่มีคอลัมน์ Large TEXT หรือ JSONB (TOAST Table Overhead)
+- **พฤติกรรม:** เขียนคิวรี `SELECT * FROM products` ทั้งที่ต้องการเพียงชื่อและราคาเพื่อแสดงผลหน้ารายการสินค้า
+- **ผลกระทบ:** ใน PostgreSQL ข้อมูลที่มีขนาดยาวเกิน 2KB (เช่น JSONB specifications ขนาดใหญ่) จะถูกย้ายไปเก็บแยกไว้ในพื้นที่พิเศษเรียกว่า **TOAST (The Oversized-Attribute Storage Technique)** การสั่ง `SELECT *` จะบังคับให้ Engine ต้องไปเปิดอ่านข้อมูลจากตาราง TOAST และแตกไฟล์บีบอัดออกมาทุกแถว เปลือง RAM, I/O และทำให้ Network Transfer ช้าลงอย่างมาก
+- **แนวทางแก้ไข:** เลือกเฉพาะคอลัมน์ที่ต้องใช้งานจริงเสมอ เช่น `SELECT id, name, price_per_kg FROM products`
+
+### 3. การปล่อยให้เกิด Long-running Transactions ค้างในระบบ
+- **พฤติกรรม:** การเปิด `BEGIN;` ใน Node.js แล้วมีโค้ดรอ Call Third-party API (เช่น Payment Gateway หรือส่ง Email) นานหลายนาทีก่อนจะสั่ง `COMMIT`
+- **ผลกระทบ:** Transaction ID ยังคงค้างอยู่ ทำให้กระบวนการ **Autovacuum ไม่สามารถล้าง Dead Tuples ของแถวที่ถูกแก้ไขทั่วทั้งฐานข้อมูลได้** ก่อให้เกิด Table Bloat ขนาดตารางบวมขึ้นหลายเท่าตัว และอาจนำไปสู่ภาวะวิกฤต Transaction ID Wraparound
+- **แนวทางแก้ไข:** เปิด Transaction ให้สั้นที่สุดเฉพาะคำสั่ง SQL ที่ต้องรับประกันความสอดคล้องกัน ห้ามใส่ Asynchronous Network Call ใดๆ เข้าไปอยู่ภายใน Transaction Block
+
+### 4. การเชื่อมต่อแอปพลิเคชันโดยตรงโดยไม่มี Connection Pooler
+- **พฤติกรรม:** กำหนด Connection Pool ใน NestJS หรือ Prisma Client ไว้ตัวละ 50 connections เมื่อ Deploy แอปพลิเคชัน 10 Pods บน Kubernetes จะมี Connections ยิงเข้าหา PostgreSQL พร้อมกันถึง 500 connections
+- **ผลกระทบ:** PostgreSQL ใช้โมเดล Process-based แต่ละ Connection ใช้หน่วยความจำ 5-10MB และแย่ง CPU Core ในการ Context Switching จนระบบเกิดอาการกระตุกและปฏิเสธการเชื่อมต่อ (`FATAL: sorry, too many clients already`)
+- **แนวทางแก้ไข:** ติดตั้ง **PgBouncer** หรือ **Supavisor** คั่นกลางระหว่างแอปพลิเคชันและฐานข้อมูล โดยใช้โหมด `Transaction Pooling` เพื่อคุม Connection จริงเข้า Postgres ไม่ให้เกิน 50-100 Connections
+
+### 5. การใช้ชนิดข้อมูล FLOAT สำหรับการเงินและน้ำหนักสินค้า
+- **พฤติกรรม:** ใช้ `FLOAT`, `DOUBLE PRECISION`, หรือ `REAL` ในคอลัมน์ `total_amount` หรือ `price_per_kg`
+- **ผลกระทบ:** เกิดความผิดพลาดจากการปัดเศษทศนิยมตามมาตรฐาน IEEE 754 เช่น เงินขาดไป 1 สตางค์ หรือยอดรวมในใบเสร็จไม่ตรงกับรายการสินค้า
+- **แนวทางแก้ไข:** บังคับใช้ `NUMERIC(10, 2)` หรือ `NUMERIC(12, 2)` สำหรับการคำนวณเงินและสต็อกเสมอ
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+ก่อนนำฐานข้อมูล PostgreSQL 16 ขึ้นสู่สภาพแวดล้อม Production ของระบบ **Smart Butcher Marketplace** ให้ตรวจสอบความพร้อมตามรายการนี้:
+
+- [ ] **Type Precision:** คอลัมน์ที่เกี่ยวกับเงินและน้ำหนักทั้งหมดใช้ `NUMERIC(10,2)` หรือ `NUMERIC(12,2)` และไม่มีการใช้ `FLOAT` ในระบบ
+- [ ] **Timezone Uniformity:** คอลัมน์เก็บเวลาทั้งหมด (เช่น `created_at`, `updated_at`) กำหนดเป็นชนิด `TIMESTAMPTZ` (Timestamp with time zone)
+- [ ] **Primary Key Standard:** ตารางทุกตัวมี Primary Key ที่ชัดเจน แนะนำให้ใช้ `UUID` v7 หรือ `gen_random_uuid()` หรือ `BIGINT`
+- [ ] **Foreign Key Indexing:** คอลัมน์ Foreign Key ทุกตัวในระบบมี B-Tree Index กำกับไว้เรียบร้อย เพื่อป้องกันปัญหา Sequential Scan ตอนทำ Referential Action
+- [ ] **Referential Actions Defined:** ตรวจสอบพฤติกรรม `ON DELETE` ของทุก Foreign Key อย่างรัดกุม (`CASCADE` เฉพาะข้อมูลที่เป็นเนื้อเดียวกัน, `RESTRICT` สำหรับประวัติคำสั่งซื้อและการเงิน)
+- [ ] **Data Integrity Constraints:** มีการใส่ `CHECK` constraint ป้องกันข้อมูลติดลบ (เช่น `price > 0`, `stock_qty >= 0`) ครบถ้วน
+- [ ] **Least Privilege Role Enforcement:** แอปพลิเคชัน Backend เชื่อมต่อด้วย Dedicated Role ที่มีเฉพาะสิทธิ์ DML (`SELECT`, `INSERT`, `UPDATE`, `DELETE`) ไม่ใช้ Superuser `postgres`
+- [ ] **Search Path Fixed:** มีการตั้งค่า `search_path` อย่างชัดเจน และเพิกถอนสิทธิ์การสร้างตารางของ Public (`REVOKE CREATE ON SCHEMA public FROM PUBLIC;`)
+- [ ] **Extensions Ready:** ติดตั้ง Extension ที่จำเป็น เช่น `pgcrypto` และ `pg_trgm` พร้อมสร้าง GIN Index สำหรับการค้นหาแบบข้อความ
+- [ ] **Connection Pooling Active:** มีการติดตั้ง Connection Pooler (เช่น PgBouncer หรือ Supabase Supavisor) กั้นหน้าฐานข้อมูลบน Production
+- [ ] **Autovacuum Tuning:** ตรวจสอบว่า Autovacuum ทำงานปกติ และไม่มี Long-running Transaction ค้างใน `pg_stat_activity`
+- [ ] **Memory Allocation Sized:** ปรับแต่งค่า `shared_buffers` ให้เหมาะสม (ประมาณ 25% ของ RAM เครื่อง) และควบคุมค่า `work_mem` ไม่ให้สูงเกินไปจนเสี่ยงต่อ OOM
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+หลังจากเข้าใจสถาปัตยกรรมระดับลึก ชนิดข้อมูล และกลไก Integrity ของ PostgreSQL 16 เรียบร้อยแล้ว ขอแนะนำให้ศึกษาหัวข้อที่เกี่ยวข้องตามลำดับดังนี้:
+
+<Callout type="tip" title="ศึกษาต่อในหัวข้อถัดไป">
+1. **ภาษา SQL เชิงลึกและการเขียน Query ประสิทธิภาพสูง:**  
+   👉 **[SQL](/docs/database/sql)** — เจาะลึกการเขียน DDL, DML, Complex Joins, Subqueries, Aggregate Functions, Window Functions และ Common Table Expressions (CTE)
+
+2. **การเชื่อมต่อและใช้งานผ่าน Application Layer:**  
+   👉 **[Prisma ORM](/docs/backend/prisma-orm)** — เรียนรู้วิธีการ Map Schema จาก PostgreSQL สู่ Prisma Models, การจัดการ Connection Pooling, การทำ Migration ด้วย Prisma Migrate, และการทำ Transactions อย่างปลอดภัยใน Node.js/NestJS
+</Callout>

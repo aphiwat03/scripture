@@ -1,0 +1,177 @@
+---
+title: SELECT Filtering
+category: DATABASE
+parentTitle: SQL
+version: SQL:2023 & PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+การดึงข้อมูลด้วยคำสั่ง `SELECT` เปรียบเสมือนการเดินเข้าไปในห้องบ่มเนื้อของ **Smart Butcher Marketplace** เพื่อคัดเลือกเนื้อตามสเปกที่ลูกค้าสั่งซื้อ โดยแทนที่จะขนสินค้าทั้งหมดในคลังออกมาวางเกะกะหน้าร้าน เราจะระบุเฉพาะคุณสมบัติที่ต้องการอย่างเจาะจง:
+- **`SELECT`**: เลือกว่าต้องการหยิบเฉพาะ "ชื่อชิ้นเนื้อ" และ "ราคาต่อกิโลกรัม" ชนิดใดออกมาดู
+- **`WHERE`**: กรองเฉพาะเนื้อดรายเอจที่บ่มเกิน 30 วันและยังมีสต็อกพร้อมขาย
+- **`ORDER BY`**: เรียงลำดับเนื้อตามระยะเวลาบ่มจากนานที่สุดไปหาน้อยที่สุด
+- **`LIMIT / OFFSET`**: หยิบเนื้อออกมาทีละ 10 ชิ้นต่อหนึ่งถาดเพื่อนำเสนอให้ลูกค้าชมในแต่ละหน้า
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อ PostgreSQL ได้รับคำสั่ง SQL จะประมวลผลผ่าน 4 กระบวนการหลัก:
+1. **Parser & Analyzer**: ตรวจสอบไวยากรณ์ (Syntax) และความถูกต้องของชื่อตาราง/คอลัมน์ใน Catalog
+2. **Rewriter**: ขยาย Views หรือประยุกต์กฎ Rules ต่างๆ
+3. **Planner / Optimizer**: วางแผนการเข้าถึงข้อมูลที่ประหยัดต้นทุนที่สุด (Cost-based Optimizer) เลือกระหว่าง **Sequential Scan** (อ่านข้อมูลเรียงแถวจาก Disk) หรือ **Index Scan** (วิ่งผ่าน B-Tree Index)
+4. **Executor**: ดึงข้อมูลจริงจาก Buffer Pool (Shared Buffers) หรือ Storage Disk
+
+```text filename="docs/database/sql.txt"
+ลำดับการประมวลผลทางตรรกะของ SQL (Logical Query Processing Order):
+1. FROM / JOIN      -> ประกอบชุดตารางตั้งต้น
+2. WHERE            -> กรองแถวที่ไม่ตรงเงื่อนไขทิ้งในระดับ Tuple
+3. GROUP BY         -> จัดกลุ่มแถวที่มีค่าเหมือนกัน
+4. HAVING           -> กรองกลุ่มข้อมูลหลังคำนวณ Aggregate
+5. SELECT           -> เลือกและคำนวณคอลัมน์ (Projection / Expressions)
+6. DISTINCT         -> กำจัดแถวที่มีค่าซ้ำกัน
+7. ORDER BY         -> เรียงลำดับผลลัพธ์ (Quicksort / Top-N Heapsort)
+8. LIMIT / OFFSET   -> ตัดขอบเขตจำนวนแถวเพื่อส่งกลับให้ Client
+```
+
+> [!WARNING] อันตรายของ `SELECT *` ในระบบ Production
+> การใช้ `SELECT *` บังคับให้ PostgreSQL ดึงข้อมูลทุกคอลัมน์จากดิสก์ ส่งผลให้:
+> 1. ทำลายโอกาสที่ Optimizer จะเลือกใช้ **Index-Only Scan** (การอ่านข้อมูลครบถ้วนจาก B-Tree Index โดยไม่ต้องเปิดอ่าน Table Heap)
+> 2. สิ้นเปลืองหน่วยความจำ **Shared Buffers** และ Network I/O มหาศาลเมื่อตารางมีคอลัมน์ประเภท `TEXT` ขนาดใหญ่
+> 3. ทำลาย Contract ของระบบเมื่อ Schema มีการเพิ่มหรือสลับตำแหน่งคอลัมน์
+
+### ปัญหา Deep Pagination ด้วย `OFFSET`
+เมื่อระบุ `OFFSET 100000 LIMIT 20` ตัวฐานข้อมูล PostgreSQL **ไม่ได้กระโดดข้ามไปยังแถวที่ 100,001 โดยตรง** แต่ Executor จะต้องสแกนแถวขึ้นมาประมวลผลทั้งสิ้น 100,020 แถว แล้วโยน 100,000 แถวแรกทิ้งไปในหน่วยความจำ ส่งผลให้ค่ายิ่งสูง Query จะยิ่งช้าลงอย่างรวดเร็ว (Time Complexity $O(N)$) ทางออกในระดับ Production สำหรับตารางขนาดใหญ่คือการใช้ **Keyset Pagination (Cursor-based Pagination)**
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การค้นหาเนื้อพรีเมียมด้วยเงื่อนไขซับซ้อนและการเรียงลำดับแบบจัดการค่าว่าง
+ค้นหาสินค้าเนื้อดรายเอจที่กำลังวางจำหน่าย มีระยะเวลาบ่มระหว่าง 30 ถึง 60 วัน หรือเป็นเนื้อวากิวญี่ปุ่นที่มีราคาต่อกิโลกรัมตั้งแต่ 3,000 บาทขึ้นไป โดยเรียงลำดับตามจำนวนวันบ่มจากมากไปน้อย หากค่าเป็น NULL ให้แสดงไว้ท้ายสุด (`NULLS LAST`):
+
+```sql filename="sql/sql.sql"
+-- ค้นหาเนื้อระดับพรีเมียมตามเงื่อนไขทางธุรกิจ
+SELECT 
+    id,
+    sku,
+    name,
+    price_per_kg,
+    stock_qty,
+    dry_aged_days
+FROM products
+WHERE is_active = TRUE
+  AND (
+        (dry_aged_days BETWEEN 30 AND 60)
+        OR (price_per_kg >= 3000.00 AND sku LIKE 'WAGYU%')
+      )
+ORDER BY dry_aged_days DESC NULLS LAST, price_per_kg ASC
+LIMIT 5 OFFSET 0;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| id | sku | name | price_per_kg | stock_qty | dry_aged_days |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 3 | TOMAHAWK-DA60-PRM | 60-Day Dry-Aged Tomahawk Prime | 3600.00 | 4 | 60 |
+| 2 | ANGUS-DA45-TBONE | 45-Day Dry-Aged Black Angus T-Bone | 2800.00 | 8 | 45 |
+| 1 | WAGYU-A5-RIB | Miyazaki Wagyu A5 Ribeye | 4500.00 | 15 | 0 |
+
+**โค้ดเทียบเคียงใน Prisma Client:**
+```typescript filename="src/sql.ts"
+// Prisma Client query เทียบเคียงกับ SQL ด้านบน
+const products = await prisma.product.findMany({
+  select: {
+    id: true,
+    sku: true,
+    name: true,
+    pricePerKg: true,
+    stockQty: true,
+    dryAgedDays: true,
+  },
+  where: {
+    isActive: true,
+    OR: [
+      { dryAgedDays: { gte: 30, lte: 60 } },
+      { AND: [{ pricePerKg: { gte: 3000 } }, { sku: { startsWith: 'WAGYU' } }] },
+    ],
+  },
+  orderBy: [
+    { dryAgedDays: { sort: 'desc', nulls: 'last' } },
+    { pricePerKg: 'asc' },
+  ],
+  take: 5,
+  skip: 0,
+});
+```
+
+### ตัวอย่างที่ 2: การทำ Keyset (Cursor-based) Pagination เพื่อประสิทธิภาพสูงสุด
+แทนที่จะใช้ `OFFSET` ที่ต้องอ่านแถวทิ้ง เราจะใช้ Primary Key (`id`) หรือคีย์ที่เรียงลำดับแน่นอนเป็น Cursor:
+
+```sql filename="sql/sql.sql"
+-- ดึงข้อมูลหน้าถัดไปโดยใช้ Cursor ID ของแถวสุดท้ายในหน้าก่อนหน้า (:last_seen_id = 3)
+SELECT 
+    id,
+    sku,
+    name,
+    price_per_kg,
+    stock_qty
+FROM products
+WHERE is_active = TRUE
+  AND id > 3 -- Keyset Filtering: ใช้ B-Tree Index ข้ามไปยังตำแหน่งเป้าหมายได้ทันที (O(log N))
+ORDER BY id ASC
+LIMIT 3;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| id | sku | name | price_per_kg | stock_qty |
+| :--- | :--- | :--- | :--- | :--- |
+| 4 | AUS-WAGYU-MB9-TEND | Australian Wagyu Tenderloin MB9+ | 3900.00 | 0 |
+| 5 | GRASS-STRIP-STD | Grass-fed Striploin Standard | 1200.00 | 25 |
+
+**โค้ดเทียบเคียงใน Prisma Client:**
+```typescript filename="src/sql.ts"
+// Cursor-based Pagination บน Prisma Client
+const productsPage = await prisma.product.findMany({
+  take: 3,
+  skip: 1, // ข้าม cursor ตัวเอง
+  cursor: {
+    id: lastSeenId, // เช่น id: 3
+  },
+  where: { isActive: true },
+  orderBy: { id: 'asc' },
+});
+```
+
+## 4. ผิด vs ถูก (Anti-patterns & Best Practices)
+
+### ❌ โค้ดที่ผิด: ใช้ `SELECT *` และทำ Deep Pagination ด้วย `OFFSET` ขนาดใหญ่
+```sql filename="sql/sql.sql"
+-- ผิด: อ่านทุกคอลัมน์ และสั่ง OFFSET 50000 บังคับให้ฐานข้อมูลอ่านทิ้ง 50,000 แถว
+SELECT * 
+FROM products 
+WHERE is_active = TRUE 
+ORDER BY id ASC 
+LIMIT 20 OFFSET 50000;
+```
+
+### ✅ โค้ดที่ถูก: เลือกเฉพาะคอลัมน์ที่แสดงผล และใช้ Cursor-based Filtering
+```sql filename="sql/sql.sql"
+-- ถูกต้อง: ดึงเฉพาะคอลัมน์ที่จำเป็น และใช้ B-Tree Index Seek ผ่าน Cursor ID
+SELECT id, sku, name, price_per_kg 
+FROM products 
+WHERE is_active = TRUE 
+  AND id > 50000 
+ORDER BY id ASC 
+LIMIT 20;
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `OFFSET / LIMIT`:** ใช้กับระบบหลังบ้าน (Admin Backoffice) ที่มีขนาดตารางไม่เกินหลักหมื่นแถว และผู้ใช้ต้องการกดข้ามไปยังเลขหน้าเจาะจง (เช่น หน้า 1, 2, 3)
+- **ควรใช้ Keyset / Cursor Pagination:** ใช้กับ Public API, โมบายแอปพลิเคชัน, Infinite Scroll Feed, และตารางขนาดใหญ่ระดับล้านแถวขึ้นไป
+- **ควรระบุคอลัมน์ชัดเจนใน `SELECT`:** ใช้ในทุก Production Query เพื่อประหยัด Bandwidth และรองรับ Index-Only Scan
+
+## 6. คำถามสัมภาษณ์ (Interview Questions)
+- **Q1: ทำไมคำสั่ง `SELECT * FROM orders ORDER BY created_at DESC LIMIT 10 OFFSET 100000` ถึงทำงานช้ามากใน PostgreSQL และมีวิธีแก้ไขอย่างไร?**
+  - *คำตอบ:* เพราะ PostgreSQL ต้องทำการค้นหาและจัดเรียงข้อมูลทั้งหมด 100,010 แถวตามลำดับ `created_at` แล้ววนอ่านแถวทั้งหมดผ่าน Disk/Buffer ก่อนจะละทิ้ง 100,000 แถวแรกไป วิธีแก้คือเปลี่ยนมาใช้ **Keyset Pagination** โดยเก็บค่า `(created_at, id)` ของแถวสุดท้าย แล้วเขียนเงื่อนไข `WHERE (created_at, id) < (:last_created_at, :last_id) ORDER BY created_at DESC, id DESC LIMIT 10` ซึ่งจะทำให้ Engine สามารถกระโดดผ่าน B-Tree Index ไปยังแถวที่ต้องการได้ทันทีในเวลา $O(\log N)$
+- **Q2: ค่าเริ่มต้นของการจัดเรียง `NULL` ใน PostgreSQL สำหรับคำสั่ง `ORDER BY column ASC` และ `ORDER BY column DESC` คืออะไร?**
+  - *คำตอบ:* สำหรับ `ASC` ค่าเริ่มต้นคือ `NULLS LAST` (ค่า NULL อยู่ท้ายสุด) แต่สำหรับ `DESC` ค่าเริ่มต้นคือ `NULLS FIRST` (ค่า NULL จะโผล่ขึ้นมาเป็นอันดับแรก) หากต้องการให้ค่า NULL อยู่ท้ายสุดเสมอไม่ว่าจะเรียงจากมากไปน้อย ต้องระบุคำสั่งเจาะจงเป็น `ORDER BY column DESC NULLS LAST`
+
+---

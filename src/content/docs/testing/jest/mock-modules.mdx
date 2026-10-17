@@ -1,0 +1,214 @@
+---
+title: Mock Modules
+category: TESTING & QUALITY
+parentTitle: Jest
+version: Jest v29 & ts-jest
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เมื่อร้าน **Smart Butcher Marketplace** จำเป็นต้องส่ง SMS แจ้งลูกค้าว่า "เนื้อดรายเอจของท่านตัดแต่งเสร็จแล้วและกำลังจัดส่ง":
+- ในระบบจริง โค้ดจะเรียกใช้โมดูลบุคคลที่สาม (Third-party Modules) เช่น `twilio`, `axios` หรือ `nodemailer` เพื่อส่งข้อมูลผ่านระบบเครือข่ายจริง
+- ใน Unit Test เราไม่ต้องการเสียค่าส่ง SMS จริง ไม่ต้องการพึ่งพาอินเทอร์เน็ต และต้องการให้เทสต์ทำงานได้เร็วระดับมิลลิวินาที
+- **`jest.mock('module-name')`**: เปรียบเหมือน "การตัดสายเคเบิลอินเทอร์เน็ตที่เชื่อมออกไปข้างนอก แล้วเสียบกล่องจำลองสัญญาณเสมือนจริงเข้าไปแทนที่" ระบบภายในจะคิดว่ามันกำลังคุยกับ `axios` ตัวจริง แต่แท้จริงแล้วคือ Mock Module ของ Jest ที่พร้อมให้เราตรวจสอบข้อมูลที่ส่งออกไป
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+กลไกที่สำคัญที่สุดและสร้างความสับสนให้ผู้เริ่มต้นมากที่สุดคือ **Babel / ts-jest Hoisting**:
+
+```text filename="docs/testing/jest.txt"
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          JEST HOISTING MECHANISM                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  [ สิ่งที่โปรแกรมเมอร์เขียนในโค้ด ]                                         │
+│  ─────────────────────────────────                                          │
+│  import axios from 'axios';                                                 │
+│  const mockPort = 8080;                                                     │
+│  jest.mock('axios', () => ({ post: jest.fn() }));                           │
+│                                                                             │
+│                                      ▼                                      │
+│  [ สิ่งที่ Jest Transpiler แปลงและนำไปรันจริง (Hoisted to Top) ]            │
+│  ─────────────────────────────────────────────────────────────              │
+│  // 1. Jest จะยก jest.mock() ขึ้นไปบนสุดของไฟล์ ก่อนคำสั่ง import ใดๆ เสมอ  │
+│  jest.mock('axios', () => ({ post: jest.fn() }));                           │
+│                                                                             │
+│  // 2. คำสั่ง Import จะถูกแปลงและโหลดหลังจาก Mock ถูกแทนที่ใน Module Cache    │
+│  import axios from 'axios';                                                 │
+│  const mockPort = 8080; // บรรทัดนี้จะถูกประกาศทีหลัง!                      │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+1. **Hoisting Rule:** Jest จะดึงคำสั่ง `jest.mock()` ไปทำงานก่อนคำสั่ง `import` อื่นๆ ทั้งหมด เพื่อดักจับ Module ตั้งแต่จังหวะที่ Node.js ทำการ `require()` ครั้งแรก
+2. **OutOfScope Variable Restriction:** ด้วยเหตุที่ถูก Hoist ทำให้ฟังก์ชัน Factory ใน `jest.mock()` ไม่สามารถเข้าถึงตัวแปรภายนอกได้ เว้นแต่ตัวแปรนั้นจะขึ้นต้นด้วยคำว่า `mock` (เช่น `const mockApiKey = '...'`) ซึ่ง Jest Transpiler จะยกเว้นให้ถูก Hoist ตามขึ้นไปด้วย
+3. **Manual Mocks (`__mocks__` directory):** Jest รองรับการสร้างโฟลเดอร์ `__mocks__` ไว้ข้างโมดูลที่ต้องการจำลอง หากเราเรียก `jest.mock('./sms.service')` โดยไม่ระบุ Factory function ตัว Jest จะวิ่งไปหาไฟล์จำลองในโฟลเดอร์ `__mocks__/sms.service.ts` มาใช้งานอัตโนมัติ
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การจำลอง Third-Party HTTP Library (`axios`) ในการยิง Webhook แจ้งสถานะการแล่เนื้อ
+การทดสอบคลาส `ButcherWebhookDispatcher`:
+
+```typescript filename="src/services/webhook-dispatcher.ts"
+import axios from 'axios';
+
+export interface CuttingProgressPayload {
+  orderNo: string;
+  butcherName: string;
+  status: 'CUTTING' | 'VACUUM_PACKED' | 'DISPATCHED';
+}
+
+export class ButcherWebhookDispatcher {
+  public static async notifyKitchenDisplay(url: string, payload: CuttingProgressPayload): Promise<boolean> {
+    const response = await axios.post(url, payload, { timeout: 3000 });
+    return response.status === 200;
+  }
+}
+```
+
+ชุดทดสอบพร้อม Mock โมดูล `axios`:
+
+```typescript filename="src/services/webhook-dispatcher.spec.ts"
+import axios from 'axios';
+import { ButcherWebhookDispatcher, CuttingProgressPayload } from './webhook-dispatcher';
+
+// สั่ง Mock ทั้งโมดูล axios
+jest.mock('axios');
+
+// ทำ Type Casting เพื่อให้ TypeScript รู้จัก Mock Methods
+const mockedAxios = axios as jest.Mocked<typeof axios>;
+
+describe('ButcherWebhookDispatcher - Module Mocking', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('should successfully post meat cutting status update to kitchen display', async () => {
+    // จำลองผลลัพธ์ของ axios.post
+    mockedAxios.post.mockResolvedValueOnce({ status: 200, data: { received: true } });
+
+    const payload: CuttingProgressPayload = {
+      orderNo: 'ORD-2026-7788',
+      butcherName: 'Somchai Premium Cuts',
+      status: 'VACUUM_PACKED',
+    };
+
+    const isSuccess = await ButcherWebhookDispatcher.notifyKitchenDisplay(
+      'https://api.smartbutcher.internal/kds/webhook',
+      payload
+    );
+
+    expect(isSuccess).toBe(true);
+    expect(mockedAxios.post).toHaveBeenCalledTimes(1);
+    expect(mockedAxios.post).toHaveBeenCalledWith(
+      'https://api.smartbutcher.internal/kds/webhook',
+      payload,
+      { timeout: 3000 }
+    );
+  });
+
+  it('should handle network timeout failure gracefully', async () => {
+    mockedAxios.post.mockRejectedValueOnce(new Error('Network timeout'));
+
+    const payload: CuttingProgressPayload = {
+      orderNo: 'ORD-TIMEOUT',
+      butcherName: 'Somchai',
+      status: 'CUTTING',
+    };
+
+    await expect(
+      ButcherWebhookDispatcher.notifyKitchenDisplay('https://invalid-url.com', payload)
+    ).rejects.toThrow('Network timeout');
+  });
+});
+```
+
+### ตัวอย่างที่ 2: การทำ Partial Mocking ด้วย `jest.requireActual`
+ในบางกรณี เราต้องการ Mock เพียงฟังก์ชันเดียวในโมดูล แต่ต้องการเก็บฟังก์ชันอื่นๆ ของโมดูลนั้นให้ทำงานตามจริง:
+
+```typescript filename="src/utils/meat-formatter.ts"
+// ฟังก์ชันจัดรูปแบบข้อความ (ต้องการให้ทำงานจริง)
+export function formatMeatLabel(sku: string, dryAgedDays: number): string {
+  return `[${sku}] Aged: ${dryAgedDays} Days (Certified Premium)`;
+}
+
+// ฟังก์ชันส่งอีเมลยืนยัน (ต้องการ Mock ไม่ให้ส่งจริง)
+export async function sendEmailNotification(to: string, subject: string, body: string): Promise<boolean> {
+  // ยิงออก SMTP Server ภายนอก
+  return true;
+}
+```
+
+ชุดทดสอบที่ใช้ Partial Mock:
+
+```typescript filename="src/utils/meat-formatter.spec.ts"
+import * as meatUtils from './meat-formatter';
+
+// สั่ง Partial Mocking
+jest.mock('./meat-formatter', () => {
+  // ดึงโค้ดจริงทั้งหมดขึ้นมา
+  const actualModule = jest.requireActual<typeof import('./meat-formatter')>('./meat-formatter');
+
+  return {
+    ...actualModule, // ใช้ฟังก์ชันจริงทั้งหมด
+    sendEmailNotification: jest.fn().mockResolvedValue(true), // เจาะจง Mock เฉพาะฟังก์ชันนี้
+  };
+});
+
+describe('MeatUtils - Partial Mocking with jest.requireActual', () => {
+  it('should use the real formatMeatLabel implementation while mocking sendEmailNotification', async () => {
+    // 1. ฟังก์ชันจัดรูปแบบข้อความต้องทำงานได้จริงตาม Logic ในไฟล์
+    const label = meatUtils.formatMeatLabel('BEEF-RIBEYE-45D', 45);
+    expect(label).toBe('[BEEF-RIBEYE-45D] Aged: 45 Days (Certified Premium)');
+
+    // 2. ฟังก์ชันส่งเมลต้องเป็น Mock Function ที่เราสามารถตรวจสอบการเรียกได้
+    await meatUtils.sendEmailNotification('vip@customer.com', 'Meat Ready', label);
+
+    expect(meatUtils.sendEmailNotification).toHaveBeenCalledWith(
+      'vip@customer.com',
+      'Meat Ready',
+      '[BEEF-RIBEYE-45D] Aged: 45 Days (Certified Premium)'
+    );
+  });
+});
+```
+
+## 4. ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+### ❌ สิ่งที่ผิด: อ้างอิงตัวแปร Scope ทั่วไปภายใน Factory ของ `jest.mock()`
+```typescript filename="src/jest.spec.ts"
+const defaultVipDiscount = 15; // ตัวแปรทั่วไป
+
+jest.mock('./discount.service', () => {
+  // พังทันที: Jest Transpiler จะโยน ReferenceError ออกมา
+  // "The module factory of `jest.mock()` is not allowed to reference any out-of-scope variables"
+  return {
+    calculateVipDiscount: () => defaultVipDiscount,
+  };
+});
+```
+
+### ✅ สิ่งที่ถูก: ประกาศค่าข้างใน Factory หรือตั้งชื่อตัวแปรนำหน้าด้วย `mock`
+```typescript filename="src/jest.spec.ts"
+// อนุญาต: ตัวแปรที่ขึ้นต้นด้วย 'mock' Jest จะยอมให้ถูก Hoist พร้อมกับ Factory
+const mockVipDiscount = 15;
+
+jest.mock('./discount.service', () => {
+  return {
+    calculateVipDiscount: () => mockVipDiscount,
+  };
+});
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `jest.mock`:** กับ External I/O Libraries (Stripe, Twilio, AWS S3, Axios, Prisma/TypeORM) เพื่อหลีกเลี่ยง Side Effects บนเครือข่ายจริง
+- **ไม่ควรใช้ `jest.mock`:** กับ Pure Domain Utilities หรือ Entity Classes ภายในระบบ เพราะจะทำให้สูญเสียความมั่นใจในการทดสอบ (Over-mocking) และทำให้เทสต์กลายเป็นเพียงการตรวจเช็กกระดาษคำตอบเปล่าๆ
+
+## 6. คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: เหตุใด Jest จึงต้องทำ Hoisting คำสั่ง `jest.mock()` และกลไกนี้กระทบกับโค้ดอย่างไร?**
+  - *แนวคำตอบ:* ใน Node.js เมื่อไฟล์ถูกโหลด คำสั่ง `import` หรือ `require()` จะทำงานทันทีและเก็บผลลัพธ์ไว้ใน Module Cache ของ Node.js หาก Jest ไม่ทำการ Hoist คำสั่ง `jest.mock()` ขึ้นไปไว้บนสุดก่อน โมดูลจริงจะถูกคอมไพล์และแคชไว้ในหน่วยความจำก่อนที่ Mock จะถูกกำหนด ทำให้การดักฟังโมดูลล้มเหลว การ Hoist ทำให้ Jest สามารถแทรก Mock Implementation เข้าไปใน Module Cache ได้ก่อนที่โค้ดจริงจะถูกเรียกใช้
+- **Q2: หากต้องการทำ Mock โมดูลที่สร้างขึ้นจาก Third-party ที่ไม่มี ESM Export (เป็น CommonJS) ใน TypeScript มีเทคนิคใดที่ช่วยให้ Type Inference ยังคงถูกต้อง?**
+  - *แนวคำตอบ:* ใช้ `jest.mocked()` Utility Function ที่มาพร้อมกับ `ts-jest` หรือ Jest 29+:
+    `const mockedLib = jest.mocked(myLibrary, { shallow: false });`
+    ตัวช่วยนี้จะทำ Deep Mock Typing ให้อัตโนมัติ ทำให้เราเรียกใช้ `.mockResolvedValue` หรือตรวจสอบ `.mock.calls` ได้โดยไม่ต้องใช้ Type Assertion แบบ `as unknown as jest.Mock` ให้สูญเสีย Type Safety
+
+---

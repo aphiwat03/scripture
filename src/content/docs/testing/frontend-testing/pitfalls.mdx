@@ -1,0 +1,66 @@
+---
+title: Anti-patterns
+category: TESTING & QUALITY
+parentTitle: Frontend Testing
+version: RTL & MSW v2
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **Testing Implementation Details (ยึดติดกับโครงสร้างภายในแทนมุมมองผู้ใช้):**
+   - **ปัญหา:** ค้นหา Element ด้วย CSS Class (`container.querySelector('.wagyu-price-red')`) หรือพยายามเข้าถึงตัวแปรภายใน Component
+   - **วิธีแก้:** ค้นหาผ่าน Accessibility Roles (`screen.getByRole`, `screen.getByLabelText`) และตรวจสอบสิ่งที่ผู้ใช้มองเห็นบนหน้าจอเท่านั้น
+2. **Using `fireEvent` Instead of `userEvent` (ใช้ `fireEvent` แทน `user-event`):**
+   - **ปัญหา:** ใช้ `fireEvent.click` หรือ `fireEvent.change` ซึ่งไม่จำลองลำดับเหตุการณ์จริงของเบราว์เซอร์ (`focus`, `keyDown`, `keyUp`, `blur`) ทำให้พลาดบั๊กในฟอร์ม React Hook Form
+   - **วิธีแก้:** ใช้ `const user = userEvent.setup()` และเรียก `await user.click(...)`, `await user.type(...)` เสมอ
+3. **Multiple Assertions with Side Effects Inside `waitFor` (ใส่คำสั่งคลิกไว้ใน `waitFor`):**
+   - **ปัญหา:** เขียน `await waitFor(() => { user.click(btn); expect(...); })` เนื่องจาก `waitFor` อาจรัน Callback ซ้ำหลายรอบจนกว่า Assertion จะผ่าน ทำให้ปุ่มถูกคลิกซ้ำหลายครั้งโดยไม่ตั้งใจ
+   - **วิธีแก้:** แยกคำสั่งกระทำ (`await user.click(btn)`) ออกมาไว้นอก `waitFor` เสมอ และใช้ `findBy*` หรือใส่เฉพาะ `expect(...)` ไว้ใน `waitFor`
+4. **Shared Zustand / QueryClient State Across Tests (ไม่ล้างสถานะ Store และ Cache):**
+   - **ปัญหา:** ใช้ `QueryClient` ตัวเดิมซ้ำทุกเคส หรือไม่รีเซ็ต Zustand Store ใน `beforeEach` ทำให้เทสต์ผ่านเมื่อรันเดี่ยวแต่พังเมื่อรันรวมทั้งไฟล์
+   - **วิธีแก้:** สร้าง `QueryClient` ใหม่ต่อหนึ่ง Test Case (ตั้ง `retry: false, gcTime: 0`) และเรียกฟังก์ชันรีเซ็ต Zustand Store ใน `beforeEach` ทุกครั้ง
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+ก่อนเปิด Pull Request สำหรับฟีเจอร์ฝั่ง Frontend ของระบบ **Smart Butcher Marketplace** ให้ตรวจสอบรายการต่อไปนี้:
+
+- [ ] **A11y-First Queries:** ใช้ `screen.getByRole` และ `screen.getByLabelText` เป็นหลัก ใช้ `getByTestId` เฉพาะกรณีที่หลีกเลี่ยงไม่ได้เท่านั้น
+- [ ] **Correct Query Variants:** ใช้ `getBy*` สำหรับ Element ปัจจุบัน, `queryBy*` สำหรับยืนยันว่าไม่มี Element อยู่ (`not.toBeInTheDocument()`), และ `await findBy*` สำหรับรอการอัปเดตแบบ Async
+- [ ] **Realistic User Events:** ทุกการจำลองการคลิกและพิมพ์ข้อความใช้ `userEvent.setup()` พร้อมใส่ `await` ครบทุกบรรทัด
+- [ ] **Isolated Client & Server State:** มีการรีเซ็ต Zustand Store ใน `beforeEach` และใช้ `QueryClient` ที่ตั้งค่า `retry: false` แยกอิสระในแต่ละเทสต์
+- [ ] **MSW Network Hygiene:** มีการตั้งค่า `server.listen()`, `server.resetHandlers()` ใน `afterEach` และ `server.close()` ใน `afterAll` ครบถ้วน
+- [ ] **RSC Boundary Separation:** แยก UI และ Business Logic ออกจาก `async` Server Components เพื่อให้ทดสอบด้วย Jest ได้อย่างรวดเร็ว และมีเทสต์ Playwright รองรับในระดับหน้าเพจ
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อคุณเข้าใจการทดสอบ Frontend ด้วย React Testing Library, MSW และกลยุทธ์สำหรับ Next.js 16 + React 19 แล้ว ขอแนะนำให้ศึกษาต่อในหัวข้อต่อไปนี้:
+
+<Callout type="tip" title="ก้าวต่อไปสู่การทดสอบ E2E เต็มรูปแบบ">
+หลังจากที่เราทดสอบระดับ Component, Custom Hooks, Form Validation และการจำลอง API ด้วย MSW จนมั่นใจแล้ว ขั้นตอนสุดท้ายของ Testing Pyramid คือการนำทุกส่วนมาประกอบเข้ากับเซิร์ฟเวอร์จริงและฐานข้อมูลจริง แล้วทดสอบผ่านเบราว์เซอร์จริงด้วย Playwright
+</Callout>
+
+- **การทดสอบ E2E, พื้นฐาน และเครื่องมือคุณภาพโค้ด:**
+  - [E2E Testing](/docs/testing/playwright) — การทดสอบระบบครบวงจรและ `async` Server Components ด้วย Playwright
+  - [Testing Fundamentals](/docs/testing/fundamentals) — หลักการ Testing Pyramid และกลยุทธ์การวางสัดส่วนชุดทดสอบ
+  - [Jest](/docs/testing/jest) — คู่มือเจาะลึก Matchers, Timers และการจัดการ Mocks ใน Jest
+  - [Backend Testing](/docs/testing/backend-testing) — การทดสอบ REST API บน NestJS 11 ด้วย Supertest
+  - [ESLint & Prettier](/docs/testing/eslint) — การใช้ปลั๊กอิน `eslint-plugin-testing-library` และ `eslint-plugin-jest-dom`
+  - [Git Hooks & CI](/docs/testing/git-hooks) — การตั้งค่าไปป์ไลน์รันเทสต์อัตโนมัติก่อน Merge โค้ด
+  - [Debugging & Type Checking](/docs/testing/type-checking) — การใช้ `screen.debug()` และการตรวจจับปัญหา TypeScript
+- **เทคโนโลยี Frontend ที่เกี่ยวข้องโดยตรง:**
+  - [Next.js](/docs/nextjs) — สถาปัตยกรรม App Router, Server Components และ Client Components
+  - [React](/docs/react) — พื้นฐาน Hooks, Rendering Lifecycle และ State Management ใน React 19
+  - [React Hook Form & Zod](/docs/react-hook-form-zod) — การสร้างฟอร์มและตรวจสอบข้อมูลด้วย Schema Validation
+  - [TanStack Query](/docs/tanstack-query) — การจัดการ Server State, Caching และ Mutations
+  - [Zustand](/docs/zustand) — การจัดการ Global Client State สำหรับตะกร้าสินค้า
+  - [Shadcn UI](/docs/shadcn) — การใช้งาน Accessible Components (Dialog, Select, Form) บนพื้นฐาน Radix UI
+  - [Toast & Notifications](/docs/toast-notify) — การออกแบบระบบแจ้งเตือนสถานะการทำงานให้ผู้ใช้ทราบ

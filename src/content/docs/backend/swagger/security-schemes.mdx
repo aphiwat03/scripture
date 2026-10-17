@@ -1,0 +1,158 @@
+---
+title: Security Schemes
+category: BACKEND
+parentTitle: Swagger
+version: OpenAPI 3.1 & NestJS Swagger
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในระบบ **Smart Butcher Marketplace** เส้นทาง API ส่วนใหญ่ต้องมีการยืนยันตัวตนและตรวจสอบสิทธิ์ เช่น ลูกค้า (`CUSTOMER`) ต้องล็อกอินก่อนสั่งซื้อเนื้อ (`Order`) หรืออัปโหลดสลิป (`Payment`) และผู้ดูแลระบบ (`ADMIN`) ต้องใช้สิทธิ์จัดการสต็อกเนื้อ (`Product`) โดยระบบใช้กลไกความปลอดภัยควบคู่กัน 2 รูปแบบ:
+1. **JWT Bearer Token (`Authorization: Bearer <token>`)**: ใช้สำหรับส่ง Access Token อายุสั้น (เช่น 15 นาที) ใน Header ของทุก Request
+2. **HttpOnly Cookie (`butcher_refresh_token`)**: ใช้สำหรับเก็บ Refresh Token อย่างปลอดภัยเพื่อขอต่ออายุ Access Token ที่ Endpoint `/auth/refresh`
+
+การตั้งค่า `@ApiBearerAuth` และ `@ApiCookieAuth` ช่วยให้Swagger UI แสดงไอคอนแม่กุญแจและแนบข้อมูลยืนยันตัวตนเหล่านี้ไปกับ Request ตอนกดทดสอบได้ทันที
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+การเชื่อมโยง Security Scheme ใน `@nestjs/swagger` มีกฎสำคัญคือ **ชื่อ (Security Name) ที่ประกาศใน `DocumentBuilder` ต้องตรงกับชื่อที่เรียกใช้ใน Decorator บน Controller ทุกตัวอักษร**:
+- หากใน `DocumentBuilder` เราประกาศ `.addBearerAuth({ ... }, 'jwt-access')`
+- เวลาใช้งานบน Controller หรือ Method เราต้องระบุชื่อเดียวกันคือ `@ApiBearerAuth('jwt-access')` (หากไม่ใส่พารามิเตอร์เลย ค่าเริ่มต้นจะเป็น `'bearer'` ซึ่งถ้าไม่ตรงกัน Swagger UI จะไม่ส่ง Header `Authorization` ไปให้เมื่อกด `Try it out`)
+
+<Callout type="warning" title="ปัญหาที่พบบ่อย: กด Authorize ใน Swagger UI แล้วแต่ Header ไม่ถูกส่งไป">
+สาเหตุอันดับ 1 ที่นักพัฒนากดปุ่ม Authorize ใส่ JWT Token ในหน้า Swagger UI แล้ว แต่พอกดยิง API กลับได้ `401 Unauthorized` เพราะไม่มี Header `Authorization` ถูกส่งออกไป เกิดจากการตั้งชื่อใน `.addBearerAuth(options, 'custom-name')` แต่ใน Controller เขียนแค่ `@ApiBearerAuth()` โดยไม่ใส่ `'custom-name'` ให้ตรงกัน
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การสร้าง Custom Composed Decorator `@ApiAuthRequired()` ที่รวมทั้ง `UseGuards`, `@ApiBearerAuth('jwt-access')`, `@ApiUnauthorizedResponse` และ `@ApiForbiddenResponse` ไว้ในคำสั่งเดียวเพื่อลดการเขียนซ้ำ
+
+```typescript filename="src/common/decorators/api-auth-required.decorator.ts"
+import { applyDecorators, UseGuards, SetMetadata } from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiUnauthorizedResponse,
+  ApiForbiddenResponse,
+} from '@nestjs/swagger';
+import { JwtAuthGuard } from '../../modules/auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../../modules/auth/guards/roles.guard';
+
+export type UserRole = 'CUSTOMER' | 'ADMIN';
+export const ROLES_KEY = 'roles';
+
+export function ApiAuthRequired(...roles: UserRole[]) {
+  const decorators: Array<ClassDecorator | MethodDecorator> = [
+    SetMetadata(ROLES_KEY, roles),
+    UseGuards(JwtAuthGuard, RolesGuard),
+    // ชื่อ 'jwt-access' ต้องตรงกับที่ตั้งไว้ใน DocumentBuilder.addBearerAuth(..., 'jwt-access')
+    ApiBearerAuth('jwt-access'),
+    ApiUnauthorizedResponse({
+      description: 'ไม่ได้แนบ Access Token หรือ Token หมดอายุ/ไม่ถูกต้อง (401)',
+    }),
+  ];
+
+  if (roles.length > 0) {
+    decorators.push(
+      ApiForbiddenResponse({
+        description: `สิทธิ์ไม่เพียงพอ ต้องการสิทธิ์ระดับ: ${roles.join(', ')} (403)`,
+      }),
+    );
+  }
+
+  return applyDecorators(...decorators);
+}
+```
+
+ตัวอย่างที่ 2: การใช้งาน `@ApiAuthRequired` ใน `OrdersController` และการใช้ `@ApiCookieAuth('cookie-refresh')` ใน `AuthController`
+
+```typescript filename="src/modules/orders/orders.controller.ts"
+import { Controller, Post, Get, Body, Req } from '@nestjs/common';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiCreatedResponse,
+  ApiOkResponse,
+  ApiCookieAuth,
+} from '@nestjs/swagger';
+import { ApiAuthRequired } from '../../common/decorators/api-auth-required.decorator';
+import { CreateOrderDto } from './dto/create-order.dto';
+import { OrdersService } from './orders.service';
+
+interface RequestWithUser {
+  user: {
+    id: string;
+    email: string;
+    role: 'CUSTOMER' | 'ADMIN';
+  };
+}
+
+@ApiTags('Orders (คำสั่งซื้อเนื้อพรีเมียม)')
+@Controller('orders')
+export class OrdersController {
+  constructor(private readonly ordersService: OrdersService) {}
+
+  @Post()
+  @ApiAuthRequired('CUSTOMER', 'ADMIN')
+  @ApiOperation({
+    summary: 'สร้างใบสั่งซื้อเนื้อพรีเมียมและตัดสต็อกแบบ Atomic',
+    description: 'ต้องล็อกอินด้วยบัญชีลูกค้าหรือแอดมิน ระบบจะคำนวณราคารวมจากน้ำหนักเนื้อและตัดสต็อกทันที',
+  })
+  @ApiCreatedResponse({
+    description: 'สร้างคำสั่งซื้อสำเร็จ รอการอัปโหลดสลิปชำระเงิน',
+  })
+  async createOrder(
+    @Req() req: RequestWithUser,
+    @Body() dto: CreateOrderDto,
+  ) {
+    return this.ordersService.createOrder(req.user.id, dto);
+  }
+
+  @Get('admin/all')
+  @ApiAuthRequired('ADMIN')
+  @ApiOperation({
+    summary: '[Admin Only] ดึงรายการคำสั่งซื้อทั้งหมดในระบบเพื่อเตรียมจัดส่ง',
+  })
+  @ApiOkResponse({
+    description: 'รายการคำสั่งซื้อทั้งหมดพร้อมสถานะการชำระเงิน',
+  })
+  async findAllOrdersForAdmin() {
+    return this.ordersService.findAllForAdmin();
+  }
+}
+
+@ApiTags('Authentication (ระบบยืนยันตัวตน)')
+@Controller('auth')
+export class AuthTokenController {
+  @Post('refresh')
+  @ApiCookieAuth('cookie-refresh')
+  @ApiOperation({
+    summary: 'ขอ Access Token ใบใหม่ด้วย Refresh Token จาก HttpOnly Cookie',
+    description: 'เบราว์เซอร์จะแนบคุกกี้ butcher_refresh_token มาให้อัตโนมัติเมื่อเปิด credentials: include',
+  })
+  @ApiOkResponse({
+    description: 'ออก Access Token ใบใหม่สำเร็จ',
+  })
+  async refreshAccessToken() {
+    return { accessToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...' };
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การตั้งชื่อ Security Scheme** | ตั้งชื่อใน `main.ts` ว่า `.addBearerAuth({}, 'access-token')` แต่ใน Controller เขียน `@ApiBearerAuth()` เปล่าๆ ทำให้ Swagger ไม่แนบ Header | ใช้ชื่อตรงกันทั้งสองฝั่ง หรือห่อหุ้มไว้ใน Custom Decorator เช่น `@ApiAuthRequired()` |
+| **การพิมพ์คำว่า `Bearer` ซ้ำ** | พิมพ์คำว่า `Bearer eyJhbG...` ลงในช่อง Value ของ Swagger UI `http` bearer scheme ทำให้ Header กลายเป็น `Bearer Bearer eyJhbG...` | ใช้ `type: 'http', scheme: 'bearer'` และวางเฉพาะตัว JWT String ล้วนๆ โดยไม่ต้องพิมพ์คำว่า `Bearer` นำหน้า |
+| **การแยก Guard ออกจาก Swagger Decorator** | ใส่ `@UseGuards(JwtAuthGuard)` แต่ลืมใส่ `@ApiBearerAuth()` ทำให้ทีม Frontend เข้าใจผิดว่าเป็น Public API ที่ไม่ต้องใช้ Token | ใช้ `applyDecorators()` มัดรวม `UseGuards` และ `@ApiBearerAuth` เข้าด้วยกันเป็น Decorator เดียวเสมอ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `@ApiBearerAuth` เมื่อ**: Endpoint นั้นตรวจสอบสิทธิ์ผ่าน HTTP Header `Authorization: Bearer <token>`
+- **ควรใช้ `@ApiCookieAuth` เมื่อ**: Endpoint นั้นอ่าน Token หรือ Session ID จาก Cookie (ทั้งこのต้องตั้งค่า CORS `credentials: true` ที่ฝั่ง NestJS ด้วยหาก Swagger UI รันคนละ Origin)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: การใช้ `applyDecorators` ของ `@nestjs/common` เพื่อรวม `@UseGuards(JwtAuthGuard)` และ `@ApiBearerAuth()` เข้าด้วยกันมีประโยชน์อย่างไรในทีมที่มีนักพัฒนาหลายคน?
+   - **แนวคำตอบ**: ช่วยบังคับมาตรฐานเดียวกันทั้งโปรเจกต์ (Convention over Configuration) ลดความผิดพลาดที่นักพัฒนาใส่ Guard ป้องกัน API แล้วลืมใส่ `@ApiBearerAuth()` หรือลืมระบุ `@ApiUnauthorizedResponse()` ทำให้ทั้งระบบรักษาความปลอดภัยจริงและเอกสาร OpenAPI สอดคล้องกัน 100% เสมอ
+2. **คำถาม**: ข้อจำกัดของการทดสอบ `HttpOnly Cookie` ผ่าน Swagger UI บนเบราว์เซอร์คืออะไร?
+   - **แนวคำตอบ**: เนื่องจากจาวาสคริปต์บนเบราว์เซอร์ (รวมถึงโค้ดของหน้าเว็บ Swagger UI) ไม่สามารถเข้าถึงหรือเขียนค่า `HttpOnly Cookie` ได้โดยตรงด้วยเหตุผลด้านความปลอดภัย (ป้องกัน XSS) ดังนั้นในการทดสอบ Endpoint ที่ใช้ `@ApiCookieAuth` นักพัฒนาจะต้องกดยิง Endpoint `/auth/login` ผ่านหน้า Swagger UI ก่อน เพื่อให้เซิร์ฟเวอร์ตอบกลับมาพร้อม Header `Set-Cookie` แล้วเบราว์เซอร์จะเก็บคุกกี้นั้นและส่งต่อไปยัง `/auth/refresh` ให้เองโดยอัตโนมัติ
+
+---

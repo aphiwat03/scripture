@@ -1,0 +1,210 @@
+---
+title: Class Validator
+category: BACKEND
+parentTitle: Validation
+version: class-validator & Zod
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ไลบรารี **`class-validator`** มี Decorators สำเร็จรูปครอบคลุมการตรวจสอบข้อมูลแทบทุกชนิดในระบบธุรกิจ ตั้งแต่การตรวจชนิดข้อมูลพื้นฐาน, รูปแบบข้อความ (Email, UUID, Phone, Regex), ขอบเขตตัวเลขและทศนิยม, ไปจนถึงขนาดของ Array
+
+สิ่งที่ยกระดับประสบการณ์ผู้ใช้ (UX) ในระบบ **Smart Butcher Marketplace** คือการปรับแต่งข้อความแจ้งเตือน (`message`) ให้เป็น **ภาษาไทยที่เข้าใจง่ายและระบุค่าที่ผิดพลาดอย่างชัดเจน** โดยใช้ Validation Message Tokens ของ `class-validator`:
+- `$property`: ชื่อฟิลด์ที่กำลังถูกตรวจสอบ
+- `$value`: ค่าที่ผู้ใช้ส่งเข้ามาแล้วไม่ผ่านเกณฑ์
+- `$constraint1`, `$constraint2`: ค่าเงื่อนไขที่ตั้งไว้ใน Decorator (เช่น ค่าต่ำสุด หรือค่าสูงสุด)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ในหนึ่งฟิลด์ที่มี Decorator หลายตัว (เช่น `@IsNotEmpty()`, `@IsString()`, `@MinLength(3)`) ตัว `class-validator` จะประเมิน Decorator และเก็บผลลัพธ์ลงในอ็อบเจกต์ `constraints` ของฟิลด์นั้น สิ่งที่ต้องระวังเป็นพิเศษคือพฤติกรรมของ **`@IsOptional()`**:
+- ใน `class-validator` ตัว `@IsOptional()` จะข้ามการตรวจสอบ Decorator ตัวอื่นๆ บนฟิลด์นั้นก็ต่อเมื่อค่าที่ส่งมาเป็น **`null` หรือ `undefined` เท่านั้น**
+- หากฝั่ง Frontend ส่งสตริงว่าง `""` เข้ามาในฟิลด์ Optional (เช่น `phoneNumber: ""`) ตัว `@IsOptional()` จะถือว่ามีค่าส่งมาแล้ว และส่งต่อไปตรวจ `@Matches()` จนเกิด Error! ดังนั้นสำหรับฟิลด์ข้อความที่เป็น Optional จึงควรใช้คู่กับ `@Transform` แปลงสตริงว่าง `""` ให้เป็น `undefined` ก่อนเสมอ
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสร้าง CreateProductDto ที่ใช้ Decorators ครบถ้วนพร้อมข้อความภาษาไทยและ Validation Tokens (พื้นฐาน)
+```typescript filename="src/modules/products/dto/create-product.dto.ts"
+import {
+  IsString,
+  IsNotEmpty,
+  IsEnum,
+  IsInt,
+  IsNumber,
+  IsBoolean,
+  IsOptional,
+  IsUUID,
+  Min,
+  Max,
+  MinLength,
+  MaxLength,
+  Matches,
+  ArrayMinSize,
+  ArrayMaxSize,
+  IsArray,
+} from 'class-validator';
+import { MeatGrade } from '@prisma/client';
+
+export class CreateProductDto {
+  @IsString({ message: 'รหัสสินค้า (SKU) ต้องเป็นข้อความตัวอักษร' })
+  @Matches(/^SB-[A-Z0-9]{3,10}-[A-Z0-9]{2,10}$/, {
+    message:
+      'รหัส SKU ($value) ไม่ตรงตามรูปแบบมาตรฐานของร้าน (ตัวอย่างที่ถูกต้อง: SB-WAGYU-A501)',
+  })
+  sku!: string;
+
+  @IsString({ message: 'ชื่อชิ้นเนื้อพรีเมียมต้องเป็นข้อความ' })
+  @IsNotEmpty({ message: 'กรุณาระบุชื่อชิ้นเนื้อพรีเมียม' })
+  @MinLength(5, {
+    message: 'ชื่อสินค้าต้องมีความยาวอย่างน้อย $constraint1 ตัวอักษร (คุณกรอกมาเพียง "$value")',
+  })
+  @MaxLength(200, {
+    message: 'ชื่อสินค้าต้องมีความยาวไม่เกิน $constraint1 ตัวอักษร',
+  })
+  name!: string;
+
+  @IsUUID('4', { message: 'รหัสหมวดหมู่สินค้า (categoryId) ต้องเป็น UUID v4 ที่ถูกต้อง' })
+  categoryId!: string;
+
+  @IsEnum(MeatGrade, {
+    message: ({ value }) =>
+      `เกรดเนื้อ "${value}" ไม่ถูกต้อง กรุณาเลือกจาก: ${Object.values(MeatGrade).join(', ')}`,
+  })
+  grade!: MeatGrade;
+
+  @IsInt({ message: 'ระดับคะแนนไขมันแทรก (marblingScore) ต้องเป็นจำนวนเต็ม' })
+  @Min(1, { message: 'คะแนนไขมันแทรก (BMS) ต้องมีค่าตั้งแต่ $constraint1 ขึ้นไป' })
+  @Max(12, { message: 'คะแนนไขมันแทรก (BMS) สูงสุดตามมาตรฐานญี่ปุ่นคือ $constraint1' })
+  marblingScore!: number;
+
+  @IsOptional()
+  @IsInt({ message: 'จำนวนวันบ่มเนื้อ Dry-Aged ต้องเป็นจำนวนเต็ม' })
+  @Min(14, { message: 'เนื้อ Dry-Aged ต้องผ่านการบ่มอย่างน้อย $constraint1 วันขึ้นไป' })
+  @Max(120, { message: 'จำนวนวันบ่มเนื้อ Dry-Aged ต้องไม่เกิน $constraint1 วัน' })
+  dryAgedDays?: number | null;
+
+  @IsNumber(
+    { maxDecimalPlaces: 2, allowNaN: false, allowInfinity: false },
+    { message: 'ราคาต่อกิโลกรัมต้องเป็นตัวเลขและมีทศนิยมไม่เกิน 2 ตำแหน่ง' },
+  )
+  @Min(100, { message: 'ราคาเนื้อต่อกิโลกรัมต้องไม่ต่ำกว่า $constraint1 บาท' })
+  @Max(100000, { message: 'ราคาเนื้อต่อกิโลกรัมต้องไม่เกิน $constraint1 บาท' })
+  pricePerKgThb!: number;
+
+  @IsInt({ message: 'น้ำหนักสต็อกเนื้อ (กรัม) ต้องเป็นจำนวนเต็มหน่วยกรัม' })
+  @Min(0, { message: 'น้ำหนักสต็อกเนื้อไม่สามารถติดลบได้' })
+  stockWeightGrams!: number;
+
+  @IsOptional()
+  @IsArray({ message: 'รายการคำแนะนำการย่าง (cookingTips) ต้องเป็น Array' })
+  @ArrayMinSize(1, { message: 'หากระบุคำแนะนำการย่าง ต้องมีอย่างน้อย $constraint1 ข้อ' })
+  @ArrayMaxSize(5, { message: 'ระบุคำแนะนำการย่างได้ไม่เกิน $constraint1 ข้อ' })
+  @IsString({ each: true, message: 'คำแนะนำการย่างแต่ละข้อต้องเป็นข้อความตัวอักษร' })
+  cookingTips?: string[];
+
+  @IsOptional()
+  @IsBoolean({ message: 'สถานะการเปิดขาย (isAvailable) ต้องเป็น true หรือ false เท่านั้น' })
+  isAvailable?: boolean;
+}
+```
+
+### ตัวอย่างที่ 2: การสร้าง Reusable Thai Validation Messages Dictionary เพื่อคุมโทนข้อความทั้งองค์กร (ขั้นสูง)
+```typescript filename="src/common/validation/thai-validation-messages.ts"
+import { ValidationArguments } from 'class-validator';
+
+// คลังข้อความภาษาไทยกลาง ช่วยให้ทุก DTO ในโปรเจกต์ใช้สำนวนเดียวกันทั้งหมด
+export const ThaiValidationMsg = {
+  required: (fieldLabel: string) => ({
+    message: `กรุณาระบุ${fieldLabel} ห้ามเว้นว่าง`,
+  }),
+  isString: (fieldLabel: string) => ({
+    message: `${fieldLabel}ต้องเป็นชนิดข้อความ (String)`,
+  }),
+  isInt: (fieldLabel: string) => ({
+    message: `${fieldLabel}ต้องเป็นตัวเลขจำนวนเต็มเท่านั้น`,
+  }),
+  minNumber: (fieldLabel: string) => ({
+    message: (args: ValidationArguments) =>
+      `${fieldLabel}ต้องมีค่าไม่น้อยกว่า ${args.constraints[0].toLocaleString('th-TH')} (ค่าที่ส่งมาคือ ${args.value})`,
+  }),
+  maxNumber: (fieldLabel: string) => ({
+    message: (args: ValidationArguments) =>
+      `${fieldLabel}ต้องมีค่าไม่เกิน ${args.constraints[0].toLocaleString('th-TH')}`,
+  }),
+  thaiPhone: () => ({
+    message: 'หมายเลขโทรศัพท์ต้องเป็นเบอร์มือถือไทย 10 หลัก (เช่น 0812345678)',
+  }),
+} as const;
+```
+
+```typescript filename="src/modules/users/dto/register-customer.dto.ts"
+import {
+  IsEmail,
+  IsString,
+  MinLength,
+  MaxLength,
+  Matches,
+} from 'class-validator';
+import { ThaiValidationMsg } from '../../../common/validation/thai-validation-messages';
+
+export class RegisterCustomerDto {
+  @IsEmail({}, { message: 'รูปแบบอีเมลไม่ถูกต้อง (ตัวอย่าง: customer@smartbutcher.co.th)' })
+  email!: string;
+
+  @IsString(ThaiValidationMsg.isString('รหัสผ่าน'))
+  @MinLength(8, { message: 'รหัสผ่านต้องมีความยาวอย่างน้อย 8 ตัวอักษร' })
+  @MaxLength(64, {
+    message: 'รหัสผ่านต้องไม่เกิน 64 ตัวอักษร (เพื่อให้รองรับขีดจำกัด 72 bytes ของ Bcrypt)',
+  })
+  @Matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/, {
+    message: 'รหัสผ่านต้องประกอบด้วยตัวพิมพ์เล็ก ตัวพิมพ์ใหญ่ และตัวเลขอย่างน้อยอย่างละ 1 ตัว',
+  })
+  password!: string;
+
+  @IsString(ThaiValidationMsg.isString('ชื่อ-นามสกุล'))
+  @MinLength(2, { message: 'กรุณาระบุชื่อ-นามสกุลจริงอย่างน้อย 2 ตัวอักษร' })
+  @MaxLength(150)
+  fullName!: string;
+
+  @IsString(ThaiValidationMsg.isString('เบอร์โทรศัพท์'))
+  @Matches(/^0[689]\d{8}$/, ThaiValidationMsg.thaiPhone())
+  phoneNumber!: string;
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/products/decorator-comparison.ts"
+import { IsArray, IsString, IsNumber } from 'class-validator';
+
+// ❌ ผิด (Anti-pattern): ใช้ @IsArray() แต่ลืมใส่ { each: true } และใช้ @IsNumber() โดยไม่จำกัดทศนิยมกับราคาเงิน
+export class BadProductTagsDto {
+  @IsArray()
+  // ลืมตรวจสมาชิกข้างใน! แฮกเกอร์สามารถส่ง tags: [{ malicious: true }, 99999] เข้ามาได้!
+  tags!: string[];
+
+  @IsNumber()
+  // ลูกค้าสามารถส่งราคา 199.9999999999 บาท เข้ามาทำลายระบบคำนวณบัญชีได้!
+  pricePerKgThb!: number;
+}
+
+// ✅ ถูก (Best Practice): ใช้ { each: true } ตรวจทุกสมาชิกใน Array และใช้ { maxDecimalPlaces: 2 } กับจำนวนเงินเสมอ
+export class GoodProductTagsDto {
+  @IsArray()
+  @IsString({ each: true, message: 'ป้ายกำกับแต่ละรายการต้องเป็นข้อความ' })
+  tags!: string[];
+
+  @IsNumber({ maxDecimalPlaces: 2 })
+  pricePerKgThb!: number;
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `@IsInt()` แทน `@IsNumber()` เมื่อ**: ฟิลด์นั้นต้องเป็นจำนวนเต็มเท่านั้น เช่น จำนวนชิ้น, น้ำหนักหน่วยกรัม (`weightGrams`), คะแนนไขมันแทรก (`marblingScore`), หรือหน่วยเงินสตางค์ (`amountSatang`)
+- **ไม่ควรใช้ `@IsString()` อย่างเดียวโดยไม่กำหนด `@MaxLength()`**: เพราะผู้โจมตีสามารถส่งสตริงความยาว 50,000 ตัวอักษรเข้ามาในฟิลด์ชื่อลูกค้าจนล้นขนาด `VARCHAR(150)` ของ PostgreSQL และทำให้เกิด Database Error 500 ได้
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ใน `class-validator` การแปะ `@IsString()` เฉยๆ ป้องกันสตริงว่าง `""` หรือสตริงที่มีแต่ช่องว่าง `"   "` ได้หรือไม่?
+   - **แนวคำตอบ**: **ไม่ได้!** เพราะทั้ง `""` และ `"   "` มีชนิดข้อมูลเป็น `string` ใน JavaScript จึงผ่าน `@IsString()` ได้ทั้งหมด และต่อให้แปะ `@IsNotEmpty()` เพิ่ม ตัว `"   "` (เคาะวรรค 3 ครั้ง) ก็ยังผ่าน `@IsNotEmpty()` ได้เพราะความยาวสตริงมากกว่า 0! วิธีที่ถูกต้องระดับ Production คือการใช้ `@Transform(({ value }) => typeof value === 'string' ? value.trim() : value)` เพื่อตัดช่องว่างหัวท้ายออกก่อน แล้วจึงตามด้วย `@IsNotEmpty()` หรือ `@MinLength(1)`
+2. **คำถาม**: ทำไมเวลาตรวจสอบฟิลด์ที่เป็น Array ของข้อความ เช่น `cookingTips: string[]` เราจึงต้องแปะทั้ง `@IsArray()` และ `@IsString({ each: true })` คู่กัน?
+   - **แนวคำตอบ**: หากเราแปะเฉพาะ `@IsString({ each: true })` โดยไม่แปะ `@IsArray()` ในบางกรณีที่ผู้ใช้งานส่งค่าที่ไม่ใช่ Array เข้ามา ข้อความแจ้งเตือนอาจจะไม่ชัดเจน และหากแปะเฉพาะ `@IsArray()` โดยไม่ใส่ `{ each: true }` ตัว Validator จะตรวจแค่ว่าตัวแปรนอกสุดเป็น `Array` หรือไม่ แต่จะไม่ตรวจสมาชิกข้างในเลย การใส่คู่กันพร้อม `@ArrayMaxSize()` จึงรัดกุมที่สุดทั้งโครงสร้างนอกและสมาชิกใน
+
+---

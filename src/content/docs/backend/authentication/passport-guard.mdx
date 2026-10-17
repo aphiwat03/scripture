@@ -1,0 +1,169 @@
+---
+title: Passport Guard
+category: BACKEND
+parentTitle: Authentication
+version: JWT & Passport.js
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ใน **NestJS 11** โมดูล `@nestjs/passport` ได้ผสานการทำงานของไลบรารียอดนิยมอย่าง **Passport.js** เข้ากับระบบ Dependency Injection และ Execution Context ของ NestJS อย่างลงตัว โดยแบ่งหน้าที่ออกเป็น 2 ส่วนคือ:
+1. **Passport Strategy (`PassportStrategy`)**: คลาสที่กำหนดวิธีสกัดข้อมูลยืนยันตัวตนออกจาก `Request` (เช่น ดึงอีเมล/รหัสผ่านจาก Body ใน `LocalStrategy` หรือดึง JWT จาก Cookie/Bearer Header ใน `JwtStrategy`) แล้วตรวจสอบความถูกต้องก่อนส่งคืนอ็อบเจกต์ผู้ใช้ไปผูกไว้ที่ `req.user`
+2. **Authentication Guard (`AuthGuard`)**: ด่านตรวจหน้า Controller ที่เรียกใช้ Strategy ตามชื่อที่ระบุ และอนุญาตให้เราปรับแต่งให้เป็น **Global Guard (ล็อกทุก Endpoint เป็นค่าเริ่มต้น)** คู่กับ Decorator `@Public()` สำหรับเปิดเฉพาะหน้าที่ไม่ต้องล็อกอิน (เช่น หน้าดูแคตตาล็อกเนื้อพรีเมียม)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อคำขอวิ่งเข้ามาที่ Route ที่มีการป้องกันด้วย `JwtAuthGuard`:
+1. Guard จะเรียก `super.canActivate(context)` ซึ่งไปกระตุ้นการทำงานของ `passport-jwt`
+2. `passport-jwt` จะรันฟังก์ชัน `jwtFromRequest` ตามลำดับที่เราตั้งไว้ (เช่น ลองดึงจาก `req.cookies['sb_access_token']` ก่อน หากไม่มีจึงไปดึงจาก Header `Authorization: Bearer <token>` เพื่อรองรับทั้ง Web Browser และ Mobile App พร้อมกัน!)
+3. จากนั้นจะตรวจสอบลายเซ็นดิจิทัล (`Signature`) และวันหมดอายุ (`exp`) กับ `JWT_ACCESS_SECRET`
+4. หากลายเซ็นถูกต้องและยังไม่หมดอายุ จึงจะส่ง Payload เข้ามายังเมธอด `validate(payload)` ของเรา ซึ่งค่าที่คืนกลับจาก `validate()` จะถูกนำไปใส่ใน `request.user` อัตโนมัติ
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสร้าง JwtStrategy ที่รองรับทั้ง HttpOnly Cookie และ Bearer Header (พื้นฐาน)
+```typescript filename="src/modules/auth/strategies/jwt.strategy.ts"
+import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { PassportStrategy } from '@nestjs/passport';
+import { ExtractJwt, Strategy } from 'passport-jwt';
+import { ConfigService } from '@nestjs/config';
+import { Request } from 'express';
+import { AccessTokenPayload } from '../token.service';
+import { ACCESS_TOKEN_COOKIE_NAME } from '../cookie-manager.helper';
+import { UserRole } from '@prisma/client';
+
+export interface AuthenticatedUser {
+  id: string;
+  email: string;
+  role: UserRole;
+}
+
+@Injectable()
+export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
+  constructor(configService: ConfigService) {
+    super({
+      // รองรับการดึง Token จาก HttpOnly Cookie เป็นอันดับแรก และ Fallback ไปที่ Bearer Header สำหรับ Mobile App
+      jwtFromRequest: ExtractJwt.fromExtractors([
+        (request: Request): string | null => {
+          const cookies = request?.cookies as Record<string, string> | undefined;
+          return cookies?.[ACCESS_TOKEN_COOKIE_NAME] ?? null;
+        },
+        ExtractJwt.fromAuthHeaderAsBearerToken(),
+      ]),
+      ignoreExpiration: false, // ปฏิเสธ Token ที่หมดอายุทันที
+      secretOrKey: configService.getOrThrow<string>('JWT_ACCESS_SECRET'),
+      issuer: 'smartbutcher-api',
+      audience: 'smartbutcher-client',
+    });
+  }
+
+  // เมธอดนี้จะถูกเรียกก็ต่อเมื่อลายเซ็น JWT ถูกต้องและยังไม่หมดอายุเท่านั้น
+  async validate(payload: AccessTokenPayload): Promise<AuthenticatedUser> {
+    if (payload.type !== 'ACCESS' || !payload.sub) {
+      throw new UnauthorizedException({
+        code: 'INVALID_ACCESS_TOKEN_TYPE',
+        message: 'ชนิดของ Token ไม่ถูกต้องสำหรับการเข้าถึงทรัพยากร',
+      });
+    }
+
+    // ค่าที่ return จากตรงนี้จะถูก NestJS นำไปผูกไว้ที่ req.user โดยอัตโนมัติ
+    return {
+      id: payload.sub,
+      email: payload.email,
+      role: payload.role,
+    };
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การสร้าง `@Public()` Decorator และ Global `JwtAuthGuard` แบบ Secure-by-Default (ขั้นสูง)
+```typescript filename="src/modules/auth/guards/jwt-auth.guard.ts"
+import {
+  ExecutionContext,
+  Injectable,
+  SetMetadata,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { AuthGuard } from '@nestjs/passport';
+import { Observable } from 'rxjs';
+
+export const IS_PUBLIC_KEY = 'isPublicRoute';
+
+// Decorator สำหรับแปะบน Route ที่อนุญาตให้เข้าถึงได้โดยไม่ต้อง Login (เช่น ดูแคตตาล็อกเนื้อวากิว)
+export const Public = () => SetMetadata(IS_PUBLIC_KEY, true);
+
+@Injectable()
+export class JwtAuthGuard extends AuthGuard('jwt') {
+  constructor(private readonly reflector: Reflector) {
+    super();
+  }
+
+  canActivate(
+    context: ExecutionContext,
+  ): boolean | Promise<boolean> | Observable<boolean> {
+    // ตรวจสอบว่าที่ Method หรือที่ Controller มีแปะ @Public() ไว้หรือไม่
+    const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+
+    if (isPublic) {
+      return true;
+    }
+
+    return super.canActivate(context);
+  }
+
+  // ปรับแต่งข้อความ Error มาตรฐานเมื่อไม่มี Token หรือ Token หมดอายุ
+  handleRequest<TUser = unknown>(
+    err: unknown,
+    user: TUser,
+    info: { name?: string; message?: string } | undefined,
+  ): TUser {
+    if (err || !user) {
+      if (info?.name === 'TokenExpiredError') {
+        throw new UnauthorizedException({
+          code: 'ACCESS_TOKEN_EXPIRED',
+          message: 'เซสชันการเข้าถึงหมดอายุ กรุณาใช้ Refresh Token เพื่อต่ออายุอัตโนมัติ',
+        });
+      }
+
+      throw new UnauthorizedException({
+        code: 'AUTHENTICATION_REQUIRED',
+        message: 'กรุณาเข้าสู่ระบบสมาชิก Smart Butcher ก่อนดำเนินการสั่งซื้อเนื้อพรีเมียม',
+      });
+    }
+
+    return user;
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/auth/guard-comparison.ts"
+// ❌ ผิด (Anti-pattern): ไม่ใช้ Global Guard แต่บังคับให้นักพัฒนาตามแปะ @UseGuards(JwtAuthGuard) เองทุก Endpoint
+// ปัญหา: เมื่อสร้าง Endpoint ใหม่สำหรับดูรายงานยอดขายแล้วลืมแปะ @UseGuards ข้อมูลความลับจะรั่วไหลสู่สาธารณะทันที!
+
+// ✅ ถูก (Best Practice): ลงทะเบียน APP_GUARD ใน AppModule เพื่อล็อกทุกเส้นทางเป็นค่าเริ่มต้น (Secure-by-Default)
+// แล้วใช้ @Public() เปิดเฉพาะเส้นทางที่ตั้งใจให้คนทั่วไปเข้าถึงได้เท่านั้น
+import { APP_GUARD } from '@nestjs/core';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
+
+export const globalAuthGuardProvider = {
+  provide: APP_GUARD,
+  useClass: JwtAuthGuard,
+};
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `ExtractJwt.fromExtractors([cookieExtractor, bearerExtractor])` เสมอ**: เพื่อให้ระบบ Backend เดียวกันสามารถให้บริการได้ทั้ง Web Frontend (Next.js ที่ใช้ `HttpOnly Cookie`) และ Mobile App / Postman / Swagger (ที่ใช้ Header `Authorization: Bearer`)
+- **ไม่ควรคิวรีฐานข้อมูลทุกครั้งใน `JwtStrategy.validate()` หากไม่จำเป็น**: เพราะจะทำลายข้อดีด้านความเร็วแบบ Stateless ของ Access Token ที่มีอายุสั้นเพียง 15 นาที (ยกเว้นเส้นทางระดับวิกฤตที่ต้องการเช็คสถานะแบนแบบวินาทีต่อวินาที)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: การแยก `code: 'ACCESS_TOKEN_EXPIRED'` ออกจาก `code: 'AUTHENTICATION_REQUIRED'` ใน `JwtAuthGuard.handleRequest` มีประโยชน์ต่อการเขียนโค้ดฝั่ง Frontend (เช่น Axios / Fetch Interceptor) อย่างไร?
+   - **แนวคำตอบ**: เมื่อ Frontend ได้รับ HTTP `401 Unauthorized` พร้อมรหัส `ACCESS_TOKEN_EXPIRED` ตัว HTTP Client Interceptor จะทราบทันทีว่าผู้ใช้ยังมีเซสชันอยู่แต่ Access Token ครบ 15 นาทีแล้ว จึงสามารถยิง `POST /api/v1/auth/refresh` แบบเงียบๆ เบื้องหลัง (Silent Refresh) แล้วนำคำขอสั่งซื้อเนื้อเดิมมายิงซ้ำให้อัตโนมัติโดยที่ลูกค้าไม่รู้สึกสะดุด แต่ถ้าได้รับรหัสอื่น (เช่น ยังไม่ได้ล็อกอินตั้งแต่แรก) ระบบก็จะพาไปหน้า Login ทันทีโดยไม่ต้องเสียเวลายิง Refresh
+2. **คำถาม**: ทำไมเราจึงต้องติดตั้ง `cookie-parser` middleware ในไฟล์ `main.ts` ก่อนที่ `JwtStrategy` จะสามารถอ่านค่าจาก `request.cookies` ได้?
+   - **แนวคำตอบ**: เพราะโดยค่าเริ่มต้น Express จะรับข้อมูล Cookie มาเป็นสตริงดิบยาวๆ ใน `request.headers.cookie` (เช่น `"sb_access_token=eyJ...; theme=dark"`) การเรียก `app.use(cookieParser())` ใน `main.ts` จะทำการ Parse สตริงนั้นให้กลายเป็นอ็อบเจกต์ `request.cookies['sb_access_token']` ที่พร้อมใช้งานใน `JwtStrategy`
+
+---

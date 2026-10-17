@@ -1,0 +1,258 @@
+---
+title: Setup Teardown
+category: TESTING & QUALITY
+parentTitle: Jest
+version: Jest v29 & ts-jest
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ลองจินตนาการถึงกิจวัตรประจำวันของช่างแล่เนื้อในร้าน **Smart Butcher Marketplace**:
+- **`beforeAll` (เปิดร้านตอนเช้า)**: ตรวจสอบอุณหภูมิห้องเย็นหลักและเปิดเครื่องทำความเย็นขนาดใหญ่ (ทำครั้งเดียวตอนเริ่มต้นไฟล์ทดสอบ)
+- **`beforeEach` (ก่อนตัดเนื้อแต่ละออเดอร์)**: นำเขียงไม้สะอาดและมีดเล่มใหม่ที่ผ่านการฆ่าเชื้อมาวางบนโต๊ะ เพื่อให้การแล่เนื้อเคสนี้บริสุทธิ์ 100% ไม่มีเศษเนื้อหรือคราบไขมันเก่าตกค้าง
+- **`afterEach` (หลังตัดเนื้อเสร็จแต่ละออเดอร์)**: เช็ดทำความสะอาดเขียง ล้างมีด และบันทึก Log การผลิต (ล้าง Mock และรีเซ็ตสถานะตัวแปรเพื่อป้องกัน State Leakage)
+- **`afterAll` (ปิดร้านตอนค่ำ)**: ปิดระบบไฟฟ้า ล้างทำความสะอาดพื้นโรงเชือด และตัดการเชื่อมต่อกับเซิร์ฟเวอร์สำนักงานใหญ่ (ตัด Database Connection และคืนหน่วยความจำ)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อมีชุดทดสอบแบบซ้อนกัน (Nested Suites) ลำดับการประมวลผล Lifecycle Hooks ของ Jest มีกฎเกณฑ์ที่แน่นอน:
+
+```text filename="docs/testing/jest.txt"
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     JEST LIFECYCLE EXECUTION HIERARCHY                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  [1] Parent beforeAll                                                       │
+│       │                                                                     │
+│       ▼                                                                     │
+│  [2] Child beforeAll                                                        │
+│       │                                                                     │
+│       ▼                                                                     │
+│  ┌─── Looop per Test Case ──────────────────────────────────────────────┐  │
+│  │                                                                      │  │
+│  │  [3] Parent beforeEach                                               │  │
+│  │       │                                                              │  │
+│  │       ▼                                                              │  │
+│  │  [4] Child beforeEach                                                │  │
+│  │       │                                                              │  │
+│  │       ▼                                                              │  │
+│  │  [5] ▶ RUN TEST CASE it()                                            │  │
+│  │       │                                                              │  │
+│  │       ▼                                                              │  │
+│  │  [6] Child afterEach      (รันจากในออกนอก: Inside-Out)               │  │
+│  │       │                                                              │  │
+│  │       ▼                                                              │  │
+│  │  [7] Parent afterEach                                                │  │
+│  │                                                                      │  │
+│  └─── End Loop ─────────────────────────────────────────────────────────┘  │
+│       │                                                                     │
+│       ▼                                                                     │
+│  [8] Child afterAll          (รันจากในออกนอก: Inside-Out)                   │
+│       │                                                                     │
+│       ▼                                                                     │
+│  [9] Parent afterAll                                                        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**สำคัญมาก:** สังเกตว่า `beforeEach` ทำงานจาก **นอกเข้าใน (Outside-In)** เพื่อให้ระดับ Global เตรียมพร้อมก่อนระดับย่อย แต่ `afterEach` และ `afterAll` จะทำงานย้อนกลับจาก **ในออกนอก (Inside-Out)** เพื่อให้ทรัพยากรระดับย่อยถูกเคลียร์ทิ้งก่อนที่ทรัพยากรหลักจะถูกปิดตัวลง
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสังเกตลำดับการทำงานของ Nested Lifecycle
+โค้ดแสดงลำดับการ Execution ผ่านชุดทดสอบการตัดแต่งเนื้อสันแหลมและสันนอก:
+
+```typescript filename="src/services/lifecycle-order.spec.ts"
+describe('Parent Vault Suite (Smart Butcher)', () => {
+  const executionLog: string[] = [];
+
+  beforeAll(() => {
+    executionLog.push('1. Parent beforeAll: Booting Cold Storage');
+  });
+
+  afterAll(() => {
+    executionLog.push('9. Parent afterAll: Shutdown Cold Storage');
+    // ตรวจสอบว่าลำดับสมบูรณ์ถูกต้องตามสเปก
+    expect(executionLog).toEqual([
+      '1. Parent beforeAll: Booting Cold Storage',
+      '2. Child beforeAll: Calibrating Scale',
+      '3. Parent beforeEach: Reset Vault Temp',
+      '4. Child beforeEach: Sanitize Knife',
+      '5. Test 1 Executed: Cut Ribeye',
+      '6. Child afterEach: Wipe Knife',
+      '7. Parent afterEach: Log Meat Temp',
+      '8. Child afterAll: Pack Scale Away',
+      '9. Parent afterAll: Shutdown Cold Storage',
+    ]);
+  });
+
+  beforeEach(() => {
+    executionLog.push('3. Parent beforeEach: Reset Vault Temp');
+  });
+
+  afterEach(() => {
+    executionLog.push('7. Parent afterEach: Log Meat Temp');
+  });
+
+  describe('Child Ribeye Cutting Station', () => {
+    beforeAll(() => {
+      executionLog.push('2. Child beforeAll: Calibrating Scale');
+    });
+
+    afterAll(() => {
+      executionLog.push('8. Child afterAll: Pack Scale Away');
+    });
+
+    beforeEach(() => {
+      executionLog.push('4. Child beforeEach: Sanitize Knife');
+    });
+
+    afterEach(() => {
+      executionLog.push('6. Child afterEach: Wipe Knife');
+    });
+
+    it('should cut a premium 400g ribeye portion', () => {
+      executionLog.push('5. Test 1 Executed: Cut Ribeye');
+      expect(true).toBe(true);
+    });
+  });
+});
+```
+
+### ตัวอย่างที่ 2: การใช้ Lifecycle จัดการ State และป้องกัน Memory/Connection Leak ใน In-Memory Database
+การจำลองคลังสต็อกเนื้อสัตว์ในหน่วยความจำสำหรับการทดสอบคำสั่งซื้อ:
+
+```typescript filename="src/services/inventory-database.spec.ts"
+interface ButcherInventoryRecord {
+  sku: string;
+  weightAvailableKg: number;
+}
+
+class MockButcherDatabase {
+  private records = new Map<string, ButcherInventoryRecord>();
+  public isConnected = false;
+
+  async connect(): Promise<void> {
+    this.isConnected = true;
+  }
+
+  async disconnect(): Promise<void> {
+    this.isConnected = false;
+    this.records.clear();
+  }
+
+  async seed(data: ButcherInventoryRecord[]): Promise<void> {
+    this.records.clear();
+    for (const item of data) {
+      this.records.set(item.sku, { ...item });
+    }
+  }
+
+  async findBySku(sku: string): Promise<ButcherInventoryRecord | null> {
+    const item = this.records.get(sku);
+    return item ? { ...item } : null;
+  }
+
+  async deduct(sku: string, kg: number): Promise<void> {
+    const item = this.records.get(sku);
+    if (!item || item.weightAvailableKg < kg) {
+      throw new Error('Stock unavailable');
+    }
+    item.weightAvailableKg -= kg;
+  }
+}
+
+describe('ButcherInventoryManager - Lifecycle Isolation', () => {
+  let db: MockButcherDatabase;
+
+  // 1. เชื่อมต่อระบบฐานข้อมูลเพียงครั้งเดียวต่อไฟล์
+  beforeAll(async () => {
+    db = new MockButcherDatabase();
+    await db.connect();
+  });
+
+  // 4. ตัดการเชื่อมต่อเมื่อรันครบทุกเคส ป้องกัน Jest ค้าง (Zombie Worker)
+  afterAll(async () => {
+    await db.disconnect();
+  });
+
+  // 2. เติมข้อมูลเริ่มต้น (Seed Fresh Fixtures) ใหม่ทุกครั้งก่อนเริ่มแต่ละเคสทดสอบ
+  beforeEach(async () => {
+    await db.seed([
+      { sku: 'DRY-AGED-T-BONE', weightAvailableKg: 15.0 },
+      { sku: 'A5-WAGYU-PICANHA', weightAvailableKg: 8.0 },
+    ]);
+  });
+
+  // 3. เคลียร์ Mock Functions ทั้งหมด ป้องกันการนับจำนวน Call ตกค้าง
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('should deduct stock in the first test without leaking state into the second test', async () => {
+    await db.deduct('DRY-AGED-T-BONE', 5.0);
+    const item = await db.findBySku('DRY-AGED-T-BONE');
+    expect(item?.weightAvailableKg).toBe(10.0);
+  });
+
+  it('should start with pristine original 15.0kg stock in the second test', async () => {
+    // ต้องได้ 15.0kg เสมอ ไม่ใช่ 10.0kg ที่ถูกหักไปในเทสต์แรก
+    const item = await db.findBySku('DRY-AGED-T-BONE');
+    expect(item?.weightAvailableKg).toBe(15.0);
+  });
+});
+```
+
+## 4. ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+### ❌ สิ่งที่ผิด: แชร์ Mutable Fixtures ระหว่างการทดสอบโดยไม่มีการ Reset
+```typescript filename="src/jest.spec.ts"
+describe('MeatOrderService', () => {
+  // อันตราย: ตัวแปรอ็อบเจกต์ตัวเดียวถูกใช้ร่วมกันทุกเคส
+  const sharedOrder = { orderId: 'ORD-01', totalAmount: 1000, items: [] };
+
+  it('should apply 200 baht coupon', () => {
+    sharedOrder.totalAmount -= 200; // แก้ไขค่าโดยตรง
+    expect(sharedOrder.totalAmount).toBe(800);
+  });
+
+  it('should apply 10% discount', () => {
+    // พังทันที: แทนที่จะคิดจาก 1000 กลับไปคิดจาก 800 ที่เหลือจากเทสต์แรก!
+    // ผลลัพธ์ขึ้นอยู่กับลำดับการรันเทสต์ (Order-dependent Flaky Test)
+    expect(sharedOrder.totalAmount).toBe(900); // Expected 900, Received 720
+  });
+});
+```
+
+### ✅ สิ่งที่ถูก: คืนค่าใหม่ (Re-instantiate) ใน `beforeEach` เสมอ
+```typescript filename="src/jest.spec.ts"
+describe('MeatOrderService', () => {
+  let order: { orderId: string; totalAmount: number; items: string[] };
+
+  beforeEach(() => {
+    // ถูกต้อง: ทุกเทสต์จะได้รับอ็อบเจกต์ชุดใหม่ที่สะอาดบริสุทธิ์เสมอ
+    order = { orderId: 'ORD-01', totalAmount: 1000, items: [] };
+  });
+
+  it('should apply 200 baht coupon', () => {
+    order.totalAmount -= 200;
+    expect(order.totalAmount).toBe(800);
+  });
+
+  it('should apply 10% discount', () => {
+    order.totalAmount = order.totalAmount * 0.9;
+    expect(order.totalAmount).toBe(900); // ผ่านแน่นอน 100%
+  });
+});
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **`beforeAll` / `afterAll`:** ควรใช้เฉพาะงานที่มีต้นทุนสูง (Expensive Operations) และไม่เปลี่ยน State เช่น การสตาร์ท Testcontainer, การต่อ Redis In-Memory หรือการสร้าง Schema
+- **`beforeEach` / `afterEach`:** ควรใช้กับทุกสิ่งที่เก็บสถานะชั่วคราว (Stateful Operations), การ Seed ข้อมูล, การรีเซ็ต Mock Spies, และการเคลียร์ Local Storage
+
+## 6. คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: เหตุใดการทดสอบที่ผ่านเมื่อรันเดี่ยวๆ (`jest path/to/file.spec.ts`) แต่กลับล้มเหลวเมื่อรันรวมทั้งโปรเจกต์ (`jest`) จึงมักมีสาเหตุมาจาก Lifecycle Hooks?**
+  - *แนวคำตอบ:* ปัญหานี้เรียกว่า **Test Pollution** หรือ **State Leakage** เกิดขึ้นจากการที่เทสต์หนึ่งไปแก้ไข Global State (เช่น `process.env`, Singleton In-Memory Cache, หรือตารางในฐานข้อมูลทดสอบ) แล้วลืมคืนค่าเดิมใน `afterEach` เมื่อรันไฟล์เดี่ยวๆ เคสอาจเรียงลำดับถูกจึงผ่าน แต่เมื่อรันพร้อมกันหลายร้อยไฟล์ ตัวแปรที่ค้างอยู่จะส่งผลกระทบต่อชุดทดสอบอื่นที่รันตามมา วิธีแก้คือต้องบังคับใช้ `afterEach` ในการ Restore สภาพแวดล้อม และเปิดใช้งาน `clearMocks: true` ใน `jest.config.ts`
+- **Q2: ข้อความเตือน "A worker process has failed to exit gracefully and has been force exited" ใน Jest มักมีต้นตอมาจากอะไร และตรวจสอบอย่างไร?**
+  - *แนวคำตอบ:* เกิดจากมี **Asynchronous Handle** ค้างอยู่ใน Node.js Event Loop ทำให้ Worker Process ไม่สามารถปิดตัวลงได้ตามธรรมชาติ (เช่น การเชื่อมต่อฐานข้อมูลที่ไม่ได้สั่ง `.close()`, `setInterval` ที่ไม่ได้สั่ง `clearInterval()`, หรือ Socket Connection ที่เปิดค้างไว้) วิธีตรวจสอบระดับ Senior คือการสั่งรันเทสต์ด้วยคำสั่ง `jest --detectOpenHandles` ซึ่ง Jest จะชี้ตำแหน่งบรรทัดโค้ดที่สร้าง Handle นั้นขึ้นมา เพื่อให้เรานำคำสั่งปิดไปใส่ในบล็อก `afterAll`
+
+---

@@ -1,0 +1,364 @@
+---
+title: Service Unit Test
+category: TESTING & QUALITY
+parentTitle: Backend Testing
+version: NestJS Testing & Supertest
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในระบบที่ใช้ [Prisma ORM](/docs/backend/prisma-orm) เป็น Data Access Layer ตัว `PrismaService` จะทำหน้าที่เชื่อมต่อกับฐานข้อมูลจริง ในการเขียน **Unit Test** สำหรับ Business Service (เช่น `ProductService` หรือ `OrderService`) เป้าหมายของเราคือการพิสูจน์ว่า **"ตรรกะทางธุรกิจ เงื่อนไขการตรวจสอบ และการจัดการข้อผิดพลาดในโค้ดทำงานถูกต้องหรือไม่"** โดยไม่ต้องการให้เกิด Network I/O ไปยังฐานข้อมูลจริง
+
+การ Mock `PrismaService` ช่วยให้เราสามารถจำลองสถานการณ์ทุกรูปแบบได้ทันที เช่น กรณีไม่พบสินค้า (`null`), กรณีสต็อกเนื้อดรายเอจไม่เพียงพอ, กรณีเกิดข้อผิดพลาด Unique Constraint (`P2002`) หรือการทดสอบ Interactive Transactions (`prisma.$transaction`) โดยที่เทสต์นับร้อยข้อสามารถรันจบได้ภายในเวลาไม่ถึง 1 วินาที
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+`PrismaClient` มีโครงสร้าง Type ที่ซับซ้อนและซ้อนทับกันหลายชั้น (Nested Delegates เช่น `prisma.product.findUnique`, `prisma.order.create`, `prisma.$transaction`) การสร้าง Object Mock ด้วยมือเปล่า (`{ product: { findUnique: jest.fn() } }`) มักทำให้สูญเสีย Type Safety หรือเกิดปัญหา Type ไม่ตรงกับ Prisma Schema
+
+ด้วยเหตุนี้ แนวทางมาตรฐานระดับ Enterprise คือการใช้ไลบรารี `jest-mock-extended` (`mockDeep<PrismaService>()`) ซึ่งทำงานด้วยกลไก **Recursive ES6 Proxy**:
+1. เมื่อโค้ดเข้าถึง Property ใดๆ ของ `PrismaService` ไม่ว่าจะลึกกี่ระดับ (เช่น `prisma.orderItem.findMany`) ตัว Proxy จะดักจับ (Trap `get`) และสร้าง `jest.fn()` ให้อัตโนมัติแบบ Lazy Instantiation
+2. มอบ Type `DeepMockProxy<PrismaService>` ที่คงชนิดข้อมูลของ Argument และค่า Return ตามที่ระบุใน `schema.prisma` ทุกประการ หากนักพัฒนาเปลี่ยนชื่อฟิลด์ในฐานข้อมูล โค้ดในไฟล์เทสต์จะแจ้งเตือน Type Error ทันที
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1 (พื้นฐาน): การทดสอบ `ProductService` (ค้นหาเนื้อพรีเมียมและตรวจสอบราคาติดลบ)
+ตัวอย่างการใช้ `DeepMockProxy<PrismaService>` เพื่อทดสอบการดึงข้อมูลเนื้อวากิวและการดักจับ Business Exception เมื่อตั้งราคาหรือสต็อกไม่ถูกต้อง:
+
+```typescript filename="src/products/product.service.spec.ts"
+import { Test, TestingModule } from '@nestjs/testing';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { mockDeep, DeepMockProxy } from 'jest-mock-extended';
+
+// จำลองโครงสร้างจาก Prisma Client สำหรับโดเมน Smart Butcher Marketplace
+export interface CategoryEntity {
+  id: string;
+  name: string;
+  slug: string;
+}
+
+export interface ProductEntity {
+  id: string;
+  sku: string;
+  name: string;
+  categoryId: string;
+  pricePerKg: number;
+  stockKg: number;
+  isDryAged: boolean;
+  dryAgedDays: number;
+}
+
+export class PrismaService {
+  product!: {
+    findUnique: (args: { where: { id?: string; sku?: string } }) => Promise<ProductEntity | null>;
+    create: (args: { data: Omit<ProductEntity, 'id'> }) => Promise<ProductEntity>;
+    update: (args: { where: { id: string }; data: Partial<ProductEntity> }) => Promise<ProductEntity>;
+  };
+  $transaction!: <T>(fn: (tx: PrismaService) => Promise<T>) => Promise<T>;
+}
+
+@Injectable()
+export class ProductService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async getProductById(id: string): Promise<ProductEntity> {
+    const product = await this.prisma.product.findUnique({ where: { id } });
+    if (!product) {
+      throw new NotFoundException(`Butcher cut with ID ${id} was not found`);
+    }
+    return product;
+  }
+
+  async createPremiumCut(data: Omit<ProductEntity, 'id'>): Promise<ProductEntity> {
+    if (data.pricePerKg <= 0) {
+      throw new BadRequestException('Wagyu price per kg must be greater than zero');
+    }
+    if (data.isDryAged && data.dryAgedDays < 14) {
+      throw new BadRequestException('Dry-aged beef requires a minimum aging period of 14 days');
+    }
+
+    const existingSku = await this.prisma.product.findUnique({ where: { sku: data.sku } });
+    if (existingSku) {
+      throw new BadRequestException(`SKU ${data.sku} already exists in inventory`);
+    }
+
+    return this.prisma.product.create({ data });
+  }
+}
+
+describe('ProductService (Unit Test with Mocked PrismaService)', () => {
+  let service: ProductService;
+  let prismaMock: DeepMockProxy<PrismaService>;
+
+  beforeEach(async () => {
+    prismaMock = mockDeep<PrismaService>();
+
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      providers: [
+        ProductService,
+        {
+          provide: PrismaService,
+          useValue: prismaMock,
+        },
+      ],
+    }).compile();
+
+    service = moduleRef.get<ProductService>(ProductService);
+  });
+
+  it('should return product entity when valid wagyu cut ID exists', async () => {
+    const mockRibeye: ProductEntity = {
+      id: 'prod-001',
+      sku: 'WAGYU-RIB-45D',
+      name: '45-Day Dry-Aged Miyazaki A5 Ribeye',
+      categoryId: 'cat-dry-aged',
+      pricePerKg: 5200,
+      stockKg: 12.5,
+      isDryAged: true,
+      dryAgedDays: 45,
+    };
+
+    prismaMock.product.findUnique.mockResolvedValue(mockRibeye);
+
+    const result = await service.getProductById('prod-001');
+
+    expect(result).toEqual(mockRibeye);
+    expect(prismaMock.product.findUnique).toHaveBeenCalledWith({
+      where: { id: 'prod-001' },
+    });
+  });
+
+  it('should throw NotFoundException when product ID does not exist', async () => {
+    prismaMock.product.findUnique.mockResolvedValue(null);
+
+    await expect(service.getProductById('prod-non-existent')).rejects.toThrow(
+      NotFoundException,
+    );
+  });
+
+  it('should throw BadRequestException when wagyu price is negative or zero', async () => {
+    await expect(
+      service.createPremiumCut({
+        sku: 'WAGYU-ERR-01',
+        name: 'Invalid Price Wagyu',
+        categoryId: 'cat-wagyu',
+        pricePerKg: -500,
+        stockKg: 5.0,
+        isDryAged: false,
+        dryAgedDays: 0,
+      }),
+    ).rejects.toThrow('Wagyu price per kg must be greater than zero');
+
+    expect(prismaMock.product.create).not.toHaveBeenCalled();
+  });
+});
+```
+
+### ตัวอย่างที่ 2 (ขั้นสูง): การจำลอง Interactive Transaction (`prisma.$transaction`) สำหรับระบบสั่งซื้อและตัดสต็อกเนื้อ
+ในการสั่งซื้อเนื้อสเต็ก ระบบต้องตรวจสอบสต็อก ตัดสต็อก สร้าง `Order` พร้อม `OrderItem` และบันทึก `Payment` ภายใน Database Transaction เดียวกัน เราสามารถจำลอง `prisma.$transaction` ให้ส่ง `prismaMock` ตัวเดิมเข้าไปเป็น Transaction Client (`tx`) ได้ดังนี้:
+
+```typescript filename="src/orders/order-transaction.service.spec.ts"
+import { Test, TestingModule } from '@nestjs/testing';
+import { Injectable, ConflictException } from '@nestjs/common';
+import { mockDeep, DeepMockProxy } from 'jest-mock-extended';
+
+export interface OrderItemEntity {
+  id: string;
+  orderId: string;
+  productId: string;
+  weightKg: number;
+  unitPrice: number;
+  subtotal: number;
+}
+
+export interface OrderEntity {
+  id: string;
+  userId: string;
+  totalAmount: number;
+  status: 'PENDING_PAYMENT' | 'PAID' | 'CANCELLED';
+}
+
+export interface PaymentEntity {
+  id: string;
+  orderId: string;
+  amount: number;
+  method: 'PROMPTPAY' | 'CREDIT_CARD';
+  status: 'COMPLETED' | 'FAILED';
+}
+
+export class ButcherPrismaService {
+  product!: {
+    findUnique: (args: { where: { id: string } }) => Promise<{ id: string; stockKg: number; pricePerKg: number } | null>;
+    update: (args: { where: { id: string }; data: { stockKg: { decrement: number } } }) => Promise<{ id: string; stockKg: number }>;
+  };
+  order!: {
+    create: (args: { data: { userId: string; totalAmount: number; status: OrderEntity['status'] } }) => Promise<OrderEntity>;
+  };
+  orderItem!: {
+    create: (args: { data: Omit<OrderItemEntity, 'id'> }) => Promise<OrderItemEntity>;
+  };
+  payment!: {
+    create: (args: { data: Omit<PaymentEntity, 'id'> }) => Promise<PaymentEntity>;
+  };
+  $transaction!: <T>(callback: (tx: ButcherPrismaService) => Promise<T>) => Promise<T>;
+}
+
+@Injectable()
+export class ButcherOrderService {
+  constructor(private readonly prisma: ButcherPrismaService) {}
+
+  async placeButcherOrder(
+    userId: string,
+    productId: string,
+    requestedWeightKg: number,
+    paymentMethod: 'PROMPTPAY' | 'CREDIT_CARD',
+  ): Promise<{ order: OrderEntity; payment: PaymentEntity }> {
+    return this.prisma.$transaction(async (tx) => {
+      const product = await tx.product.findUnique({ where: { id: productId } });
+      if (!product || product.stockKg < requestedWeightKg) {
+        throw new ConflictException('Insufficient dry-aged beef stock for requested weight');
+      }
+
+      await tx.product.update({
+        where: { id: productId },
+        data: { stockKg: { decrement: requestedWeightKg } },
+      });
+
+      const totalAmount = Math.round(product.pricePerKg * requestedWeightKg);
+
+      const order = await tx.order.create({
+        data: {
+          userId,
+          totalAmount,
+          status: 'PAID',
+        },
+      });
+
+      await tx.orderItem.create({
+        data: {
+          orderId: order.id,
+          productId,
+          weightKg: requestedWeightKg,
+          unitPrice: product.pricePerKg,
+          subtotal: totalAmount,
+        },
+      });
+
+      const payment = await tx.payment.create({
+        data: {
+          orderId: order.id,
+          amount: totalAmount,
+          method: paymentMethod,
+          status: 'COMPLETED',
+        },
+      });
+
+      return { order, payment };
+    });
+  }
+}
+
+describe('ButcherOrderService (Interactive Transaction Unit Test)', () => {
+  let service: ButcherOrderService;
+  let prismaMock: DeepMockProxy<ButcherPrismaService>;
+
+  beforeEach(async () => {
+    prismaMock = mockDeep<ButcherPrismaService>();
+
+    // กำหนดให้ $transaction รัน Callback โดยส่ง prismaMock เข้าไปเป็น tx
+    prismaMock.$transaction.mockImplementation(async (callback) => {
+      return callback(prismaMock);
+    });
+
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      providers: [
+        ButcherOrderService,
+        { provide: ButcherPrismaService, useValue: prismaMock },
+      ],
+    }).compile();
+
+    service = moduleRef.get<ButcherOrderService>(ButcherOrderService);
+  });
+
+  it('should deduct stock, create order, order item, and payment inside transaction when stock is sufficient', async () => {
+    prismaMock.product.findUnique.mockResolvedValue({
+      id: 'prod-tomahawk-01',
+      stockKg: 5.0,
+      pricePerKg: 3200,
+    });
+    prismaMock.product.update.mockResolvedValue({
+      id: 'prod-tomahawk-01',
+      stockKg: 3.5,
+    });
+    prismaMock.order.create.mockResolvedValue({
+      id: 'ord-9001',
+      userId: 'user-cust-01',
+      totalAmount: 4800,
+      status: 'PAID',
+    });
+    prismaMock.orderItem.create.mockResolvedValue({
+      id: 'item-1',
+      orderId: 'ord-9001',
+      productId: 'prod-tomahawk-01',
+      weightKg: 1.5,
+      unitPrice: 3200,
+      subtotal: 4800,
+    });
+    prismaMock.payment.create.mockResolvedValue({
+      id: 'pay-501',
+      orderId: 'ord-9001',
+      amount: 4800,
+      method: 'PROMPTPAY',
+      status: 'COMPLETED',
+    });
+
+    const result = await service.placeButcherOrder(
+      'user-cust-01',
+      'prod-tomahawk-01',
+      1.5,
+      'PROMPTPAY',
+    );
+
+    expect(result.order.totalAmount).toBe(4800);
+    expect(result.payment.status).toBe('COMPLETED');
+    expect(prismaMock.product.update).toHaveBeenCalledWith({
+      where: { id: 'prod-tomahawk-01' },
+      data: { stockKg: { decrement: 1.5 } },
+    });
+  });
+
+  it('should abort order creation and throw ConflictException when requested weight exceeds available stock', async () => {
+    prismaMock.product.findUnique.mockResolvedValue({
+      id: 'prod-tomahawk-01',
+      stockKg: 0.8, // เหลือเพียง 0.8 กก. แต่ลูกค้าสั่ง 2.0 กก.
+      pricePerKg: 3200,
+    });
+
+    await expect(
+      service.placeButcherOrder('user-cust-01', 'prod-tomahawk-01', 2.0, 'CREDIT_CARD'),
+    ).rejects.toThrow(ConflictException);
+
+    // ยืนยันว่าไม่มีการตัดสต็อกหรือสร้างคำสั่งซื้อเกิดขึ้น
+    expect(prismaMock.product.update).not.toHaveBeenCalled();
+    expect(prismaMock.order.create).not.toHaveBeenCalled();
+  });
+});
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การตรวจสอบ Query ของ Prisma** | ยืนยันแค่ว่า `expect(prisma.product.update).toHaveBeenCalled()` โดยไม่ตรวจพารามิเตอร์ `where` และ `data` | ตรวจสอบว่า `where` และค่า `decrement` ถูกส่งเข้าไปด้วยตัวเลขที่คำนวณถูกต้องหรือไม่เพื่อป้องกันบั๊กตัดสต็อกผิดชิ้น |
+| **การสร้าง Mock Prisma** | ใช้ `as any` กับ Object เปล่า เช่น `{ product: { findMany: jest.fn() } } as any` จนหลุด Type Check | ใช้ `mockDeep<PrismaService>()` จาก `jest-mock-extended` เพื่อรักษา Strict Type Safety ตาม Schema |
+| **ความคาดหวังต่อ Constraint ของ DB** | คิดว่า `prismaMock` จะโยน Foreign Key Error หรือ Unique Error ออกมาเองอัตโนมัติ | จำลองการโยน `PrismaClientKnownRequestError` ด้วย `mockRejectedValueOnce` เมื่อต้องการทดสอบการจัดการ Error ของ Service |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ:** ทดสอบตรรกะการคำนวณราคา การตรวจสอบเงื่อนไขทางธุรกิจ (Business Rules) การแยกกิ่งเงื่อนไข (Branching Logic) และการจัดการ Exception ภายใน Service ที่ต้องการความเร็วสูง
+- **ไม่ควรใช้เมื่อ:** ต้องการพิสูจน์ว่า Raw SQL (`prisma.$queryRaw`), Complex Relational Filtering, Database Triggers หรือ Index Constraint บน PostgreSQL ทำงานถูกต้องจริง กรณีเหล่านั้นต้องทดสอบด้วย Integration Test ที่เชื่อมต่อ Test Database จริง
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: การจำลอง `PrismaService` ด้วย `mockDeep` มีข้อจำกัดอะไรที่ Unit Test ไม่สามารถตรวจพบได้?**
+  - *แนวคำตอบ:* `mockDeep` เพียงแค่คืนค่าตามที่เราสั่งใน `mockResolvedValue` โดยไม่ได้ประมวลผลคำสั่งคิวรีกับเครื่องยนต์ฐานข้อมูลจริง ดังนั้นมันจะไม่สามารถตรวจพบข้อผิดพลาดระดับฐานข้อมูลได้ เช่น เงื่อนไข `where` ที่เขียนตรรกะผิดแต่ Type ถูก, การเกิด Deadlock, การละเมิด Foreign Key Constraint หรือการที่ Transaction ไม่ได้ Rollback จริงเมื่อเกิด Unhandled Error นอกบล็อก จึงต้องมี E2E / Integration Test คอยประกบเสมอ
+- **Q2: เราจะจำลองการเกิด Unique Constraint Violation (รหัส `P2002` เช่น SKU เนื้อซ้ำ) ใน Unit Test ของ Prisma ได้อย่างไร?**
+  - *แนวคำตอบ:* สร้างอินสแตนซ์ของ `Prisma.PrismaClientKnownRequestError` เช่น `new Prisma.PrismaClientKnownRequestError('Unique constraint failed on the fields: (sku)', { code: 'P2002', clientVersion: '6.0.0', meta: { target: ['sku'] } })` แล้วสั่ง `prismaMock.product.create.mockRejectedValueOnce(error)` เพื่อทดสอบว่า Service แปลง Error ดังกล่าวเป็น `ConflictException` (HTTP 409) ได้อย่างถูกต้อง
+
+---

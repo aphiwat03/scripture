@@ -1,0 +1,140 @@
+---
+title: SwaggerModule
+category: BACKEND
+parentTitle: Swagger
+version: OpenAPI 3.1 & NestJS Swagger
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+**OpenAPI Specification (OAS 3.0)** คือมาตรฐานสากลที่ใช้รูปแบบไฟล์ JSON หรือ YAML ในการอธิบายความสามารถทั้งหมดของ RESTful API ส่วน **Swagger UI** คือเครื่องมือที่นำไฟล์สเปกนั้นมาแสดงผลเป็นหน้าเว็บที่สวยงามและกดทดสอบยิง Request (`Try it out`) ได้ทันที ใน NestJS 11 เราใช้คลาส `DocumentBuilder` เพื่อกำหนดข้อมูลพื้นฐานของเอกสาร (เช่น ชื่อระบบ, เวอร์ชัน, เซิร์ฟเวอร์) และใช้ `SwaggerModule` ในการสแกนหา Controller และ DTO ทั้งหมดในแอปพลิเคชันเพื่อสร้างเป็น OpenAPI Document
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อแอปพลิเคชัน NestJS เริ่มต้นทำงานและเรียก `SwaggerModule.createDocument(app, config)`:
+1. `SwaggerScanner` จะไล่สำรวจ Dependency Graph ของทุก Module เพื่อค้นหา Controller และ Route Handler ทั้งหมด (`@Get()`, `@Post()`, `@Patch()`, `@Delete()`)
+2. อ่านข้อมูลจาก TypeScript Reflection Metadata (`emitDecoratorMetadata`) ร่วมกับข้อมูลจาก `@Api*` Decorators เพื่อสร้าง Schema ของพารามิเตอร์และ Body
+3. เมื่อเรียก `SwaggerModule.setup('api/docs', app, documentFactory)` NestJS จะเปิดเส้นทาง `/api/docs` สำหรับหน้าเว็บ Swagger UI และเปิดเส้นทาง `/api/docs-json` (และ `/api/docs-yaml`) สำหรับดาวน์โหลดไฟล์ Raw OpenAPI Specification ไปใช้งานต่อ
+
+<Callout type="warning" title="การจำกัดการเข้าถึงหน้า Swagger UI บน Production">
+ในสภาพแวดล้อม Production ของระบบอีคอมเมิร์ซ การเปิดหน้า `/api/docs` ทิ้งไว้ให้บุคคลภายนอกเข้าถึงได้โดยอิสระถือเป็นการเปิดเผยโครงสร้างภายในทั้งหมดของระบบ (API Reconnaissance) จึงควรเปิดใช้งาน Swagger เฉพาะเมื่อ `NODE_ENV !== 'production'` หรือป้องกันเส้นทาง `/api/docs` ด้วย Basic Authentication เฉพาะทีมนักพัฒนาเท่านั้น
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การแยกฟังก์ชันตั้งค่า `setupSwagger` ออกเป็นโมดูลที่ชัดเจนพร้อมตั้งค่า `SwaggerCustomOptions` เพื่อให้จดจำ Token เวลา Refresh หน้าเว็บ (`persistAuthorization: true`)
+
+```typescript filename="src/config/swagger.config.ts"
+import { INestApplication, Logger } from '@nestjs/common';
+import { DocumentBuilder, SwaggerModule, OpenAPIObject } from '@nestjs/swagger';
+
+export function setupSwagger(app: INestApplication): OpenAPIObject | null {
+  const logger = new Logger('SwaggerSetup');
+  const nodeEnv = process.env.NODE_ENV ?? 'development';
+
+  // ป้องกันการเปิดเผยโครงสร้าง API สู่สาธารณะในโหมด Production
+  if (nodeEnv === 'production' && process.env.ENABLE_SWAGGER !== 'true') {
+    logger.log('Swagger UI ถูกปิดใช้งานในโหมด Production เพื่อความปลอดภัย');
+    return null;
+  }
+
+  const config = new DocumentBuilder()
+    .setTitle('Smart Butcher Marketplace API')
+    .setDescription(
+      'ระบบบริหารจัดการร้านค้าเนื้อพรีเมียมออนไลน์ รองรับการจัดการสินค้าเนื้อวากิว (Product), หมวดหมู่ (Category), คำสั่งซื้อ (Order), การชำระเงิน (Payment) และผู้ช่วย AI แนะนำการปรุงเนื้อ',
+    )
+    .setVersion('1.0.0')
+    .addServer('http://localhost:3000', 'Local Development Server')
+    .addBearerAuth(
+      {
+        type: 'http',
+        scheme: 'bearer',
+        bearerFormat: 'JWT',
+        description: 'ระบุ Access Token ที่ได้รับจากการ Login (ไม่ต้องพิมพ์คำว่า Bearer นำหน้า)',
+      },
+      'jwt-access',
+    )
+    .addCookieAuth(
+      'butcher_refresh_token',
+      {
+        type: 'apiKey',
+        in: 'cookie',
+        name: 'butcher_refresh_token',
+        description: 'HttpOnly Cookie สำหรับต่ออายุ Access Token',
+      },
+      'cookie-refresh',
+    )
+    .build();
+
+  const document = SwaggerModule.createDocument(app, config, {
+    operationIdFactory: (controllerKey: string, methodKey: string) =>
+      `${controllerKey.replace('Controller', '')}_${methodKey}`,
+  });
+
+  SwaggerModule.setup('api/docs', app, document, {
+    jsonDocumentUrl: 'api/docs-json',
+    swaggerOptions: {
+      persistAuthorization: true, // ไม่ต้องกรอก JWT ใหม่ทุกครั้งที่กด Refresh หน้าเว็บ
+      docExpansion: 'list',
+      filter: true,
+      showRequestDuration: true,
+    },
+    customSiteTitle: 'Smart Butcher API Docs',
+  });
+
+  logger.log('Swagger UI พร้อมใช้งานที่ http://localhost:3000/api/docs');
+  logger.log('OpenAPI JSON Spec พร้อมใช้งานที่ http://localhost:3000/api/docs-json');
+
+  return document;
+}
+```
+
+ตัวอย่างที่ 2: การเรียกใช้ `setupSwagger(app)` ร่วมกับ Global Prefix (`/api/v1`) ในไฟล์ `src/main.ts`
+
+```typescript filename="src/main.ts"
+import { NestFactory } from '@nestjs/core';
+import { ValidationPipe } from '@nestjs/common';
+import { AppModule } from './app.module';
+import { setupSwagger } from './config/swagger.config';
+
+async function bootstrap(): Promise<void> {
+  const app = await NestFactory.create(AppModule);
+
+  // กำหนด Global Prefix ให้ทุก API ขึ้นต้นด้วย /api/v1
+  app.setGlobalPrefix('api/v1');
+
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    }),
+  );
+
+  // เรียกตั้งค่า Swagger หลังจากกำหนด Global Prefix เพื่อให้ Path ในเอกสารมี /api/v1 ครบถ้วน
+  setupSwagger(app);
+
+  await app.listen(process.env.PORT ?? 3000, '0.0.0.0');
+}
+
+void bootstrap();
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **ลำดับการเรียก `setGlobalPrefix`** | เรียก `SwaggerModule.createDocument()` ก่อน `app.setGlobalPrefix('api/v1')` ทำให้ Path ใน Swagger ขาด `/api/v1` และกดยิงทดสอบแล้วขึ้น 404 | ตั้งค่า `app.setGlobalPrefix()` ให้เรียบร้อยก่อนเรียก `SwaggerModule.createDocument()` เสมอ |
+| **การจำกัดสิทธิ์ใน Production** | เปิดหน้า `/api/docs` ทิ้งไว้บน Production Server โดยไม่มีการตรวจสอบสิทธิ์หรือเงื่อนไข Environment | เช็ค `NODE_ENV !== 'production'` ก่อนเปิดใช้งาน หรือตั้งรหัสผ่านป้องกันหน้าเอกสาร |
+| **การตั้งค่า `operationIdFactory`** | ปล่อยให้ `operationId` ยาวและซ้ำซ้อน เช่น `ProductsController_findAll_v1` | กำหนด `operationIdFactory` ให้อ่านง่าย เช่น `Products_findAll` เพื่อเวลา Generate Frontend SDK จะได้ชื่อฟังก์ชันที่สะอาด |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: พัฒนา RESTful API ที่ต้องทำงานร่วมกับทีม Frontend, Mobile App, หรือทีม QA และต้องการให้ทุกฝ่ายทดสอบ API และตรวจสอบ Schema ได้ด้วยตัวเองทันที
+- **ไม่ควรใช้เมื่อ**: เป็น Internal Worker Service ที่สื่อสารผ่าน Message Queue เท่านั้นและไม่มี HTTP Controller เปิดรับ Request
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ออปชัน `persistAuthorization: true` ใน `swaggerOptions` ช่วยแก้ปัญหาอะไรให้นักพัฒนา?
+   - **แนวคำตอบ**: โดยค่าเริ่มต้นของ Swagger UI เมื่อนักพัฒนากดปุ่ม `Authorize` เพื่อใส่ JWT Bearer Token แล้วทำการแก้ไขโค้ดและกด Refresh หน้าเบราว์เซอร์ (`F5`) ค่า Token ที่ใส่ไว้จะหายไปทั้งหมด ทำให้ต้องเสียเวลาก๊อปปี้ Token มาวางใหม่ทุกครั้ง การเปิด `persistAuthorization: true` จะสั่งให้ Swagger UI เก็บค่า Token ไว้ใน `localStorage` ของเบราว์เซอร์ ทำให้ Refresh หน้าเว็บกี่ครั้งก็ยังยิงทดสอบ API ที่ติด Guard ได้ทันที
+2. **คำถาม**: ทำไมเราจึงไม่สามารถใช้ TypeScript `interface` สำหรับกำหนด `@Body()` DTO ใน NestJS หากต้องการให้ Swagger สร้าง Schema ได้?
+   - **แนวคำตอบ**: เพราะ TypeScript `interface` จะถูกลบทิ้งทั้งหมดหลังผ่านการคอมไพล์เป็น JavaScript (Type Erasure) ทำให้ไม่มีข้อมูลหลงเหลืออยู่ในช่วง Runtime ที่ `SwaggerScanner` และ `class-validator` ทำงาน เราจึงต้องประกาศ DTO ด้วย `class` เสมอ เพื่อให้มี Prototype และ Metadata คงอยู่ในช่วง Runtime
+
+---

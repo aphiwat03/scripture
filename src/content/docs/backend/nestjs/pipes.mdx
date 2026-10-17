@@ -1,0 +1,130 @@
+---
+title: Pipes
+category: BACKEND
+parentTitle: NestJS 11
+version: NestJS 11
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด
+ก่อนที่เนื้อสเต็กจะถูกนำไปปรุง ต้องผ่านการตรวจสอบคุณภาพว่าไม่มีสิ่งปลอมปน และต้องถูกตัดแบ่งชั่งน้ำหนักให้ได้ขนาดตามมาตรฐานสากล เช่น ถ้าลูกค้าส่งน้ำหนักเนื้อมาเป็นตัวอักษร `"500"` ตัว Pipe จะแปลงค่าให้กลายเป็นตัวเลข `500` (Number) และตรวจสอบว่าไม่มีการส่งค่าน้ำหนักติดลบเข้ามา
+
+ใน NestJS **Pipe** มีหน้าที่หลัก 2 อย่าง:
+1. **Transformation**: แปลง Input ให้เป็น Type หรือ Format ที่ต้องการ (เช่น แปลง String เป็น Number, แปลง ID เป็น UUID)
+2. **Validation**: ตรวจสอบความสมบูรณ์ของข้อมูลตามเงื่อนไขที่กำหนด หากข้อมูลผิดพลาด จะโยน `BadRequestException` (HTTP 400) ทันที ก่อนที่ข้อมูลจะหลุดเข้าไปถึง Controller หรือ Service
+
+## 2. หลักการเบื้องหลัง
+คลาส Pipe จะต้องอิมพลีเมนต์อินเทอร์เฟซ `PipeTransform<T, R>` ซึ่งมีเมธอด `transform(value: any, metadata: ArgumentMetadata)`
+- `value`: ข้อมูลดิบที่ Client ส่งเข้ามา
+- `metadata`: รายละเอียดว่าข้อมูลนี้มาจากที่ใด (`body`, `query`, หรือ `param`) และมี Data Type เป็นอะไรตาม Type Definition
+- NestJS มี Built-in Pipes เตรียมไว้ให้ใช้งานมากมาย เช่น `ParseIntPipe`, `ParseFloatPipe`, `ParseBoolPipe`, `ParseArrayPipe`, `ParseUUIDPipe`, และ `ValidationPipe`
+
+## 3. ตัวอย่างโค้ด
+
+### ตัวอย่างที่ 1: การใช้งาน Built-in Pipes สำหรับแปลง Route Parameters
+```typescript filename="src/modules/products/products.controller.ts"
+import { Controller, Get, Param, ParseUUIDPipe, Query, ParseIntPipe, DefaultValuePipe } from '@nestjs/common';
+import { ProductsService } from './products.service';
+
+@Controller('products')
+export class ProductsController {
+  constructor(private readonly productsService: ProductsService) {}
+
+  // 1. ตรวจสอบว่า id ใน URL ต้องเป็นรูปแบบ UUID v4 เท่านั้น
+  // ตัวอย่าง URL: GET /products/d3b07384-d113-49a6-bb8a-d9961f1816e8
+  @Get(':id')
+  getProductById(
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string
+  ) {
+    return this.productsService.findProductById(id);
+  }
+
+  // 2. แปลง Query limit & page เป็นตัวเลข พร้อมกำหนดค่าเริ่มต้น (DefaultValuePipe)
+  // ตัวอย่าง URL: GET /products?page=2&limit=20
+  @Get()
+  getProductsWithPagination(
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+    @Query('limit', new DefaultValuePipe(10), ParseIntPipe) limit: number
+  ) {
+    return this.productsService.paginate({ page, limit });
+  }
+}
+```
+
+### ตัวอย่างที่ 2: Custom Pipe สำหรับการปัดเศษน้ำหนักเนื้อสเต็กตามมาตรฐานการแล่
+```typescript filename="src/common/pipes/meat-weight-rounding.pipe.ts"
+import { PipeTransform, Injectable, ArgumentMetadata, BadRequestException } from '@nestjs/common';
+
+@Injectable()
+export class MeatWeightRoundingPipe implements PipeTransform<number, number> {
+  /**
+   * กฎการตัดแต่งเนื้อสเต็ก Smart Butcher:
+   * 1. น้ำหนักขั้นต่ำต้องไม่น้อยกว่า 150 กรัม
+   * 2. ต้องปัดเศษให้ลงตัวที่ 50 กรัมเสมอ (เช่น 230g -> 250g, 310g -> 350g)
+   */
+  transform(value: any, metadata: ArgumentMetadata): number {
+    const numericWeight = Number(value);
+
+    if (isNaN(numericWeight)) {
+      throw new BadRequestException('ค่าน้ำหนักชิ้นเนื้อต้องเป็นตัวเลขเท่านั้น');
+    }
+
+    if (numericWeight < 150) {
+      throw new BadRequestException('น้ำหนักชิ้นเนื้อสั่งตัดขั้นต่ำต้องไม่น้อยกว่า 150 กรัม');
+    }
+
+    // ปัดเศษขึ้นให้ลงตัวที่ละ 50 กรัม
+    const roundedWeight = Math.ceil(numericWeight / 50) * 50;
+    return roundedWeight;
+  }
+}
+```
+
+```typescript filename="src/modules/orders/orders.controller.ts"
+import { Controller, Post, Body } from '@nestjs/common';
+import { MeatWeightRoundingPipe } from '../../common/pipes/meat-weight-rounding.pipe';
+
+@Controller('orders')
+export class OrdersController {
+  @Post('custom-cut')
+  orderCustomCut(
+    @Body('targetWeightGrams', MeatWeightRoundingPipe) finalWeight: number
+  ) {
+    return {
+      message: 'รับออเดอร์ตัดเนื้อสำเร็จ',
+      cutWeightGrams: finalWeight, // จะได้ค่าที่ปัดเศษลงตัวที่ 50g เสมอ
+    };
+  }
+}
+```
+
+## 4. ผิด vs ถูก
+
+```typescript filename="src/nestjs.ts"
+// ❌ ผิด: ไม่เปิด whitelist ใน ValidationPipe ทำให้เกิดช่องโหว่ความปลอดภัย (Parameter Pollution / Over-posting)
+app.useGlobalPipes(new ValidationPipe()); // ส่งฟิลด์ isAdmin: true แอบแฝงเข้ามาใน Body ได้
+```
+
+```typescript filename="src/nestjs.ts"
+// ✅ ถูก: เปิดการตั้งค่า Security Whitelist และ Auto-transform ระดับ Global
+app.useGlobalPipes(
+  new ValidationPipe({
+    whitelist: true, // ✅ ตัดฟิลด์แปลกปลอมที่ไม่ได้ประกาศไว้ใน DTO ทิ้งทันที ป้องกันแฮกเกอร์ฉีดฟิลด์
+    forbidNonWhitelisted: true, // ✅ โยน 400 Bad Request หากตรวจพบฟิลด์ที่ไม่ได้รับอนุญาต
+    transform: true, // ✅ แปลง Payload ให้อยู่ในรูปคลาส DTO ตัวจริง (ไม่ใช่ Plain JavaScript Object)
+  })
+);
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Pipe**: กับทุกๆ Input ขาเข้าของ Controller ทั้ง Body, Query Parameters, และ Route Params
+- **ไม่ควรใช้ Pipe**: ในการตรวจสอบสิทธิ์หรือเชื่อมต่อฐานข้อมูลภายนอกเพื่อตรวจสอบสิทธิ์การเข้าถึง (ควรทำใน Guard หรือ Service)
+
+> [!NOTE]
+> ศึกษารายละเอียดการเขียน DTO เชิงลึกและการใช้งาน Decorator อย่างละเอียดได้ที่: **[Validation (class-validator + class-transformer)](/docs/backend/validation)**
+
+## 6. คำถามสัมภาษณ์
+**ถาม**: ทำไมการเปิดออปชัน `transform: true` ใน `ValidationPipe` ถึงมีความสำคัญอย่างยิ่งต่อการทำงานกับ TypeScript?
+**ตอบ**: เพราะข้อมูล JSON ที่เดินทางผ่าน HTTP เครือข่ายจะเป็นเพียง Plain JavaScript Object ธรรมดา แม้ว่าเราจะประกาศ Type Hint ใน Controller เป็น `dto: CreateOrderDto` แต่ Type นั้นจะหายไปเมื่อ Compile เป็น JavaScript การเปิด `transform: true` จะทำให้ `class-transformer` นำ Prototype ของคลาส DTO มาครอบ ทำให้เราสามารถเรียกใช้งานเมธอดหรือฟิลด์ที่กำหนดค่าเริ่มต้นในคลาสนั้นได้อย่างสมบูรณ์
+
+---

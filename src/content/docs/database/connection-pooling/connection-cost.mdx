@@ -1,0 +1,107 @@
+---
+title: Connection Cost
+category: DATABASE
+parentTitle: Connection Pooling
+version: PgBouncer & Supavisor
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+หากเปรียบเซิร์ฟเวอร์ฐานข้อมูลเป็นห้องครัวตัดแต่งเนื้อของ **Smart Butcher Marketplace**:
+- การสร้าง Connection ใหม่เข้าหา PostgreSQL ทุกครั้งที่มีลูกค้ากดดูหน้าเว็บ เปรียบเสมือน **"ทุกครั้งที่มีลูกค้าเดินเข้าร้าน 1 คน เราต้องโทรศัพท์เรียกเชฟคนใหม่เดินทางมาจากบ้าน ตรวจบัตรประชาชน เปลี่ยนชุดยูนิฟอร์ม ล้างมือ แล้วหั่นเนื้อให้ลูกค้าแค่ 1 ชิ้น จากนั้นไล่เชฟคนนั้นกลับบ้านทันที!"**
+- เมื่อมีลูกค้าเข้าร้านพร้อมกัน 500 คน เราจะเสียเวลาไปกับการตรวจบัตรและเปลี่ยนชุดเชฟจนหมดวัน และห้องครัวก็จะอัดแน่นไปด้วยเชฟ 500 คนที่เบียดเสียดแย่งเขียงกันจนไม่มีใครหั่นเนื้อได้เลย
+
+ตรงกันข้ามกับ MySQL ที่ใช้โมเดล Thread-based (ใช้เธรดเบาๆ ภายในโปรเซสเดียว) **PostgreSQL 16 ใช้สถาปัตยกรรมแบบ Process-per-Connection** ซึ่งให้ความเสถียรและการแยกส่วนความจำที่ปลอดภัยสูงสุด (หากโปรเซสของลูกค้าคนหนึ่งเกิด Crash โปรเซสของลูกค้าคนอื่นจะไม่ล่มตาม) แต่แลกมาด้วยต้นทุนในการสร้างและถือครองแต่ละ Connection ที่สูงมาก
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ทุกครั้งที่แอปพลิเคชันสั่งเปิดการเชื่อมต่อใหม่ (`new Connection`) ไปยัง PostgreSQL 16 จะเกิดขั้นตอนที่กินเวลาและทรัพยากรถึง 4 ด่าน:
+1. **TCP 3-Way Handshake (1 RTT):** สร้างการเชื่อมต่อระดับเครือข่าย (`SYN`, `SYN-ACK`, `ACK`)
+2. **TLS/SSL Handshake (1-2 RTTs):** แลกเปลี่ยนกุญแจเข้ารหัสและตรวจสอบใบรับรองความปลอดภัย
+3. **Postmaster Process Forking (`fork()`):** โปรเซสแม่ของ PostgreSQL (`postmaster`) จะสั่งระบบปฏิบัติการ Linux ให้ทำการ `fork()` สร้าง **OS Process ใหม่แยกออกมา 1 ตัวเต็มๆ (`postgres` backend process)** สำหรับการเชื่อมต่อนี้โดยเฉพาะ ซึ่งแต่ละโปรเซสจะจองหน่วยความจำส่วนตัว (Private Memory เช่น `work_mem`, Catalog Cache, Prepared Statement Cache) เฉลี่ย **5 MB ถึง 10 MB ต่อ 1 Connection** ทันที!
+4. **SCRAM-SHA-256 Authentication (2 RTTs):** คำนวณแฮชยืนยันตัวตนหลายพันรอบเพื่อตรวจสอบรหัสผ่าน
+
+รวมเวลาในการเปิดการเชื่อมต่อใหม่ 1 ครั้งอาจสูงถึง **30 - 150 มิลลิวินาที** ทั้งที่ตัวคำสั่ง SQL `SELECT * FROM products WHERE id = $1` ใช้เวลาทำงานจริงเพียง **0.5 มิลลิวินาที** เท่านั้น!
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: เปรียบเทียบโค้ดที่สร้าง Connection ใหม่ทุก Request (อันตราย) กับการใช้ Connection Pool
+การใช้ไดรเวอร์ `pg` ใน Node.js เพื่อแสดงให้เห็นความต่างระหว่างการเปิด-ปิดสายใหม่ทุกครั้ง กับการยืมสายที่เปิดค้างไว้แล้วจาก Pool:
+
+```typescript filename="src/database/raw-connection-comparison.ts"
+import { Client, Pool } from 'pg';
+
+// ❌ อันตรายร้ายแรง: เปิดและปิด OS Process ใหม่ใน PostgreSQL ทุกครั้งที่ลูกค้าขอดูราคาเนื้อ!
+// หากมีคนเข้าพร้อมกัน 200 คน เซิร์ฟเวอร์จะเสียเวลาทำ TCP+TLS+Fork จน CPU พุ่ง 100%
+export async function getProductPriceAntiPattern(productId: string) {
+  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  await client.connect(); // <-- เสียเวลา 50-100ms ตรงนี้ทุกครั้ง!
+  try {
+    const res = await client.query(
+      'SELECT id, name, price_per_kg FROM products WHERE id = $1',
+      [productId]
+    );
+    return res.rows[0];
+  } finally {
+    await client.end(); // <-- สั่งทำลายโปรเซสใน Postgres ทิ้ง
+  }
+}
+
+// ✅ Best Practice: สร้าง Pool เพียงครั้งเดียวตอนเปิดเซิร์ฟเวอร์ แล้วนำ Connection เดิมมาหมุนเวียนใช้ซ้ำ
+const sharedPool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 10, // เปิดโปรเซสค้างไว้สูงสุดแค่ 10 ตัว
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
+});
+
+export async function getProductPriceWithPool(productId: string) {
+  // ยืม Connection ที่ทำ Handshake เสร็จพร้อมใช้งานอยู่แล้วในหน่วยความจำ (ใช้เวลา 0ms!)
+  const res = await sharedPool.query(
+    'SELECT id, name, price_per_kg FROM products WHERE id = $1',
+    [productId]
+  );
+  return res.rows[0];
+}
+```
+
+### ตัวอย่างที่ 2: การวัดปริมาณหน่วยความจำและตรวจสอบ OS Process ของแต่ละ Connection ใน PostgreSQL 16
+เราสามารถรันคิวรีใน PostgreSQL 16 เพื่อดูหมายเลขโปรเซสของระบบปฏิบัติการ (`PID`) และตรวจสอบการตั้งค่าหน่วยความจำต่อโปรเซสได้โดยตรง:
+
+```sql filename="inspect_backend_processes.sql"
+-- 1. ตรวจสอบค่าหน่วยความจำที่แต่ละ Connection สามารถจองใช้ได้และเพดานการเชื่อมต่อสูงสุด
+SELECT name, setting, unit, short_desc
+FROM pg_settings
+WHERE name IN ('max_connections', 'superuser_reserved_connections', 'work_mem', 'shared_buffers');
+
+-- 2. แสดงรายการ OS Process ID (pid) ที่ถูก fork() ออกมารับใช้แต่ละการเชื่อมต่อของร้าน Smart Butcher
+SELECT
+    pid AS os_process_id,
+    usename AS db_role,
+    application_name,
+    client_addr,
+    backend_start,
+    state
+FROM pg_stat_activity
+WHERE backend_type = 'client backend'
+ORDER BY backend_start DESC;
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **วงจรชีวิตของ Connection** | เปิด Connection ใหม่ในทุกฟังก์ชัน HTTP Handler แล้วสั่งปิดเมื่อจบฟังก์ชัน | เปิด Connection Pool ทิ้งไว้ตั้งแต่เริ่มรันเซิร์ฟเวอร์ และนำกลับมาใช้ซ้ำ (Reuse) ตลอดอายุการทำงาน |
+| **การตั้งค่า `max_connections`** | ตั้งค่า `max_connections = 2000` ใน `postgresql.conf` โดยคิดว่ายิ่งเยอะยิ่งดี จน RAM หมดเครื่อง (OOM Kill) | ตั้งค่า `max_connections` บน PostgreSQL ให้อยู่ในระดับพอเหมาะ (เช่น 100 - 300) แล้วใช้ Pooler คั่นข้างหน้า |
+| **การจัดการ `work_mem`** | ตั้ง `work_mem = 256MB` พร้อมเปิดรับ 500 Connections ทำให้เสี่ยงกิน RAM สูงถึง `256MB * 500 = 128GB` | คำนวณ `work_mem` ให้สอดคล้องกับจำนวน Active Connections สูงสุดที่ทำงานพร้อมกันจริง |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Connection Pooling เสมอเมื่อ:** พัฒนาเว็บแอปพลิเคชัน, API Server หรือระบบใดๆ ที่มีการเรียกใช้ฐานข้อมูลซ้ำๆ ต่อเนื่องกัน
+- **ไม่ควรใช้การต่อตรงแบบไร้ Pool เมื่อ:** ระบบรับโหลดจากผู้ใช้งานจริงบน Production (ยกเว้นสคริปต์ CLI เฉพาะกิจที่รันคำสั่งเดียวแล้วจบการทำงาน เช่น สคริปต์ `pg_dump` หรือ `prisma migrate deploy`)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: จงอธิบายสถาปัตยกรรม Process-per-Connection ของ PostgreSQL และอธิบายว่าทำไมมันจึงมีต้นทุนสูงกว่าการเชื่อมต่อในฐานข้อมูลแบบ Thread-based?**
+  - **แนวคำตอบ:** ใน PostgreSQL ทุกครั้งที่มี Client เชื่อมต่อเข้ามาสำเร็จ โปรเซสหลัก (`postmaster`) จะทำการ `fork()` สร้าง OS Process ใหม่ขึ้นมา 1 ตัวต่อ 1 การเชื่อมต่อ ซึ่งแต่ละโปรเซสมีการจัดสรรหน่วยความจำแยกของตัวเองราว 5-10 MB และเมื่อมีโปรเซสจำนวนมากทำงานพร้อมกัน ระบบปฏิบัติการจะมีภาระสูงในการสลับโปรเซส (OS Process Context Switching) และจัดการ Page Tables ซึ่งหนักกว่าการสลับ Thread เบาๆ ที่แชร์พื้นที่หน่วยความจำเดียวกัน
+- **Q2: นอกจากเรื่องการ `fork()` โปรเซสแล้ว การเปิด Connection ใหม่ทุกครั้งที่ยิงคิวรีทำให้เกิดความหน่วง (Latency) ในระดับเครือข่ายอย่างไรบ้าง?**
+  - **แนวคำตอบ:** ต้องเสียเวลาเดินทางไป-กลับผ่านเครือข่าย (Network Round-Trip Time - RTT) อย่างน้อย 3-4 รอบก่อนจะได้เริ่มส่งคำสั่ง SQL ได้แก่: (1) TCP 3-Way Handshake, (2) TLS Encryption Handshake และ (3) การแลกเปลี่ยนข้อความยืนยันตัวตนแบบ SCRAM-SHA-256 ซึ่งหากฐานข้อมูลอยู่ต่างโซน เวลาในการเชื่อมต่ออาจนานกว่าเวลาในการรันคิวรีจริงถึง 50 เท่า
+
+---

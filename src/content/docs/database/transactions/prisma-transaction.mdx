@@ -1,0 +1,179 @@
+---
+title: Prisma Transaction
+category: DATABASE
+parentTitle: Transactions
+version: PostgreSQL 16 & Prisma $tx
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในเลเยอร์ของ Backend ที่พัฒนาด้วย **NestJS / Node.js** และใช้ **Prisma ORM** การควบคุม SQL Transaction จะทำผ่าน API `prisma.$transaction()` ซึ่งมีให้เลือกใช้งาน 2 รูปแบบตามความซับซ้อนของงาน:
+1. **Sequential Operations (`prisma.$transaction([op1, op2, ...])`):** การส่งอาร์เรย์ของคำสั่ง Prisma เข้าไปรันเรียงตามลำดับภายใต้ `BEGIN ... COMMIT` เดียวกัน เหมาะกับกรณีที่คำสั่งหลังไม่ต้องนำผลลัพธ์จากการคำนวณในโค้ด TypeScript ของคำสั่งแรกมาตัดสินใจ
+2. **Interactive Transactions (`prisma.$transaction(async (tx) => { ... }, options)`):** การส่งฟังก์ชัน Callback เข้าไป โดย Prisma จะเปิด Connection เดียวกัน สั่ง `BEGIN` แล้วส่งตัวแปร Transaction Client (`tx`) มาให้เราเขียนลอจิกตรวจสอบเงื่อนไข รันคิวรีหลายขั้นตอน และหากโยน `throw new Error(...)` ออกมาเมื่อใด Prisma จะสั่ง `ROLLBACK` ให้ทันที
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ข้อผิดพลาดที่นักพัฒนา Fullstack มักทำผิดบ่อยที่สุดเมื่อใช้ Interactive Transactions (`async (tx) => { ... }`) คือ **การเผลอเรียกใช้ `this.prisma.<model>` (Global Client ตัวนอก) แทนที่จะเรียกใช้ตัวแปร `tx.<model>` (Transaction Client ตัวใน) ภายในบล็อก Callback!**
+- หากเราเผลอเรียก `this.prisma.order.create(...)` ภายในบล็อก `tx` คำสั่งนั้นจะไปขอดึง **Connection ตัวใหม่จาก Pool** แล้วรันแยกออกไปข้างนอก Transaction ทันที! หากต่อมาเกิด Error คำสั่งนั้นจะไม่ถูก Rollback และที่เลวร้ายกว่านั้นคืออาจเกิด **Self-Deadlock** เพราะ Connection ข้างนอกไปรอ Lock จาก Connection `tx` ข้างในที่ตัวเองกำลังรออยู่!
+- นอกจากนี้ ค่าเริ่มต้นของ Interactive Transaction ใน Prisma มี `timeout: 5000` (5 วินาที) และ `maxWait: 2000` (เวลารอดึง Connection จาก Pool 2 วินาที) ซึ่งเราสามารถกำหนดทั้ง `isolationLevel`, `maxWait`, และ `timeout` ได้อย่างละเอียด
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การใช้ Sequential `$transaction` สำหรับการอัปเดตราคาสินค้าหลายรายการและบันทึกประวัติพร้อมกัน
+เมื่อแอดมินปรับราคาเนื้อวากิวและต้องการบันทึกประวัติลงตารางโดยไม่ต้องมีลอจิก `if/else` คั่นกลาง:
+
+```typescript filename="src/catalog/catalog-pricing.service.ts"
+import { Injectable } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+
+@Injectable()
+export class CatalogPricingService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async updateProductPriceWithLog(
+    productId: string,
+    newPricePerKg: number,
+    adminId: string,
+  ) {
+    // ใช้ Sequential $transaction มัดรวมคำสั่งอัปเดตราคาและบันทึก Audit Log ใน Transaction เดียว
+    const [updatedProduct] = await this.prisma.$transaction([
+      this.prisma.product.update({
+        where: { id: productId },
+        data: {
+          pricePerKg: newPricePerKg,
+          version: { increment: 1 },
+        },
+      }),
+      this.prisma.$executeRaw`
+        INSERT INTO audit_logs (table_name, record_id, operation, new_values, changed_by)
+        VALUES ('products', ${productId}::uuid, 'UPDATE', jsonb_build_object('price_per_kg', ${newPricePerKg}::numeric), ${adminId})
+      `,
+    ]);
+
+    return updatedProduct;
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การใช้ Interactive `$transaction` ระดับ Production สำหรับสร้างคำสั่งซื้อและตัดสต็อกอย่างปลอดภัย
+แสดงการใช้ `tx` ตลอดทั้งฟังก์ชัน การวางคำสั่งตัดสต็อกไว้ท้ายสุด และการกำหนดค่า `isolationLevel`, `maxWait`, `timeout`:
+
+```typescript filename="src/orders/orders-checkout.service.ts"
+import { Injectable, BadRequestException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+
+interface CreateOrderDto {
+  userId: string;
+  productId: string;
+  quantity: number;
+  shippingAddress: Record<string, unknown>;
+}
+
+@Injectable()
+export class OrdersCheckoutService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async checkoutSingleItemOrder(dto: CreateOrderDto) {
+    // เปิด Interactive Transaction พร้อมกำหนดค่า Timeout และ Isolation Level
+    return await this.prisma.$transaction(
+      async (tx) => {
+        // 1. ดึงข้อมูลสินค้าปัจจุบันผ่านตัวแปร tx เท่านั้น (ห้ามใช้ this.prisma!)
+        const product = await tx.product.findFirst({
+          where: {
+            id: dto.productId,
+            isActive: true,
+            deletedAt: null,
+          },
+          select: {
+            id: true,
+            sku: true,
+            name: true,
+            pricePerKg: true,
+            stockQty: true,
+          },
+        });
+
+        if (!product) {
+          throw new BadRequestException('ไม่พบสินค้าหรือสินค้านี้ปิดการขายแล้ว');
+        }
+
+        // 2. คำนวณยอดเงินรวมด้วย Prisma.Decimal เพื่อความแม่นยำทางการเงิน 100%
+        const subtotal = product.pricePerKg.mul(dto.quantity);
+        const shippingFee = new Prisma.Decimal(150.0);
+        const totalAmount = subtotal.add(shippingFee);
+        const orderNumber = `ORD-${Date.now()}`;
+
+        // 3. สร้างใบสั่งซื้อและรายการสินค้าย่อยพร้อมเก็บ Snapshot ราคาและชื่อสินค้า
+        const createdOrder = await tx.order.create({
+          data: {
+            userId: dto.userId,
+            orderNumber,
+            status: 'PENDING',
+            subtotalAmount: subtotal,
+            shippingFee,
+            totalAmount,
+            shippingAddress: dto.shippingAddress as Prisma.InputJsonValue,
+            orderItems: {
+              create: {
+                productId: product.id,
+                productNameSnapshot: product.name,
+                productSkuSnapshot: product.sku,
+                quantity: dto.quantity,
+                unitPrice: product.pricePerKg,
+              },
+            },
+          },
+          include: { orderItems: true },
+        });
+
+        // 4. ตัดสต็อกแบบ Atomic ที่บรรทัดสุดท้ายก่อนจบ Transaction
+        // เงื่อนไข stockQty: { gte: dto.quantity } ป้องกันสต็อกติดลบแม้มีคนซื้อพร้อมกัน!
+        const stockUpdateResult = await tx.product.updateMany({
+          where: {
+            id: product.id,
+            stockQty: { gte: dto.quantity },
+          },
+          data: {
+            stockQty: { decrement: dto.quantity },
+            version: { increment: 1 },
+          },
+        });
+
+        if (stockUpdateResult.count === 0) {
+          // เมื่อ throw Error ออกไป Prisma จะสั่ง ROLLBACK ยกเลิกใบสั่งซื้อด้านบนทั้งหมดทันที!
+          throw new BadRequestException(
+            `สินค้า ${product.name} มีสต็อกไม่เพียงพอสำหรับการสั่งซื้อ`,
+          );
+        }
+
+        return createdOrder;
+      },
+      {
+        maxWait: 2000, // รอคิว Connection จาก Pool สูงสุด 2 วินาที
+        timeout: 5000, // เวลาทำงานรวมของ Transaction ห้ามเกิน 5 วินาที
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+      },
+    );
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การเรียก Client ภายใน Callback** | เรียก `await this.prisma.order.create(...)` ข้างใน `prisma.$transaction(async (tx) => { ... })` | เรียกผ่านพารามิเตอร์ `await tx.order.create(...)` ทุกจุดภายใน Callback เสมอ |
+| **การส่ง `tx` ข้ามไปยัง Event/Async Queue** | ส่งตัวแปร `tx` เข้าไปใน Event Emitter ที่ทำงานแบบ Background หลักจากฟังก์ชันหลักจบแล้ว | ส่งเฉพาะข้อมูล (เช่น `orderId`) ออกไปหลัง `prisma.$transaction` ทำงานและ `COMMIT` เสร็จสมบูรณ์แล้วเท่านั้น |
+| **การตั้งค่า `timeout` สูงเกินจริง** | ตั้ง `timeout: 120000` (2 นาที) เพื่อแก้ปัญหาโค้ดช้า ทำให้ฐานข้อมูลติด Lock นาน 2 นาที | แก้ไขโค้ดให้ย้ายงานช้า (เช่น การสร้างไฟล์ PDF หรือยิง API นอก) ออกนอก `$transaction` และคุม `timeout` ไว้ที่ `5000` ms |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Interactive `$transaction(async (tx) => ...)` เมื่อ:** ขั้นตอนถัดไปใน Transaction ต้องใช้ข้อมูลหรือตรวจสอบเงื่อนไขจากผลลัพธ์ของขั้นตอนก่อนหน้า
+- **ควรใช้ Sequential `$transaction([...])` หรือ Nested Writes (`order.create({ data: { orderItems: { create: ... } } })`) เมื่อ:** เป็นการบันทึกข้อมูลแม่-ลูกพร้อมกันโดยไม่มีเงื่อนไขซับซ้อน เพราะ Nested Write ของ Prisma จะทำงานภายใต้ Transaction ให้อัตโนมัติอยู่แล้ว
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ในตัวอย่างโค้ดที่ 2 ทำไมเราจึงใช้ `tx.product.updateMany({ where: { id: product.id, stockQty: { gte: dto.quantity } }, data: { stockQty: { decrement: dto.quantity } } })` แทนที่จะเช็ค `if (product.stockQty < dto.quantity)` ใน TypeScript แล้วสั่ง `tx.product.update({ where: { id: product.id }, data: { stockQty: product.stockQty - dto.quantity } })`?**
+  - **แนวคำตอบ:** เพราะในระดับ `READ COMMITTED` หากลูกค้า 2 คนอ่านค่า `product.stockQty` (สมมติเหลือ 1 ชิ้น) ในเสี้ยววินาทีเดียวกัน ทั้งคู่จะผ่าน `if (1 < 1)` ใน TypeScript แล้วต่างคนต่างสั่ง `SET stock_qty = 0` ทับกัน (เกิด **Lost Update** ขายของเกินสต็อกจริงไป 1 ชิ้น!) แต่การใช้ `updateMany` ที่ใส่เงื่อนไข `WHERE id = $1 AND stock_qty >= $2` พร้อมสั่ง `SET stock_qty = stock_qty - $2` จะบังคับให้ PostgreSQL ตรวจสอบค่าสต็อกล่าสุดและหักลบในระดับ Database Engine แบบ Atomic หากคนแรกตัดไปเหลือ 0 แล้ว คนที่สองจะได้ผลลัพธ์ `count === 0` และถูก Rollback ทันที!
+- **Q2: เกิดอะไรขึ้นหากเราเรียกใช้ฟังก์ชันย่อย `await this.paymentService.recordLog(...)` ภายใน `prisma.$transaction(async (tx) => ...)` แต่เราไม่ได้ส่งตัวแปร `tx` เข้าไปให้ฟังก์ชันย่อยนั้น?**
+  - **แนวคำตอบ:** ฟังก์ชันย่อยนั้นจะไปใช้ `this.prisma` ตัวหลัก ซึ่งเป็นการเปิด Connection แยกต่างหากที่ไม่เกี่ยวข้องกับ Transaction ปัจจุบันเลย ส่งผลให้ (1) หาก Transaction หลักเกิด Error และ Rollback ข้อมูลที่ `recordLog` เขียนไปแล้วจะไม่ถูกยกเลิกตาม และ (2) หากในขณะนั้น Connection Pool เต็มทุกช่อง ตัว Transaction หลักจะถือ Connection ค้างไว้เพื่อรอให้ `recordLog` ขอ Connection ใหม่ แต่ไม่มี Connection ว่างเหลือเลย ทำให้ระบบเกิด **Connection Pool Deadlock** ค้างจนกว่าจะ Timeout!
+
+---

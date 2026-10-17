@@ -1,0 +1,115 @@
+---
+title: GroqService
+category: BACKEND
+parentTitle: AI Integration
+version: Groq SDK & Llama 3.3
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เพื่อให้โค้ดมีความเป็นระเบียบ ทดสอบง่าย (Testable) และเป็นไปตามหลักการ Dependency Injection ของ NestJS 11 เราไม่ควรสร้างอินสแตนซ์ `new Groq()` กระจัดกระจายอยู่ตาม Controller หรือ Business Service ต่างๆ แต่ควรสร้าง **`GroqService`** แยกไว้ในโมดูลเฉพาะ (`AiModule`) ที่อ่านค่า `GROQ_API_KEY` และ `GROQ_MODEL` ผ่าน `ConfigService` เพียงจุดเดียว
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อ `GroqService` ถูกประกาศด้วย `@Injectable()`:
+1. NestJS IoC Container จะสร้างอินสแตนซ์ของ `GroqService` แบบ Singleton ตอนที่แอปพลิเคชันเริ่มต้นทำงาน
+2. ภายใน `constructor` เราดึงค่า `GROQ_API_KEY` ด้วย `this.configService.getOrThrow<string>('GROQ_API_KEY')` ซึ่งหากลืมตั้งค่าใน `.env` แอปพลิเคชันจะแจ้งเตือนทันทีตั้งแต่ตอนบูต
+3. อินสแตนซ์ของ `Groq` Client ที่ถูกสร้างขึ้นจะจัดการ HTTP Keep-Alive Connection Pool ภายในตัวเองอัตโนมัติ ช่วยลดเวลาในการทำ TLS Handshake ซ้ำๆ เมื่อมีคำขอเข้ามาต่อเนื่อง
+
+<Callout type="tip" title="การแยกชื่อโมเดลไว้ใน Environment Variable">
+แทนที่จะฮาร์ดโค้ดสตริง `'llama-3.1-8b-instant'` กระจายไว้หลายไฟล์ ควรเก็บไว้ในตัวแปรสภาพแวดล้อม เช่น `GROQ_MODEL=llama-3.1-8b-instant` พร้อมกำหนดค่า Default ใน `GroqService` เพื่อให้ในอนาคตเมื่อต้องการอัปเกรดเป็นโมเดลรุ่นใหม่ของ Groq สามารถเปลี่ยนได้ทันทีผ่าน `.env` โดยไม่ต้องแก้โค้ดและไม่ต้อง Build Docker Image ใหม่
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การสร้าง `GroqService` มาตรฐานใน NestJS 11 ที่ห่อหุ้ม `groq-sdk` พร้อมกำหนดค่าเริ่มต้นของโมเดลและความปลอดภัย
+
+```typescript filename="src/modules/ai-butcher/groq.service.ts"
+import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import Groq from 'groq-sdk';
+
+export interface GroqChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+export interface GroqCompletionResult {
+  content: string;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+@Injectable()
+export class GroqService {
+  private readonly logger = new Logger(GroqService.name);
+  private readonly client: Groq;
+  private readonly defaultModel: string;
+
+  constructor(private readonly configService: ConfigService) {
+    const apiKey = this.configService.getOrThrow<string>('GROQ_API_KEY');
+    this.defaultModel = this.configService.get<string>(
+      'GROQ_MODEL',
+      'llama-3.1-8b-instant',
+    );
+
+    this.client = new Groq({
+      apiKey,
+      timeout: 8000, // กำหนด Timeout เริ่มต้นที่ 8 วินาที
+      maxRetries: 2, // ลองใหม่สูงสุด 2 ครั้งเมื่อเกิด Network Error หรือ 429 ชั่วคราว
+    });
+
+    this.logger.log(
+      `GroqService initialized successfully with default model: ${this.defaultModel}`,
+    );
+  }
+
+  public getRawClient(): Groq {
+    return this.client;
+  }
+
+  public getDefaultModel(): string {
+    return this.defaultModel;
+  }
+}
+```
+
+ตัวอย่างที่ 2: การลงทะเบียน `AiButcherModule` ร่วมกับ `ConfigModule` และ `PrismaModule` เพื่อพร้อมใช้งานทั่วทั้งระบบ
+
+```typescript filename="src/modules/ai-butcher/ai-butcher.module.ts"
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { PrismaModule } from '../prisma/prisma.module';
+import { GroqService } from './groq.service';
+import { AiButcherService } from './ai-butcher.service';
+import { AiButcherController } from './ai-butcher.controller';
+
+@Module({
+  imports: [ConfigModule, PrismaModule],
+  controllers: [AiButcherController],
+  providers: [GroqService, AiButcherService],
+  exports: [GroqService, AiButcherService],
+})
+export class AiButcherModule {}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การเข้าถึง API Key** | ฮาร์ดโค้ด `apiKey: 'gsk_...'` ลงในไฟล์ `.ts` หรือเรียก `process.env.GROQ_API_KEY!` โดยไม่ผ่านการ Validate | ใช้ `this.configService.getOrThrow<string>('GROQ_API_KEY')` ร่วมกับการตรวจ Schema ของ `.env` ตอนบูตระบบ |
+| **การสร้าง Instance ของ Groq** | สั่ง `new Groq({ apiKey })` ใหม่ทุกครั้งภายในฟังก์ชันที่ถูกเรียกในแต่ละ HTTP Request | สร้างเป็น Singleton ภายใน `constructor` ของ `GroqService` เพียงครั้งเดียว |
+| **การเขียน Unit Test** | ผูก `AiButcherService` เข้ากับไลบรารี `groq-sdk` โดยตรงจนจำลองการทำงานเวลารัน Jest ไม่ได้ | แยก `GroqService` ออกมาเป็น Provider เพื่อให้ใช้ `jest.spyOn()` หรือ Mock Provider ได้ง่ายในขั้นตอนทดสอบ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: เริ่มต้นวางโครงสร้างระบบ AI ในโปรเจกต์ NestJS ทุกขนาด เพื่อให้การจัดการ Key, Model, Timeout และการทำ Mock Testing รวมศูนย์อยู่ที่จุดเดียว
+- **ไม่ควรใช้เมื่อ**: ไม่ควรนำ `GROQ_API_KEY` ของสภาพแวดล้อม Production มาใช้ร่วมกับเครื่อง Local Development ของนักพัฒนาแต่ละคน ควรแยก API Key ตามสภาพแวดล้อม (`dev`, `staging`, `prod`) เพื่อคุมโควตาและตรวจสอบการใช้งานได้อย่างอิสระ
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: การแยก `GroqService` ออกจาก `AiButcherService` (ที่มี Business Logic การดึงข้อมูล `Product` จาก Prisma) มีข้อดีอย่างไรในการทำ Automated Testing?
+   - **แนวคำตอบ**: เวลาเราเขียน Unit Test หรือ Integration Test ให้กับ `AiButcherService` เราไม่ต้องการให้ Jest ยิง HTTP Request ไปหาเซิร์ฟเวอร์จริงของ Groq เพราะจะทำให้เทสต์ช้า เสียโควตา Token และผลลัพธ์ไม่คงที่ การแยก `GroqService` ออกมาช่วยให้เราสามารถสลับใส่ `{ provide: GroqService, useValue: mockGroqService }` ใน `Test.createTestingModule()` เพื่อจำลองทั้งกรณีที่ AI ตอบสำเร็จและกรณีที่เกิด Timeout ได้ทันที
+2. **คำถาม**: ทำไมเราควรใช้ `configService.getOrThrow('GROQ_API_KEY')` แทน `configService.get('GROQ_API_KEY')`?
+   - **แนวคำตอบ**: `getOrThrow` จะโยน Error ทันทีในขั้นตอนการสร้าง Dependency Graph ตอนเริ่มรันแอปพลิเคชันหากไม่พบค่า `GROQ_API_KEY` ช่วยให้ทีม DevOps รู้ทันทีว่าการตั้งค่า Environment ตกหล่น แทนที่จะปล่อยให้แอปบูตผ่านไปก่อนแล้วค่อยพังเมื่อมีลูกค้ากดใช้งานฟีเจอร์ AI เป็นคนแรก
+
+---

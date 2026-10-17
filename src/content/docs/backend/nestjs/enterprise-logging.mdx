@@ -1,0 +1,114 @@
+---
+title: Enterprise Logging
+category: BACKEND
+parentTitle: NestJS 11
+version: NestJS 11
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด
+การใช้ `console.log()` ในระบบ Production ถือเป็นข้อห้ามร้ายแรงของวิศวกรซอฟต์แวร์ระดับอาวุโส เพราะ `console.log()` ใน Node.js ทำงานแบบ Synchronous I/O ในบางสภาวะ (บล็อก Event Loop), ไม่มีระดับความสำคัญ (Log Levels), ขาด Timestamp ที่ได้มาตรฐาน, และที่สำคัญที่สุดคือไม่รองรับการส่งออกเป็น **Structured JSON Logging** สำหรับนำเข้าสู่ระบบรวมศูนย์อย่าง ELK Stack, Datadog หรือ Grafana Loki
+
+ใน NestJS เรามีคลาส Built-in `Logger` ที่รองรับ Context อย่างเป็นระเบียบ และสามารถปรับแต่งไปใช้ High-Performance Logger ระดับโลกอย่าง **Pino (`nestjs-pino`)** ซึ่งมีความเร็วในการประมวลผลสูงกว่า Winston และ Logger ทั่วไปถึง 5-10 เท่า
+
+## 2. หลักการเบื้องหลัง
+ระดับความสำคัญของ Log (Log Levels):
+1. `fatal`: ข้อผิดพลาดขั้นวิกฤตที่ทำให้ระบบต้องหยุดทำงาน
+2. `error`: ข้อผิดพลาดที่ต้องได้รับการตรวจสอบทันที (เช่น เชื่อมต่อ Payment Gateway ไม่สำเร็จ)
+3. `warn`: คำเตือนเกี่ยวกับพฤติกรรมผิดปกติแต่ระบบยังทำงานได้ (เช่น สต็อกเนื้อเหลือน้อยกว่า 3 ชิ้น)
+4. `log`: บันทึกข้อมูลการทำงานปกติทั่วไป (Info)
+5. `debug`: ข้อมูลเชิงลึกสำหรับนักพัฒนาใช้ตรวจสอบขณะแก้บั๊ก
+6. `verbose`: ข้อมูลละเอียดยิบย่อยที่สุด
+
+## 3. ตัวอย่างโค้ด
+
+### ตัวอย่างที่ 1: การใช้งาน Built-in Logger พร้อมกำหนด Context ใน Service
+```typescript filename="src/modules/orders/orders.service.ts"
+import { Injectable, Logger } from '@nestjs/common';
+
+@Injectable()
+export class OrdersService {
+  // สร้าง Logger ประจำคลาส โดยระบุ Context เป็นชื่อคลาสเพื่อความชัดเจนในบันทึก
+  private readonly logger = new Logger(OrdersService.name);
+
+  async reserveCut(cutId: string, customerId: string) {
+    this.logger.log(`เริ่มต้นกระบวนการจองชิ้นเนื้อรหัส ${cutId} สำหรับลูกค้า ${customerId}`);
+
+    try {
+      // จำลองการตัดสต็อก
+      this.logger.debug(`ตรวจสอบสถานะล็อกในตู้จัดเก็บชิ้นเนื้อ: ${cutId}`);
+      // ... การตัดสต็อกสำเร็จ
+      this.logger.log(`จองเนื้อรหัส ${cutId} สำเร็จ`);
+    } catch (err: any) {
+      this.logger.error(
+        `เกิดข้อผิดพลาดในการตัดชิ้นเนื้อ ${cutId}: ${err.message}`,
+        err.stack
+      );
+      throw err;
+    }
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การใช้ `nestjs-pino` สร้าง Structured JSON Logs สำหรับระบบ Enterprise
+```typescript filename="src/app.module.ts"
+import { Module } from '@nestjs/common';
+import { LoggerModule } from 'nestjs-pino';
+import { CORRELATION_ID_HEADER } from './common/middlewares/correlation-id.middleware';
+
+@Module({
+  imports: [
+    LoggerModule.forRoot({
+      pinoHttp: {
+        // ใน Production ให้พ่นเป็น Pure JSON เพื่อส่งเข้า ElasticSearch/Loki
+        // ใน Development ให้ใช้ pino-pretty เพื่อให้อ่านง่าย
+        transport:
+          process.env.NODE_ENV !== 'production'
+            ? { target: 'pino-pretty', options: { colorize: true } }
+            : undefined,
+        level: process.env.NODE_ENV !== 'production' ? 'debug' : 'info',
+        // บันทึก Correlation ID ลงในทุกบรรทัดของ Log แบบอัตโนมัติ
+        customProps: (req: any) => ({
+          correlationId: req.headers[CORRELATION_ID_HEADER] || 'unknown-trace',
+        }),
+        // ปิดบังข้อมูลสำคัญ (Sensitive Data Redaction) เพื่อความปลอดภัยตามมาตรฐาน PDPA
+        redact: [
+          'req.headers.authorization',
+          'req.headers.cookie',
+          'req.body.creditCardNumber',
+          'req.body.cvv',
+        ],
+      },
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+## 4. ผิด vs ถูก
+
+```typescript filename="src/nestjs.ts"
+// ❌ ผิด: ใช้ console.log พ่นข้อมูลดิบติดเลขบัตรเครดิตลูกค้าลงในเซิร์ฟเวอร์
+console.log('ลูกค้าสั่งซื้อเนื้อ:', req.body); 
+// ผลกระทบ: ละเมิดกฎหมายความปลอดภัยข้อมูล (PDPA / PCI-DSS) และบล็อก I/O ของ Node.js
+```
+
+```typescript filename="src/nestjs.ts"
+// ✅ ถูก: ใช้ Structured Logger พร้อม Redaction ซ่อนข้อมูลอ่อนไหวอัตโนมัติ
+this.logger.log({
+  message: 'บันทึกคำสั่งซื้อเนื้อสำเร็จ',
+  orderId: order.id,
+  totalAmountThb: order.amount,
+  // ข้อมูลบัตรเครดิตจะถูก Redact เป็น [REDACTED] โดย Pino โดยอัตโนมัติ
+});
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Structured Logger**: ในทุกระบบที่รันบน Production, Kubernetes หรือ Microservices
+- **ไม่ควรบันทึก Sensitive Data**: ห้ามพิมพ์รหัสผ่าน, PIN, ข้อมูลบัตรเครดิต หรือข้อมูลสุขภาพลงใน Log โดยเด็ดขาด
+
+## 6. คำถามสัมภาษณ์
+**ถาม**: ทำไมในระบบ High-Throughput Microservices จึงนิยมเลือกใช้งาน Pino มากกว่า Winston หรือ `console.log`?
+**ตอบ**: เพราะ Pino ถูกออกแบบมาโดยคำนึงถึงประสิทธิภาพเป็นอันดับหนึ่ง (Extreme Performance) มี Overhead ต่ำมาก โดยประมวลผลการจัดรูปแบบ JSON เป็น Asynchronous Stream และใช้เทคนิค String Allocation ขั้นสูง ทำให้ไม่บล็อก Event Loop ของ Node.js ส่งผลให้ Throughput ของ API ไม่ตกแม้จะเปิดบันทึก Log ในปริมาณมหาศาล
+
+---

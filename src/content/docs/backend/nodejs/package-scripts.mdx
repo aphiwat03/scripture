@@ -1,0 +1,143 @@
+---
+title: Package Scripts
+category: BACKEND
+parentTitle: Node.js
+version: Node.js 22 LTS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในการประกอบธุรกิจร้านค้า **Smart Butcher Marketplace** เราต้องมีการสั่งซื้อวัตถุดิบและอุปกรณ์จากซัพพลายเออร์ภายนอก Package Manager (npm, pnpm) ทำหน้าที่เปรียบเสมือนระบบจัดการจัดซื้อ:
+- `package.json` คือ **ใบสั่งซื้อและพิมพ์เขียวประจำร้าน** ที่ระบุว่าเราต้องการเครื่องสไลด์เนื้อรุ่นใด ซอสหมักยี่ห้อใด เวอร์ชันไหน
+- `lockfile` (`package-lock.json`, `pnpm-lock.yaml`) คือ **ใบตรวจรับของที่ระบุเลขซีเรียลและ Hash อย่างแม่นยำ** เพื่อให้แน่ใจว่าไม่ว่าพ่อครัวคนไหนในสาขาใดเปิดร้าน จะได้เครื่องมือและวัตถุดิบตรงกัน 100%
+- `pnpm` นำเสนอแนวคิด **ศูนย์กระจายสินค้าส่วนกลาง (Content-Addressable Store)** แทนที่จะก๊อปปี้เครื่องสไลด์เนื้อเครื่องเดิมซ้ำๆ ลงทุกสาขา ให้เก็บไว้ที่โกดังกลางที่เดียวแล้วใช้ Hard Link เชื่อมโยง ช่วยประหยัดเนื้อที่ดิสก์มหาศาลและทำงานรวดเร็วกว่า npm ดั้งเดิม
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **Semantic Versioning (SemVer: `MAJOR.MINOR.PATCH`):**
+   - `MAJOR` (เช่น 2.0.0): มี Breaking Changes การทำงานเก่าอาจใช้งานไม่ได้
+   - `MINOR` (เช่น 1.4.0): เพิ่มฟีเจอร์ใหม่แบบ Backward-compatible ไม่กระทบของเดิม
+   - `PATCH` (เช่น 1.4.2): แก้ไขบั๊กหรือปรับปรุงความปลอดภัยโดยไม่เพิ่มฟีเจอร์
+   - สัญลักษณ์นำหน้า:
+     - `^1.2.3` (Caret): อัปเดต Minor และ Patch อัตโนมัติ (`>= 1.2.3 < 2.0.0`)
+     - `~1.2.3` (Tilde): อัปเดตเฉพาะ Patch เท่านั้น (`>= 1.2.3 < 1.3.0`)
+     - `1.2.3` (Exact): ล็อกเวอร์ชันเป๊ะ ห้ามขยับเด็ดขาด
+2. **ประเภทของ Dependencies ใน `package.json`:**
+   - `dependencies`: แพ็กเกจที่จำเป็นสำหรับ Production Runtime (เช่น `prisma`, `express`, `bcrypt`, `dotenv`)
+   - `devDependencies`: แพ็กเกจที่ใช้เฉพาะช่วงเวลา Development หรือ Build (เช่น `typescript`, `eslint`, `jest`, `@types/node`)
+   - `peerDependencies`: ข้อกำหนดว่า Host application ที่นำไลบรารีนี้ไปใช้ ต้องติดตั้งแพ็กเกจนี้ไว้ด้วย (เช่น ปลั๊กอิน NestJS ต้องการ `@nestjs/common` เป็น peer)
+3. **pnpm Content-addressable Store และ Hard Links:**
+   - npm แบบเดิมจะวางไฟล์แบบ Flat ในโฟลเดอร์ `node_modules` ทำให้เกิดปัญหา **Phantom Dependencies** (โค้ดสามารถ `import` แพ็กเกจที่ไม่ได้ประกาศใน `package.json` ได้ หากมันเป็น dependency ของ dependency อีกทอดหนึ่ง)
+   - pnpm ใช้ **Global Content-addressable Storage** เก็บไฟล์ตาม Hash ของเนื้อหา และสร้าง Symlinks/Hard Links ไปยังโครงสร้างจำลอง ช่วยกำจัด Phantom Dependencies ป้องกันบั๊กซ่อนเร้น และประหยัดพื้นที่ดิสก์ได้ถึง 70-80%
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: โครงสร้าง `package.json` มาตรฐาน Enterprise ของ Smart Butcher Backend
+```json filename="package.json"
+{
+  "name": "@smart-butcher/marketplace-api",
+  "version": "1.0.0",
+  "description": "Backend API for Smart Butcher Marketplace Platform",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "prebuild": "pnpm run clean",
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "rimraf dist",
+    "start": "node --env-file=.env dist/server.js",
+    "dev": "tsx watch --env-file=.env.local src/server.ts",
+    "lint": "eslint \"src/**/*.ts\" --max-warnings 0",
+    "test": "jest --config jest.config.ts",
+    "test:coverage": "jest --coverage",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate deploy",
+    "seed:meat-categories": "tsx src/database/seeds/categories.seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.2.1",
+    "bcrypt": "^5.1.1",
+    "dotenv": "^16.4.7",
+    "jsonwebtoken": "^9.0.2",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/jsonwebtoken": "^9.0.8",
+    "@types/node": "^22.10.7",
+    "eslint": "^9.18.0",
+    "jest": "^29.7.0",
+    "prisma": "^6.2.1",
+    "rimraf": "^6.0.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20.11.0",
+    "pnpm": ">=9.0.0"
+  }
+}
+```
+
+### ตัวอย่างที่ 2: สคริปต์ตรวจสอบความถูกต้องของ Dependencies ป้องกัน Phantom Imports
+```typescript filename="scripts/verify-dependencies.ts"
+import fs from 'node:fs';
+import path from 'node:path';
+
+// สคริปต์ CI ตรวจสอบว่า package สำคัญไม่ได้เผลอหลุดไปอยู่ใน devDependencies
+const packageJsonPath = path.resolve('package.json');
+const rawPackage = fs.readFileSync(packageJsonPath, 'utf-8');
+const pkg = JSON.parse(rawPackage);
+
+const productionCriticalLibs = ['@prisma/client', 'bcrypt', 'jsonwebtoken', 'zod'];
+
+console.log('[CI Check] ตรวจสอบ Production Dependencies ของ Smart Butcher...');
+
+let hasError = false;
+productionCriticalLibs.forEach((libName) => {
+  if (pkg.devDependencies && pkg.devDependencies[libName]) {
+    console.error(`❌ ผิดพลาด: ไลบรารี ${libName} อยู่ใน devDependencies! จะทำให้ Production ใช้งานไม่ได้`);
+    hasError = true;
+  } else if (!pkg.dependencies || !pkg.dependencies[libName]) {
+    console.error(`❌ ผิดพลาด: ไม่พบไลบรารี ${libName} ใน dependencies`);
+    hasError = true;
+  } else {
+    console.log(`✅ ผ่าน: ${libName} (@${pkg.dependencies[libName]}) อยู่ใน dependencies ถูกต้อง`);
+  }
+});
+
+if (hasError) {
+  process.exit(1);
+} else {
+  console.log('[CI Check] โครงสร้าง Dependency ถูกต้องสมบูรณ์');
+}
+```
+
+## 4. ผิด vs ถูก (Anti-patterns & Best Practices)
+
+### ❌ โค้ดที่ผิด: ไม่ยอม Commit Lockfile หรือใช้ `npm install` ใน Production CI/CD
+```bash filename="terminal.sh"
+# ผิด: การสั่ง npm install บนเซิร์ฟเวอร์ Production
+# อาจทำให้ npm ปรับเวอร์ชันของ dependency ตามเครื่องหมาย ^ หรือ ~
+# ส่งผลให้โค้ดที่รันบน Production ไม่ตรงกับโค้ดที่ผ่านการทดสอบบนเครื่อง Developer
+npm install
+```
+
+### ✅ โค้ดที่ถูก: Commit Lockfile เสมอ และใช้คำสั่งติดตั้งแบบเข้มงวดบน CI/CD
+```bash filename="terminal.sh"
+# ถูกต้อง: สำหรับ npm ให้ใช้ npm ci (Clean Install)
+npm ci
+
+# ถูกต้อง: สำหรับ pnpm ให้ใช้ flag --frozen-lockfile
+pnpm install --frozen-lockfile
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้:** `pnpm` ควรเป็นตัวเลือกอันดับหนึ่งในการสร้างโปรเจกต์ใหม่และ Monorepo เนื่องจากความเร็วและการป้องกัน Phantom Dependencies
+- **ไม่ควรใช้:** หลีกเลี่ยงการใช้คำสั่ง `npm install <pkg>` และ `pnpm add <pkg>` สลับกันไปมาในเครื่องเดียวกัน เพราะจะทำให้ไฟล์ lockfile สับสนและอาจเกิดความไม่สอดคล้องของ Dependency Tree
+
+## 6. คำถามสัมภาษณ์ (Interview Questions)
+- **Q1: อะไรคือความแตกต่างระหว่าง `npm install` และ `npm ci` และทำไมในระบบ Continuous Integration (CI) ถึงบังคับให้ใช้ `npm ci`?**
+  - *คำตอบ:* `npm install` สามารถแก้ไขไฟล์ `package-lock.json` ได้หากพบว่า dependencies ใน `package.json` ไม่ตรงกัน แต่ `npm ci` จะอ่านเฉพาะ `package-lock.json` อย่างเคร่งครัด หากพบความไม่สอดคล้องจะโยน Error ทันที และจะลบโฟลเดอร์ `node_modules` ทิ้งทั้งหมดก่อนติดตั้งใหม่ เพื่อการันตีว่าจะได้ Dependency Tree ที่ตรงกับที่ทดสอบไว้ 100%
+- **Q2: ปัญหา Phantom Dependencies คืออะไร และ pnpm ป้องกันปัญหานี้ได้อย่างไร?**
+  - *คำตอบ:* คือการที่โค้ดในโปรเจกต์สามารถเรียกใช้ไลบรารี B ได้ ทั้งๆ ที่ใน `package.json` ติดตั้งไว้เฉพาะไลบรารี A (แต่ไลบรารี A ไปดึง B มาให้ในแบบ Flat node_modules) หากวันหนึ่งไลบรารี A เลิกใช้ B โค้ดของเราจะพังทันที pnpm ป้องกันปัญหานี้ด้วยการจัดโครงสร้าง `node_modules` โดยใช้ Symlinks ทำให้ใน root `node_modules` จะมองเห็นเฉพาะแพ็กเกจที่ประกาศไว้ใน `package.json` อย่างชัดเจนเท่านั้น
+
+---

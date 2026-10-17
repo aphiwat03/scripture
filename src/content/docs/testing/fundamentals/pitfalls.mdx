@@ -1,0 +1,59 @@
+---
+title: Anti-patterns
+category: TESTING & QUALITY
+parentTitle: Testing Fundamentals
+version: Testing Pyramid & TDD
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+ในการตรวจสอบ Code Review ระดับองค์กร มักพบ Anti-patterns สำคัญเหล่านี้ที่ควรหลีกเลี่ยง:
+
+### 1. The Liar (เทสต์จอมปลอมที่ผ่านเสมอ)
+เทสต์ที่รันผ่านตลอดเวลาเพราะลืมใส่ `await` ในคำสั่ง Async, ลืมใส่ `expect()`, หรือใส่ Assertion ที่ไม่มีวันล้มเหลว เช่น `expect(true).toBe(true)` ทำให้เกิดความมั่นใจแบบผิดๆ
+
+### 2. The Slow Poke (เทสต์เต่าคลาน)
+Unit Test ที่แอบต่อ Database จริง หรือเปิดอ่านไฟล์ขนาดใหญ่จากดิสก์ทุกครั้ง ทำให้ชุดเทสต์ใช้เวลารันเป็นสิบนาที จนวิศวกรเลิกรันเทสต์ในเครื่องตัวเองก่อน Push งาน
+
+### 3. The Tight Coupler (เทสต์ผูกติดกระดูก)
+เทสต์ที่ผูกกับโครงสร้างภายในของคลาส (Private Properties, Private Methods) จนไม่สามารถ Refactor โค้ดเพื่อปรับปรุง Performance ได้เลย
+
+### 4. The Giant Setup (การจัดเตรียมข้อมูลมหึมา)
+เขียนส่วน `Arrange` ยาวเหยียด 200 บรรทัดเพื่อเตรียมข้อมูลสำหรับเทสต์ฟังก์ชันที่มีเงื่อนไข `if` เพียงบรรทัดเดียว ทางแก้คือการใช้ **Object Mother** หรือ **Test Data Builder Pattern**
+
+### 5. The Multiple Personalities (หลายพฤติกรรมในเคสเดียว)
+การใส่ `it()` เดียวแล้วทดสอบตั้งแต่สมัครสมาชิก, เลือกเนื้อ, คำนวณเงิน, จ่ายเงิน, ไปจนถึงส่งอีเมล หากล้มเหลวที่จุดแรก จุดที่เหลือจะไม่ถูกรันเลย ทำให้ไม่รู้ขอบเขตความเสียหายที่แท้จริง
+
+### 6. The Mock Free-for-all (Mock จนไม่เหลือความจริง)
+Mock ทุกโมดูลจนโค้ดเทสต์ทดสอบเพียงแค่ว่า Mock ฟังก์ชันถูกเรียกตามที่คาด แต่เมื่อนำไปต่อกับของจริงบน Production โค้ดกลับพังพินาศทันทีเพราะ Data Contract ไม่ตรงกัน
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+ก่อนเปิด Pull Request หรือตรวจรับโค้ดในส่วน Testing ให้ตรวจสอบเช็กลิสต์ความพร้อมเหล่านี้:
+
+- [ ] **Fast Execution**: ชุด Unit Test ทั้งหมดในโปรเจกต์ต้องรันเสร็จสิ้นภายในเวลาไม่กี่วินาที
+- [ ] **No Flakiness**: รันเทสต์ซ้ำ 10 รอบติดต่อกัน ผลลัพธ์ต้องเป็นสีเขียวเหมือนเดิมทุกรอบ 100%
+- [ ] **Behavior-Focused**: ทดสอบที่ Observable Behavior ไม่แตะต้อง Private Variables หรือ Implementation Details
+- [ ] **AAA Structure**: ทุกเทสต์เคสมีการแบ่งสัดส่วน Arrange, Act, Assert อย่างชัดเจน
+- [ ] **Edge Cases Covered**: ครอบคลุมค่าขอบเขต (0, ค่าติดลบ, สต็อกไม่พอ, สตริงว่าง, วันที่ข้ามเดือน)
+- [ ] **Deterministic Time**: ฟังก์ชันที่เกี่ยวข้องกับเวลาต้องใช้ Fake Timers หรือ Time Injection ห้ามพึ่งพา `new Date()` ของระบบจริง
+- [ ] **Isolated & Clean**: แต่ละเทสต์ไม่มีการแชร์ State ร่วมกัน มีการเคลียร์ข้อมูลก่อนและหลังรันเสมอ
+- [ ] **Meaningful Names**: ชื่อเทสต์อธิบายพฤติกรรมและความต้องการทางธุรกิจอย่างชัดเจนในรูปแบบภาษาอังกฤษเชิงพฤติกรรม
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เพื่อต่อยอดองค์ความรู้จากพื้นฐานทางทฤษฎีและกลยุทธ์สู่การลงมือปฏิบัติจริงกับสแต็กเทคโนโลยีชั้นนำ แนะนำให้ศึกษาตามลำดับขั้นตอนดังนี้:
+
+1. **[Jest](/docs/testing/jest)**: เรียนรู้เครื่องมือทดสอบยอดนิยมสูงสุดของ JavaScript/TypeScript, การตั้งค่า Config สำหรับ Enterprise, Matchers เชิงลึก, และการทำ Snapshot Testing
+2. **[Backend Testing](/docs/testing/backend-testing)**: การทำ Integration Testing สำหรับ REST API, การ Mock Dependency Injection, Database Test Containers, และ Authentication Testing
+3. **[Frontend Testing](/docs/testing/frontend-testing)**: การทดสอบ React Components จากมุมมองของผู้ใช้งาน (User-Centric), การจัดการ User Events, Async UI, และ State Management
+4. **[E2E Testing](/docs/testing/playwright)**: การทำ End-to-End Automation ครอบคลุม Cross-browser, การดักจับ Network, Visual Regression Testing, และ CI Pipeline Integration

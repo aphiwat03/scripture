@@ -1,0 +1,168 @@
+---
+title: Rate Limiting
+category: BACKEND
+parentTitle: Security
+version: OWASP Top 10 API
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+แม้เราจะใช้ Bcrypt เข้ารหัสรหัสผ่านแล้ว แต่หากเราปล่อยให้ผู้โจมตีสามารถยิง `POST /api/v1/auth/login` หรือยิงขอรหัส OTP เข้ามาได้วินาทีละ 1,000 ครั้ง แฮกเกอร์จะสามารถสุ่มรหัสผ่านสำเร็จ (Brute-force / Credential Stuffing), ผลาญงบค่าส่ง SMS OTP ของบริษัทจนหมดตัว, หรือทำให้ CPU ของเซิร์ฟเวอร์เต็ม 100% จากการคำนวณ Bcrypt (Denial of Service)
+
+ใน **NestJS 11** เราใช้แพ็กเกจทางการ **`@nestjs/throttler`** เพื่อทำ **Multi-Tier Rate Limiting (การจำกัดอัตราการยิงคำขอหลายระดับความละเอียด)** และปรับแต่งให้เข้มงวดเป็นพิเศษในจุดเสี่ยงสำคัญ
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+`ThrottlerGuard` ทำงานโดยการนับจำนวนคำขอจากรหัสระบุตัวตนของไคลเอนต์ (Tracker Key เช่น IP Address หรือ User ID) ภายในกรอบเวลาที่กำหนด (`ttl` หน่วยเป็นมิลลิวินาทีใน `@nestjs/throttler` v5/v6+) หากจำนวนคำขอเกินกว่าค่า `limit` ที่ตั้งไว้ Guard จะตัดจบคำขอทันทีตั้งแต่หน้าประตูด้วยสถานะ **`429 Too Many Requests`** พร้อมแนบ Header มาตรฐาน (`Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`) โดยไม่ปล่อยให้คำขอหลุดเข้าไปถึง Controller หรือฐานข้อมูลเลย
+
+<Callout type="important" title="การอ่าน IP จริงเมื่อรันหลัง Reverse Proxy / Cloudflare / Nginx">
+เมื่อนำ NestJS ขึ้นรันบน Production หลัง Load Balancer, Nginx หรือ Docker ตัวแปร req.ip จะกลายเป็น IP ภายในของ Load Balancer เสมอ (เช่น 10.0.0.1) ทำให้ลูกค้าทุกคนทั้งประเทศถูกนับรวมเป็นคนเดียวกันและโดนบล็อกพร้อมกันทั้งหมด! ดังนั้นจึงต้องตั้งค่า app.set('trust proxy', 1) และเขียน Custom ThrottlerGuard เพื่อดึง IP จริงอย่างถูกต้อง
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การตั้งค่า Multi-tier ThrottlerModule (Short, Medium, Long) ใน AppModule (พื้นฐาน)
+```typescript filename="src/app.module.ts"
+import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerModule, seconds, minutes } from '@nestjs/throttler';
+import { CustomProxyThrottlerGuard } from './common/security/custom-throttler.guard';
+
+@Module({
+  imports: [
+    // ตั้งค่า Rate Limit 3 ระดับความถี่พร้อมกันทั่วทั้งระบบ
+    ThrottlerModule.forRoot([
+      {
+        name: 'short-burst',
+        ttl: seconds(1), // ใน 1 วินาที
+        limit: 5,        // ห้ามยิงรัวเกิน 5 ครั้ง (ป้องกัน Bot สคริปต์รัวปุ่ม)
+      },
+      {
+        name: 'medium-window',
+        ttl: seconds(10), // ใน 10 วินาที
+        limit: 25,        // ห้ามเกิน 25 ครั้ง
+      },
+      {
+        name: 'long-sustained',
+        ttl: minutes(1),  // ใน 1 นาที
+        limit: 100,       // ห้ามเกิน 100 ครั้งสำหรับการใช้งานทั่วไป
+      },
+    ]),
+  ],
+  providers: [
+    {
+      provide: APP_GUARD,
+      useClass: CustomProxyThrottlerGuard,
+    },
+  ],
+})
+export class AppModule {}
+```
+
+### ตัวอย่างที่ 2: การสร้าง CustomProxyThrottlerGuard และการจำกัดความถี่เข้มงวดพิเศษที่หน้า Login & Checkout (ขั้นสูง)
+```typescript filename="src/common/security/custom-throttler.guard.ts"
+import {
+  Injectable,
+  ExecutionContext,
+  HttpException,
+  HttpStatus,
+} from '@nestjs/common';
+import { ThrottlerGuard, ThrottlerLimitDetail } from '@nestjs/throttler';
+import { Request } from 'express';
+
+@Injectable()
+export class CustomProxyThrottlerGuard extends ThrottlerGuard {
+  // สกัด Tracker Key จากทั้ง User ID (ถ้าล็อกอินแล้ว) และ IP จริงหลัง Reverse Proxy
+  protected async getTracker(req: Record<string, any>): Promise<string> {
+    const expressReq = req as Request & { user?: { id: string } };
+
+    const forwardedFor = expressReq.headers['x-forwarded-for'];
+    const clientIp =
+      typeof forwardedFor === 'string'
+        ? forwardedFor.split(',')[0].trim()
+        : (expressReq.ips?.length ? expressReq.ips[0] : expressReq.ip) ??
+          'unknown-ip';
+
+    // หากผู้ใช้ล็อกอินแล้ว ให้ผูก Rate Limit ตามรหัสผู้ใช้คู่กับ IP เพื่อความแม่นยำสูงสุด
+    if (expressReq.user?.id) {
+      return `user:${expressReq.user.id}:ip:${clientIp}`;
+    }
+
+    return `anon-ip:${clientIp}`;
+  }
+
+  // ปรับแต่งข้อความแจ้งเตือน 429 Too Many Requests ให้เป็นภาษาไทยตามมาตรฐานระบบ
+  protected async throwThrottlingException(
+    _context: ExecutionContext,
+    throttlerLimitDetail: ThrottlerLimitDetail,
+  ): Promise<void> {
+    throw new HttpException(
+      {
+        code: 'RATE_LIMIT_EXCEEDED',
+        message: `คุณส่งคำขอถี่เกินกำหนด กรุณารอ ${throttlerLimitDetail.timeToExpire} วินาทีแล้วลองใหม่อีกครั้ง`,
+        retryAfterSeconds: throttlerLimitDetail.timeToExpire,
+      },
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+  }
+}
+```
+
+```typescript filename="src/modules/auth/auth-rate-limited.controller.ts"
+import { Controller, Post, Get, Body } from '@nestjs/common';
+import { Throttle, SkipThrottle, minutes } from '@nestjs/throttler';
+import { Public } from './guards/jwt-auth.guard';
+
+@Controller('auth')
+export class AuthRateLimitedController {
+  // 1. เข้มงวดสูงสุดสำหรับหน้า Login: อนุญาตให้ลองรหัสผ่านได้ไม่เกิน 5 ครั้งภายใน 1 นาที!
+  @Public()
+  @Throttle({
+    'short-burst': { limit: 1, ttl: minutes(1) / 5 },
+    'long-sustained': { limit: 5, ttl: minutes(1) },
+  })
+  @Post('login')
+  async login(@Body() dto: { email: string; password: string }) {
+    return { status: 'authenticated', email: dto.email };
+  }
+
+  // 2. เข้มงวดสูงสุดสำหรับการขอรหัส OTP ทาง SMS: ไม่เกิน 3 ครั้งใน 15 นาที ป้องกัน SMS Pumping!
+  @Public()
+  @Throttle({
+    'long-sustained': { limit: 3, ttl: minutes(15) },
+  })
+  @Post('request-phone-otp')
+  async requestOtp(@Body() dto: { phoneNumber: string }) {
+    return { otpSent: true, phoneNumber: dto.phoneNumber };
+  }
+
+  // 3. ยกเว้นการทำ Rate Limit สำหรับ Endpoint ตรวจสอบสถานะเซิร์ฟเวอร์ของ Load Balancer
+  @Public()
+  @SkipThrottle()
+  @Get('health-ping')
+  healthPing() {
+    return { ok: true };
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/common/security/throttler-comparison.ts"
+// ❌ ผิด (Anti-pattern): ใช้ Rate Limit ค่าเดียวกันทั้งระบบ (เช่น 100 ครั้ง/นาที) โดยไม่จำกัดเฉพาะที่หน้า Login และ OTP
+// ปัญหา: แฮกเกอร์สามารถสุ่มรหัสผ่านได้ถึง 100 ครั้งต่อนาที (6,000 ครั้งต่อชั่วโมง) หรือยิงผลาญ SMS OTP ได้นับพันบาทในไม่กี่นาที!
+
+// ✅ ถูก (Best Practice): ใช้ Global Throttler สำหรับ API ทั่วไป และแปะ @Throttle() บีบขีดจำกัดให้ต่ำมาก (เช่น 3-5 ครั้ง/นาที)
+// เฉพาะที่เส้นทาง /auth/login, /auth/register, /auth/forgot-password และ /payments
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Redis Storage สำหรับ `@nestjs/throttler` เมื่อ**: รันระบบ Production แบบหลายอินสแตนซ์ (Multiple Pods / Containers) เพื่อให้ตัวนับจำนวนครั้งถูกแชร์ร่วมกันที่ศูนย์กลาง ไม่ใช่แยกนับตามหน่วยความจำของแต่ละ Pod
+- **ไม่ควรใช้ `@SkipThrottle()` กับ Endpoint ที่มีการคิวรีฐานข้อมูลหรือประมวลผลหนัก**: ควรใช้ `@SkipThrottle()` เฉพาะกับ Lightweight Health Check ของระบบโครงสร้างพื้นฐานเท่านั้น
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ถ้าเรารันแอปพลิเคชัน NestJS จำนวน 4 Instances (Pods) อยู่หลัง Load Balancer แบบ Round-Robin แต่เราใช้ Default In-Memory Storage ของ `@nestjs/throttler` ที่ตั้งไว้ 5 ครั้งต่อนาทีสำหรับหน้า Login จะเกิดช่องโหว่อะไรขึ้น?
+   - **แนวคำตอบ**: ผู้โจมตีจะสามารถยิงเดารหัสผ่านได้ถึง $5 \times 4 = 20$ ครั้งต่อนาที! เพราะ In-Memory Storage เก็บตัวนับไว้ใน RAM ของแต่ละ Instance แยกจากกัน เมื่อ Load Balancer กระจายคำขอวนไปทีละเครื่อง เครื่องละ 5 ครั้ง จึงไม่มีเครื่องไหนรู้ว่าเครื่องอื่นรับคำขอไปแล้วกี่ครั้ง วิธีแก้คือต้องเปลี่ยน Storage ของ `ThrottlerModule` ให้เชื่อมต่อกับ **Redis** เพื่อให้ทุก Instance นับคะแนนรวมที่จุดเดียว secara Atomic
+2. **คำถาม**: ในการป้องกันการสุ่มรหัสผ่านที่หน้า Login ทำไมการล็อกตาม IP Address เพียงอย่างเดียวจึงยังไม่เพียงพอสำหรับการโจมตีด้วย Botnet สมัยใหม่?
+   - **แนวคำตอบ**: เพราะผู้โจมตีที่ใช้ Distributed Botnet หรือบริการ Residential Proxy สามารถสลับ IP Address ใหม่ทุกๆ คำขอได้นับหมื่น IP ทำให้การนับตาม IP ไม่ถึงขีดจำกัดสักที ดังนั้นในระบบระดับสูง เราจึงต้องนับ Rate Limit 2 แกนควบคู่กัน คือ **(1) นับตาม IP Address** และ **(2) นับตาม `email` เป้าหมายที่ถูกพยายามล็อกอิน** (เช่น หากบัญชี `vip@smartbutcher.co.th` ถูกลองรหัสผิดครบ 5 ครั้งไม่ว่าจะมาจาก IP ใดก็ตาม ให้หน่วงเวลาหรือบังคับตรวจ CAPTCHA / ส่งอีเมลแจ้งเตือนทันที)
+
+---

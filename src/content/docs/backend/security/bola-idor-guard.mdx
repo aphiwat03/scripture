@@ -1,0 +1,226 @@
+---
+title: BOLA IDOR Guard
+category: BACKEND
+parentTitle: Security
+version: OWASP Top 10 API
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+**BOLA (Broken Object Level Authorization)** หรือที่รู้จักในชื่อเดิมว่า **IDOR (Insecure Direct Object Reference)** คือช่องโหว่อันดับที่ 1 ในทำเนียบ OWASP API Security Top 10 ตลอดกาล!
+
+ช่องโหว่นี้เกิดขึ้นเมื่อระบบตรวจสอบแล้วว่าผู้ใช้ล็อกอินจริง (`JwtAuthGuard` ผ่าน) และมีบทบาทเป็น `CUSTOMER` จริง (`RolesGuard` ผ่าน) แต่เมื่อผู้ใช้เรียก `GET /api/v1/orders/ord-999` หรือ `PATCH /api/v1/orders/ord-999` โค้ดใน Service กลับดึงข้อมูลด้วย `prisma.order.findUnique({ where: { id: orderId } })` โดย **ลืมตรวจสอบว่าใบสั่งซื้อ `ord-999` นั้นเป็นของ `currentUser.id` จริงหรือไม่!** ส่งผลให้ลูกค้าคนใดก็ได้สามารถเข้าดูใบเสร็จ ที่อยู่บ้าน เบอร์โทรศัพท์ หรือสั่งยกเลิกใบสั่งซื้อเนื้อวากิวของลูกค้าคนอื่นได้ทั้งหมดเพียงแค่เปลี่ยนรหัส ID ใน URL
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+การป้องกันปัญหา BOLA / IDOR อย่างเด็ดขาดในสถาปัตยกรรม NestJS 11 + Prisma ORM ต้องยึดหลักการ 3 ข้อ:
+1. **ใช้ UUID v4 หรือ ULID แทน Auto-increment Integer ID (`1, 2, 3`)**: เพื่อป้องกันไม่ให้ผู้โจมตีเขียนลูป `for (let id = 1; id <= 10000; id++)` กวาดดูข้อมูลทั้งระบบได้ง่ายๆ (แต่พึงระลึกไว้เสมอว่าการใช้ UUID ช่วยป้องกันการเดาสุ่มเท่านั้น ไม่ได้ทดแทนการเช็คสิทธิ์ Ownership!)
+2. **Query-Level Ownership Scoping**: ในการคิวรี แก้ไข หรือลบข้อมูลของลูกค้า ให้ฝังเงื่อนไข `userId: currentUser.id` ลงไปในบล็อก `where` ของ Prisma โดยตรงเสมอ
+3. **Policy / Ownership Check สำหรับ Multi-Role**: หากเป็นข้อมูลที่อนุญาตให้ทั้งเจ้าของ (`order.userId === user.id`) และผู้ดูแลระบบ (`user.role === 'ADMIN'`) เข้าถึงได้ ให้สร้าง Ownership Policy Method ที่ชัดเจนและคืนค่า `404 Not Found` หรือ `403 Forbidden` ทันทีเมื่อไม่มีสิทธิ์
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การบังคับใช้ Query-Level Ownership Scoping ใน OrdersOwnershipService (พื้นฐาน)
+```typescript filename="src/modules/orders/orders-ownership.service.ts"
+import {
+  Injectable,
+  NotFoundException,
+  ForbiddenException,
+} from '@nestjs/common';
+import { UserRole } from '@prisma/client';
+import { PrismaService } from '../../database/prisma.service';
+import { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
+
+@Injectable()
+export class OrdersOwnershipService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  // 1. การดึงข้อมูลใบสั่งซื้อ: ตรวจสอบสิทธิ์ความเป็นเจ้าของระดับแถว (Row-level Ownership)
+  async getOrderByIdSecurely(orderId: string, currentUser: AuthenticatedUser) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: {
+          include: {
+            product: { select: { id: true, name: true, sku: true } },
+          },
+        },
+        payment: true,
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException({
+        code: 'ORDER_NOT_FOUND',
+        message: `ไม่พบคำสั่งซื้อรหัส ${orderId}`,
+      });
+    }
+
+    // 🛡️ หัวใจของการป้องกัน BOLA / IDOR:
+    // อนุญาตเฉพาะเจ้าของคำสั่งซื้อ, เชฟแล่เนื้อ, หรือผู้ดูแลระบบเท่านั้น
+    const isOwner = order.userId === currentUser.id;
+    const isPrivilegedStaff =
+      currentUser.role === UserRole.ADMIN ||
+      currentUser.role === UserRole.BUTCHER_CHEF;
+
+    if (!isOwner && !isPrivilegedStaff) {
+      // สามารถเลือกโยน 403 Forbidden หรือโยน 404 Not Found เพื่อไม่ให้ผู้โจมตีรู้ว่ารหัสนี้มีอยู่จริง
+      throw new ForbiddenException({
+        code: 'ORDER_OWNERSHIP_VIOLATION',
+        message: 'คุณไม่มีสิทธิ์เข้าถึงข้อมูลคำสั่งซื้อของลูกค้ารายอื่น',
+      });
+    }
+
+    return order;
+  }
+
+  // 2. การแก้ไขที่อยู่จัดส่ง: ฝัง userId ลงในคำสั่ง WHERE ของฐานข้อมูลโดยตรง (Atomic Ownership Check)
+  async updateShippingAddressByCustomer(
+    orderId: string,
+    customerId: string,
+    newShippingAddress: Record<string, string>,
+  ) {
+    // อัปเดตเฉพาะแถวที่ทั้ง id และ userId ตรงกับผู้เรียกในคำสั่งเดียว!
+    const updated = await this.prisma.order.updateMany({
+      where: {
+        id: orderId,
+        userId: customerId, // ถ้าไม่ใช่เจ้าของ คำสั่งนี้จะได้ count === 0 ทันที!
+      },
+      data: {
+        shippingAddressJson: newShippingAddress,
+      },
+    });
+
+    if (updated.count === 0) {
+      throw new NotFoundException({
+        code: 'ORDER_NOT_FOUND_OR_UNAUTHORIZED',
+        message: 'ไม่พบคำสั่งซื้อของคุณที่ต้องการแก้ไขที่อยู่จัดส่ง',
+      });
+    }
+
+    return this.prisma.order.findUnique({ where: { id: orderId } });
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การป้องกัน Nested BOLA เมื่อลูกค้าจัดการรายการย่อย `OrderItem` และขอใบเสร็จ `Payment` (ขั้นสูง)
+```typescript filename="src/modules/payments/payments-ownership.controller.ts"
+import {
+  Controller,
+  Get,
+  Delete,
+  Param,
+  ParseUUIDPipe,
+  NotFoundException,
+} from '@nestjs/common';
+import { PrismaService } from '../../database/prisma.service';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
+
+@Controller()
+export class PaymentsAndItemsOwnershipController {
+  constructor(private readonly prisma: PrismaService) {}
+
+  // ป้องกัน Nested BOLA: เมื่อลูกค้าลบ OrderItem ใน URL /orders/:orderId/items/:itemId
+  // ต้องตรวจทั้งว่า itemId อยู่ภายใต้ orderId นั้นจริง และ orderId นั้นเป็นของ currentUser.id จริง!
+  @Delete('orders/:orderId/items/:itemId')
+  async deleteMyOrderItem(
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @Param('itemId', ParseUUIDPipe) itemId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    // ใช้ Relational Filter ใน Prisma เพื่อตรวจสอบสิทธิ์ทะลุไปถึงตารางแม่ (Order.userId) ในคิวรีเดียว!
+    const deleted = await this.prisma.orderItem.deleteMany({
+      where: {
+        id: itemId,
+        orderId: orderId,
+        order: {
+          userId: user.id,
+          status: 'PENDING_PAYMENT', // ลบได้เฉพาะตอนที่ยังไม่จ่ายเงินเท่านั้น
+        },
+      },
+    });
+
+    if (deleted.count === 0) {
+      throw new NotFoundException({
+        code: 'ORDER_ITEM_NOT_MODIFIABLE',
+        message: 'ไม่พบรายการสินค้าในใบสั่งซื้อของคุณ หรือใบสั่งซื้อชำระเงินแล้ว',
+      });
+    }
+
+    return { deleted: true, itemId };
+  }
+
+  // ป้องกัน BOLA บนตาราง Payment: ตรวจสอบความเชื่อมโยงผ่าน payment.order.userId
+  @Get('payments/:paymentId/receipt')
+  async getMyPaymentReceipt(
+    @Param('paymentId', ParseUUIDPipe) paymentId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    const payment = await this.prisma.payment.findFirst({
+      where: {
+        id: paymentId,
+        // บังคับว่า Order ที่ผูกกับ Payment นี้ต้องเป็นของ User คนที่กำลังเรียก API อยู่เท่านั้น!
+        ...(user.role === 'CUSTOMER' ? { order: { userId: user.id } } : {}),
+      },
+      include: {
+        order: {
+          select: {
+            id: true,
+            orderNumber: true,
+            grandTotalThb: true,
+          },
+        },
+      },
+    });
+
+    if (!payment) {
+      throw new NotFoundException({
+        code: 'PAYMENT_RECEIPT_NOT_FOUND',
+        message: 'ไม่พบข้อมูลใบเสร็จรับเงินที่คุณร้องขอ',
+      });
+    }
+
+    return payment;
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/orders/bola-idor-comparison.ts"
+// ❌ ผิด (Anti-pattern): เช็คแค่ @UseGuards(JwtAuthGuard) แล้วลบหรือดึงข้อมูลด้วย id อย่างเดียว (ช่องโหว่ BOLA เต็มๆ!)
+export async function deleteOrderVulnerableToBola(prisma: any, orderId: string) {
+  // ลูกค้าคนไหนที่ล็อกอินแล้ว ยิง DELETE /orders/<รหัสของคนอื่น> ก็สามารถลบออเดอร์คนอื่นได้ทั้งระบบ!
+  return prisma.order.delete({
+    where: { id: orderId },
+  });
+}
+
+// ✅ ถูก (Best Practice): ส่ง currentUser.id เข้าไปใน Service ทุกครั้ง และผูกเงื่อนไข where: { id: orderId, userId: currentUser.id }
+export async function deleteOrderProtectedFromBola(
+  prisma: any,
+  orderId: string,
+  currentUserId: string,
+) {
+  return prisma.order.deleteMany({
+    where: {
+      id: orderId,
+      userId: currentUserId,
+    },
+  });
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรฝัง `userId: currentUser.id` ลงใน `where` ของ Prisma ทุกครั้งเมื่อ**: เป็น Endpoint สำหรับลูกค้าในการดู แก้ไข หรือลบข้อมูลส่วนตัว เช่น `Order`, `OrderItem`, `Payment`, ที่อยู่จัดส่ง
+- **ไม่ควรตรวจแต่ตารางลูกโดยลืมตรวจความสัมพันธ์กับตารางแม่**: เช่น ใน `/orders/:orderId/items/:itemId` หากเราสั่ง `where: { id: itemId }` โดยไม่เช็คว่า `item.orderId === orderId` และ `order.userId === currentUser.id` ผู้โจมตีจะสามารถใส่ `orderId` ของตัวเองคู่กับ `itemId` ของคนอื่นเพื่อลบรายการเนื้อของคนอื่นได้ (เรียกว่า **Cross-Aggregate BOLA**)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ถ้าเราเปลี่ยนรหัส Primary Key ของตาราง `orders` จากตัวเลขเรียงลำดับ (`1, 2, 3`) ไปเป็น `UUID v4` แล้ว เรายังจำเป็นต้องเขียนโค้ดเช็ค `order.userId === currentUser.id` อยู่หรือไม่?
+   - **แนวคำตอบ**: **จำเป็นต้องเช็ค 100% ไม่มีข้อยกเว้น!** การใช้ UUID เป็นเพียงการทำ Security through obscurity ที่ช่วยป้องกันการสุ่มเดาตัวเลขเรียงกันเท่านั้น แต่รหัส UUID ของใบสั่งซื้ออาจรั่วไหลได้จากหลายช่องทาง เช่น ประวัติใน Browser History บนเครื่องสาธารณะ, การแชร์ลิงก์หน้าจอ, Log ของระบบภายนอก, หรือผู้ขายเนื้อที่เคยเห็นรหัสออเดอร์ หากไม่มีการตรวจสอบ Ownership ที่ฝั่งเซิร์ฟเวอร์ ผู้ที่รู้ UUID ก็ยังสามารถเข้าถึงและแก้ไขข้อมูลของคนอื่นได้อยู่ดี
+2. **คำถาม**: ในกรณีที่ตรวจพบว่าผู้ใช้ A พยายามเรียกดูใบสั่งซื้อของลูกค้า B ด้วย `GET /api/v1/orders/:id` การคืนค่า `404 Not Found` กับ `403 Forbidden` มีข้อดีข้อเสียต่างกันอย่างไรในมุมมองด้านความปลอดภัย?
+   - **แนวคำตอบ**:
+     - การคืน `403 Forbidden` สื่อความหมายชัดเจนตามมาตรฐาน HTTP ว่ามี Resource นี้อยู่แต่คุณไม่มีสิทธิ์ แต่ในบางระบบที่ต้องการความลับสูง การคืน `403` อาจทำให้ผู้โจมตีรู้ว่ารหัส ID ที่สุ่มมานั้นมีอยู่จริงในฐานข้อมูล (Resource Existence Disclosure)
+     - การใช้ `findFirst({ where: { id: orderId, userId: currentUser.id } })` แล้วคืน `404 Not Found` ทันทีเมื่อไม่พบ มีข้อดีคือผู้โจมตีไม่สามารถแยกแยะได้เลยว่ารหัส ID นั้นไม่มีอยู่จริง หรือเป็นของคนอื่นกันแน่ และยังเขียนโค้ดได้กระชับจบในคิวรีเดียว
+
+---

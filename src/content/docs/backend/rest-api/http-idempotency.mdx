@@ -1,0 +1,218 @@
+---
+title: HTTP Idempotency
+category: BACKEND
+parentTitle: REST API Design
+version: RESTful API Standards
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในสถาปัตยกรรม REST (Representational State Transfer) เราใช้ **HTTP Methods (Verbs)** เป็นตัวกำหนด "เจตนาของการกระทำ" ต่อข้อมูล (Resource) แทนการเขียนชื่อกริยาไว้ใน URL โดยคุณลักษณะสำคัญที่วิศวกร Backend ต้องเข้าใจอย่างถ่องแท้คือ **Safety (ความปลอดภัยต่อสถานะ)** และ **Idempotency (การทำซ้ำแล้วผลลัพธ์ทางสถานะของระบบเหมือนเดิม)**
+
+| HTTP Method | หน้าที่หลักใน Smart Butcher | Safe? | Idempotent? | รองรับ Request Body? |
+| :--- | :--- | :---: | :---: | :---: |
+| **GET** | ดึงข้อมูลรายการเนื้อพรีเมียม (`Product`), หมวดหมู่ (`Category`), หรือรายละเอียดคำสั่งซื้อ (`Order`) | ✅ ใช่ | ✅ ใช่ | ❌ ไม่ควรมี |
+| **POST** | สร้างคำสั่งซื้อเนื้อใหม่ (`Order`) หรือสร้างรายการชำระเงิน (`Payment`) | ❌ ไม่ | ❌ ไม่ (โดยปกติ) | ✅ มี |
+| **PUT** | แทนที่ข้อมูลสินค้า (`Product`) หรือที่อยู่จัดส่งทั้งหมดของ `User` ด้วยข้อมูลก้อนใหม่ทั้งก้อน | ❌ ไม่ | ✅ ใช่ | ✅ มี |
+| **PATCH** | แก้ไขข้อมูลบางฟิลด์ เช่น ปรับราคาเนื้อวากิว หรือเปลี่ยนสถานะ `Order` | ❌ ไม่ | ⚠️ ขึ้นกับการออกแบบ | ✅ มี |
+| **DELETE** | ลบสินค้าออกจากระบบ หรือยกเลิกรายการในตะกร้า (`OrderItem`) | ❌ ไม่ | ✅ ใช่ | ❌ ไม่นิยมใช้ |
+
+<Callout type="note" title="Idempotency คือหัวใจของระบบการเงินและสต็อกสินค้า">
+คำว่า Idempotent หมายความว่า ไม่ว่าไคลเอนต์จะส่งคำขอเดิมซ้ำกี่ครั้ง (เช่น ลูกค้ากดปุ่มจ่ายเงินซ้ำเพราะเน็ตมือถือค้าง หรือระบบ Retry อัตโนมัติทำงาน) ผลลัพธ์ที่เกิดขึ้นกับสถานะในฐานข้อมูลจะต้องเหมือนกับการส่งคำขอเพียงครั้งเดียวเสมอ
+</Callout>
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ตามมาตรฐาน **RFC 9110**:
+1. **GET, HEAD, OPTIONS** เป็นทั้ง *Safe* และ *Idempotent* เพราะเป็นเพียงการอ่านข้อมูล ไม่เปลี่ยนแปลงสถานะของเซิร์ฟเวอร์
+2. **PUT** เป็น *Idempotent* เสมอ เพราะเป็นการนำ Payload ไปทับสถานะเดิมที่ตำแหน่ง URI นั้นตรงๆ เช่น การสั่งตั้งค่าราคาเนื้อ `ribeye-a5` ให้เป็น `4500` บาท ไม่ว่าจะส่งซ้ำ 10 ครั้ง ราคาก็ยังเป็น `4500` บาท
+3. **DELETE** เป็น *Idempotent* ในแง่ของสถานะระบบ แม้การเรียกครั้งแรกจะคืนค่า `200 OK` หรือ `204 No Content` และครั้งถัดไปอาจคืนค่า `404 Not Found` แต่ผลลัพธ์ปลายทางในฐานข้อมูลคือ Resource นั้นถูกลบหายไปเหมือนกัน
+4. **POST** ไม่เป็น *Idempotent* โดยธรรมชาติ การยิง `POST /api/v1/orders` ซ้ำ 2 ครั้ง จะสร้างใบสั่งซื้อ 2 ใบ และตัดสต็อกเนื้อวากิว 2 รอบ ดังนั้นในระบบ Production เราจึงต้องสร้างกลไก **Idempotency Key** ผ่าน HTTP Header `Idempotency-Key` เพื่อแปลงให้ POST ในเส้นทางสำคัญ (เช่น การสร้าง `Order` และ `Payment`) มีคุณสมบัติ Idempotent
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การใช้ HTTP Methods อย่างถูกต้องใน ProductsController (พื้นฐาน)
+```typescript filename="src/modules/products/products.controller.ts"
+import {
+  Controller,
+  Get,
+  Post,
+  Put,
+  Patch,
+  Delete,
+  Param,
+  Body,
+  HttpCode,
+  HttpStatus,
+  ParseUUIDPipe,
+} from '@nestjs/common';
+import { ProductsService } from './products.service';
+import {
+  CreateProductDto,
+  ReplaceProductDto,
+  UpdateProductStockDto,
+} from './dto/product.dto';
+
+@Controller('products')
+export class ProductsController {
+  constructor(private readonly productsService: ProductsService) {}
+
+  // GET: Safe & Idempotent - ดึงข้อมูลเนื้อพรีเมียมตาม ID
+  @Get(':id')
+  async findOne(@Param('id', ParseUUIDPipe) id: string) {
+    return this.productsService.findById(id);
+  }
+
+  // POST: Non-Idempotent - เพิ่มรายการเนื้อตัดแต่งชิ้นใหม่เข้าระบบ
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  async create(@Body() createDto: CreateProductDto) {
+    return this.productsService.create(createDto);
+  }
+
+  // PUT: Idempotent - แทนที่ข้อมูลสินค้าชิ้นนั้นทั้งหมดด้วยข้อมูลชุดใหม่
+  @Put(':id')
+  async replace(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() replaceDto: ReplaceProductDto,
+  ) {
+    return this.productsService.replace(id, replaceDto);
+  }
+
+  // PATCH: อัปเดตเฉพาะจำนวนสต็อกหรือราคาแบบเจาะจงฟิลด์
+  @Patch(':id/stock')
+  async updateStock(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() updateStockDto: UpdateProductStockDto,
+  ) {
+    return this.productsService.setExactStock(id, updateStockDto.stockQuantity);
+  }
+
+  // DELETE: Idempotent - ลบรายการสินค้าออกจากแคตตาล็อก
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async remove(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
+    await this.productsService.deleteIfExists(id);
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การสร้าง Idempotency Interceptor สำหรับ POST /payments (ขั้นสูง)
+```typescript filename="src/common/interceptors/idempotency.interceptor.ts"
+import {
+  Injectable,
+  NestInterceptor,
+  ExecutionContext,
+  CallHandler,
+  BadRequestException,
+  ConflictException,
+} from '@nestjs/common';
+import { Observable, of } from 'rxjs';
+import { tap } from 'rxjs/operators';
+import { Request, Response } from 'express';
+
+interface CachedIdempotentRecord {
+  status: 'PROCESSING' | 'COMPLETED';
+  statusCode?: number;
+  responseBody?: unknown;
+  createdAt: number;
+}
+
+@Injectable()
+export class IdempotencyInterceptor implements NestInterceptor {
+  // ใน Production จริง แนะนำให้ใช้ Redis พร้อมตั้งค่า TTL 24 ชั่วโมง
+  private readonly store = new Map<string, CachedIdempotentRecord>();
+
+  intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
+    const httpContext = context.switchToHttp();
+    const req = httpContext.getRequest<Request>();
+    const res = httpContext.getResponse<Response>();
+
+    // บังคับใช้เฉพาะ POST หรือ PATCH ที่ต้องการป้องกันการส่งซ้ำ
+    if (req.method !== 'POST') {
+      return next.handle();
+    }
+
+    const idempotencyKey = req.headers['idempotency-key'];
+    if (!idempotencyKey || typeof idempotencyKey !== 'string') {
+      throw new BadRequestException({
+        code: 'MISSING_IDEMPOTENCY_KEY',
+        message: 'กรุณาระบุ Header "Idempotency-Key" (UUID v4) สำหรับการสั่งซื้อและชำระเงิน',
+      });
+    }
+
+    const userId = (req as Request & { user?: { id: string } }).user?.id ?? 'anonymous';
+    const compositeKey = `idemp:${userId}:${req.originalUrl}:${idempotencyKey}`;
+    const existingRecord = this.store.get(compositeKey);
+
+    if (existingRecord) {
+      if (existingRecord.status === 'PROCESSING') {
+        throw new ConflictException({
+          code: 'CONCURRENT_IDEMPOTENT_REQUEST',
+          message: 'คำสั่งซื้อเนื้อพรีเมียมรายการนี้กำลังอยู่ในระหว่างการประมวลผล กรุณารอสักครู่',
+        });
+      }
+
+      // คืนค่าผลลัพธ์เดิมทันทีโดยไม่รัน Business Logic หรือตัดบัตรเครดิตซ้ำ
+      res.status(existingRecord.statusCode ?? 200);
+      res.setHeader('X-Idempotent-Replayed', 'true');
+      return of(existingRecord.responseBody);
+    }
+
+    // ล็อกสถานะเป็น PROCESSING ก่อนเข้าสู่ Controller
+    this.store.set(compositeKey, {
+      status: 'PROCESSING',
+      createdAt: Date.now(),
+    });
+
+    return next.handle().pipe(
+      tap({
+        next: (responseBody: unknown) => {
+          this.store.set(compositeKey, {
+            status: 'COMPLETED',
+            statusCode: res.statusCode,
+            responseBody,
+            createdAt: Date.now(),
+          });
+        },
+        error: () => {
+          // หากเกิด Error ให้ลบ Lock เพื่อให้ไคลเอนต์สามารถ Retry ด้วย Key เดิมได้
+          this.store.delete(compositeKey);
+        },
+      }),
+    );
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/orders/anti-pattern-vs-best.ts"
+// ❌ ผิด (Anti-pattern): ใช้ GET เพื่อเปลี่ยนแปลงข้อมูลในฐานข้อมูล หรือใช้ PATCH แบบบวกเพิ่มโดยไม่มี Idempotency Key
+// ปัญหา: Browser Prefetch หรือ Web Crawler อาจเรียก URL นี้เอง ทำให้คำสั่งซื้อถูกยกเลิกโดยไม่ตั้งใจ
+// GET /api/v1/orders/ord-999/cancel
+
+// และการใช้ PATCH แบบ Relative Increment โดยไม่มี Idempotency Key:
+// PATCH /api/v1/products/wagyu-a5/stock -> { "adjustBy": -2 }
+// หาก Network Timeout แล้ว Client Retry ซ้ำ สต็อกเนื้อจะถูกตัดเบิ้ลเป็น -4 ชิ้นทันที!
+
+// ✅ ถูก (Best Practice): ใช้ HTTP Method ให้ตรงกับความหมาย และออกแบบ Payload ให้เป็น Absolute State หรือมี Idempotency Key
+// 1. การยกเลิกคำสั่งซื้อ ต้องใช้ POST (Sub-resource Action) หรือ PATCH เปลี่ยนสถานะ
+// PATCH /api/v1/orders/ord-999 -> { "status": "CANCELLED", "cancelReason": "Customer changed cut thickness" }
+
+// 2. การชำระเงิน ต้องแนบ Header Idempotency-Key เสมอ
+export interface CreatePaymentHeaders {
+  'idempotency-key': string; // เช่น "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Idempotency Key เมื่อ**: เป็น Endpoint ประเภท `POST` หรือ `PATCH` ที่เกี่ยวข้องกับการตัดเงิน (`Payment`), การตัดสต็อกเนื้อวากิวที่มีจำกัด (`Order` / `OrderItem`), หรือการส่งอีเมล/SMS แจ้งเตือนสำคัญ
+- **ไม่ควรใช้ Idempotency Key เมื่อ**: เป็นคำขอประเภท `GET`, `PUT`, `DELETE` ที่มีธรรมชาติเป็น Idempotent อยู่แล้ว หรือเป็นระบบบันทึก Log ทั่วไปที่ไม่ส่งผลกระทบต่อความถูกต้องของข้อมูลทางธุรกิจ
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไม `PUT` ถึงเป็น Idempotent เสมอ แต่ `PATCH` อาจไม่เป็น Idempotent?
+   - **แนวคำตอบ**: เพราะ `PUT` คือการนำสถานะใหม่ทั้งก้อนไปทับสถานะเดิมของ Resource (เช่น ตั้งค่า `weightGrams: 500`) ไม่ว่าจะเรียกซ้ำกี่ครั้ง ค่าในฐานข้อมูลก็จะเป็น `500` เสมอ ในขณะที่ `PATCH` เป็นการระบุวิธีแก้ไขบางส่วน ซึ่งหากออกแบบให้รับค่าแบบสัมพัทธ์ (เช่น `{ "incrementPriceBy": 100 }`) การเรียกซ้ำแต่ละครั้งจะทำให้ราคาเนื้อเพิ่มขึ้นเรื่อยๆ จึงไม่เป็น Idempotent ยกเว้นจะออกแบบ `PATCH` ให้รับค่าสัมบูรณ์ (เช่น `{ "pricePerKg": 4500 }`)
+2. **คำถาม**: ถ้าลูกค้ากดสั่งซื้อเนื้อ Dry-Aged ราคาแพงแล้วอินเทอร์เน็ตหลุดก่อนได้รับ Response จนลูกค้ากดซ้ำอีกครั้ง ระบบ Backend จะป้องกันการตัดเงินซ้ำได้อย่างไร?
+   - **แนวคำตอบ**: ให้ฝั่ง Frontend สร้าง UUID v4 ขึ้นมาทันทีที่เปิดหน้า Checkout แล้วส่งมาใน HTTP Header `Idempotency-Key` เมื่อ Backend ได้รับคำขอ จะทำการ Atomic Lock ใน Redis ด้วย Key นั้น หากคำขอแรกประมวลผลเสร็จแล้วแต่เน็ตลูกค้าหลุด เมื่อคำขอที่สองส่งมาด้วย `Idempotency-Key` เดิม ระบบจะดึงผลลัพธ์ของคำขอแรกจาก Cache ส่งกลับไปทันทีโดยไม่รันโค้ดตัดเงินซ้ำ
+
+---

@@ -1,0 +1,235 @@
+---
+title: Model Relations
+category: BACKEND
+parentTitle: Prisma ORM
+version: Prisma 6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในระบบอีคอมเมิร์ซที่มีความซับซ้อน ข้อมูลแต่ละส่วนมีความเชื่อมโยงกันอย่างเป็นระบบ ใน Prisma ORM เราสามารถนิยามความสัมพันธ์ทั้ง 3 รูปแบบหลักได้อย่างชัดเจน:
+1. **One-to-One (1-1)**: เช่น หนึ่งคำสั่งซื้อ (`Order`) มีข้อมูลการชำระเงินหลัก (`Payment`) เพียงหนึ่งรายการ (ต้องมี `@unique` ที่คอลัมน์ Foreign Key เสมอ)
+2. **One-to-Many (1-N)**: เช่น ลูกค้าหนึ่งคน (`User`) สั่งซื้อได้หลายใบสั่งซื้อ (`Order`), หรือหนึ่งหมวดหมู่ (`Category`) มีสินค้าเนื้อ (`Product`) ได้หลายชิ้น
+3. **Many-to-Many (M-N) แบบ Explicit Relation Table**: เช่น ความสัมพันธ์ระหว่างใบสั่งซื้อ (`Order`) กับสินค้า (`Product`) ที่เชื่อมผ่านตารางกลางคือ **`OrderItem`** เนื่องจากต้องเก็บข้อมูลเพิ่มเติมในรายการสั่งซื้อ เช่น น้ำหนักที่สั่งตัด (`weightGrams`), ความหนาของการสไลซ์ (`cutStyle`), และราคาต่อหน่วย ณ วันที่ซื้อ (`unitPriceSnapshotThb`)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ในไฟล์ `schema.prisma` ฟิลด์ที่เป็นชื่อโมเดลความสัมพันธ์ (เช่น `order Order @relation(...)` หรือ `items OrderItem[]`) เรียกว่า **Relation Fields** ซึ่งไม่มีอยู่จริงเป็นคอลัมน์ในฐานข้อมูล PostgreSQL แต่มีไว้เพื่อให้ Prisma Client ใช้สร้างคำสั่ง `JOIN` หรือ Subquery อัตโนมัติ ส่วนคอลัมน์ที่เก็บค่ากุญแจเชื่อมตารางจริงๆ ในฐานข้อมูลเรียกว่า **Foreign Key Scalar Field** (เช่น `orderId String @db.Uuid`)
+
+นอกจากนี้ การกำหนด **Referential Actions (`onDelete`, `onUpdate`)** มีความสำคัญอย่างยิ่งต่อความถูกต้องของข้อมูลทางบัญชี:
+- **`Restrict` (หรือ `NoAction`)**: ห้ามลบข้อมูลแม่หากยังมีข้อมูลลูกอ้างอิงอยู่ (เช่น ห้ามลบ `Product` หรือ `User` หากมีประวัติ `OrderItem` และ `Order` ผูกอยู่ เพื่อรักษาหลักฐานทางภาษี)
+- **`Cascade`**: เมื่อลบข้อมูลแม่ ให้ลบข้อมูลลูกตามไปด้วยอัตโนมัติ (เช่น เมื่อลบ `Order` ร่างที่ยังไม่จ่ายเงิน ให้ลบ `OrderItem` ย่อยในใบสั่งซื้อนั้นทิ้งด้วย)
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การออกแบบความสัมพันธ์ครบวงจรสำหรับ Order, OrderItem และ Payment (พื้นฐาน)
+```prisma filename="prisma/schema.prisma"
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  PREPARING_CUT
+  SHIPPED
+  DELIVERED
+  CANCELLED
+
+  @@map("order_status")
+}
+
+enum PaymentMethod {
+  PROMPTPAY_QR
+  CREDIT_CARD
+  BANK_TRANSFER
+
+  @@map("payment_method")
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+
+  @@map("payment_status")
+}
+
+// ความสัมพันธ์ 1-N กับ User, 1-N กับ OrderItem และ 1-1 กับ Payment
+model Order {
+  id                  String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderNumber         String      @unique @map("order_number") @db.VarChar(40)
+  userId              String      @map("user_id") @db.Uuid
+  status              OrderStatus @default(PENDING_PAYMENT)
+  subtotalThb         Decimal     @map("subtotal_thb") @db.Decimal(12, 2)
+  coldShippingFeeThb  Decimal     @map("cold_shipping_fee_thb") @db.Decimal(12, 2)
+  grandTotalThb       Decimal     @map("grand_total_thb") @db.Decimal(12, 2)
+  shippingAddressJson Json        @map("shipping_address_json") @db.JsonB
+  createdAt           DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  // 1-N: User หนึ่งคนมีได้หลาย Order (ห้ามลบ User ถ้ายังมี Order ในระบบ)
+  user                User        @relation(fields: [userId], references: [id], onDelete: Restrict)
+  // 1-N: Order หนึ่งใบมีได้หลาย OrderItem
+  items               OrderItem[]
+  // 1-1: Order หนึ่งใบผูกกับ Payment หนึ่งรายการ
+  payment             Payment?
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status])
+  @@map("orders")
+}
+
+// Explicit Many-to-Many (M-N) Join Table ระหว่าง Order และ Product
+model OrderItem {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId              String   @map("order_id") @db.Uuid
+  productId            String   @map("product_id") @db.Uuid
+  cutStyle             String   @map("cut_style") @db.VarChar(50) // เช่น "STEAK_25MM", "SHABU_2MM"
+  weightGrams          Int      @map("weight_grams")
+  // ต้อง Snapshot ราคาเนื้อ ณ วินาทีที่สั่งซื้อไว้เสมอ ป้องกันราคาเปลี่ยนในอนาคตแล้วบิลเก่าเพี้ยน!
+  unitPricePerKgThb    Decimal  @map("unit_price_per_kg_thb") @db.Decimal(12, 2)
+  lineTotalThb         Decimal  @map("line_total_thb") @db.Decimal(12, 2)
+
+  // ถ้าลบ Order ให้ลบ OrderItem ตาม (Cascade) แต่ห้ามลบ Product ถ้าเคยถูกสั่งซื้อแล้ว (Restrict)
+  order                Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product              Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@unique([orderId, productId, cutStyle])
+  @@index([orderId])
+  @@index([productId])
+  @@map("order_items")
+}
+
+// One-to-One (1-1) กับ Order
+model Payment {
+  id                 String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // @unique บน orderId คือหัวใจที่บังคับให้ความสัมพันธ์นี้เป็น 1-1 ในระดับ Database Constraint
+  orderId            String        @unique @map("order_id") @db.Uuid
+  idempotencyKey     String        @unique @map("idempotency_key") @db.VarChar(100)
+  method             PaymentMethod
+  status             PaymentStatus @default(PENDING)
+  amountThb          Decimal       @map("amount_thb") @db.Decimal(12, 2)
+  gatewayReferenceId String?       @map("gateway_reference_id") @db.VarChar(120)
+  paidAt             DateTime?     @map("paid_at") @db.Timestamptz(3)
+  createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  order              Order         @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  @@index([status])
+  @@map("payments")
+}
+```
+
+### ตัวอย่างที่ 2: การทำ Nested Writes สร้าง Order พร้อม OrderItem และ Payment ในคำสั่งเดียว (ขั้นสูง)
+```typescript filename="src/modules/orders/orders-relation.service.ts"
+import { Injectable } from '@nestjs/common';
+import { Prisma, OrderStatus, PaymentMethod } from '@prisma/client';
+import { PrismaService } from '../../database/prisma.service';
+
+export interface CreateMeatOrderInput {
+  userId: string;
+  idempotencyKey: string;
+  paymentMethod: PaymentMethod;
+  shippingAddress: {
+    recipientName: string;
+    phone: string;
+    fullAddress: string;
+    postalCode: string;
+  };
+  items: Array<{
+    productId: string;
+    cutStyle: string;
+    weightGrams: number;
+    unitPricePerKgThb: number;
+  }>;
+}
+
+@Injectable()
+export class OrdersRelationService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  // Nested Write ของ Prisma จะถูกรันภายใต้ Database Transaction เดียวกันโดยอัตโนมัติ
+  async createOrderWithItemsAndPayment(input: CreateMeatOrderInput) {
+    const calculatedItems = input.items.map((item) => {
+      const lineTotal = (item.weightGrams / 1000) * item.unitPricePerKgThb;
+      return {
+        productId: item.productId,
+        cutStyle: item.cutStyle,
+        weightGrams: item.weightGrams,
+        unitPricePerKgThb: new Prisma.Decimal(item.unitPricePerKgThb.toFixed(2)),
+        lineTotalThb: new Prisma.Decimal(lineTotal.toFixed(2)),
+      };
+    });
+
+    const subtotalNumber = input.items.reduce(
+      (sum, item) => sum + (item.weightGrams / 1000) * item.unitPricePerKgThb,
+      0,
+    );
+    const coldShippingFeeNumber = subtotalNumber >= 3000 ? 0 : 150;
+    const grandTotalNumber = subtotalNumber + coldShippingFeeNumber;
+
+    const orderNumber = `SB-${Date.now()}`;
+
+    return this.prisma.order.create({
+      data: {
+        orderNumber,
+        userId: input.userId,
+        status: OrderStatus.PENDING_PAYMENT,
+        subtotalThb: new Prisma.Decimal(subtotalNumber.toFixed(2)),
+        coldShippingFeeThb: new Prisma.Decimal(coldShippingFeeNumber.toFixed(2)),
+        grandTotalThb: new Prisma.Decimal(grandTotalNumber.toFixed(2)),
+        shippingAddressJson: input.shippingAddress,
+        // สร้างข้อมูลในตาราง order_items (1-N) พร้อมกันทันที
+        items: {
+          create: calculatedItems,
+        },
+        // สร้างข้อมูลในตาราง payments (1-1) พร้อมกันทันที
+        payment: {
+          create: {
+            idempotencyKey: input.idempotencyKey,
+            method: input.paymentMethod,
+            amountThb: new Prisma.Decimal(grandTotalNumber.toFixed(2)),
+          },
+        },
+      },
+      include: {
+        items: {
+          include: {
+            product: {
+              select: { id: true, sku: true, name: true, grade: true },
+            },
+          },
+        },
+        payment: true,
+      },
+    });
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```prisma filename="prisma/relations-comparison.prisma"
+// ❌ ผิด (Anti-pattern): ใช้ Implicit M-N กับ Order และ Product และตั้งค่า onDelete: Cascade บนตารางบัญชี
+model BadOrder {
+  id       String       @id
+  userId   String
+  // ถ้าลบ User ข้อมูลประวัติการสั่งซื้อและภาษีทั้งหมดจะถูกลบหายไปจากฐานข้อมูลทันที!
+  user     User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // เก็บจำนวนน้ำหนักเนื้อที่สั่งและราคา ณ วันที่ซื้อไม่ได้เลย
+  products BadProduct[]
+}
+
+// ✅ ถูก (Best Practice): ใช้ Explicit Join Table (OrderItem) เก็บ Snapshot ราคา และใช้ onDelete: Restrict กับข้อมูลทางการเงิน
+// ดูโครงสร้างที่ถูกต้องใน model Order และ model OrderItem ด้านบน
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Explicit Many-to-Many (สร้างโมเดลตารางกลางเอง เช่น `OrderItem`) เมื่อ**: ความสัมพันธ์นั้นต้องเก็บข้อมูลประกอบเพิ่มเติม (เช่น จำนวนชิ้น, น้ำหนักกรัม, ราคา Snapshot, เวลาที่เพิ่มเข้าตะกร้า) ซึ่งในระบบ Production จริงเกือบ 95% ของความสัมพันธ์ M-N จะต้องใช้แบบ Explicit
+- **ไม่ควรใช้ `onDelete: Cascade` กับตารางหลักทางธุรกิจ**: เช่น `User`, `Product`, `Order`, `Payment` ควรใช้ `onDelete: Restrict` คู่กับการทำ Soft Delete (`isActive: false` หรือ `deletedAt`) เพื่อป้องกันข้อมูลทางการเงินสูญหาย
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมในตาราง `OrderItem` เราจึงต้องมีคอลัมน์ `unitPricePerKgThb` เก็บซ้ำอีกครั้ง ทั้งๆ ที่ในตาราง `Product` ก็มีคอลัมน์ `pricePerKgThb` อยู่แล้ว?
+   - **แนวคำตอบ**: นี่คือหลักการ **Historical Data Snapshot** ในการออกแบบฐานข้อมูลอีคอมเมิร์ซ ราคาในตาราง `Product` คือ "ราคาขายปัจจุบันในแคตตาล็อก" ซึ่งอาจปรับขึ้นหรือลงตามต้นทุนการนำเข้าเนื้อวากิวในแต่ละสัปดาห์ หากเราไม่บันทึก Snapshot ราคา ณ วินาทีที่ลูกค้าสั่งซื้อไว้ใน `OrderItem` เมื่อสัปดาห์หน้าร้านค้าปรับราคาเนื้อขึ้น ใบเสร็จและยอดรวมของคำสั่งซื้อในอดีตทั้งหมดจะเปลี่ยนตามไปด้วย ซึ่งผิดกฎหมายภาษีและมาตรฐานบัญชีอย่างร้ายแรง
+2. **คำถาม**: ความแตกต่างระหว่าง Implicit Many-to-Many กับ Explicit Many-to-Many ใน Prisma คืออะไร?
+   - **แนวคำตอบ**: Implicit M-N คือการให้ Prisma สร้างตารางเชื่อมเบื้องหลังให้เอง (เช่น `_OrderToProduct`) โดยเราไม่ต้องประกาศโมเดลตารางกลางใน `schema.prisma` เหมาะกับความสัมพันธ์ง่ายๆ ที่ไม่มีฟิลด์อื่นเลย เช่น บทความกับป้ายกำกับ (`Post` <-> `Tag`) ส่วน Explicit M-N คือการที่เราประกาศโมเดลตารางกลางอย่างชัดเจน (เช่น `OrderItem`) ทำให้เราสามารถเพิ่มคอลัมน์ (`weightGrams`, `cutStyle`, `createdAt`), กำหนด Composite Index และคิวรีตารางกลางโดยตรงผ่าน `prisma.orderItem.*` ได้
+
+---

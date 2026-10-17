@@ -1,0 +1,207 @@
+---
+title: Process MVCC
+category: DATABASE
+parentTitle: PostgreSQL 16
+version: PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ลองจินตนาการถึงโรงงานตัดแต่งเนื้อสเต๊กพรีเมียม **Smart Butcher Central Processing Plant**:
+- **Client-Server Model:** ผู้จัดการร้านสาขา (Client / Backend Node.js) ส่งคำสั่งขอเบิกเนื้อเข้ามายังสำนักงานใหญ่
+- **Postmaster (ผู้จัดการใหญ่):** นั่งเฝ้าประตู (Port 5432) เมื่อมีสายโทรเข้ามาขอเชื่อมต่อ จะไม่ลงมือสับเนื้อเอง แต่จะ "เรียกลูกน้องประจำตัวคนใหม่" (Fork a dedicated Backend Process) มารับสายลูกค้ารายนั้นเป็นการเฉพาะ
+- **Crash Isolation:** หากลูกน้องคนหนึ่งเกิดอุบัติเหตุทำมีดหล่น (Backend Process แครช) คนอื่นๆ ยังคงแล่เนื้อต่อไปได้โดยไม่ทำให้โรงงานต้องปิดตัวลง
+- **MVCC (Multi-Version Concurrency Control):** ในขณะที่ช่างแล่เนื้อกำลังแต่งก้อนเนื้อสันนอกชิ้นใหม่ (Writer กำลัง UPDATE ข้อมูล) ลูกค้าที่เดินเข้ามาส่องตู้กระจก (Reader) จะมองเห็นก้อนเนื้อเวอร์ชันเดิมที่ตัดเสร็จเรียบร้อยแล้วทันที โดยไม่ต้องยืนรอให้ช่างแล่เนื้อเสร็จ และในขณะเดียวกันช่างก็ไม่ต้องหยุดรอให้ลูกค้ามองเสร็จ นี่คือเหตุผลที่ **Reader ไม่บล็อก Writer และ Writer ไม่บล็อก Reader**
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+```text filename="docs/database/postgresql.txt"
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       POSTGRESQL INSTANCE ARCHITECTURE                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  [ Client: NestJS App ] ───( TCP Connection )───┐                          │
+│                                                 ▼                           │
+│                                        ┌─────────────────┐                  │
+│                                        │    Postmaster   │                  │
+│                                        │ (Master Process)│                  │
+│                                        └────────┬────────┘                  │
+│                                                 │ fork()                    │
+│                        ┌────────────────────────┴───────────────────────┐   │
+│                        ▼                                                ▼   │
+│             ┌──────────────────────┐                         ┌──────────────────────┐
+│             │    Backend Process   │                         │    Backend Process   │
+│             │  (Connection #1)     │                         │  (Connection #2)     │
+│             │ ┌──────────────────┐ │                         │ ┌──────────────────┐ │
+│             │ │ work_mem         │ │                         │ │ work_mem         │ │
+│             │ │ maintenance_w_mem│ │                         │ │ maintenance_w_mem│ │
+│             │ └──────────────────┘ │                         │ └──────────────────┘ │
+│             └──────────┬───────────┘                         └──────────┬───────────┘
+│                        │                                                │   │
+│ ═══════════════════════╪════════════════════════════════════════════════╪═══│
+│   SHARED MEMORY        │                                                │   │
+│   ┌────────────────────┴────────────────────────────────────────────────┴─┐ │
+│   │                         shared_buffers                                │ │
+│   │        (Data Pages Cache: 8KB per Page, LRU Clock Sweep)              │ │
+│   ├───────────────────────────────────────────────────────────────────────┤ │
+│   │                         WAL Buffers (Write-Ahead Log)                 │ │
+│   ├───────────────────────────────────────────────────────────────────────┤ │
+│   │                         Lock Management & Shared Catalog Cache        │ │
+│   └──────┬─────────────────────┬──────────────────────┬───────────────────┘ │
+│          │                     │                      │                     │
+│ ═════════╪═════════════════════╪══════════════════════╪═════════════════════│
+│   AUXILIARY BACKGROUND PROCESSES                      │                     │
+│   ┌──────▼──────┐       ┌──────▼──────┐        ┌──────▼──────┐              │
+│   │ WAL Writer  │       │ Checkpointer│        │ Autovacuum  │              │
+│   │             │       │             │        │   Daemon    │              │
+│   └──────┬──────┘       └──────┬──────┘        └──────┬──────┘              │
+│          │ fsync()             │ flush dirty          │ clean dead          │
+│          ▼                     ▼ pages                ▼ tuples              │
+│   ┌─────────────┐       ┌─────────────┐        ┌─────────────┐              │
+│   │  WAL Files  │       │  Data Files │        │ Cumulative  │              │
+│   │  (pg_wal)   │       │ (base/oid)  │        │ Stats (RAM) │              │
+│   └─────────────┘       └─────────────┘        └─────────────┘              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 1. สถาปัตยกรรมหน่วยความจำ (Memory Architecture)
+- **Shared Memory:**
+  - `shared_buffers`: หน่วยความจำหลักที่ใช้พัก Data Pages ขนาด 8KB จากดิสก์ ค่ามาตรฐานใน Production มักตั้งอยู่ที่ 25% ของ RAM ทั้งหมดของเครื่อง
+  - `wal_buffers`: พักข้อมูล Transaction Log ก่อนจะสั่ง `fsync()` ลงใน `pg_wal`
+  - Lock Space: จัดการล็อกในระดับ Table, Row, Page
+- **Process Private Memory (Local Memory ต่อ 1 Backend):**
+  - `work_mem`: หน่วยความจำสำหรับการเรียงลำดับ (`ORDER BY`), สร้างตาราง Hash (`DISTINCT`, Hash Join), หากข้อมูลเกินขนาดนี้ Postgres จะ spill ข้อมูลลง Disk (Temp Files) ซึ่งทำให้ระบบช้าลงมาก
+  - `maintenance_work_mem`: หน่วยความจำสำหรับคำสั่งบำรุงรักษา เช่น `VACUUM`, `CREATE INDEX`, `ALTER TABLE`
+  - `temp_buffers`: จัดเก็บตารางชั่วคราว (Temporary Tables)
+
+### 2. กลไก Background Processes
+- **WAL Writer:** ทำหน้าที่ Flush ข้อมูลจาก `wal_buffers` ลงดิสก์ เพื่อให้มั่นใจในหลักการ Durability
+- **Checkpointer:** รันตามรอบเวลา (`checkpoint_timeout`) หรือปริมาณ WAL (`max_wal_size`) เพื่อดัน Data Pages ที่ถูกแก้ไข (Dirty Pages) จาก `shared_buffers` ลง Data Files เพื่อลดระยะเวลาในการ Recovery หากเครื่องดับ
+- **Autovacuum Daemon:** มอนิเตอร์จำนวนแถวที่ถูก UPDATE หรือ DELETE และทำการ Reclaim พื้นที่ของ Dead Tuples คืนกลับมา รวมถึงสั่งรัน `ANALYZE` เพื่ออัปเดตสถิติให้ Cost-Based Optimizer ทำงานได้อย่างแม่นยำ
+
+### 3. กลไก MVCC และ Tuple Versioning (xmin / xmax)
+ทุกๆ แถว (Tuple) ใน PostgreSQL จะมีคอลัมน์พิเศษระดับระบบ (System Hidden Columns) แฝงอยู่เสมอ:
+- `xmin`: หมายเลข Transaction ID (XID) ของธุรกรรมที่ทำการ INSERT แถวนี้เข้ามา
+- `xmax`: หมายเลข Transaction ID ของธุรกรรมที่ทำการ DELETE หรือ UPDATE แถวนี้ออกไป (หากแถวยังมีสถานะใช้งานอยู่ `xmax` จะมีค่าเป็น 0)
+- `ctid`: ตำแหน่งทางกายภาพของ Tuple บนดิสก์ ในรูปแบบ `(page_number, tuple_index)`
+
+เมื่อมีการสั่ง `UPDATE products SET stock_qty = 15 WHERE id = 1`:
+1. Postgres จะ **ไม่ลบหรือเขียนทับ** ข้อมูลเดิม
+2. ใส่ค่า Transaction ID ปัจจุบันลงใน `xmax` ของ Tuple เดิม (กลายเป็น Dead Tuple สำหรับ Transaction ในอนาคต)
+3. สั่ง INSERT Tuple ใหม่ลงในพื้นที่ว่าง โดยใส่ค่า Transaction ID ปัจจุบันลงใน `xmin` ของ Tuple ใหม่ และให้ `xmax` เป็น 0
+4. อัปเดต `ctid` ของ Tuple เดิมให้ชี้ไปยังตำแหน่งของ Tuple ใหม่
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: ตรวจสอบ xmin, xmax และ ctid เพื่อพิสูจน์การทำงานของ MVCC
+เราจะมาส่องดูการทำงานระดับ Low-Level ของตาราง `products` เมื่อมีการอัปเดตสต็อกเนื้อริบอายวากิว:
+
+```sql filename="03_mvcc_deep_dive.sql"
+-- 1. สร้างตารางและบันทึกข้อมูลตั้งต้น
+CREATE TABLE products (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    sku TEXT UNIQUE NOT NULL,
+    price_per_kg NUMERIC(10,2) NOT NULL,
+    stock_qty INT NOT NULL,
+    dry_aged_days INT DEFAULT 0
+);
+
+INSERT INTO products (name, sku, price_per_kg, stock_qty, dry_aged_days)
+VALUES ('Japanese Wagyu A5 Ribeye', 'WAGYU-A5-RIB', 4500.00, 20, 0);
+
+-- 2. ส่องดูคอลัมน์ระบบ xmin, xmax, ctid
+SELECT xmin, xmax, ctid, id, name, stock_qty 
+FROM products 
+WHERE sku = 'WAGYU-A5-RIB';
+
+/* ผลลัพธ์ตัวอย่าง:
+  xmin   | xmax | ctid  | id |           name           | stock_qty 
+---------+------+-------+----+--------------------------+-----------
+ 1005234 |    0 | (0,1) |  1 | Japanese Wagyu A5 Ribeye |        20
+*/
+
+-- 3. ทำการ UPDATE สต็อกเนื้อเมื่อมีออเดอร์ตัดเนื้อออกไป 2 กก.
+UPDATE products 
+SET stock_qty = 18 
+WHERE sku = 'WAGYU-A5-RIB';
+
+-- 4. ส่องดู xmin, xmax, ctid อีกครั้ง
+SELECT xmin, xmax, ctid, id, name, stock_qty 
+FROM products 
+WHERE sku = 'WAGYU-A5-RIB';
+
+/* ผลลัพธ์หลัง UPDATE:
+  xmin   | xmax | ctid  | id |           name           | stock_qty 
+---------+------+-------+----+--------------------------+-----------
+ 1005235 |    0 | (0,2) |  1 | Japanese Wagyu A5 Ribeye |        18
+ 
+ สังเกตเห็นได้ชัดเจน:
+ - xmin เปลี่ยนเป็น Transaction ID ใหม่ (1005235)
+ - ctid ขยับจาก Page 0 Item 1 (0,1) กลายเป็น Page 0 Item 2 (0,2)
+ - ข้อมูลเก่าที่ (0,1) ยังคงค้างอยู่ใน Disk File กลายเป็น Dead Tuple รอ Autovacuum มาเก็บกวาด!
+*/
+```
+
+### ตัวอย่างที่ 2: การตรวจสอบสถานะ Dead Tuples และสั่งคำสั่ง VACUUM
+ตรวจสอบว่าตารางในระบบ Smart Butcher มี Dead Tuples สะสมมากเกินไปหรือไม่:
+
+```sql filename="04_vacuum_monitoring.sql"
+-- 1. ตรวจสอบจำนวน Live Tuples และ Dead Tuples ในระบบ
+SELECT 
+    relname AS table_name,
+    n_live_tup AS active_rows,
+    n_dead_tup AS dead_tuples,
+    last_vacuum,
+    last_autovacuum,
+    last_analyze
+FROM pg_stat_user_tables
+WHERE relname IN ('products', 'orders', 'order_items');
+
+-- 2. สั่งรัน VACUUM แบบเจาะจงพร้อมเก็บสถิติ (ANALYZE)
+-- หมายเหตุ: VACUUM ธรรมดาทำงานแบบ Online โดยไม่บล็อกการ SELECT, INSERT, UPDATE
+VACUUM (VERBOSE, ANALYZE) products;
+
+-- 3. กรณีที่ต้องการคืนพื้นที่ระดับ OS Disk (ล็อกตาราง Exclusive Lock - ใช้เฉพาะช่วง Maintenance)
+-- VACUUM FULL products; 
+```
+
+## 4. ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+### ❌ สิ่งที่ผิด: ตั้งค่า `work_mem` ใน `postgresql.conf` สูงเกินไปจนเกิด Out Of Memory (OOM)
+```ini filename="docs/database/postgresql.txt"
+# การตั้งค่าที่ผิดพลาดร้ายแรงในระดับ Global
+# เซิร์ฟเวอร์มี RAM 32GB แต่ตั้ง work_mem = 2GB
+# หากมี 50 Concurrent Queries รันคำสั่ง Sort หรือ Hash Join พร้อมกัน
+# 50 * 2GB = 100GB -> Linux Kernel OOM Killer จะเข้ามายิง Process postgres ดับทันที!
+work_mem = 2GB
+```
+
+### ✅ สิ่งที่ถูก: ตั้ง `work_mem` ระดับ Global ต่ำๆ แล้วเปิดเพิ่มเฉพาะ Session ที่ต้องรัน Report
+```sql filename="sql/postgresql.sql"
+-- ในไฟล์คอนฟิกหลัก postgresql.conf ตั้งค่าพอเหมาะสำหรับเวิร์กโหลดทั่วไป
+-- work_mem = 32MB
+
+-- เมื่อมีคิวรีสรุปยอดขายประจำปีของร้านเนื้อที่ต้อง Sort ข้อมูลหลายล้านแถว:
+BEGIN;
+  -- เพิ่ม work_mem เฉพาะทรานแซกชันหรือเซสชันนี้เท่านั้น ไม่กระทบผู้ใช้อื่น
+  SET LOCAL work_mem = '512MB';
+
+  SELECT product_id, SUM(subtotal)
+  FROM order_items
+  GROUP BY product_id
+  ORDER BY SUM(subtotal) DESC;
+COMMIT;
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **Process Architecture:** เนื่องจาก 1 Connection กินทรัพยากรประมาณ 5-10MB ของ RAM หากระบบมี Backend Instances หลายตัวต่อเข้ามาตรงๆ พร้อมกันเกิน 300-500 Connections ระบบจะเริ่มสูญเสียประสิทธิภาพจากการทำ Context Switching ของ OS
+- **ทางออกที่ถูกต้อง:** **ต้องใช้ Connection Pooler เสมอ** ในงานระดับ Production เช่น **PgBouncer** หรือ **Supavisor** โดยตั้งค่าให้แอปพลิเคชันเชื่อมต่อไปยัง Pooler ในโหมด `Transaction Pooling` เพื่อจำกัด Connection จริงที่เข้าสู่ PostgreSQL ให้ไม่เกิน 50-100 Connections
+
+## 6. คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: อะไรคือสาเหตุของปัญหา Table Bloat ใน PostgreSQL และเหตุใด Long-running Transaction จึงส่งผลร้ายแรงต่อระบบ?**
+  - *แนวคำตอบ:* Table Bloat เกิดจากการสะสมของ Dead Tuples ที่เกิดจากการ UPDATE หรือ DELETE แต่ Autovacuum ไม่สามารถเข้ามา Reclaim พื้นที่คืนได้ สาเหตุที่พบบ่อยและร้ายแรงที่สุดคือการมี **Long-running Transaction** (เช่น มี Batch Job ค้างอยู่นานหลายชั่วโมง) เพราะกลไก MVCC กำหนดว่า Autovacuum ห้ามลบ Dead Tuple ใดๆ ที่ Transaction เก่าตัวนั้นอาจจะต้องมองเห็น ส่งผลให้ Dead Tuples จากคำสั่งอื่นทั่วทั้งตารางไม่สามารถถูกลบออกได้ ขนาดตารางจะบวมขึ้นเรื่อยๆ เปลืองแคช I/O และทำให้ Query ช้าลงอย่างมหาศาล
+- **Q2: ใน PostgreSQL 16 มีการปรับปรุงกลไก Cumulative Statistics อย่างไรที่ช่วยลดภาระ Disk I/O?**
+  - *แนวคำตอบ:* ก่อนหน้า PostgreSQL 15 สถิติการทำงานของระบบ (Activity Stats) จะถูกส่งผ่าน UDP Socket ไปยังกระบวนการ Stats Collector Process ซึ่งจะคอยเขียนไฟล์สถิติลง Disk อย่างต่อเนื่อง แต่ใน PostgreSQL 16 ระบบ Cumulative Statistics ถูกเปลี่ยนมาจัดเก็บไว้ใน **Shared Memory (RAM)** โดยตรง ทำให้ตัดกระบวนการ Stats Collector ทิ้งไปได้อย่างสมบูรณ์ ลดภาระ Disk I/O และลดการทำงานที่ไม่จำเป็นของ CPU ได้อย่างมีนัยสำคัญ
+
+---

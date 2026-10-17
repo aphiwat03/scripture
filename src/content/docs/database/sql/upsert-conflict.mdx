@@ -1,0 +1,162 @@
+---
+title: UPSERT Conflict
+category: DATABASE
+parentTitle: SQL
+version: SQL:2023 & PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เมื่อซัพพลายเออร์ส่งข้อมูลสต็อกเนื้อวัวนำเข้าล็อตใหม่เข้ามาในระบบ **Smart Butcher Marketplace**:
+- หากสินค้ารหัสนั้น (`sku`) ยังไม่เคยมีอยู่ในคลัง $\rightarrow$ ให้ทำการเพิ่มแถวสินค้าใหม่ (**INSERT**)
+- หากมีสินค้ารหัสนั้นอยู่ในคลังอยู่แล้ว $\rightarrow$ ให้ทำการบวกจำนวนสต็อกเพิ่มเข้าไปในของเดิม (**UPDATE**)
+
+ในอดีต หากทำในระดับโค้ด Application โดยการ `SELECT` ก่อนเพื่อดูว่ามีของหรือไม่ ถ้าไม่มีค่อยสั่ง `INSERT` จะเกิดปัญหา **Race Condition** ทันทีเมื่อมี Request ชนกัน แต่ใน PostgreSQL เรามีคำสั่ง **Atomic UPSERT (`INSERT ... ON CONFLICT`)** ที่รับประกันความปลอดภัย 100% ในระดับเครื่องยนต์ฐานข้อมูล
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **กับดัก Check-then-Insert (Race Condition)**:
+   หากคำสั่งทำงานแยกกัน:
+   ```text filename="docs/database/sql.txt"
+   Thread 1: SELECT sku -> ไม่พบสินค้า
+   Thread 2: SELECT sku -> ไม่พบสินค้า
+   Thread 1: INSERT sku -> สำเร็จ
+   Thread 2: INSERT sku -> แครช! เกิดข้อผิดพลาด 23505 (Unique Violation)
+   ```
+2. **การทำงานของ `ON CONFLICT` ในระดับ Engine**:
+   PostgreSQL จะพยายามเขียน Tuple ใหม่ลงไปในตาราง หากพบว่าไปละเมิดเงื่อนไข **Unique Constraint หรือ Exclusion Constraint** ที่ระบุไว้ในวงเล็บ `ON CONFLICT (target)`:
+   - **`DO NOTHING`**: ระบบจะยกเลิกการเขียนแถวนั้นทิ้งไปอย่างเงียบๆ โดยไม่ฟ้อง Error (Idempotent Operation)
+   - **`DO UPDATE SET`**: ระบบจะสลับไปรันคำสั่ง UPDATE บนแถวเดิมที่เกิดข้อขัดแย้งนั้นทันทีภายใต้ **Row-level Exclusive Lock** เดียวกัน
+3. **ตารางเสมือน `EXCLUDED`**:
+   เป็น Pseudo-table พิเศษที่ PostgreSQL สร้างขึ้นมาชั่วคราวในจังหวะประมวลผล เพื่อบรรจุค่าของแถวใหม่ที่กำลังพยายาม INSERT เข้ามา ทำให้เราสามารถนำค่าเดิมในตารางมาคำนวณร่วมกับค่าใหม่ได้ เช่น:
+   ```sql filename="sql/sql.sql"
+   SET stock_qty = products.stock_qty + EXCLUDED.stock_qty
+   ```
+   (นำสต็อกเดิมที่มีอยู่ในตาราง `products` มาบวกกับจำนวนสต็อกใหม่ที่ส่งมาในตาราง `EXCLUDED`)
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การนำเข้าสต็อกเนื้อแบบ Atomic UPSERT บวกสต็อกเดิมอัตโนมัติ
+รับข้อมูลเนื้อล็อตใหม่ หาก SKU ซ้ำให้บวกสต็อกเพิ่มและอัปเดตราคาใหม่ หากไม่ซ้ำให้สร้างใหม่:
+
+```sql filename="sql/sql.sql"
+-- ทำการบันทึกสินค้าใหม่ หรือบวกสต็อกทบเข้าของเดิมอย่างปลอดภัยระดับ Atomic
+INSERT INTO products (
+    category_id,
+    sku,
+    name,
+    price_per_kg,
+    stock_qty,
+    dry_aged_days,
+    is_active
+) VALUES (
+    3,
+    'ANGUS-DA45-TBONE',
+    '45-Day Dry-Aged Black Angus T-Bone',
+    2950.00, -- ราคาปรับใหม่
+    5,        -- สต็อกล็อตใหม่ที่ส่งมาเพิ่ม 5 ชิ้น
+    45,
+    TRUE
+)
+ON CONFLICT (sku) DO UPDATE 
+SET 
+    -- นำสต็อกปัจจุบันบวกกับสต็อกใหม่ที่ส่งเข้ามาผ่าน EXCLUDED table
+    stock_qty = products.stock_qty + EXCLUDED.stock_qty,
+    price_per_kg = EXCLUDED.price_per_kg,
+    is_active = TRUE
+RETURNING 
+    id, 
+    sku, 
+    name, 
+    stock_qty AS total_accumulated_stock, 
+    price_per_kg AS updated_price;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| id | sku | name | total_accumulated_stock | updated_price |
+| :--- | :--- | :--- | :--- | :--- |
+| 2 | ANGUS-DA45-TBONE | 45-Day Dry-Aged Black Angus T-Bone | 11 | 2950.00 |
+
+*(คำอธิบาย: สต็อกเดิมมีอยู่ 6 ชิ้น เมื่อได้รับสต็อกใหม่เพิ่ม 5 ชิ้น ระบบจึงรวมยอดเป็น 11 ชิ้นโดยอัตโนมัติ)*
+
+**โค้ดเทียบเคียงใน Prisma Client:**
+```typescript filename="src/sql.ts"
+// Prisma Client รองรับการทำ upsert ผ่าน Unique field
+const product = await prisma.product.upsert({
+  where: {
+    sku: 'ANGUS-DA45-TBONE',
+  },
+  update: {
+    stockQty: {
+      increment: 5, // บวกสต็อกเพิ่ม
+    },
+    pricePerKg: 2950.00,
+    isActive: true,
+  },
+  create: {
+    categoryId: 3,
+    sku: 'ANGUS-DA45-TBONE',
+    name: '45-Day Dry-Aged Black Angus T-Bone',
+    pricePerKg: 2950.00,
+    stockQty: 5,
+    dryAgedDays: 45,
+    isActive: true,
+  },
+});
+```
+
+### ตัวอย่างที่ 2: Idempotent Event Consumer ด้วย `ON CONFLICT DO NOTHING`
+เมื่อมี Webhook การแจ้งเตือนชำระเงินซ้ำเข้ามาจาก Payment Gateway เพื่อป้องกันไม่ให้เกิดบันทึกการจ่ายเงินซ้ำซ้อน:
+
+```sql filename="sql/sql.sql"
+-- ป้องกันการบันทึกรายการชำระเงินซ้ำด้วย DO NOTHING
+INSERT INTO payments (
+    order_id,
+    amount,
+    method,
+    slip_url,
+    status
+) VALUES (
+    1,
+    13500.00,
+    'CREDIT_CARD',
+    'https://storage.butcher.io/slips/ord-001-dup.png',
+    'PAID'
+)
+-- หากมี order_id ที่ชำระเงินสำเร็จอยู่แล้ว ให้ข้ามคำสั่งไปอย่างปลอดภัย
+ON CONFLICT (order_id) WHERE status = 'PAID' DO NOTHING
+RETURNING id, order_id, status;
+```
+
+## 4. ผิด vs ถูก (Anti-patterns & Best Practices)
+
+### ❌ โค้ดที่ผิด: ทำ Check-then-Insert ในระดับ Application Code
+```typescript filename="src/sql.ts"
+// ผิดมหันต์: เกิด Race Condition ได้ง่ายมากเมื่อมีคำสั่งซื้อหรือ Webhook ยิงเข้ามาพร้อมกัน
+const existing = await db.query('SELECT id FROM products WHERE sku = $1', [sku]);
+if (existing.rows.length === 0) {
+  // จังหวะนี้อาจมี Request อื่นแทรกเข้ามา INSERT ตัดหน้า ทำให้คำสั่งนี้แครชทันที!
+  await db.query('INSERT INTO products (sku, ...) VALUES ($1, ...)', [sku]);
+}
+```
+
+### ✅ โค้ดที่ถูก: มอบหมายให้ฐานข้อมูลจัดการแบบ Atomic ด้วย `ON CONFLICT`
+```sql filename="sql/sql.sql"
+-- ถูกต้อง: ทำงานในระดับ Storage Engine ภายใต้ Lock ปลอดภัยจากปัญหา Concurrency แน่นอน
+INSERT INTO products (sku, stock_qty) 
+VALUES ('WAGYU-A5', 10)
+ON CONFLICT (sku) DO UPDATE 
+SET stock_qty = products.stock_qty + EXCLUDED.stock_qty;
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้:** การประมวลผล Webhook, ระบบตัดสต็อกอัตโนมัติ, การซิงก์ข้อมูลจากระบบภายนอก (Data Ingestion), และการบันทึก Log สถิติที่ต้องการความเป็น Idempotent
+- **ข้อกำหนดที่ต้องระวัง:** คอลัมน์ที่ระบุใน `ON CONFLICT (target)` **จะต้องมี UNIQUE Constraint หรือ UNIQUE Index รองรับอยู่แล้วเท่านั้น** หากไม่มี อินเด็กซ์ คำสั่งจะฟ้อง Error ทันที
+
+## 6. คำถามสัมภาษณ์ (Interview Questions)
+- **Q1: ตารางเสมือน `EXCLUDED` ในคำสั่ง `ON CONFLICT DO UPDATE` คืออะไร และมีบทบาทอย่างไร?**
+  - *คำตอบ:* `EXCLUDED` เป็น Pseudo-table พิเศษที่เกิดขึ้นชั่วคราวในขั้นตอนประมวลผลคำสั่ง UPSERT โดยจะบรรจุค่าของแถวข้อมูลใหม่ที่ถูกส่งเข้ามาในคำสั่ง `VALUES(...)` ที่เกือบจะได้ INSERT แต่เกิดการชนกับข้อมูลเดิมเสียก่อน ประโยชน์คือช่วยให้เราสามารถนำค่าใหม่นี้ไปเปรียบเทียบหรือคำนวณร่วมกับค่าเดิมที่มีอยู่แล้วในตารางจริงได้ เช่น `SET stock_qty = products.stock_qty + EXCLUDED.stock_qty`
+- **Q2: หากคอลัมน์ที่เราใส่ใน `ON CONFLICT (column_name)` ไม่มี UNIQUE Index หรือ Primary Key รองรับ จะเกิดผลลัพธ์อย่างไร?**
+  - *คำตอบ:* PostgreSQL จะปฏิเสธการประมวลผลคำสั่งและฟ้องข้อผิดพลาดทันทีว่า `ERROR: there is no unique or exclusion constraint matching the ON CONFLICT specification` เนื่องจากตัว Engine ต้องอาศัยโครงสร้าง Unique Index ในการตรวจจับความขัดแย้งของ Tuple อย่างรวดเร็วในระดับ Storage Page ก่อนจะตัดสินใจสลับโหมดไปเป็น Update
+
+---

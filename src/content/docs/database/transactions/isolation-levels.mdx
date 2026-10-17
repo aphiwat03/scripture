@@ -1,0 +1,102 @@
+---
+title: Isolation Levels
+category: DATABASE
+parentTitle: Transactions
+version: PostgreSQL 16 & Prisma $tx
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เมื่อมีผู้ใช้งานหลายร้อยคนทำรายการพร้อมกัน ย่อมเกิดคำถามว่า **"ในขณะที่ Transaction A กำลังทำงานอยู่และแก้ไขข้อมูลไปบางส่วนแล้ว Transaction B ที่รันอยู่พร้อมกันควรจะมองเห็นข้อมูลอย่างไร?"** มาตรฐาน SQL ได้นิยาม **ปรากฏการณ์ข้อมูลเพี้ยนจากการทำงานพร้อมกัน (Read Phenomena / Anomalies)** ไว้ 4 รูปแบบเรียงจากรุนแรงไปละเอียดอ่อน:
+1. **Dirty Read (อ่านเห็นข้อมูลที่ยังไม่ Commit):** Transaction B แอบเห็นข้อมูลที่ Transaction A แก้ไขค้างไว้ แต่ยังไม่ได้สั่ง `COMMIT` (และต่อมา A ดันสั่ง `ROLLBACK` ทำให้ B ได้ข้อมูลปลอมไปใช้งาน!)
+2. **Non-Repeatable Read (อ่านแถวเดิมซ้ำสองครั้งได้ค่าไม่เท่ากัน):** Transaction A อ่านราคาสินค้าแถวเดิมครั้งที่ 1 ได้ 5,000 บาท ทันใดนั้น Transaction B เข้ามาแก้ราคาเป็น 5,500 บาทแล้ว `COMMIT` เมื่อ Transaction A อ่านแถวเดิมซ้ำครั้งที่ 2 ภายใน Transaction เดียวกัน กลับได้ค่าเปลี่ยนเป็น 5,500 บาท
+3. **Phantom Read (อ่านเงื่อนไขเดิมซ้ำแต่มีแถวผีโผล่เพิ่มหรือหายไป):** Transaction A คิวรีนับจำนวนออเดอร์วันนี้ได้ 10 แถว ทันใดนั้น Transaction B สั่ง `INSERT` ออเดอร์ใหม่เพิ่มเข้ามา 1 แถวแล้ว `COMMIT` เมื่อ Transaction A รันคิวรีเดิมซ้ำกลับได้ 11 แถว
+4. **Serialization Anomaly:** ผลลัพธ์ของการรันหลาย Transaction พร้อมกัน ไม่ตรงกับผลลัพธ์ของการนำ Transaction เหล่านั้นมาเรียงต่อคิวรันทีละอันไม่ว่าจะเรียงลำดับแบบใดก็ตาม (เช่น กรณีอ่านเช็คเงื่อนไขพร้อมกันแล้วต่างคนต่างเขียนทับกัน หรือ Write Skew)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เพื่อควบคุมปรากฏการณ์ข้างต้น มาตรฐาน SQL จึงแบ่ง **Isolation Levels** ออกเป็น 4 ระดับ แต่สิ่งที่ยอดเยี่ยมของ **PostgreSQL 16** คือกลไก **MVCC (Snapshot Isolation)** มีความแข็งแกร่งกว่ามาตรฐานขั้นต่ำของ SQL อย่างมาก:
+- ใน PostgreSQL **ไม่มีปรากฏการณ์ Dirty Read เกิดขึ้นเลยในทุกระดับ!** แม้คุณจะสั่งตั้งค่าเป็น `READ UNCOMMITTED` ตัว PostgreSQL ก็จะยกระดับให้ทำงานเสมือน `READ COMMITTED` โดยอัตโนมัติ
+- ในระดับ **`READ COMMITTED` (ค่าเริ่มต้นของ PostgreSQL 16):** แต่ละคำสั่ง SQL (`SELECT`, `UPDATE`) ภายใน Transaction จะถ่ายภาพ **Snapshot ใหม่ทุกครั้งที่เริ่มคำสั่งนั้น** ทำให้มองเห็นข้อมูลล่าสุดที่เพิ่งถูก `COMMIT` ไปก่อนวินาทีที่คำสั่งนั้นเริ่มรัน
+- ในระดับ **`REPEATABLE READ`:** PostgreSQL จะถ่ายภาพ **Snapshot เพียงครั้งเดียวตอนรันคำสั่งแรกของ Transaction** และใช้ภาพนั้นไปจนจบ Transaction ทำให้ป้องกันได้ทั้ง **Non-Repeatable Read** และป้องกัน **Phantom Read** ได้ครบ 100% อีกด้วย! นอกจากนี้ หากมี Transaction อื่นแอบแก้ไขแถวเดียวกันตัดหน้าในขณะที่เราอยู่ในโหมด `REPEATABLE READ` แล้วเราพยายาม `UPDATE` แถวนั้นซ้ำ PostgreSQL จะโยน Error `ERROR: could not serialize access due to concurrent update` (รหัส `40001`) ทันทีเพื่อป้องกันข้อมูลทับกัน!
+- ในระดับ **`SERIALIZABLE`:** ใช้กลไก **Serializable Snapshot Isolation (SSI)** คอยตรวจสอบ Dependency Graph (SIREAD Locks) เพื่อป้องกัน Serialization Anomaly ทุกรูปแบบโดยไม่ต้องล็อกตารางค้างไว้
+
+### ตารางเปรียบเทียบ Isolation Levels ใน PostgreSQL 16 จริง
+
+| Isolation Level | Dirty Read | Non-Repeatable Read | Phantom Read | Serialization Anomaly | กลไก Snapshot ใน PostgreSQL 16 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **`READ UNCOMMITTED`** | ❌ ไม่เกิดเลย | อาจเกิดขึ้นได้ | อาจเกิดขึ้นได้ | อาจเกิดขึ้นได้ | ทำงานเหมือน `READ COMMITTED` ทุกประการ |
+| **`READ COMMITTED` (Default)** | ❌ ไม่เกิดเลย | อาจเกิดขึ้นได้ | อาจเกิดขึ้นได้ | อาจเกิดขึ้นได้ | สร้าง Snapshot ใหม่ใน **ทุกๆ คำสั่ง SQL ย่อย** |
+| **`REPEATABLE READ`** | ❌ ไม่เกิดเลย | ❌ ไม่เกิดเลย | ❌ **ไม่เกิดเลย** | อาจเกิด Write Skew ได้ | สร้าง Snapshot ครั้งเดียวที่ **คำสั่งแรกของ Transaction** |
+| **`SERIALIZABLE`** | ❌ ไม่เกิดเลย | ❌ ไม่เกิดเลย | ❌ ไม่เกิดเลย | ❌ **ไม่เกิดเลย** | Snapshot ครั้งเดียว + ตรวจจับ SSI Conflicts (`40001`) |
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การใช้ `REPEATABLE READ` สำหรับการออกรายงานสรุปยอดขายและบัญชีประจำวัน
+เมื่อฝ่ายบัญชีต้องการดึงรายงานที่ประกอบด้วยคิวรีหลายชุด (เช่น คิวรีที่ 1 ดึงยอดรวมจาก `orders` และคิวรีที่ 2 ดึงยอดรวมแยกตามวิธีชำระเงินจาก `payments`) หากใช้ `READ COMMITTED` แล้วมีลูกค้าจ่ายเงินเข้ามาตรงกลางระหว่างคิวรีที่ 1 กับ 2 ตัวเลขสองตารางจะไม่เท่ากันทันที! เราจึงต้องใช้ `REPEATABLE READ`:
+
+```sql filename="sql/05_repeatable_read_financial_report.sql"
+-- เริ่มต้น Transaction ในโหมด REPEATABLE READ และระบุว่าเป็น READ ONLY เพื่อประสิทธิภาพสูงสุด
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+
+-- คิวรีที่ 1: ดึงยอดรวมคำสั่งซื้อทั้งหมดที่ชำระเงินแล้ว (ถ่ายภาพ Snapshot ณ วินาทีนี้)
+SELECT COUNT(*) AS total_paid_orders, SUM(total_amount) AS orders_sum
+FROM orders
+WHERE status IN ('PAID', 'PREPARING', 'SHIPPED', 'DELIVERED');
+
+-- (ต่อให้มีลูกค้ากดจ่ายเงินสำเร็จเข้ามาในเสี้ยววินาทีนี้ คิวรีด้านล่างก็จะยังคงเห็นข้อมูลชุดเดียวกับคิวรีบนเป๊ะ 100%)
+
+-- คิวรีที่ 2: ดึงยอดรวมการรับชำระเงินแยกตามช่องทาง ตัวเลขผลรวมจะตรงกับ orders_sum เสมอ!
+SELECT payment_method, COUNT(*) AS tx_count, SUM(amount) AS payments_sum
+FROM payments
+WHERE status = 'SUCCEEDED'
+GROUP BY payment_method;
+
+COMMIT;
+```
+
+### ตัวอย่างที่ 2: การใช้ `SERIALIZABLE` เพื่อป้องกันปัญหา Write Skew ในการอนุมัติวงเงินเครดิตลูกค้า VIP
+สมมติร้านค้ามีกฎว่าลูกค้าองค์กร (ร้านอาหาร) มีวงเงินเครดิตรวม 100,000 บาท หากมีพนักงานขาย 2 คนเปิดดูยอดหนี้คงค้างของลูกค้าพร้อมกันเห็นว่ามียอดค้างอยู่ 60,000 บาท แล้วต่างคนต่างกดสร้างออเดอร์เครดิตใบใหม่ใบละ 30,000 บาทพร้อมกัน (รวมเป็น 120,000 บาท เกินวงเงิน!) เนื่องจากทั้งคู่เป็นการ `INSERT` แถวใหม่คนละแถว การล็อกแถวเดิมจึงช่วยไม่ได้ แต่ระดับ `SERIALIZABLE` จะตรวจจับและบล็อกไม่ให้เกินวงเงินได้ทันที:
+
+```sql filename="sql/06_serializable_prevent_write_skew.sql"
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+
+-- 1. ตรวจสอบยอดออเดอร์เครดิตที่ยังไม่ชำระทั้งหมดของลูกค้ารายนี้
+SELECT COALESCE(SUM(total_amount), 0.00) AS current_unpaid_credit
+FROM orders
+WHERE user_id = 'a1111111-1111-1111-1111-111111111111'
+  AND status = 'PENDING';
+
+-- 2. หากยอดรวม + ออเดอร์ใหม่ (30,000) ไม่เกิน 100,000 จึงทำการสร้างใบสั่งซื้อใหม่
+-- หากมีอีก Transaction ในโหมด SERIALIZABLE ทำแบบเดียวกันพร้อมกัน ตัวที่ COMMIT ทีหลังจะได้ Error 40001 ทันที!
+INSERT INTO orders (user_id, order_number, status, subtotal_amount, total_amount, shipping_address)
+VALUES (
+    'a1111111-1111-1111-1111-111111111111',
+    'ORD-VIP-20261017-099',
+    'PENDING',
+    30000.00,
+    30000.00,
+    '{"recipient": "ภัตตาคารเนื้อย่างทองหล่อ"}'::jsonb
+);
+
+COMMIT;
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การใช้ `SERIALIZABLE` โดยไม่มีระบบ Retry** | เปิดโหมด `REPEATABLE READ` หรือ `SERIALIZABLE` แต่ไม่เขียนโค้ดดักจับ Error `40001` เพื่อสั่งรัน Transaction ซ้ำ (Retry) | เมื่อใช้ระดับที่สูงกว่า `READ COMMITTED` แอปพลิเคชันต้องมีลอจิก Retry อัตโนมัติเมื่อเกิด Serialization Failure (`40001`) เสมอ |
+| **การดึงรายงานหลายตารางด้วย `READ COMMITTED`** | รันคิวรีสรุปงบการเงิน 5 คำสั่งแยกกันในโหมด Default ทำให้ตัวเลขระหว่างตารางขัดแย้งกันเมื่อมีออเดอร์ใหม่เข้ามา | หุ้มคิวรีรายงานทั้งหมดไว้ใน `BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY; ... COMMIT;` |
+| **การตั้ง `SERIALIZABLE` เป็นค่า Default ทั้งระบบ** | เปลี่ยนค่าเริ่มต้นของทุกคิวรีในระบบเป็น `SERIALIZABLE` ทำให้เกิด Overhead และ Serialization Error ในคิวรีทั่วไป | ใช้ `READ COMMITTED` เป็นค่าเริ่มต้น และยกระดับ Isolation Level เฉพาะ Transaction ที่ต้องการความเข้มงวดสูง |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `READ COMMITTED` (Default) เมื่อ:** เป็นการทำงานของ API ทั่วไป หรือเมื่อเรามีการใช้คำสั่งล็อกแถวแบบเจาะจง (`SELECT ... FOR UPDATE`) และคำสั่ง Atomic Update (`SET stock_qty = stock_qty - $1`) ควบคุมความถูกต้องไว้อยู่แล้ว
+- **ควรใช้ `REPEATABLE READ` หรือ `SERIALIZABLE` เมื่อ:** ต้องออกรายงานทางการเงินที่ประกอบด้วยหลายคิวรีที่ต้องการเห็นภาพข้อมูล ณ จุดเวลาเดียวกันเป๊ะ หรือมีกฎทางธุรกิจที่ขึ้นอยู่กับผลรวมของหลายแถวซึ่งไม่สามารถล็อกแถวเดี่ยวๆ ได้
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ในมาตรฐาน ANSI SQL ระดับ `REPEATABLE READ` ยอมให้เกิดปรากฏการณ์ Phantom Read ได้ แต่ใน PostgreSQL 16 ทำไมระดับ `REPEATABLE READ` จึงป้องกัน Phantom Read ได้ด้วย?**
+  - **แนวคำตอบ:** มาตรฐาน ANSI SQL ยุคดั้งเดิมเขียนขึ้นโดยอิงจากฐานข้อมูลที่ใช้ระบบ Lock-based (ซึ่งล็อกเฉพาะแถวที่มีอยู่เดิมแต่ไม่ได้ล็อกช่องว่างทำให้มีแถวใหม่แทรกเข้ามาได้) แต่ PostgreSQL ใช้สถาปัตยกรรม **MVCC (Snapshot Isolation)** โดยในระดับ `REPEATABLE READ` ตัว Engine จะยึดภาพถ่าย Snapshot ณ จุดเริ่มต้นของคำสั่งแรกใน Transaction ดังนั้นต่อให้ Transaction อื่น `INSERT` แถวใหม่และ `COMMIT` เข้ามา แถวใหม่เหล่านั้นจะมีหมายเลข `xmin` ที่ใหม่กว่า Snapshot จึงถูกกรองทิ้งทั้งหมด ทำให้ไม่เกิด Phantom Read เลยใน PostgreSQL
+- **Q2: ปัญหา "Write Skew" คืออะไร และเกิดขึ้นในระดับ `REPEATABLE READ` ของ PostgreSQL ได้อย่างไร?**
+  - **แนวคำตอบ:** Write Skew เกิดขึ้นเมื่อมี 2 Transactions อ่านข้อมูลชุดเดียวกัน (เช่น ตรวจสอบว่ามีเชฟแล่เนื้อเข้าเวรอย่างน้อย 1 คน โดยตอนนี้มีเชฟ A และเชฟ B เข้าเวรอยู่รวม 2 คน) ทั้งสอง Transaction เห็นว่ามี 2 คนจึงผ่านเงื่อนไข จากนั้น Transaction แรกสั่งอัปเดตสถานะของ **เชฟ A** ให้พักเวร และ Transaction ที่สองสั่งอัปเดตสถานะของ **เชฟ B** ให้พักเวร เนื่องจากทั้งคู่แก้ไข **คนละแถวกัน** ในระดับ `REPEATABLE READ` จึงไม่ตรวจพบการชนกันและยอมให้ทั้งคู่ `COMMIT` สำเร็จ ส่งผลให้ไม่เหลือเชฟเข้าเวรเลย 0 คน (ผิดกฎธุรกิจ) ซึ่งปัญหานี้ต้องป้องกันด้วยระดับ `SERIALIZABLE` หรือการล็อกแถวด้วย `FOR UPDATE`
+
+---

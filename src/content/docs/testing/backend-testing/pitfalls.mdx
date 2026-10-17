@@ -1,0 +1,66 @@
+---
+title: Anti-patterns
+category: TESTING & QUALITY
+parentTitle: Backend Testing
+version: NestJS Testing & Supertest
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **The Monolithic Unit Test (โหลด `AppModule` ทั้งก้อนใน Unit Test):**
+   - **ปัญหา:** นักพัฒนาใส่ `imports: [AppModule]` ในไฟล์ `.spec.ts` ทุกไฟล์ ทำให้ทุกครั้งที่รัน Unit Test ต้องรอการเชื่อมต่อฐานข้อมูล โหลดโมดูลนับสิบตัว และเสียเวลาคอมไพล์นานหลายวินาทีต่อไฟล์
+   - **วิธีแก้:** ใน Unit Test ให้ลงทะเบียนเฉพาะ `TargetService` และ Mock Providers ที่เกี่ยวข้องเท่านั้น สงวนการโหลด `AppModule` ไว้เฉพาะในไฟล์ `.e2e-spec.ts`
+2. **The Divergent Pipeline (ตั้งค่า `ValidationPipe` ในเทสต์ไม่ตรงกับ `main.ts`):**
+   - **ปัญหา:** ใน `main.ts` ตั้งค่า `whitelist: true, transform: true` แต่ในไฟล์เทสต์ E2E สั่งแค่ `app.useGlobalPipes(new ValidationPipe())` เปล่าๆ ทำให้เทสต์ให้ผลลัพธ์ไม่ตรงกับ Production จริง
+   - **วิธีแก้:** แยกฟังก์ชันตั้งค่า Global Pipes, Filters และ Interceptors ออกมาเป็นฟังก์ชันกลาง เช่น `configureButcherApp(app: INestApplication)` แล้วเรียกใช้ทั้งใน `main.ts` และในไฟล์เทสต์
+3. **The Unclosed Nest Application (ลืมสั่ง `await app.close()`):**
+   - **ปัญหา:** เปิด `app.init()` ใน E2E Test แต่ไม่มี `afterAll(async () => await app.close())` ทำให้ Connection Pool และ HTTP Server ค้างอยู่ในหน่วยความจำจน Jest ค้างบน CI Pipeline
+   - **วิธีแก้:** มีบล็อก `afterAll` ที่เรียก `await app.close()` คู่กับ `beforeAll` เสมอ
+4. **Testing the Mock Instead of the System (Mock ลึกจนไม่ได้ทดสอบตรรกะจริง):**
+   - **ปัญหา:** ใน Unit Test ของ `OrderService` ดันไป Mock เมธอดคำนวณราคาภายในคลาสเดียวกันเอง (`jest.spyOn(orderService, 'calculateTotal').mockReturnValue(5000)`) จนไม่ได้ทดสอบว่าสูตรคำนวณราคาเนื้อดรายเอจทำงานถูกหรือไม่
+   - **วิธีแก้:** Mock เฉพาะขอบเขต I/O ภายนอก (เช่น `PrismaService`, Payment Gateway, S3) และปล่อยให้ตรรกะทางธุรกิจภายในรันจริงทั้งหมด
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+ก่อนส่งมอบโค้ดฝั่ง Backend ของระบบ **Smart Butcher Marketplace** ขึ้นสู่ไปป์ไลน์ CI/CD ให้ตรวจสอบรายการต่อไปนี้:
+
+- [ ] **Isolated Unit Tests:** ไฟล์ `.spec.ts` ของ Service ใช้ `Test.createTestingModule` เฉพาะคลาสที่เกี่ยวข้องและ Mock `PrismaService` ด้วย `mockDeep<PrismaService>()`
+- [ ] **Transaction Verification:** ทุกเมธอดที่มีการตัดสต็อกเนื้อและสร้างคำสั่งซื้อมีการทดสอบทั้งกรณีสำเร็จและกรณีที่สต็อกไม่พอ (ต้องไม่เกิดการสร้าง Order หรือตัดสต็อกบางส่วน)
+- [ ] **Guard & Pipe Coverage:** มีการทดสอบ Custom Guards (เช่น `ButcherRoleGuard`) และ Custom Pipes ทั้งเคสที่อนุญาตให้ผ่านและเคสที่โยน `ForbiddenException` / `BadRequestException`
+- [ ] **Consistent App Setup:** ไฟล์ `.e2e-spec.ts` ใช้การตั้งค่า `ValidationPipe` (`whitelist: true`, `forbidNonWhitelisted: true`, `transform: true`) และ Global Exception Filters ชุดเดียวกับ Production
+- [ ] **Proper Resource Teardown:** ทุกไฟล์ที่เรียก `await app.init()` มีการเรียก `await app.close()` ใน `afterAll` ครบถ้วน ไม่มีคำเตือนเรื่อง Open Handles
+- [ ] **Concurrency Safety:** ฟีเจอร์ที่เกี่ยวข้องกับการจองเนื้อหายากหรือการตัดสต็อกมีชุดทดสอบด้วย `Promise.allSettled` เพื่อยืนยันว่าไม่เกิดปัญหาขายเกินสต็อก (Overselling)
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อคุณเชี่ยวชาญการเขียนชุดทดสอบฝั่ง Backend ด้วย NestJS 11, Jest และ Supertest แล้ว ขอแนะนำให้ศึกษาต่อในหัวข้อที่เชื่อมโยงกันดังนี้:
+
+<Callout type="tip" title="เส้นทางการเรียนรู้ถัดไป">
+หลังจากวางรากฐานการทดสอบ REST API, Service และ Database บนฝั่ง Backend อย่างแข็งแกร่งแล้ว ขั้นตอนต่อไปคือการเชื่อมต่อคุณภาพไปยังฝั่งหน้าบ้านด้วยการทดสอบ React Components ใน Next.js 16 และการปิดจบด้วยการทดสอบ E2E ผ่านเบราว์เซอร์จริงด้วย Playwright
+</Callout>
+
+- **พื้นฐานการทดสอบและเครื่องมือหลัก:**
+  - [Testing Fundamentals](/docs/testing/fundamentals) — แนวคิด Testing Pyramid, Test Doubles และหลักการ FIRST
+  - [Jest](/docs/testing/jest) — เจาะลึก Matchers, Lifecycle Hooks, Spy, Mock และการตั้งค่า `jest.config.ts`
+- **สถาปัตยกรรม Backend ที่เกี่ยวข้องโดยตรง:**
+  - [NestJS](/docs/backend/nestjs) — โครงสร้าง Modules, Dependency Injection, Guards, Pipes และ Interceptors
+  - [Prisma ORM](/docs/backend/prisma-orm) — การออกแบบ Schema, Relations และการจัดการ Transactions
+  - [Authentication](/docs/backend/authentication) — การออกแบบระบบยืนยันตัวตนด้วย JWT และ RBAC
+  - [Security](/docs/backend/security) — การป้องกันช่องโหว่ด้วย ValidationPipe และ Rate Limiting
+  - [File Upload](/docs/backend/file-upload) — การจัดการอัปโหลดไฟล์ด้วย Multer และการตรวจสอบความปลอดภัยของไฟล์
+  - [Docker](/docs/backend/docker) — การจำลองคอนเทนเนอร์ฐานข้อมูลสำหรับรัน Integration Test
+- **การทดสอบฝั่ง Frontend, E2E และ CI/CD:**
+  - [Frontend Testing](/docs/testing/frontend-testing) — การทดสอบ React 19 และ Next.js 16 ด้วย React Testing Library และ MSW
+  - [E2E Testing](/docs/testing/playwright) — การทดสอบระบบครบวงจรบนเบราว์เซอร์จริงด้วย Playwright
+  - [ESLint & Prettier](/docs/testing/eslint) — การตั้งค่า Static Analysis ดักจับข้อผิดพลาดในไฟล์เทสต์
+  - [Git Hooks & CI](/docs/testing/git-hooks) — การรันชุดทดสอบอัตโนมัติบน GitHub Actions และ Husky
+  - [Debugging & Type Checking](/docs/testing/type-checking) — เทคนิคการวิเคราะห์จุดพังของเทสต์และการตรวจสอบชนิดข้อมูล

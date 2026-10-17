@@ -1,0 +1,157 @@
+---
+title: Providers Services
+category: BACKEND
+parentTitle: NestJS 11
+version: NestJS 11
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด
+ถ้าเปรียบเทียบแอปพลิเคชันเป็นร้านขายเนื้อสเต็ก **Provider** ก็คือบุคลากรเฉพาะทางทั้งหมดในร้าน ตั้งแต่พ่อครัวใหญ่ผู้เชี่ยวชาญการแล่เนื้อ (Meat Service), ผู้เชี่ยวชาญการดรายเอจเนื้อ (DryAging Specialist), ไปจนถึงพนักงานคุมบัญชีและเครื่องรูดบัตร (Payment Gateway)
+
+ใน NestJS แนวคิดของ **Provider** คือหัวใจหลักของ Inversion of Control สิ่งใดก็ตามที่มีการตกแต่งด้วย `@Injectable()` สามารถถือว่าเป็น Provider ได้ทั้งสิ้น ไม่ว่าจะเป็น Services, Repositories, Factories, หรือ Helpers โดยหน้าที่สำคัญที่สุดคือการแยก **Separation of Concerns (SoC)** ให้ตรรกะทางธุรกิจทำงานอย่างเป็นอิสระจาก HTTP Request
+
+## 2. หลักการเบื้องหลัง
+เมื่อคลาสถูกตกแต่งด้วย `@Injectable()` ตัวคอมไพเลอร์ TypeScript (ภายใต้ `emitDecoratorMetadata: true` ใน `tsconfig.json`) จะบันทึก Type ของ Constructor Parameters ไว้ในรูปของ Metadata ด้วยไลบรารี `reflect-metadata`
+
+เมื่อ NestJS ทำการเริ่มระบบ ตัว IoC Container จะสแกนหา Provider ทั้งหมด ตรวจสอบว่าคลาสนี้ต้องการ Dependency ตัวใด แล้วทำการสร้าง Instance (Instantiation) และจัดส่ง (Inject) ไปให้แบบอัตโนมัติ โดยค่าเริ่มต้นจะเป็น **Singleton** (สร้างเพียง 1 Instance ตลอดอายุของ Process)
+
+## 3. ตัวอย่างโค้ด
+
+### ตัวอย่างที่ 1: Service ตรรกะจัดการเนื้อ Wagyu และการคำนวณราคาตาม Marbling Score
+```typescript filename="src/modules/products/wagyu-pricing.service.ts"
+import { Injectable, BadRequestException } from '@nestjs/common';
+
+export interface WagyuCut {
+  name: string;
+  marblingScore: 3 | 4 | 5 | 8 | 9 | 12; // BMS (Beef Marbling Standard)
+  basePricePerKg: number;
+  weightGrams: number;
+}
+
+@Injectable()
+export class WagyuPricingService {
+  /**
+   * คำนวณราคาเนื้อวากิวพรีเมียมโดยเพิ่มตัวคูณความพรีเมียมตามระดับไขมันลายหินอ่อน (BMS)
+   */
+  calculatePremiumCutPrice(cut: WagyuCut): {
+    weightGrams: number;
+    basePrice: number;
+    bmsMultiplier: number;
+    finalPriceThb: number;
+  } {
+    if (cut.weightGrams <= 0) {
+      throw new BadRequestException('น้ำหนักชิ้นเนื้อต้องมากกว่า 0 กรัม');
+    }
+
+    // ตัวคูณมูลค่าความนุ่มตามคะแนน BMS
+    let multiplier = 1.0;
+    if (cut.marblingScore >= 12) multiplier = 1.5; // ระดับยอดมงกุฎ A5 BMS 12
+    else if (cut.marblingScore >= 9) multiplier = 1.3;
+    else if (cut.marblingScore >= 5) multiplier = 1.15;
+
+    const basePrice = (cut.basePricePerKg / 1000) * cut.weightGrams;
+    const finalPriceThb = Math.round(basePrice * multiplier);
+
+    return {
+      weightGrams: cut.weightGrams,
+      basePrice,
+      bmsMultiplier: multiplier,
+      finalPriceThb,
+    };
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การทำงานร่วมกันระหว่างหลาย Services (Service-to-Service Collaboration)
+```typescript filename="src/modules/orders/orders.service.ts"
+import {
+  Injectable,
+  NotFoundException,
+  ConflictException,
+} from '@nestjs/common';
+import { ProductsService } from '../products/products.service';
+import { WagyuPricingService } from '../products/wagyu-pricing.service';
+
+export interface CheckoutRequest {
+  productId: string;
+  customerEmail: string;
+}
+
+@Injectable()
+export class OrdersService {
+  // Inject หลาย Services พร้อมกันผ่าน Constructor
+  constructor(
+    private readonly productsService: ProductsService,
+    private readonly wagyuPricingService: WagyuPricingService
+  ) {}
+
+  async createSteakOrder(dto: CheckoutRequest) {
+    // 1. ตรวจสอบว่าสินค้ามีอยู่จริงและสต็อกพร้อมจำหน่ายหรือไม่
+    const meat = this.productsService.findProductById(dto.productId);
+    if (!meat.inStock) {
+      throw new ConflictException(`เนื้อชิ้น ${meat.name} ถูกลูกค้าท่านอื่นจองตัดไปแล้ว`);
+    }
+
+    // 2. ส่งต่อให้ WagyuPricingService ช่วยประเมินราคาตามเกรด
+    const pricing = this.wagyuPricingService.calculatePremiumCutPrice({
+      name: meat.name,
+      marblingScore: 9,
+      basePricePerKg: meat.pricePerKg,
+      weightGrams: meat.weightGrams,
+    });
+
+    // 3. ประกอบเป็นคำสั่งซื้อที่สมบูรณ์
+    const order = {
+      orderId: `ORD-${Date.now()}`,
+      customer: dto.customerEmail,
+      item: meat.name,
+      weightGrams: pricing.weightGrams,
+      totalAmount: pricing.finalPriceThb,
+      status: 'PENDING_PAYMENT',
+      createdAt: new Date().toISOString(),
+    };
+
+    return order;
+  }
+}
+```
+
+## 4. ผิด vs ถูก
+
+```typescript filename="src/nestjs.ts"
+// ❌ ผิด: Service เข้าไปดึง HTTP Context (@Req) หรือพยายามอ่าน Headers ใน Service Layer
+@Injectable()
+export class BadOrdersService {
+  // นำ Request จาก Express เข้ามาใน Service
+  constructor(@Inject(REQUEST) private readonly request: Request) {}
+
+  processOrder() {
+    // ❌ เข้าถึง Header ตรงๆ ใน Service
+    const authHeader = this.request.headers['authorization'];
+    // ผลกระทบ: Service นี้ไม่สามารถถูกเรียกจาก Cron Job, Message Queue หรือ CLI ได้อีกต่อไป
+  }
+}
+```
+
+```typescript filename="src/nestjs.ts"
+// ✅ ถูก: Service รับเฉพาะ Pure Data ผ่าน Arguments และคืนค่า Domain Entity
+@Injectable()
+export class GoodOrdersService {
+  // Service รับเฉพาะ user context และข้อมูลที่ถูก parse มาแล้ว
+  processOrder(userId: string, orderData: CreateOrderDto) {
+    // ✅ สะอาด, เขียน Unit Test ง่าย, รันใน CronJob หรือ Kafka Consumer ได้อย่างไร้ปัญหา
+    return this.saveOrderToDatabase(userId, orderData);
+  }
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Service**: จัดเก็บตรรกะทางธุรกิจ (Business Rules) ทุกรูปแบบ, การทำ Data Transformation, การเชื่อมต่อ Third-Party API, และการจัดการ Transaction
+- **ไม่ควรใช้ Service เป็นตัวเก็บ State แบบ Mutable ของผู้ใช้คนใดคนหนึ่ง**: เนื่องจาก Service เป็น Singleton โดยค่าเริ่มต้น หากคุณประกาศ `private currentUser: User` ใน Service ข้อมูลของผู้ใช้คนนั้นจะรั่วไหลไปสู่คำขอของผู้ใช้คนอื่นทันที (Race Condition & Security Breach)
+
+## 6. คำถามสัมภาษณ์
+**ถาม**: ทำไม NestJS ถึงออกแบบให้ Service เป็น Singleton Scope โดยค่าเริ่มต้น (Default Scope) แทนที่จะเป็น Transient หรือ Request Scope?
+**ตอบ**: เพราะการใช้ Singleton มีประสิทธิภาพสูงที่สุด (High Performance & Low Memory Footprint) ตัว Node.js Engine จะสร้าง Instance เพียงครั้งเดียวตอนเริ่มระบบ ไม่ต้องเสียเวลาสร้างอ็อบเจกต์ใหม่ทุกครั้งที่มี HTTP Request เข้ามา ช่วยลดภาระของระบบจัดการหน่วยความจำ (V8 Garbage Collector) ได้อย่างมหาศาล
+
+---

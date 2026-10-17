@@ -1,0 +1,158 @@
+---
+title: SQL Injection
+category: DATABASE
+parentTitle: Security
+version: PostgreSQL 16 Security & PDPA
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+**SQL Injection (SQLi)** คือช่องโหว่ระดับตำนานที่เกิดจากการนำข้อความที่ผู้ใช้กรอกเข้ามา (เช่น คำค้นหาชื่อเนื้อสเต๊ก) ไป **"ต่อสตริง (String Concatenation)"** รวมกับคำสั่ง SQL โดยตรง หากลูกค้าผู้ไม่หวังดีกรอกคำค้นหาว่า `Wagyu' OR '1'='1` โครงสร้างประโยคคำสั่ง SQL จะถูกบิดเบือนไปจากความตั้งใจเดิมทันที หรืออาจรุนแรงถึงขั้นแอบดึงข้อมูลจากตาราง `users` และ `payments` ออกไปทั้งหมด
+
+วิธีป้องกันที่สมบูรณ์แบบที่สุดไม่ใช่การพยายามเขียนโค้ดตัดตัวอักษรพิเศษด้วยตัวเอง แต่คือการใช้ **Parameterized Queries (Prepared Statements)** ซึ่งแยก **"โครงสร้างคำสั่ง SQL"** ออกจาก **"ตัวข้อมูล (Data Parameters)"** ในระดับโปรโตคอลของ PostgreSQL 16
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ทำไม Parameterized Queries ถึงป้องกัน SQL Injection ได้ 100%? คำตอบอยู่ที่การทำงานของ **PostgreSQL Extended Query Protocol** ซึ่งแบ่งการประมวลผลออกเป็น 3 ขั้นตอนแยกจากกันอย่างเด็ดขาด:
+1. **ขั้นตอน Parse (สร้าง Syntax Tree ล่วงหน้า):**
+   ไดรเวอร์ (หรือ Prisma Client) ส่งเฉพาะโครงร่างคำสั่งที่มีตัวแทนตำแหน่ง เช่น `SELECT id, name, price_per_kg FROM products WHERE sku = $1 AND marbling_score >= $2` ไปให้ PostgreSQL 16 ตัว Engine จะทำการวิเคราะห์ไวยากรณ์ (Lexical & Syntactic Parsing) และสร้าง **Parse Tree (โครงสร้างคำสั่ง)** ให้เสร็จสิ้นตั้งแต่ขั้นตอนนี้!
+2. **ขั้นตอน Bind (ผูกค่าข้อมูลเข้ากับช่องตัวแปร):**
+   ไดรเวอร์ส่งค่าที่ผู้ใช้กรอกมาแยกในแพ็กเกจข้อมูลอีกชุดหนึ่งเพื่อนำไปใส่ในช่อง `$1` และ `$2` เนื่องจากขั้นตอนการสร้างโครงสร้างคำสั่ง (Parse) จบไปแล้ว PostgreSQL 16 จะปฏิบัติต่อค่าใน `$1` ในฐานะ **"ก้อนข้อมูลตัวอักษรล้วนๆ (Literal Value)"** เท่านั้น ต่อให้ใน `$1` มีเครื่องหมาย `'` หรือคำว่า `OR 1=1; DROP TABLE orders;--` ตัว Engine ก็จะไม่นำมันไปตีความเป็นคำสั่ง SQL อีกต่อไป แต่จะนำไปค้นหาสินค้าที่มีรหัส SKU ชื่อยาวๆ แบบนั้นตรงตัว!
+3. **ขั้นตอน Execute:**
+   รันแผนการสืบค้นจาก Parse Tree ที่ผูกค่าตัวแปรเรียบร้อยแล้ว
+
+```text filename="docs/database/security.txt"
+[ 1. PARSE PHASE ] ──► ส่งโครงสร้าง: SELECT * FROM products WHERE sku = $1
+                       (PostgreSQL ล็อกโครงสร้างคำสั่ง SQL ตายตัวตั้งแต่ตรงนี้!)
+                                          │
+                                          ▼
+[ 2. BIND PHASE ]  ──► ส่งค่าตัวแปรแยกต่างหาก: $1 = "' OR 1=1 --"
+                       (ถูกมองเป็นเพียงข้อความธรรมดา ไม่สามารถแหกออกมาแก้โครงสร้างคำสั่งได้)
+```
+
+ใน Prisma ORM คำสั่งมาตรฐานทั้งหมด (`findMany`, `findUnique`, `create`, `update`) และคำสั่ง **`$queryRaw` แบบ Tagged Template Literal** จะใช้กลไก Parameterized Queries นี้ให้อัตโนมัติ แต่หากนักพัฒนาเผลอใช้ **`$queryRawUnsafe`** ร่วมกับการต่อสตริง `${variable}` ช่องโหว่ SQL Injection จะเปิดขึ้นทันที!
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: เปรียบเทียบโค้ดที่มีช่องโหว่ (`$queryRawUnsafe`) กับโค้ดที่ปลอดภัย (`$queryRaw` Tagged Template)
+เมื่อต้องการเขียน Raw SQL ที่ซับซ้อนในระบบ **Smart Butcher Marketplace**:
+
+```typescript filename="src/products/product-search.service.ts"
+import { Injectable } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { Prisma } from '@prisma/client';
+
+@Injectable()
+export class ProductSearchService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  // ❌ อันตรายร้ายแรง (VULNERABLE TO SQL INJECTION):
+  // การใช้ $queryRawUnsafe ร่วมกับการต่อสตริงด้วย Template Literal ${...}
+  // หากผู้โจมตีส่ง skuInput = "A5' UNION SELECT id, email, password_hash, 0 FROM users --" ข้อมูลรั่วทันที!
+  async findBySkuVulnerable(skuInput: string) {
+    const unsafeSql = `SELECT id, sku, name, price_per_kg FROM products WHERE sku = '${skuInput}'`;
+    return this.prisma.$queryRawUnsafe(unsafeSql);
+  }
+
+  // ✅ ปลอดภัย 100% (SAFE PARAMETERIZED QUERY):
+  // การใช้ $queryRaw แบบ Tagged Template (ไม่มีวงเล็บครอบตอนเรียกฟังก์ชัน)
+  // Prisma จะแปลง ${skuInput} และ ${minMarbling} ให้กลายเป็นตัวแปร $1 และ $2 ในระดับ PostgreSQL Protocol
+  async findBySkuAndMarblingSafe(skuInput: string, minMarbling: number) {
+    return this.prisma.$queryRaw<
+      Array<{ id: string; sku: string; name: string; price_per_kg: Prisma.Decimal }>
+    >`
+      SELECT id, sku, name, price_per_kg
+      FROM products
+      WHERE sku = ${skuInput}
+        AND marbling_score >= ${minMarbling}
+      ORDER BY price_per_kg DESC
+    `;
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การสร้างคิวรีแบบมีเงื่อนไขไดนามิกและการจัดเรียงลำดับ (`ORDER BY`) อย่างปลอดภัยไร้ช่องโหว่
+ใน PostgreSQL เราไม่สามารถส่งชื่อคอลัมน์ใน `ORDER BY $1` เป็น Parameter ได้ เพราะ `$1` ใช้แทนได้เฉพาะ "ค่าข้อมูล (Value)" ไม่สามารถใช้แทน "ชื่อคอลัมน์หรือทิศทางการเรียง (Identifier/Keyword)" ได้ ดังนั้นเมื่อต้องทำ Dynamic Sorting จึงต้องใช้ **Strict Allowlist (Whitelist Map)** คู่กับ `Prisma.sql`:
+
+```typescript filename="src/orders/order-report.service.ts"
+import { Injectable, BadRequestException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { Prisma, OrderStatus } from '@prisma/client';
+
+// กำหนดรายการคอลัมน์และทิศทางที่อนุญาตให้เรียงลำดับแบบตายตัว (Allowlist)
+const ALLOWED_SORT_COLUMNS: Record<string, Prisma.Sql> = {
+  createdAt: Prisma.sql`o.created_at`,
+  totalAmount: Prisma.sql`o.total_amount`,
+};
+
+const ALLOWED_SORT_DIRECTIONS: Record<string, Prisma.Sql> = {
+  asc: Prisma.sql`ASC`,
+  desc: Prisma.sql`DESC`,
+};
+
+@Injectable()
+export class OrderReportService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async searchOrdersSecurely(params: {
+    status?: OrderStatus;
+    minTotalAmount?: number;
+    sortBy?: string;
+    sortDir?: string;
+  }) {
+    const sortColumnSql = ALLOWED_SORT_COLUMNS[params.sortBy ?? 'createdAt'];
+    const sortDirSql = ALLOWED_SORT_DIRECTIONS[params.sortDir ?? 'desc'];
+
+    if (!sortColumnSql || !sortDirSql) {
+      throw new BadRequestException('Invalid sort parameters specified');
+    }
+
+    // ประกอบเงื่อนไข WHERE แบบไดนามิกแต่ยังคงใช้ Parameterized Variables ($1, $2) ทุกจุด
+    const conditions: Prisma.Sql[] = [Prisma.sql`1 = 1`];
+
+    if (params.status) {
+      conditions.push(Prisma.sql`o.status = ${params.status}::"OrderStatus"`);
+    }
+
+    if (params.minTotalAmount !== undefined) {
+      conditions.push(Prisma.sql`o.total_amount >= ${params.minTotalAmount}`);
+    }
+
+    const whereClause = Prisma.join(conditions, ' AND ');
+
+    return this.prisma.$queryRaw`
+      SELECT
+        o.id,
+        o.status,
+        o.total_amount,
+        o.created_at,
+        u.email AS customer_email
+      FROM orders o
+      INNER JOIN users u ON u.id = o.user_id
+      WHERE ${whereClause}
+      ORDER BY ${sortColumnSql} ${sortDirSql}
+      LIMIT 50
+    `;
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การเรียกใช้ `$queryRaw`** | เขียน `prisma.$queryRawUnsafe(\`SELECT * FROM users WHERE email = '\${email}'\`)` | เขียน `prisma.$queryRaw\`SELECT * FROM users WHERE email = \${email}\`` (Tagged Template) |
+| **การทำ Dynamic `ORDER BY`** | นำค่า `req.query.sortBy` มาต่อสตริงใส่หลังคำว่า `ORDER BY` ตรงๆ | สร้าง Allowlist Object จับคู่ชื่อฟิลด์ที่อนุญาตเข้ากับ `Prisma.sql` เท่านั้น |
+| **การส่งรายการ `IN (...)` ใน Raw SQL** | ใช้ `.join(',')` ต่อสตริงใส่ในวงเล็บ `IN (...)` เอง | ใช้ `WHERE id IN (${Prisma.join(ids)})` เพื่อให้ Prisma แตกเป็น `($1, $2, $3)` อย่างปลอดภัย |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Prisma Client Query API (`findMany`, `create`, ฯลฯ) เป็นหลักเมื่อ:** คิวรีเป็นงาน CRUD และการกรองข้อมูลทั่วไป เพราะปลอดภัยและได้รับการตรวจสอบชนิดข้อมูล (Type-safe) สูงสุด
+- **ควรใช้ `prisma.$queryRaw` คู่กับ `Prisma.sql` เมื่อ:** ต้องการเขียนคิวรีวิเคราะห์ข้อมูลขั้นสูงของ PostgreSQL 16 เช่น Window Functions, CTEs หรือ JSONB Operators
+- **ไม่ควรใช้ `$queryRawUnsafe` หรือ `$executeRawUnsafe` เด็ดขาด:** ในทุกกรณีที่มีตัวแปรมาจากผู้ใช้งานภายนอก
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: จงอธิบายในระดับ Database Engine ว่าทำไมการใช้ Parameterized Queries (`$1`, `$2`) จึงป้องกัน SQL Injection ได้อย่างเด็ดขาด แม้ผู้โจมตีจะส่งเครื่องหมาย Single Quote (`'`) เข้ามาก็ตาม?**
+  - **แนวคำตอบ:** เพราะใน Extended Query Protocol ของ PostgreSQL คำสั่ง SQL ที่มีตัวแปร `$1` จะถูกส่งไปเข้ากระบวนการ **Parse** เพื่อสร้างโครงสร้างคำสั่ง (Syntax Tree) ให้เสร็จสิ้นก่อน จากนั้นค่าข้อมูลที่ผู้ใช้ส่งมาจึงจะถูกส่งตามไปทีหลังในขั้นตอน **Bind** เนื่องจากโครงสร้างคำสั่งถูกล็อกตายตัวไปแล้วตั้งแต่ขั้นตอน Parse ค่าที่อยู่ใน `$1` จึงถูกจำกัดให้เป็นเพียงข้อมูลตัวอักษรภายในโหนดนั้นเท่านั้น ไม่สามารถเปลี่ยนแปลงโครงสร้าง Syntax Tree ของคำสั่ง SQL ได้เลย
+- **Q2: ทำไมเราจึงไม่สามารถใช้ Parameter (`$1`) แทนชื่อตารางหรือชื่อคอลัมน์ใน `ORDER BY $1` ได้ และมีวิธีแก้ไขที่ปลอดภัยอย่างไร?**
+  - **แนวคำตอบ:** เพราะในการวางแผนคิวรี (Query Planning) PostgreSQL จำเป็นต้องรู้ชื่อตารางและชื่อคอลัมน์ที่ชัดเจนตั้งแต่ขั้นตอน Parse เพื่อตรวจสอบว่าตารางและคอลัมน์นั้นมีอยู่จริงหรือไม่และจะใช้ Index ตัวไหน หากใส่ `ORDER BY $1` PostgreSQL จะตีความว่าให้เรียงลำดับตาม "ค่าคงที่สตริง" ซึ่งไม่มีผลใดๆ ต่อการเรียงแถว วิธีแก้ไขที่ปลอดภัยคือการตรวจสอบค่าที่รับเข้ามากับ **Strict Allowlist (Whitelist)** ในฝั่งโค้ดก่อนนำไปประกอบคำสั่ง
+
+---

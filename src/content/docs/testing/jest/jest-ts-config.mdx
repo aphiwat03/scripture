@@ -1,0 +1,172 @@
+---
+title: Jest TS Config
+category: TESTING & QUALITY
+parentTitle: Jest
+version: Jest v29 & ts-jest
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+การติดตั้งสายพานและระบบควบคุมในโรงงานตัดแต่งเนื้อ **Smart Butcher Marketplace**:
+- **`jest.config.ts`**: เปรียบเหมือน "คู่มือการตั้งค่าเครื่องจักรของโรงงาน" ระบุว่าจะให้ใครเป็นผู้ตรวจเนื้อ ค้นหาไฟล์จากโฟลเดอร์ไหน และจำลองสภาพแวดล้อมแบบใด
+- **`ts-jest` (เครื่องตรวจละเอียดแบบดั้งเดิม)**: เปรียบเหมือน "ช่างตรวจสอบคุณภาพที่ตรวจเช็กไทป์และกฎเกณฑ์ TypeScript ละเอียดยิบทุกกระเบียดนิ้ว" ก่อนจะเริ่มรันเทสต์ ข้อดีคือปลอดภัยสูงสุด แต่ข้อเสียคือรันช้าเมื่อโรงงานมีขนาดใหญ่
+- **`@swc/jest` (เครื่องจักรความเร็วแสงขับเคลื่อนด้วย Rust)**: เปรียบเหมือน "เครื่องจักรอัตโนมัติพลังสูง" ที่ทำหน้าที่แปลงโค้ด TypeScript เป็น JavaScript เพียงอย่างเดียวโดยไม่ตรวจไทป์ (ปล่อยให้ `tsc --noEmit` ทำงานใน CI แทน) ทำให้ความเร็วในการรันเทสต์พุ่งสูงขึ้นกว่าเดิม **5 ถึง 10 เท่า**
+- **Path Aliases (`@/...`)**: เปรียบเหมือน "ระบบสายพานลำเลียงด่วน" แทนที่จะต้องเขียนเส้นทางไฟล์ย้อนหลังซับซ้อน `../../services/meat.service` เราสามารถสั่งดึงจาก `@/services/meat.service` ได้ทันที
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **`moduleNameMapper` (Path Aliasing Engine):** ในโปรเจกต์ TypeScript เรามักตั้งค่า `paths` ใน `tsconfig.json` เพื่อใช้ `@/*` แต่ Jest ทำงานบน Node.js Runtime จึงไม่รู้จัก Path เหล่านี้ Jest จึงมีกลไก `moduleNameMapper` เพื่อใช้ Regular Expression แปลงเส้นทาง เช่น `'^@/(.*)$': '<rootDir>/src/$1'`
+2. **`testEnvironment` ('node' vs 'jsdom'):**
+   - `'node'`: สภาพแวดล้อม Node.js บริสุทธิ์ เหมาะกับ Backend Services (Fastest, Leanest)
+   - `'jsdom'`: จำลอง Browser DOM, Window, Document ในหน่วยความจำ เหมาะกับ React Frontend
+3. **`setupFilesAfterEnv`:** สคริปต์ที่จะถูกรันก่อนเริ่มไฟล์ทดสอบทุกไฟล์หลังจากที่ Jest Test Framework ถูกติดตั้งลงใน Environment เรียบร้อยแล้ว นิยมใช้ใส่ Custom Matchers หรือ Global Teardown Logic
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การกำหนดค่า `jest.config.ts` แบบมาตรฐานองค์กรด้วย `ts-jest`
+การตั้งค่าสำหรับการทดสอบระบบ Backend ของ Smart Butcher:
+
+```typescript filename="jest.config.ts"
+import type { Config } from 'jest';
+
+const config: Config = {
+  // 1. ระบุให้ Jest ทำงานในโหมด Node.js Environment สำหรับ Backend Testing
+  testEnvironment: 'node',
+
+  // 2. กำหนดรากของโฟลเดอร์ Source Code
+  rootDir: '.',
+  roots: ['<rootDir>/src'],
+
+  // 3. รูปแบบชื่อไฟล์ที่จะถูกมองว่าเป็นชุดทดสอบ
+  testMatch: [
+    '**/__tests__/**/*.+(ts|tsx|js)',
+    '**/?(*.)+(spec|test).+(ts|tsx|js)',
+  ],
+
+  // 4. คอมไพล์ TypeScript ด้วย ts-jest
+  transform: {
+    '^.+\\.(ts|tsx)$': [
+      'ts-jest',
+      {
+        tsconfig: '<rootDir>/tsconfig.json',
+        isolatedModules: false, // เปิด Type-checking อย่างสมบูรณ์
+      },
+    ],
+  },
+
+  // 5. แปลง Path Aliases ให้ตรงกับ tsconfig.json (@/ -> src/)
+  moduleNameMapper: {
+    '^@/(.*)$': '<rootDir>/src/$1',
+    '^@test/(.*)$': '<rootDir>/test/$1',
+  },
+
+  // 6. กำหนดไฟล์ Setup เพื่อรันการล้าง Mock อัตโนมัติทุกรอบ
+  setupFilesAfterEnv: ['<rootDir>/test/jest.setup.ts'],
+
+  // 7. นโยบายการวัด Code Coverage
+  collectCoverageFrom: [
+    'src/**/*.{ts,js}',
+    '!src/**/*.d.ts',
+    '!src/**/*.interface.ts',
+    '!src/main.ts',
+  ],
+  coverageDirectory: '<rootDir>/coverage',
+  coverageReporters: ['text', 'lcov', 'html'],
+
+  // 8. เคลียร์สถานะ Mock อัตโนมัติหลังจบแต่ละเคสทดสอบ
+  clearMocks: true,
+  restoreMocks: true,
+
+  // 9. ป้องกัน Worker ค้างนานเกินไป
+  testTimeout: 10000,
+};
+
+export default config;
+```
+
+ไฟล์ Global Setup:
+```typescript filename="test/jest.setup.ts"
+// สคริปต์นี้จะถูกโหลดก่อนเริ่มการรันเทสต์ทุกไฟล์
+beforeAll(() => {
+  // บังคับ Timezone ให้เป็น UTC เสมอ เพื่อป้องกันปัญหา Date คลาดเคลื่อนระหว่าง Dev กับ CI
+  process.env.TZ = 'UTC';
+});
+
+afterEach(() => {
+  // ล้างการจำลอง Mock ทั้งหมด
+  jest.clearAllMocks();
+});
+```
+
+### ตัวอย่างที่ 2: การตั้งค่า High-Performance ด้วย `@swc/jest` สำหรับ Monorepo หรือโปรเจกต์ขนาดใหญ่
+เมื่อโปรเจกต์มีไฟล์ทดสอบหลักร้อยไฟล์ การสลับมาใช้ SWC จะช่วยลดเวลา CI จาก 5 นาทีเหลือไม่ถึง 40 วินาที:
+
+```typescript filename="jest.swc.config.ts"
+import type { Config } from 'jest';
+
+const config: Config = {
+  testEnvironment: 'node',
+  rootDir: '.',
+  transform: {
+    '^.+\\.(t|j)sx?$': [
+      '@swc/jest',
+      {
+        jsc: {
+          parser: {
+            syntax: 'typescript',
+            decorators: true,
+            dynamicImport: true,
+          },
+          transform: {
+            legacyDecorator: true,
+            decoratorMetadata: true,
+          },
+          target: 'es2022',
+        },
+      },
+    ],
+  },
+  moduleNameMapper: {
+    '^@/(.*)$': '<rootDir>/src/$1',
+  },
+  clearMocks: true,
+};
+
+export default config;
+```
+
+## 4. ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+### ❌ สิ่งที่ผิด: ตั้งค่า Path Aliases ใน `tsconfig.json` แต่ละเลย `moduleNameMapper` ใน `jest.config.ts`
+```typescript filename="src/jest.spec.ts"
+// ใน tsconfig.json: "paths": { "@/*": ["src/*"] }
+// แต่ใน jest.config.ts ไม่ได้ใส่ moduleNameMapper
+// ผลลัพธ์: VS Code ไม่ขึ้น Error สีแดง แต่เมื่อสั่ง npm test จะพังทันที:
+// "Cannot find module '@/services/meat-stock.service' from 'src/services/...'"
+```
+
+### ✅ สิ่งที่ถูก: แมป Path ใน `moduleNameMapper` ให้สอดคล้องกันแบบ Regex 100%
+```typescript filename="jest.config.ts"
+import type { Config } from 'jest';
+
+const config: Config = {
+  moduleNameMapper: {
+    '^@/(.*)$': '<rootDir>/src/$1',
+  },
+};
+
+export default config;
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `ts-jest`:** ในโปรเจกต์ขนาดเล็กถึงปานกลางที่ต้องการความมั่นใจสูงสุดว่า Type Errors ทั้งหมดจะถูกตรวจจับได้ทันทีในจังหวะรันเทสต์
+- **ควรใช้ `@swc/jest`:** ในระบบ Enterprise หรือ Monorepo ขนาดใหญ่ที่มีเทสต์มากกว่า 500+ เคส โดยมีเงื่อนไขว่าต้องรัน `tsc --noEmit` แยกต่างหากในขั้นตอน CI Pipeline เพื่อตรวจสอบ Type Checking
+
+## 6. คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: อะไรคือความแตกต่างสำคัญระหว่าง `setupFiles` และ `setupFilesAfterEnv` ใน Jest?**
+  - *แนวคำตอบ:*
+    - `setupFiles`: จะถูกสั่งรันก่อนที่ Test Framework (Jest Runtime) จะถูกติดตั้งเข้าสู่ Environment เหมาะสำหรับการกำหนด Environment Variables พื้นฐาน หรือ Polyfill ชนิดข้อมูล Global (เช่น `process.env.NODE_ENV = 'test'`) ในจุดนี้เราจะยังไม่สามารถเรียกใช้คำสั่ง `beforeEach` หรือ `expect` ได้
+    - `setupFilesAfterEnv`: จะถูกสั่งรันหลังจากที่ Jest Test Framework ถูกติดตั้งเรียบร้อยแล้ว ในไฟล์นี้เราจึงสามารถประกาศ Global Lifecycle Hooks เช่น `beforeAll`, `afterEach` หรือติดตั้ง Custom Matchers เพิ่มเติมเข้าสู่ `expect.extend(...)` ได้อย่างสมบูรณ์
+- **Q2: หากเปลี่ยนมาใช้ `@swc/jest` แล้วพบว่า NestJS Dependency Injection พัง หรือ Custom Decorators ไม่ทำงาน มีสาเหตุมาจากอะไร?**
+  - *แนวคำตอบ:* เกิดจาก Decorator Metadata ของ TypeScript ไม่ถูกสร้างขึ้นมา ใน NestJS ตัวระบบต้องพึ่งพา `reflect-metadata` เพื่อทำ Dependency Injection ผ่าน Type Definition ของ Constructor เมื่อใช้ `@swc/jest` เราต้องเปิดค่า `legacyDecorator: true` และ `decoratorMetadata: true` ภายในบล็อกคอนฟิก `jsc.transform` เสมอ เพื่อให้ SWC สร้าง Reflection Metadata ที่จำเป็นสำหรับการทำงานของ NestJS Container
+
+---

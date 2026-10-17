@@ -1,0 +1,140 @@
+---
+title: Relational vs NoSQL
+category: DATABASE
+parentTitle: SQL vs NoSQL
+version: Polyglot Persistence
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เพื่อให้เห็นภาพความแตกต่างชัดเจนที่สุด ลองเปรียบเทียบการจัดเก็บข้อมูลในร้าน **Smart Butcher Marketplace**:
+- **SQL / Relational Database (เช่น PostgreSQL 16):** เปรียบเสมือน **"สมุดบัญชีแยกประเภทและคลังสินค้าที่มีช่องตารางมาตรฐานบังคับตายตัว"** ข้อมูลลูกค้า (`users`), สินค้า (`products`), และใบสั่งซื้อ (`orders`) ถูกแยกเก็บคนละตารางอย่างเป็นระเบียบ (Normalization) เพื่อไม่ให้ข้อมูลซ้ำซ้อน และเชื่อมโยงกันด้วยรหัสอ้างอิง (Foreign Keys) หากใครพยายามใส่ราคาเนื้อเป็นตัวหนังสือ หรือพยายามสร้างใบสั่งซื้อของลูกค้าที่ไม่มีตัวตน ระบบจะปฏิเสธทันที
+- **NoSQL / Non-Relational Database (เช่น MongoDB, Redis, DynamoDB):** เปรียบเสมือน **"แฟ้มเอกสารอิสระหรือตู้ล็อกเกอร์ความเร็วสูง"** ที่เน้นความยืดหยุ่นของโครงสร้างข้อมูล (Schema-flexible) หรือเน้นการเข้าถึงด้วยคีย์เดียวด้วยความเร็วระดับไมโครวินาที โดยยอมแลกความเข้มงวดของความสัมพันธ์ระหว่างตารางออกไป เพื่อให้กระจายข้อมูลไปเก็บไว้บนเซิร์ฟเวอร์หลายสิบเครื่อง (Horizontal Sharding) ได้ง่ายขึ้น
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **ACID vs BASE Consistency Model:**
+   - **SQL (ACID):** ยึดหลัก **Atomicity** (พังจุดเดียวต้องยกเลิกทั้งหมด), **Consistency** (ข้อมูลถูกต้องตามกฎ Constraint เสมอ), **Isolation** (ธุรกรรมที่รันพร้อมกันไม่กวนกัน), และ **Durability** (ข้อมูลถูกเขียนลง WAL บนดิสก์ไม่สูญหาย)
+   - **NoSQL ยุคแรก (BASE):** ยึดหลัก **Basically Available** (ระบบพร้อมตอบสนองเสมอ), **Soft state** (สถานะข้อมูลอาจเปลี่ยนแปลงได้แม้ไม่มี Input ใหม่เพราะกำลังซิงค์ข้อมูล), และ **Eventually consistent** (ข้อมูลในแต่ละโหนดอาจไม่ตรงกันชั่วคราว แต่สุดท้ายจะซิงค์จนตรงกันในที่สุด)
+2. **การอ่านข้อมูล: Join-on-Read (SQL) vs Denormalized Pre-joined Document (NoSQL):**
+   - ใน SQL เราแยกตาราง `orders` กับ `order_items` ออกจากกัน เวลาต้องการแสดงผลใบเสร็จ เราใช้คำสั่ง `JOIN` เพื่อประกอบร่างข้อมูลตอนอ่าน
+   - ใน Document NoSQL เรามักฝังอาร์เรย์ของ `items` เข้าไปอยู่ในเอกสาร `order` ก้อนเดียวกันเลย ทำให้การอ่านใบเสร็จ 1 ใบทำได้ในการอ่านดิสก์ครั้งเดียว แต่หากชื่อสินค้าเปลี่ยน เราจะต้องตามไปอัปเดตเอกสารใบสั่งซื้อเก่าทุกใบที่เคยฝังชื่อนั้นไว้!
+3. **อาวุธลับของ PostgreSQL 16 (`JSONB` + GIN Index):**
+   PostgreSQL 16 ทลายเส้นแบ่งระหว่าง SQL กับ Document NoSQL ด้วยชนิดข้อมูล **`JSONB` (Binary JSON)** เราสามารถใช้ตารางเชิงสัมพันธ์ที่เคร่งครัดกับคอลัมน์หลัก (`id`, `sku`, `price_per_kg`, `stock_weight_gr`) และเพิ่มคอลัมน์ `butcher_metadata JSONB` สำหรับเก็บคุณสมบัติเฉพาะของเนื้อแต่ละสายพันธุ์ที่มีฟิลด์ไม่เหมือนกันเลยได้ในตารางเดียวกัน!
+
+### ตารางเปรียบเทียบเชิงวิศวกรรม: PostgreSQL 16 (SQL) vs MongoDB (Document) vs Redis (Key-Value)
+
+| มิติการเปรียบเทียบ | PostgreSQL 16 (ORDBMS / SQL) | MongoDB (Document NoSQL) | Redis (In-Memory Key-Value) |
+| :--- | :--- | :--- | :--- |
+| **หน่วยจัดเก็บข้อมูลหลัก** | ตาราง (Tables), แถว (Tuples) และ `JSONB` | เอกสาร **BSON** (Binary JSON) ใน Collections | คีย์และโครงสร้างข้อมูลใน RAM (Strings, Hashes, Sets) |
+| **การบังคับโครงสร้าง (Schema)** | **Schema-on-Write** (เข้มงวดระดับ Engine + ยืดหยุ่นในคอลัมน์ `JSONB`) | **Schema-flexible** (แต่ละเอกสารใน Collection เดียวกันมีฟิลด์ต่างกันได้) | ไม่มี Schema ตายตัว (กำหนดโครงสร้างตามชื่อ Key) |
+| **ความสัมพันธ์และการทำ JOIN** | ยอดเยี่ยมที่สุด (Hash Join, Merge Join, Nested Loop + Foreign Keys) | ไม่เน้นการทำ Join (มี `$lookup` แต่ช้ากว่า SQL Join มาก) | ไม่มีการทำ Join ระหว่างคีย์ |
+| **การรับประกันธุรกรรม** | **ACID เต็มรูปแบบ 100%** (ทั้งข้อมูลตาราง, `JSONB` และ DDL) | รองรับ Multi-document ACID แต่มี Overhead สูงกว่าการอัปเดตเอกสารเดี่ยว | อะตอมมิกในระดับคำสั่งเดี่ยว หรือผ่านสคริปต์ **Lua Script** |
+| **ความเร็วในการตอบสนอง (Latency)** | เร็วมาก (**0.5 - 5 มิลลิวินาที** จาก RAM Buffer / SSD) | เร็วมากสำหรับการดึงเอกสารเดี่ยวด้วย `_id` (**1 - 5 มิลลิวินาที**) | **เร็วระดับขีดสุด (< 0.1 - 0.5 มิลลิวินาที)** เพราะอยู่ใน RAM ล้วนๆ |
+| **หน้าที่หลักใน Smart Butcher** | **ฐานข้อมูลหลัก (System of Record):** ลูกค้า, สต็อกเนื้อ, ออเดอร์, การเงิน | เก็บ Log อุณหภูมิตู้แช่ IoT หรือแค็ตตาล็อกที่มีโครงสร้างหลากหลายสุดขั้ว | **Caching Layer, ตะกร้าสินค้าชั่วคราว, คิวงาน และ Rate Limiting** |
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การผสานจุดเด่นของ SQL (Relational Constraints) เข้ากับ NoSQL (`JSONB`) ในตาราง `products` ของ PostgreSQL 16
+แทนที่จะต้องติดตั้ง MongoDB แยกเพียงเพื่อเก็บข้อมูลใบรับรองฟาร์มวัวที่มีฟิลด์ต่างกันในแต่ละประเทศ เราใช้ `JSONB` พร้อม `GIN Index` ใน PostgreSQL 16:
+
+```sql filename="01_hybrid_relational_jsonb.sql"
+-- สร้างตารางสินค้าที่ใช้ความเคร่งครัดของ SQL ในส่วนราคาและสต็อก
+-- แต่ใช้ความยืดหยุ่นแบบ Document NoSQL (JSONB) ในส่วนข้อมูลจำเพาะของฟาร์ม (origin_metadata)
+CREATE TABLE "products" (
+    "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    "category_id" UUID NOT NULL REFERENCES "categories"("id") ON DELETE RESTRICT,
+    "sku" VARCHAR(50) NOT NULL UNIQUE,
+    "name" VARCHAR(200) NOT NULL,
+    "price_per_kg" NUMERIC(10, 2) NOT NULL CHECK ("price_per_kg" > 0),
+    "stock_weight_gr" INTEGER NOT NULL DEFAULT 0 CHECK ("stock_weight_gr" >= 0),
+    "origin_metadata" JSONB NOT NULL DEFAULT '{}'::jsonb,
+    "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- สร้าง GIN Index บนคอลัมน์ JSONB เพื่อให้ค้นหาฟิลด์ข้างใน JSON ได้เร็วระดับมิลลิวินาที!
+CREATE INDEX "idx_products_origin_metadata_gin"
+ON "products" USING GIN ("origin_metadata" jsonb_path_ops);
+
+-- บันทึกเนื้อวากิวญี่ปุ่น (มีฟิลด์ prefecture และ nose_print_id) และเนื้อแองกัสออสเตรเลีย (มีฟิลด์ pasture_region)
+INSERT INTO "products" ("category_id", "sku", "name", "price_per_kg", "stock_weight_gr", "origin_metadata")
+VALUES
+(
+    '11111111-1111-1111-1111-111111111111',
+    'SB-KOBE-RIB-A5',
+    'Kobe Beef A5 Ribeye',
+    9500.00,
+    5000,
+    '{"country": "Japan", "prefecture": "Hyogo", "bms_score": 12, "cattle_id": "JP-9876543210", "halal_certified": true}'
+),
+(
+    '22222222-2222-2222-2222-222222222222',
+    'SB-ANGUS-TMAHWK',
+    ' Tasmanian Grass-Fed Tomahawk',
+    3200.00,
+    12000,
+    '{"country": "Australia", "pasture_region": "Tasmania", "grass_fed_days": 450, "hormone_free": true}'
+);
+
+-- ค้นหาสินค้าด้วย JSONB Containment Operator (@>) ซึ่งวิ่งผ่าน GIN Index ทันที!
+SELECT sku, name, price_per_kg, origin_metadata->>'cattle_id' AS cattle_id
+FROM "products"
+WHERE "origin_metadata" @> '{"country": "Japan", "halal_certified": true}';
+```
+
+### ตัวอย่างที่ 2: การค้นหาข้อมูลภายในคอลัมน์ `JSONB` ควบคู่กับเงื่อนไขปกติผ่าน Prisma Client
+Prisma ORM รองรับการกรองข้อมูลภายในคอลัมน์ `Json` (`JSONB`) ของ PostgreSQL 16 ได้โดยตรง:
+
+```typescript filename="src/products/jsonb-catalog.service.ts"
+import { Injectable } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+
+@Injectable()
+export class JsonbCatalogService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async findJapaneseHalalWagyuInStock(minWeightGrams: number) {
+    return this.prisma.product.findMany({
+      where: {
+        // 1. เงื่อนไข Relational มาตรฐานบนคอลัมน์มีโครงสร้าง
+        stockWeightGr: { gte: minWeightGrams },
+        // 2. เงื่อนไขค้นหาลึกเข้าไปใน JSONB Document (originMetadata)
+        originMetadata: {
+          path: ['country'],
+          equals: 'Japan',
+        },
+        AND: [
+          {
+            originMetadata: {
+              path: ['halal_certified'],
+              equals: true,
+            },
+          },
+        ],
+      },
+      orderBy: { pricePerKg: 'desc' },
+    });
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การใช้ `JSONB` ผิดวัตถุประสงค์** | ยัดข้อมูลทุกอย่าง (รวมถึง `price`, `stock`, `user_id`) ลงในคอลัมน์ `JSONB` ก้อนเดียวจนใช้ Foreign Key ไม่ได้ | ใช้คอลัมน์ปกติสำหรับฟิลด์หลักที่ต้องทำความสัมพันธ์และคำนวณเงิน แล้วใช้ `JSONB` เฉพาะส่วนข้อมูลเสริมที่ยืดหยุ่น |
+| **การเลือกฐานข้อมูลตามกระแส** | เลือกใช้ NoSQL กับระบบบัญชีและการตัดสต็อกสินค้าเพราะคิดว่าไม่ต้องออกแบบตารางให้เสียเวลา | วิเคราะห์รูปแบบการเข้าถึงข้อมูล (Access Patterns) และความสำคัญของความถูกต้อง (ACID) ก่อนเลือกเสมอ |
+| **การทำ `JOIN` ในแอปพลิเคชันเอง** | ดึงตาราง `orders` ออกมา แล้วเขียนลูป `for` ยิงคิวรีดึง `users` ทีละคนในโค้ดเพราะกลัวการใช้ SQL `JOIN` | ใช้ `JOIN` (หรือ Prisma `include`) ให้ Database Engine ประมวลผลให้เสร็จในคราวเดียว |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ SQL (PostgreSQL 16) เมื่อ:** ข้อมูลมีความสัมพันธ์กันชัดเจน (ลูกค้า -> คำสั่งซื้อ -> รายการสินค้า -> การชำระเงิน), ต้องการความถูกต้องของตัวเลขทางการเงินและสต็อก 100% (ACID), และมีการทำรายงานวิเคราะห์ข้อมูลหลายมิติ
+- **ไม่ควรใช้ Relational Table แบบแยกตารางย่อยเป็นร้อยตาราง (Entity-Attribute-Value Anti-pattern) เมื่อ:** เก็บคุณลักษณะเสริมของสินค้าที่แตกต่างกันไปตามแต่ละหมวดหมู่ (ในกรณีนี้ควรใช้คอลัมน์ `JSONB` ใน PostgreSQL หรือใช้ Document Database)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ใน PostgreSQL ชนิดข้อมูล `JSON` กับ `JSONB` แตกต่างกันอย่างไร และทำไมในระดับ Production เราจึงควรใช้ `JSONB` แทบทุกกรณี?**
+  - **แนวคำตอบ:**
+    - `JSON` เก็บข้อมูลเป็นข้อความดิบ (Plain Text) ตามที่ส่งเข้ามาทุกตัวอักษร (รวมถึงช่องว่าง) เวลาเขียนจะเร็วกว่าเล็กน้อย แต่เวลาค้นหาฟิลด์ข้างในจะต้องทำการ Parse ข้อความใหม่ทุกครั้งและไม่รองรับการทำ GIN Indexing แบบเต็มรูปแบบ
+    - ส่วน `JSONB` (Binary JSON) จะทำการแยกวิเคราะห์และแปลงโครงสร้างให้เป็นไบนารีตั้งแต่ตอนบันทึก ตัดช่องว่างที่ไม่จำเป็นออก แม้จะใช้เวลาตอน `INSERT` เพิ่มขึ้นเสี้ยววินาที แต่ทำให้การอ่านค้นหาข้อมูลข้างในเร็วกว่ามาก และรองรับการสร้าง **GIN Index** รวมถึงตัวดำเนินการ `@>` (Containment) ได้อย่างสมบูรณ์
+- **Q2: คำว่า Normalization กับ Denormalization คืออะไร และเกี่ยวพันกับการออกแบบ SQL vs NoSQL อย่างไร?**
+  - **แนวคำตอบ:** Normalization (หัวใจของ SQL) คือการจัดระเบียบข้อมูลเพื่อลดความซ้ำซ้อนโดยแยกข้อมูลออกเป็นตารางย่อยแล้วเชื่อมด้วย Foreign Key ทำให้เวลาแก้ไขข้อมูลแก้เพียงจุดเดียวและไม่เกิดความขัดแย้งกัน ส่วน Denormalization (หัวใจของ NoSQL) คือการยอมเก็บข้อมูลซ้ำซ้อนไว้ในเอกสารก้อนเดียวกันเพื่อหลีกเลี่ยงการทำ Join ตอนอ่าน ทำให้การอ่านข้อมูลเร็วขึ้นมากแต่ต้องแลกมาด้วยความซับซ้อนในการตามอัปเดตข้อมูลให้ตรงกันทุกจุดเมื่อเกิดการเปลี่ยนแปลง
+
+---

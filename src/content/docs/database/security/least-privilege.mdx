@@ -1,0 +1,116 @@
+---
+title: Least Privilege
+category: DATABASE
+parentTitle: Security
+version: PostgreSQL 16 Security & PDPA
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในร้าน **Smart Butcher Marketplace** เราคงไม่มอบ "กุญแจมาสเตอร์คีย์ที่สามารถสั่งทุบทำลายห้องเย็นและตู้เซฟของบริษัทได้" ให้กับพนักงานแคชเชียร์หน้าร้าน พนักงานแคชเชียร์ควรมีสิทธิ์เพียงแค่การเปิดบิล (`INSERT`), ตัดสต็อกเนื้อ (`UPDATE`), และดูรายการสินค้า (`SELECT`) เท่านั้น ส่วนสิทธิ์ในการรื้อถอนหรือสร้างชั้นวางใหม่ (`CREATE TABLE`, `DROP TABLE`, `ALTER TABLE`) ต้องเป็นของวิศวกรก่อสร้างเพียงผู้เดียว
+
+ในทางฐานข้อมูล หลักการนี้เรียกว่า **Principle of Least Privilege (การให้สิทธิ์เท่าที่จำเป็นต่อการปฏิบัติงานเท่านั้น)** โดยห้ามนำบัญชี Superuser (`postgres`) ไปใส่ไว้ในไฟล์ `.env` ของแอปพลิเคชัน Backend เด็ดขาด แต่ต้องแบ่งแยก Role ออกเป็น 3 ระดับชัดเจน:
+1. **`butcher_migrator` (Schema Owner / DDL Role):** ใช้เฉพาะในไปป์ไลน์ CI/CD ตอนรันคำสั่ง `npx prisma migrate deploy` เท่านั้น มีสิทธิ์สร้างและแก้ไขโครงสร้างตาราง
+2. **`butcher_app` (Application Runtime / DML Role):** ใช้โดยเซิร์ฟเวอร์ Node.js / NestJS ตลอด 24 ชั่วโมง มีสิทธิ์เฉพาะ `SELECT`, `INSERT`, `UPDATE`, `DELETE` เท่านั้น **ไม่มีสิทธิ์สั่ง `DROP TABLE` หรือ `TRUNCATE` เด็ดขาด**
+3. **`butcher_readonly` (Analytics / BI Role):** ใช้สำหรับระบบออกรายงานยอดขาย มีสิทธิ์เพียง `SELECT` อย่างเดียว
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **PostgreSQL Unified Role System:**
+   ใน PostgreSQL 16 คำว่า `USER` และ `GROUP` ถูกรวมเข้าด้วยกันภายใต้แนวคิดเดียวคือ **`ROLE`** (โดยคำสั่ง `CREATE USER` มีความหมายเทียบเท่ากับ `CREATE ROLE ... WITH LOGIN`)
+2. **กับดักของตารางที่สร้างขึ้นใหม่ในอนาคต (`ALTER DEFAULT PRIVILEGES`):**
+   ปัญหาที่วิศวกรส่วนใหญ่มักพลาดคือ เมื่อเราสั่ง `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO butcher_app;` คำสั่งนี้จะมีผลเฉพาะกับ **ตารางที่มีอยู่แล้ว ณ วินาทีนั้นเท่านั้น!** วันรุ่งขึ้นเมื่อ `butcher_migrator` รัน Migration สร้างตารางใหม่ชื่อ `promotions` บัญชี `butcher_app` จะไม่สามารถเข้าถึงตาราง `promotions` ได้เลย (เกิด Error `permission denied for table promotions`)
+   เราจึงต้องสั่ง **`ALTER DEFAULT PRIVILEGES FOR ROLE butcher_migrator IN SCHEMA public GRANT ...`** เพื่อบอก PostgreSQL 16 ว่า "ตารางใดๆ ก็ตามที่ถูกสร้างโดย `butcher_migrator` ในอนาคต ให้มอบสิทธิ์ DML แก่ `butcher_app` โดยอัตโนมัติทันที"
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: สคริปต์ SQL สร้างและแยกสิทธิ์ Role สำหรับ Migration, Application และ Analytics
+สคริปต์เตรียมความพร้อมระดับ Production ที่จำกัดจำนวนการเชื่อมต่อและแยกสิทธิ์ DDL ออกจาก DML อย่างเด็ดขาด:
+
+```sql filename="01_setup_least_privilege_roles.sql"
+-- 1. เพิกถอนสิทธิ์ที่ไม่จำเป็นจากกลุ่ม PUBLIC เพื่อความมั่นคงสูงสุดใน PostgreSQL 16
+REVOKE ALL ON DATABASE smart_butcher_db FROM PUBLIC;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+
+-- 2. สร้าง Role สำหรับรัน Migration ใน CI/CD (เจ้าของตารางและโครงสร้าง DDL)
+CREATE ROLE butcher_migrator WITH
+    LOGIN
+    PASSWORD 'StrongMigratorPassword_#2026!'
+    NOSUPERUSER NOCREATEDB NOCREATEROLE
+    CONNECTION LIMIT 5;
+
+-- 3. สร้าง Role สำหรับแอปพลิเคชัน Backend (ใช้รับคำสั่งซื้อตลอด 24 ชม. มีเฉพาะสิทธิ์ DML)
+CREATE ROLE butcher_app WITH
+    LOGIN
+    PASSWORD 'StrongAppRuntimePassword_#2026!'
+    NOSUPERUSER NOCREATEDB NOCREATEROLE
+    CONNECTION LIMIT 100;
+
+-- 4. สร้าง Role สำหรับทีม Data Analytics (อ่านได้อย่างเดียว และจำกัดเวลาคิวรีไม่ให้เกิน 10 วินาที)
+CREATE ROLE butcher_readonly WITH
+    LOGIN
+    PASSWORD 'StrongReadOnlyPassword_#2026!'
+    NOSUPERUSER NOCREATEDB NOCREATEROLE
+    CONNECTION LIMIT 10;
+ALTER ROLE butcher_readonly SET statement_timeout = '10s';
+
+-- 5. มอบสิทธิ์การเชื่อมต่อฐานข้อมูลและใช้งาน Schema public
+GRANT CONNECT ON DATABASE smart_butcher_db TO butcher_migrator, butcher_app, butcher_readonly;
+GRANT USAGE, CREATE ON SCHEMA public TO butcher_migrator;
+GRANT USAGE ON SCHEMA public TO butcher_app, butcher_readonly;
+
+-- 6. มอบสิทธิ์บนตารางและ Sequences ที่มีอยู่แล้วในปัจจุบัน
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO butcher_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO butcher_app;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO butcher_readonly;
+
+-- 7. สำคัญที่สุด: ตั้งค่า Default Privileges สำหรับตารางใหม่ที่จะถูกสร้างโดย butcher_migrator ในอนาคต
+ALTER DEFAULT PRIVILEGES FOR ROLE butcher_migrator IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO butcher_app;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE butcher_migrator IN SCHEMA public
+    GRANT USAGE, SELECT ON SEQUENCES TO butcher_app;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE butcher_migrator IN SCHEMA public
+    GRANT SELECT ON TABLES TO butcher_readonly;
+```
+
+### ตัวอย่างที่ 2: การตั้งค่า Prisma ให้ใช้ `butcher_app` ตอนรันแอป และใช้ `butcher_migrator` ตอนทำ Migration
+การแยก Connection String ในไฟล์ `.env` และ `schema.prisma` เพื่อบังคับใช้ Least Privilege จริงในโค้ด:
+
+```prisma filename="prisma/schema.prisma"
+datasource db {
+  provider  = "postgresql"
+  // แอปพลิเคชันรันไทม์จะใช้ DATABASE_URL ซึ่งล็อกอินด้วยบัญชี butcher_app (ทำได้แค่ SELECT/INSERT/UPDATE/DELETE)
+  url       = env("DATABASE_URL")
+  // คำสั่ง prisma migrate deploy จะใช้ DIRECT_URL ซึ่งล็อกอินด้วยบัญชี butcher_migrator (มีสิทธิ์ ALTER/CREATE)
+  directUrl = env("DIRECT_URL")
+}
+```
+
+```ini filename=".env.example"
+# สำหรับ Prisma Client ใน NestJS/Next.js (DML Only - ผ่าน Pooler ได้)
+DATABASE_URL="postgresql://butcher_app:StrongAppRuntimePassword@pooler.smartbutcher.internal:6543/smart_butcher_db?pgbouncer=true&sslmode=verify-full"
+
+# สำหรับ CI/CD Pipeline ตอนรัน npx prisma migrate deploy เท่านั้น (DDL Allowed - ต่อตรงเข้า Postgres)
+DIRECT_URL="postgresql://butcher_migrator:StrongMigratorPassword@db.smartbutcher.internal:5432/smart_butcher_db?sslmode=verify-full"
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **บัญชีที่แอปพลิเคชันใช้** | ใช้บัญชี `postgres` (Superuser) ในโค้ด Node.js หากเกิดช่องโหว่แฮกเกอร์สามารถสั่ง `DROP TABLE` หรืออ่านไฟล์ใน OS ได้ทันที | ใช้บัญชีเฉพาะ `butcher_app` ที่มีสิทธิ์แค่ DML (`SELECT`, `INSERT`, `UPDATE`, `DELETE`) เท่านั้น |
+| **การจัดการตารางใหม่** | ต้องคอยมารัน `GRANT` ด้วยมือทุกครั้งหลัง Deploy เพราะลืมตั้งค่า Default Privileges | ตั้งค่า `ALTER DEFAULT PRIVILEGES FOR ROLE butcher_migrator` ไว้ตั้งแต่เริ่มต้น |
+| **การจำกัดทรัพยากรราย Role** | ปล่อยให้ Role สำหรับทำรายงานรันคิวรีหนักๆ ค้างนานหลายชั่วโมงจนเว็บหน้าร้านล่ม | กำหนด `CONNECTION LIMIT` และ `ALTER ROLE ... SET statement_timeout` แยกตามหน้าที่ของแต่ละ Role |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้การแยก Role (App vs Migrator vs Readonly) เมื่อ:** ระบบขึ้นสู่ชั้น Staging และ Production ทุกกรณี
+- **ไม่ควรให้สิทธิ์ `DELETE` บนตารางประวัติการเงิน (`payments`) แก่ `butcher_app`:** ในระบบการเงินที่เข้มงวด เราสามารถจำกัดให้ `butcher_app` มีสิทธิ์เพียง `SELECT, INSERT, UPDATE` บนตาราง `payments` และ `orders` โดยไม่อนุญาตให้สั่ง `DELETE` แถวข้อมูลทิ้งเลย (บังคับให้ใช้การเปลี่ยนสถานะ `status = 'CANCELLED'` แทน)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ทำไมหลังจากที่เราสั่ง `GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA public TO app_user;` เรียบร้อยแล้ว พอสัปดาห์ต่อมามีการรัน Migration สร้างตารางใหม่ `app_user` ถึงขึ้น Error ว่า `permission denied` บนตารางใหม่นั้น?**
+  - **แนวคำตอบ:** เพราะคำสั่ง `GRANT ... ON ALL TABLES` มีผลเฉพาะกับตารางที่มีตัวตนอยู่ในแค็ตตาล็อก ณ เวลาที่รันคำสั่งเท่านั้น ไม่ได้มีผลย้อนหลังไปถึงตารางที่จะถูกสร้างขึ้นใหม่ในอนาคต วิธีแก้ไขคือต้องรันคำสั่ง `ALTER DEFAULT PRIVILEGES FOR ROLE <role_ที่ใช้รัน_migration> IN SCHEMA public GRANT SELECT, INSERT ON TABLES TO app_user;`
+- **Q2: หากเกิดช่องโหว่ในโค้ดที่ทำให้ผู้โจมตีสามารถรันคำสั่ง SQL ผ่าน Connection ของแอปพลิเคชันได้ การแยก Role `butcher_app` ออกจาก Superuser `postgres` จะช่วยลดความเสียหายได้อย่างไร?**
+  - **แนวคำตอบ:** บัญชี Superuser `postgres` สามารถข้ามการตรวจสอบสิทธิ์ทั้งหมดได้ สามารถสั่ง `DROP DATABASE` ล้างข้อมูลทั้งบริษัท หรือที่ร้ายแรงที่สุดคือสามารถใช้คำสั่ง `COPY ... TO PROGRAM` เพื่อสั่งรันคำสั่ง Shell ในระดับระบบปฏิบัติการของเครื่องเซิร์ฟเวอร์ฐานข้อมูลได้ (Remote Code Execution) แต่หากจำกัดไว้เป็น `butcher_app` ผู้โจมตีจะไม่สามารถลบตาราง ไม่สามารถแก้ไขโครงสร้าง และไม่สามารถเข้าถึงระบบปฏิบัติการหรือฐานข้อมูลก้อนอื่นในคลัสเตอร์ได้เลย
+
+---

@@ -1,0 +1,106 @@
+---
+title: Row Level Security
+category: DATABASE
+parentTitle: Supabase
+version: Supabase & PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+**Row Level Security (RLS)** คือฟีเจอร์ความปลอดภัยระดับแถวข้อมูลที่มีมาให้ในตัวของ PostgreSQL 16 และถูกนำมาใช้เป็นหัวใจหลักของสถาปัตยกรรม Supabase
+แนวคิดของ RLS คือการฝัง **"ยามเฝ้าประตูระดับแถวข้อมูล"** ลงไปในตารางโดยตรง เช่น เรากำหนดกฎไว้บนตาราง `orders` ว่า *"ลูกค้าแต่ละคนจะมองเห็นเฉพาะแถวคำสั่งซื้อที่มีค่า `user_id` ตรงกับรหัสของตัวเองเท่านั้น"*
+เมื่อมีกฎนี้ทำงานอยู่ ต่อให้โค้ดฝั่งหน้าบ้านเขียนคิวรีสั่ง `SELECT * FROM orders;` (โดยลืมใส่ `WHERE user_id = ...`) ตัว Engine ของ PostgreSQL 16 จะแอบเติมเงื่อนไข `WHERE user_id = auth.uid()` เข้าไปในแผนการสืบค้นให้อัตโนมัติ ทำให้ลูกค้าไม่มีวันแอบดูใบสั่งซื้อเนื้อวากิวของคนอื่นได้เลย!
+
+แต่สิ่งสำคัญที่สุดที่นักพัฒนา Backend ต้องเข้าใจคือ: **เมื่อเราเชื่อมต่อด้วย Prisma ORM ผ่านบัญชี `postgres` (หรือ Role ที่มีสิทธิ์ `BYPASSRLS`) กฎ RLS ทั้งหมดจะถูกข้ามไปโดยอัตโนมัติ!**
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **พฤติกรรม Default-Deny เมื่อเปิด RLS:**
+   ทันทีที่เราสั่ง `ALTER TABLE orders ENABLE ROW LEVEL SECURITY;` บนตารางใดก็ตามใน PostgreSQL 16 โดยยังไม่ได้เขียน `CREATE POLICY` ผลลัพธ์คือ **ผู้ใช้ทั่วไป (`anon` และ `authenticated` ที่ผ่าน PostgREST API ของ Supabase) จะมองไม่เห็นข้อมูลเลยแม้แต่แถวเดียว (คืนค่า 0 แถว)** ซึ่งปลอดภัยมาก!
+2. **ฟังก์ชัน `auth.uid()` และ `auth.jwt()` ของ Supabase:**
+   เมื่อมีคำขอวิ่งผ่าน API Gateway ของ Supabase พร้อมแนบ JWT Token มาด้วย Supabase จะแกะข้อมูลจาก Token แล้วตั้งค่าลงในตัวแปรเฉพาะธุรกรรม (`request.jwt.claims`) จากนั้นฟังก์ชัน `auth.uid()` ใน PostgreSQL จะอ่านค่า `sub` (User ID) ออกมาใช้ตรวจสอบเทียบกับคอลัมน์ `user_id` ในแต่ละแถว
+3. **ทำไม Prisma Client ถึงมองเห็นข้อมูลทุกแถวแม้จะเปิด RLS ไว้?**
+   ใน Connection String มาตรฐานของ Supabase ที่เรานำมาใส่ใน Prisma (`postgresql://postgres.<ref>:...`) เราเชื่อมต่อด้วย Role **`postgres`** ซึ่งในระบบของ Supabase บัญชีนี้มีคุณสมบัติพิเศษคือ **`BYPASSRLS` (ข้ามกฎ Row Level Security ทั้งหมด)**
+   - **ข้อดี:** เซิร์ฟเวอร์ Backend ของเรา (เช่น NestJS หรือ Next.js API) สามารถทำงานประมวลผลหลังบ้าน ค้นหาออเดอร์ทั้งหมดเพื่อจัดส่ง หรือทำรายงานสรุปยอดขายได้อย่างอิสระและรวดเร็ว โดยเราเป็นผู้เขียนเงื่อนไข `where: { userId }` ควบคุมสิทธิ์ในโค้ด Backend เอง
+   - **ทำไมยังต้องเปิด RLS บนทุกตารางใน Schema `public` แม้เราจะใช้แค่ Prisma?** เพราะ Supabase เปิดบริการ **PostgREST (Data API)** เอาไว้ที่ URL สาธารณะของโปรเจกต์! หากเราไม่เปิด RLS ทิ้งไว้บนตาราง `orders` หรือ `users` ใครก็ตามที่รู้ `anon key` จากหน้าเว็บจะสามารถยิง HTTP Request เข้ามาที่ PostgREST เพื่อดูดข้อมูลตารางของเราออกไปได้ทั้งหมด! การสั่ง **`ENABLE ROW LEVEL SECURITY` (โดยไม่ต้องเขียน Policy เปิดให้ `anon`)** จึงเป็นการล็อกประตู PostgREST จากโลกภายนอกอย่างสมบูรณ์ ในขณะที่ Prisma ของเรายังทำงานผ่าน `postgres` role ได้ตามปกติ 100%!
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การเปิด RLS บนทุกตารางเพื่อบล็อกการเข้าถึงจาก Public PostgREST API และตัวอย่างการเขียน Policy
+สคริปต์ SQL ที่ควรใส่ไว้ในไฟล์ Migration เพื่อล็อกตารางทั้งหมดของระบบ **Smart Butcher Marketplace** ไม่ให้รั่วไหลออกทาง Public API ของ Supabase พร้อมตัวอย่างการเขียน Policy ให้ลูกค้าอ่านรายการสินค้าและดูออเดอร์ของตัวเองได้:
+
+```sql filename="prisma/migrations/20261017080000_enable_rls_protection/migration.sql"
+-- 1. เปิดใช้งาน Row Level Security (RLS) บนทุกตารางใน Schema public!
+-- ทันทีที่เปิด บัญชีสาธารณะ (anon / authenticated) ที่ยิงผ่าน Supabase URL จะถูกบล็อกทันที (Default-Deny)
+-- ส่วน Prisma Client ที่ต่อด้วยบัญชี postgres (BYPASSRLS) จะยังคงทำงานได้ปกติ 100%
+ALTER TABLE "public"."users" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."categories" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."products" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."orders" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."order_items" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."payments" ENABLE ROW LEVEL SECURITY;
+
+-- 2. (ทางเลือกกรณีใช้ Supabase Client ฝั่งหน้าบ้านควบคู่ด้วย):
+-- อนุญาตให้ทุกคน (anon และ authenticated) อ่านรายการหมวดหมู่และสินค้าเนื้อสเต๊กได้เท่านั้น (ห้ามแก้ไข)
+CREATE POLICY "allow_public_read_categories"
+ON "public"."categories"
+FOR SELECT
+TO anon, authenticated
+USING (true);
+
+CREATE POLICY "allow_public_read_products"
+ON "public"."products"
+FOR SELECT
+TO anon, authenticated
+USING (true);
+
+-- 3. อนุญาตให้ลูกค้าที่ล็อกอินแล้ว (authenticated) ดูได้เฉพาะใบสั่งซื้อ (orders) ของตัวเองเท่านั้น
+-- เทคนิค Performance ของ PG 16: ครอบ (SELECT auth.uid()) ด้วยวงเล็บเพื่อให้ Optimizer คำนวณค่าแค่ครั้งเดียวต่อคิวรี (InitPlan Caching)!
+CREATE POLICY "customers_view_own_orders_only"
+ON "public"."orders"
+FOR SELECT
+TO authenticated
+USING ((SELECT auth.uid()) = "user_id");
+```
+
+### ตัวอย่างที่ 2: การสร้าง Index รองรับคอลัมน์ที่ใช้ใน RLS Policy เพื่อป้องกันปัญหาตารางช้า
+เมื่อมีการใช้ RLS Policy ที่ตรวจสอบเงื่อนไข เช่น `(SELECT auth.uid()) = user_id` ทุกคิวรีที่วิ่งผ่าน Policy นี้จะถูกเติม `WHERE user_id = ...` เสมอ ดังนั้นคอลัมน์ `user_id` ในตาราง `orders` จึง **ต้องมี B-Tree Index มารองรับอย่างเคร่งครัด**:
+
+```sql filename="02_rls_performance_indexing.sql"
+-- สร้าง B-Tree Index บนคอลัมน์ที่ใช้ตรวจสอบใน RLS Policy เพื่อให้การเช็คสิทธิ์ทำงานแบบ Index Scan ในเสี้ยววินาที
+CREATE INDEX IF NOT EXISTS "idx_orders_user_id_rls"
+ON "public"."orders" ("user_id");
+
+-- ตรวจสอบสถานะว่าตารางใดใน Schema public ยังลืมเปิดใช้งาน RLS อยู่บ้าง (Security Audit Query)
+SELECT
+    schemaname,
+    tablename,
+    rowsecurity AS is_rls_enabled
+FROM pg_tables
+WHERE schemaname = 'public'
+  AND tablename <> '_prisma_migrations'
+ORDER BY is_rls_enabled ASC, tablename ASC;
+```
+
+<Callout type="tip" title="เคล็ดลับเพิ่มความเร็ว RLS Policy 10 เท่าด้วย (SELECT auth.uid())">
+ในการเขียนเงื่อนไข `USING` ของ RLS Policy บน Supabase แทนที่จะเขียน `USING (auth.uid() = user_id)` ตรงๆ ซึ่งอาจทำให้ PostgreSQL เรียกฟังก์ชัน `auth.uid()` ซ้ำทุกแถวที่สแกน ให้เขียนครอบด้วย Subquery เป็น **`USING ((SELECT auth.uid()) = user_id)`** เสมอ! วิธีนี้จะบังคับให้ Query Planner ของ PostgreSQL 16 ดึงค่า UUID ของผู้ใช้ออกมาเก็บไว้เป็นค่าคงที่เพียงครั้งเดียวก่อนเริ่มสแกน Index (`InitPlan`) ทำให้คิวรีเร็วขึ้นอย่างมหาศาล
+</Callout>
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การสร้างตารางด้วย Prisma บน Supabase** | รัน `prisma migrate` สร้างตารางใน `public` แล้วปล่อยทิ้งไว้โดยไม่เปิด RLS ทำให้หน้า Dashboard ขึ้นเตือนสีแดงและข้อมูลรั่วไหลผ่าน PostgREST API | สั่ง `ALTER TABLE ... ENABLE ROW LEVEL SECURITY;` บนทุกตารางที่สร้างใหม่ใน Schema `public` เสมอ |
+| **ความเข้าใจผิดเรื่องสิทธิ์ของ Prisma** | คิดว่าการเขียน RLS Policy บน Supabase จะช่วยกรองข้อมูลให้คำสั่ง `prisma.order.findMany()` อัตโนมัติ เลยไม่ใส่ `where: { userId }` ในโค้ด Backend | ทราบชัดเจนว่า Prisma ใช้ Role `postgres` ซึ่งข้าม RLS (`BYPASSRLS`) ดังนั้นในโค้ด Backend ต้องเขียนเงื่อนไข `where: { userId }` เสมอ |
+| **การเขียน `auth.uid()` ใน Policy** | เขียน `USING (auth.uid() = user_id)` เปล่าๆ และไม่สร้าง Index บน `user_id` ทำให้คิวรีช้าลงเมื่อตารางใหญ่ขึ้น | เขียน `USING ((SELECT auth.uid()) = user_id)` และสร้าง B-Tree Index บนคอลัมน์ `user_id` เสมอ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรเปิด `ENABLE ROW LEVEL SECURITY` เสมอเมื่อ:** สร้างตารางใดๆ ก็ตามใน Schema `public` บนแพลตฟอร์ม Supabase ไม่ว่าคุณจะเรียกใช้งานผ่าน Supabase SDK หรือเรียกผ่าน Prisma ORM เพียงอย่างเดียวก็ตาม (เพื่อปิดประตูรั่วไหลทาง PostgREST)
+- **ไม่ควรพึ่งพา RLS แทนการตรวจสอบสิทธิ์ในชั้น Backend API เมื่อ:** แอปพลิเคชันของคุณเชื่อมต่อฐานข้อมูลด้วย Connection String ของ Role `postgres` (ที่มีสิทธิ์ `BYPASSRLS`)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: หากโปรเจกต์ของคุณใช้เพียงแค่ NestJS + Prisma ORM ต่อเข้าฐานข้อมูล Supabase โดยที่ฝั่ง Frontend ไม่ได้ติดตั้ง `@supabase/supabase-js` เลย ทำไมการไม่เปิดใช้งาน RLS บนตารางใน Schema `public` จึงยังถือเป็นช่องโหว่ความปลอดภัยร้ายแรง?**
+  - **แนวคำตอบ:** เพราะโดยค่าเริ่มต้น Supabase จะเปิดบริการ **PostgREST (Auto-generated REST API)** เอาไว้สำหรับทุกตารางใน Schema `public` หากตารางใดไม่ได้เปิดใช้งาน RLS (`ENABLE ROW LEVEL SECURITY`) ตารางนั้นจะเปิดกว้างให้เข้าถึงผ่าน HTTP API ของโปรเจกต์ได้ทันที หากคีย์สาธารณะ (`anon key`) หลุดออกไปหรือถูกเปิดใช้งานอยู่ ผู้ไม่หวังดีจะสามารถยิง HTTP Request เข้ามาอ่านหรือลบข้อมูลในตารางทั้งหมดได้โดยไม่ต้องผ่านเซิร์ฟเวอร์ NestJS ของเราเลย การสั่ง `ENABLE ROW LEVEL SECURITY` บนทุกตาราง (โดยไม่ต้องเพิ่ม Policy ใดๆ) จะทำการบล็อกการเข้าถึงผ่าน PostgREST ทั้งหมดเป็น Default-Deny ทันที ในขณะที่ Prisma ที่ใช้บัญชี `postgres` (`BYPASSRLS`) ยังคงทำงานได้ตามปกติ
+- **Q2: ทำไมการเขียน RLS Policy ว่า `USING ((SELECT auth.uid()) = user_id)` จึงทำงานเร็วกว่า `USING (auth.uid() = user_id)` บนตารางขนาดใหญ่ใน PostgreSQL 16?**
+  - **แนวคำตอบ:** เพราะฟังก์ชัน `auth.uid()` มีสถานะเป็น `STABLE` เมื่อเขียนเรียกตรงๆ ในบางแผนการสืบค้น PostgreSQL อาจประเมินค่าฟังก์ชันนี้ซ้ำในทุกๆ แถวที่อ่านขึ้นมาตรวจสอบ แต่เมื่อครอบด้วย `(SELECT auth.uid())` ตัว Optimizer ของ PostgreSQL 16 จะมองว่าเป็น Scalar Subquery ที่ไม่ขึ้นกับแถวข้อมูล จึงแยกออกไปรันเป็น **`InitPlan` เพียงครั้งเดียว** ตอนเริ่มต้นคิวรี แล้วนำค่า UUID ที่ได้ไปใช้ค้นหาใน B-Tree Index ของ `user_id` โดยตรง
+
+---

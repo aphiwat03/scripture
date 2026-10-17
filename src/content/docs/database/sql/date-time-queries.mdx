@@ -1,0 +1,147 @@
+---
+title: Date Time Queries
+category: DATABASE
+parentTitle: SQL
+version: SQL:2023 & PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในธุรกิจเนื้อดรายเอจ เวลาเป็นปัจจัยกำหนดรสชาติและราคาอย่างแท้จริง:
+- การบ่มเนื้อวากิวต้องการการจับเวลาที่แม่นยำระดับชั่วโมง
+- การตัดยอดขายและจัดทำรายงานภาษีต้องอิงตาม Timezone ของประเทศไทย (`Asia/Bangkok` / UTC+7) อย่างเคร่งครัด
+- ออเดอร์ที่ค้างชำระเกิน 24 ชั่วโมงต้องถูกยกเลิกสต็อกคืนอัตโนมัติ
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **ชนิดข้อมูลวันที่และเวลาใน PostgreSQL**:
+   - **`TIMESTAMPTZ` (`timestamp with time zone`)**: **ทางเลือกมาตรฐานสำหรับระบบ Production!** ตัว PostgreSQL จะแปลงเวลาทุกค่าที่ส่งเข้ามาให้กลายเป็นเวลามาตรฐาน **UTC** แล้วบันทึกลง Disk ในขนาด 8 Bytes เสมอ เมื่อ Client เรียกอ่านข้อมูล Engine จะแปลงเวลา UTC นั้นกลับไปเป็น Timezone ของ Session ผู้ใช้งานโดยอัตโนมัติ
+   - **`TIMESTAMP` (`timestamp without time zone`)**: เก็บตัวเลขวันเวลาโดยไม่มีข้อมูล Timezone กำกับ ทำให้เกิดข้อผิดพลาดรุนแรงเมื่อระบบย้าย Cloud Region หรือมี Client จากหลายประเทศ
+2. **ความแตกต่างของฟังก์ชันดึงเวลาปัจจุบัน**:
+   - `NOW()` หรือ `CURRENT_TIMESTAMP`: คืนค่าเวลา ณ **จุดเริ่มต้นของ Transaction** เวลาจะมีค่าคงที่ตลอดทุกคำสั่งภายใน Transaction เดียวกันเพื่อความสอดคล้องตามหลัก ACID
+   - `clock_timestamp()`: คืนค่าเวลาจริง ณ **เสี้ยววินาทีที่คำสั่งนั้นกำลังรันจริง** เหมาะสำหรับการทำ Profiling หรือ Benchmark ประสิทธิภาพ
+3. **การตัดทอนเวลาด้วย `date_trunc`**:
+   `date_trunc('month', created_at)` ทำการปัดเศษเวลาส่วนที่ละเอียดกว่าทิ้ง เช่น `2026-10-17 14:35:20` จะกลายเป็น `2026-10-01 00:00:00` ซึ่งจำเป็นอย่างยิ่งในการทำ `GROUP BY` รายเดือนหรือรายวัน
+4. **ความสำคัญของ SARGable Query กับเวลา**:
+   การครอบฟังก์ชันบนคอลัมน์ในเงื่อนไข `WHERE` เช่น `WHERE date(created_at) = '2026-10-15'` จะทำลาย B-Tree Index ทันที (Non-SARGable) ต้องเขียนเป็น Range Query แทนเสมอ
+
+```text filename="docs/database/sql.txt"
++─────────────────────────────────────────────────────────────────────────────+
+|               สถาปัตยกรรม TIMESTAMPTZ ใน PostgreSQL ENGINE                   |
++─────────────────────────────────────────────────────────────────────────────+
+| Client ส่งเวลา: '2026-10-17 15:00:00+07'                                     |
+|                      │                                                      |
+|                      ▼                                                      |
+| PostgreSQL ทำการแปลงเวลาเป็น UTC สากล:                                         |
+| -> '2026-10-17 08:00:00 UTC'                                                |
+|                      │                                                      |
+|                      ▼                                                      |
+| บันทึกลง Storage Disk ในรูปแบบ UTC 8 Bytes เสมอ                               |
+|                      │                                                      |
+|                      ▼                                                      |
+| Client จากโตเกียว (UTC+9) เรียกอ่านข้อมูล:                                     |
+| -> Engine แปลงคืนเป็น '2026-10-17 17:00:00+09' ให้โดยอัตโนมัติ!               |
++─────────────────────────────────────────────────────────────────────────────+
+```
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: สรุปยอดขายเนื้อดรายเอจรายเดือนย้อนหลัง พร้อมแปลง Timezone
+จัดทำรายงานยอดขายรายเดือนตามเวลาประเทศไทย (`Asia/Bangkok`) ย้อนหลัง 6 เดือน:
+
+```sql filename="sql/sql.sql"
+-- รายงานยอดขายรายเดือนตาม Timezone ไทย
+SELECT 
+    date_trunc('month', created_at AT TIME ZONE 'Asia/Bangkok') AS sales_month,
+    to_char(date_trunc('month', created_at AT TIME ZONE 'Asia/Bangkok'), 'Mon YYYY') AS display_month,
+    COUNT(id) AS total_orders,
+    SUM(total_amount) AS monthly_revenue
+FROM orders
+WHERE status = 'COMPLETED'
+  AND created_at >= NOW() - INTERVAL '6 months' -- คำนวณช่วงเวลาย้อนหลัง 6 เดือนด้วย INTERVAL
+GROUP BY sales_month, display_month
+ORDER BY sales_month DESC;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| sales_month | display_month | total_orders | monthly_revenue |
+| :--- | :--- | :--- | :--- |
+| 2026-10-01 00:00:00 | Oct 2026 | 2 | 19100.00 |
+
+### ตัวอย่างที่ 2: SARGable Query ค้นหาออเดอร์ค้างชำระเกิน 24 ชั่วโมงเพื่อตัดสต็อกคืน
+ค้นหาออเดอร์สถานะ `PENDING` ที่ถูกสร้างขึ้นมาเกิน 24 ชั่วโมง เพื่อส่งระบบ Background Job ไปยกเลิก:
+
+```sql filename="sql/sql.sql"
+-- ค้นหาออเดอร์หมดอายุด้วยเงื่อนไข SARGable เพื่อให้ใช้ B-Tree Index บน created_at ได้เต็มที่
+SELECT 
+    id,
+    order_no,
+    user_id,
+    total_amount,
+    created_at,
+    -- คำนวณว่าออเดอร์ค้างมาแล้วกี่ชั่วโมง
+    ROUND(EXTRACT(EPOCH FROM (NOW() - created_at)) / 3600, 1) AS hours_overdue
+FROM orders
+WHERE status = 'PENDING'
+  AND created_at < NOW() - INTERVAL '24 hours' -- SARGable: คอลัมน์ created_at อยู่เดี่ยวๆ ไม่ถูกครอบฟังก์ชัน
+ORDER BY created_at ASC;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| id | order_no | user_id | total_amount | created_at | hours_overdue |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 3 | ORD-20261010-003 | 2 | 10800.00 | 2026-10-10 18:45:00+07 | 148.5 |
+
+**โค้ดเทียบเคียงใน Prisma Client:**
+```typescript filename="src/sql.ts"
+// SARGable query บน Prisma Client
+const cutoffTime = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+const expiredOrders = await prisma.order.findMany({
+  where: {
+    status: 'PENDING',
+    createdAt: {
+      lt: cutoffTime,
+    },
+  },
+  select: {
+    id: true,
+    orderNo: true,
+    totalAmount: true,
+    createdAt: true,
+  },
+});
+```
+
+## 4. ผิด vs ถูก (Anti-patterns & Best Practices)
+
+### ❌ โค้ดที่ผิด: เอาฟังก์ชันไปครอบคอลัมน์เวลาใน `WHERE` (Non-SARGable)
+```sql filename="sql/sql.sql"
+-- ผิด: การเอา to_char หรือ date() ครอบคอลัมน์ created_at ทำให้ B-Tree Index ไร้ค่าทันที (เกิด Full Table Scan)
+SELECT id, total_amount 
+FROM orders 
+WHERE to_char(created_at, 'YYYY-MM-DD') = '2026-10-15';
+```
+
+### ✅ โค้ดที่ถูก: เขียนเงื่อนไขเป็นช่วงเวลา (Range Condition) แบบ SARGable
+```sql filename="sql/sql.sql"
+-- ถูกต้อง: คอลัมน์ created_at ไม่ถูกครอบด้วยฟังก์ชัน ทำให้ PostgreSQL วิ่งผ่าน Index ได้ทันที
+SELECT id, total_amount 
+FROM orders 
+WHERE created_at >= '2026-10-15 00:00:00+07' 
+  AND created_at < '2026-10-16 00:00:00+07';
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `TIMESTAMPTZ`:** เป็นค่าเริ่มต้นสำหรับคอลัมน์เก็บวันเวลาทั้งหมดในระบบ Production
+- **ควรใช้ Date Range (`>=` และ `<`):** ในการกรองวันเวลาใน `WHERE` clause เสมอ
+- **ไม่ควรใช้ `TIMESTAMP` (Without Time Zone):** กับข้อมูลที่มีการแลกเปลี่ยนข้ามระบบ เครือข่าย หรือเซิร์ฟเวอร์คนละโซนเวลา
+
+## 6. คำถามสัมภาษณ์ (Interview Questions)
+- **Q1: เหตุใดฟังก์ชัน `NOW()` จึงคืนค่าเวลาเดิมซ้ำๆ ตลอดทั้ง Transaction และหากต้องการเวลาจริงของนาฬิการะบบขณะที่คำสั่งกำลังรันต้องใช้ฟังก์ชันใด?**
+  - *คำตอบ:* เพราะ `NOW()` ถูกออกแบบมาเพื่อให้สอดคล้องกับคุณสมบัติ **Atomicity และ Consistency ของ ACID** ในหนึ่ง Transaction ข้อมูลหลายตารางที่ถูกบันทึกควรมี Timestamp เดียวกันเพื่อสะท้อนจุดเวลาเดียวกัน หากต้องการอ่านเวลาจริงของนาฬิกา Hardware ณ เสี้ยววินาทีที่คำสั่งนั้นประมวลผล ต้องใช้ฟังก์ชัน **`clock_timestamp()`**
+- **Q2: หากตาราง `orders` มีขนาด 20 ล้านแถว และมี Index บนคอลัมน์ `created_at` เหตุใดคำสั่ง `WHERE created_at::date = '2026-10-01'` ถึงทำงานช้าและกิน CPU 100%?**
+  - *คำตอบ:* เพราะการ Cast ข้อมูลด้วย `::date` หรือการครอบฟังก์ชันใดๆ บนคอลัมน์ จะทำให้ Query นั้นสูญเสียคุณสมบัติ **SARGable (Search Argument Able)** ตัว Query Optimizer จะไม่สามารถนำค่า '2026-10-01' ไปค้นหาในโครงสร้าง B-Tree Index ได้โดยตรง ส่งผลให้ต้องทำ **Sequential Scan (Full Table Scan)** โดยไล่อ่านข้อมูลทั้ง 20 ล้านแถวมาแปลงค่าทีละแถวเพื่อเปรียบเทียบ
+
+---

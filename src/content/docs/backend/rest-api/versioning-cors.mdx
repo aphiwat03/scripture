@@ -1,0 +1,245 @@
+---
+title: Versioning CORS
+category: BACKEND
+parentTitle: REST API Design
+version: RESTful API Standards
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เมื่อระบบ **Smart Butcher Marketplace** เติบโตขึ้นและมีทั้งเว็บไซต์ Next.js, แอปมือถือ iOS/Android ของลูกค้า และระบบเครื่องชั่งดิจิทัลในโรงเชือดเชื่อมต่อเข้ามาพร้อมกัน เราไม่สามารถแก้ไขโครงสร้าง API เดิมแบบหักดิบ (Breaking Changes) ได้เพราะลูกค้าที่ยังไม่อัปเดตแอปมือถือจะใช้งานไม่ได้ทันที ดังนั้นเราจึงต้องมี **API Versioning (การจัดการเวอร์ชันของ API)**, การตั้งค่าความปลอดภัยข้ามโดเมนด้วย **CORS (Cross-Origin Resource Sharing)** และการทำความเข้าใจความแตกต่างเชิงสัญญะระหว่าง **PUT vs PATCH**
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **API Versioning ใน NestJS 11**: รองรับ 4 รูปแบบคือ:
+   - **URI Versioning** (`/api/v1/products`, `/api/v2/products`): นิยมที่สุดในระบบ Production เพราะเห็นชัดเจนใน Browser DevTools, Server Logs และตั้งค่า Routing บน API Gateway / Cloudflare ได้ง่ายที่สุด
+   - **Header Versioning** (`X-API-Version: 2`): URL สะอาด แต่ทดสอบผ่าน Browser ตรงๆ ยากกว่า
+   - **Media Type Versioning** (`Accept: application/vnd.smartbutcher.v2+json`): ตามหลัก REST บริสุทธิ์แต่ซับซ้อนในการดูแล
+2. **CORS (Cross-Origin Resource Sharing)**: กลไกความปลอดภัยของเบราว์เซอร์ที่จะส่งคำขอ **Preflight (`OPTIONS`)** มาถามเซิร์ฟเวอร์ก่อนเมื่อมีการเรียกข้ามโดเมน หรือมีการใช้ Custom Headers (เช่น `Authorization`, `Idempotency-Key`) หากเราใช้ `credentials: true` (เพื่อส่ง `HttpOnly Cookie`) มาตรฐาน W3C จะห้ามตั้งค่า `Access-Control-Allow-Origin: *` โดยเด็ดขาด ต้องระบุโดเมนต้นทางอย่างชัดเจนเท่านั้น
+3. **ความต่างระหว่าง PUT vs PATCH**:
+   - **PUT (Full Replacement)**: ไคลเอนต์ต้องส่งฟิลด์ทั้งหมดของ Resource มา หากไม่ส่งฟิลด์ใดมา เซิร์ฟเวอร์ต้องถือว่าต้องการล้างฟิลด์นั้นเป็น `null` หรือค่าเริ่มต้น
+   - **PATCH (Partial Update)**: ไคลเอนต์ส่งเฉพาะฟิลด์ที่ต้องการเปลี่ยน ฟิลด์ที่ไม่ถูกส่งมา (`undefined`) จะต้องคงค่าเดิมในฐานข้อมูลไว้ แต่หากส่งฟิลด์มาเป็น `null` อย่างจงใจ หมายถึงต้องการล้างค่าฟิลด์นั้น
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การเปิดใช้งาน URI Versioning และตั้งค่า Strict CORS ใน main.ts (พื้นฐาน)
+```typescript filename="src/main.ts"
+import { NestFactory } from '@nestjs/core';
+import { VersioningType, ValidationPipe } from '@nestjs/common';
+import { AppModule } from './app.module';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+
+  // 1. ตั้งค่า Global Prefix ยกเว้นหน้า Health Check
+  app.setGlobalPrefix('api', {
+    exclude: ['health'],
+  });
+
+  // 2. เปิดใช้งาน URI Versioning (/api/v1/..., /api/v2/...)
+  app.enableVersioning({
+    type: VersioningType.URI,
+    defaultVersion: '1',
+  });
+
+  // 3. ตั้งค่า CORS แบบปลอดภัยสำหรับ Production ที่ใช้งานร่วมกับ HttpOnly Cookie
+  const allowedOrigins = (
+    process.env.ALLOWED_ORIGINS ?? 'https://smartbutcher.co.th,https://admin.smartbutcher.co.th'
+  ).split(',');
+
+  app.enableCors({
+    origin: (requestOrigin, callback) => {
+      // อนุญาตคำขอจาก Server-to-Server หรือ Mobile App ที่ไม่มี Origin Header
+      if (!requestOrigin || allowedOrigins.includes(requestOrigin)) {
+        callback(null, true);
+      } else {
+        callback(new Error(`Origin ${requestOrigin} is not allowed by CORS policy`));
+      }
+    },
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'Idempotency-Key',
+      'X-Request-Id',
+    ],
+    exposedHeaders: ['Location', 'X-Idempotent-Replayed', 'X-Request-Id'],
+    credentials: true, // จำเป็นสำหรับการส่ง HttpOnly Cookie ข้าม Subdomain
+    maxAge: 86400, // ให้ Browser จดจำผลลัพธ์ Preflight OPTIONS นาน 24 ชั่วโมงเพื่อลด Latency
+  });
+
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    }),
+  );
+
+  await app.listen(process.env.PORT ?? 3000);
+}
+bootstrap();
+```
+
+### ตัวอย่างที่ 2: การจัดการ Controller หลายเวอร์ชัน และความต่างของ PUT vs PATCH (ขั้นสูง)
+```typescript filename="src/modules/products/products-versioned.controller.ts"
+import {
+  Controller,
+  Get,
+  Put,
+  Patch,
+  Param,
+  Body,
+  Version,
+  Res,
+  ParseUUIDPipe,
+} from '@nestjs/common';
+import { Response } from 'express';
+
+export class ReplaceProductPutDto {
+  name!: string;
+  categoryId!: string;
+  pricePerKgThb!: number;
+  dryAgedDays!: number | null; // ต้องส่งทุกฟิลด์ หากไม่ใช่เนื้อ Dry-Aged ต้องส่ง null
+  tastingNotes!: string | null;
+}
+
+export class UpdateProductPatchDto {
+  name?: string;
+  categoryId?: string;
+  pricePerKgThb?: number;
+  dryAgedDays?: number | null; // ส่งเฉพาะฟิลด์ที่ต้องการเปลี่ยน
+  tastingNotes?: string | null;
+}
+
+@Controller('products')
+export class ProductsVersionedController {
+  // GET /api/v1/products/:id (Deprecated - เตรียมยกเลิกในอีก 6 เดือน)
+  @Version('1')
+  @Get(':id')
+  async getProductV1(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    // แนบ Deprecation & Sunset Headers ตามมาตรฐาน IETF เพื่อแจ้งเตือนทีม Frontend/Partner
+    res.setHeader('Deprecation', 'true');
+    res.setHeader('Sunset', 'Sat, 01 May 2027 00:00:00 GMT');
+    res.setHeader('Link', '</api/v2/products>; rel="successor-version"');
+
+    return {
+      id,
+      name: 'Miyazaki Wagyu A5',
+      price: 6900, // V1 ใช้ฟิลด์ชื่อ price เฉยๆ
+    };
+  }
+
+  // GET /api/v2/products/:id (โครงสร้างใหม่แยกสกุลเงินและหน่วยน้ำหนักชัดเจน)
+  @Version('2')
+  @Get(':id')
+  async getProductV2(@Param('id', ParseUUIDPipe) id: string) {
+    return {
+      id,
+      name: 'Miyazaki Wagyu A5',
+      pricing: {
+        amountSubunits: 690000, // 6,900.00 บาท (เก็บเป็นสตางค์)
+        currency: 'THB',
+        unit: 'KG',
+      },
+    };
+  }
+
+  // PUT /api/v1/products/:id -> แทนที่ข้อมูลทั้งก้อน (Full Replacement)
+  @Version('1')
+  @Put(':id')
+  async replaceProduct(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReplaceProductPutDto,
+  ) {
+    // ทุกฟิลด์ในฐานข้อมูลจะถูกเขียนทับด้วยค่าใน dto ทันที
+    return {
+      operation: 'PUT_FULL_REPLACE',
+      id,
+      persistedState: {
+        name: dto.name,
+        categoryId: dto.categoryId,
+        pricePerKgThb: dto.pricePerKgThb,
+        dryAgedDays: dto.dryAgedDays ?? null,
+        tastingNotes: dto.tastingNotes ?? null,
+      },
+    };
+  }
+
+  // PATCH /api/v1/products/:id -> แก้ไขเฉพาะฟิลด์ที่ส่งมา (Partial Update)
+  @Version('1')
+  @Patch(':id')
+  async updateProductPartially(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateProductPatchDto,
+  ) {
+    const existingInDb = {
+      name: 'Miyazaki Wagyu A5',
+      categoryId: 'cat-wagyu',
+      pricePerKgThb: 6900,
+      dryAgedDays: 45,
+      tastingNotes: 'Rich buttery aroma with nutty finish',
+    };
+
+    // ฟิลด์ที่เป็น undefined จะไม่ถูกนำไปทับค่าเดิม แต่ถ้าส่ง null มาจะล้างค่าเป็น null
+    const updatedState = {
+      name: dto.name !== undefined ? dto.name : existingInDb.name,
+      categoryId:
+        dto.categoryId !== undefined ? dto.categoryId : existingInDb.categoryId,
+      pricePerKgThb:
+        dto.pricePerKgThb !== undefined
+          ? dto.pricePerKgThb
+          : existingInDb.pricePerKgThb,
+      dryAgedDays:
+        dto.dryAgedDays !== undefined
+          ? dto.dryAgedDays
+          : existingInDb.dryAgedDays,
+      tastingNotes:
+        dto.tastingNotes !== undefined
+          ? dto.tastingNotes
+          : existingInDb.tastingNotes,
+    };
+
+    return {
+      operation: 'PATCH_PARTIAL_UPDATE',
+      id,
+      persistedState: updatedState,
+    };
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/products/put-patch-comparison.ts"
+// ❌ ผิด (Anti-pattern): ใช้ PUT แต่เขียนโค้ดข้างในเป็น Partial Update หรือตั้งค่า CORS origin: '*' ทั้งที่เปิด credentials
+export const WRONG_CORS_CONFIG = {
+  origin: '*', // พังทันทีเมื่อใช้คู่กับ credentials: true บน Browser สมัยใหม่!
+  credentials: true,
+};
+
+// ✅ ถูก (Best Practice): แยกแยะความต่างระหว่าง undefined (ไม่ได้ส่งมา = คงค่าเดิมใน PATCH) กับ null (ตั้งใจล้างค่าให้ว่าง)
+export function buildPrismaPatchData(dto: { tastingNotes?: string | null }) {
+  return {
+    // ถ้า dto.tastingNotes เป็น undefined Prisma จะข้ามการอัปเดตคอลัมน์นี้
+    // ถ้า dto.tastingNotes เป็น null Prisma จะสั่ง SET tasting_notes = NULL
+    tastingNotes: dto.tastingNotes,
+  };
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรขึ้น API Version ใหม่ (`v2`) เมื่อ**: มีการเกิด **Breaking Changes** เท่านั้น เช่น การลบฟิลด์เดิมออก, การเปลี่ยนชื่อฟิลด์ (`price` เป็น `pricing`), การเปลี่ยนชนิดข้อมูล (จาก `number` เป็น `object`), หรือการเพิ่มฟิลด์บังคับ (Required field) ใน Request Body
+- **ไม่ควรขึ้น API Version ใหม่เมื่อ**: เป็นการเพิ่มฟิลด์ใหม่แบบ Optional ใน Request หรือเพิ่มฟิลด์ใหม่ใน Response ซึ่งไคลเอนต์รุ่นเก่าสามารถละเว้นฟิลด์ที่ตัวเองไม่รู้จักได้ตามปกติ (Backward-compatible change)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมการตั้งค่า `maxAge` ใน CORS Configuration จึงช่วยเพิ่มประสิทธิภาพให้กับ REST API บน Production ได้อย่างมาก?
+   - **แนวคำตอบ**: เพราะทุกครั้งที่ Frontend ส่งคำขอแบบ Cross-Origin ที่มี Header พิเศษ (เช่น `Authorization` หรือ `Idempotency-Key`) หรือใช้เมธอด `PUT`, `PATCH`, `DELETE` เบราว์เซอร์จะยิงคำขอ `OPTIONS` (Preflight Request) ไปถามเซิร์ฟเวอร์ก่อน 1 รอบเสมอ ส่งผลให้เกิด Network Round-Trip เพิ่มขึ้นเป็น 2 เท่า การตั้งค่า `maxAge: 86400` (Access-Control-Max-Age) จะสั่งให้เบราว์เซอร์แคชผลการอนุญาต CORS ไว้ 24 ชั่วโมง ทำให้คำขอถัดๆ ไปยิงตรงเข้า API ทันทีโดยไม่ต้องยิง `OPTIONS` ซ้ำ
+2. **คำถาม**: ในการทำ `PATCH` เราจะแยกได้อย่างไรว่าไคลเอนต์ "ไม่ต้องการแก้ไขฟิลด์ `tastingNotes`" กับ "ต้องการลบข้อความใน `tastingNotes` ทิ้งให้เป็นค่าว่าง"?
+   - **แนวคำตอบ**: ใช้ความแตกต่างระหว่าง `undefined` และ `null` ใน JSON:
+     - หากไคลเอนต์ไม่ต้องการแก้ไขฟิลด์นั้น ไคลเอนต์จะไม่ส่งคีย์นั้นมาใน JSON เลย (ใน TypeScript ค่าจะเป็น `undefined`) เซิร์ฟเวอร์จะคงค่าเดิมไว้
+     - หากไคลเอนต์ต้องการล้างค่าในฐานข้อมูลให้ว่าง ไคลเอนต์จะส่ง `{ "tastingNotes": null }` มาอย่างชัดเจน เซิร์ฟเวอร์จึงสั่งอัปเดตคอลัมน์นั้นในฐานข้อมูลให้เป็น `NULL`
+
+---

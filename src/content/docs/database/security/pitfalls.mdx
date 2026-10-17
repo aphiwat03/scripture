@@ -1,0 +1,69 @@
+---
+title: Anti-patterns
+category: DATABASE
+parentTitle: Security
+version: PostgreSQL 16 Security & PDPA
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การใช้บัญชี Superuser (`postgres`) ใน Connection String ของแอปพลิเคชัน**
+   - **สาเหตุ:** นักพัฒนานำค่าเริ่มต้นจาก Docker Compose ตอนทำ Local Dev ไปใช้ต่อบน Production
+   - **ผลกระทบ:** หากเกิดช่องโหว่จุดเดียวในแอปพลิเคชัน ผู้โจมตีจะได้สิทธิ์สูงสุดในการลบฐานข้อมูลทั้งหมดหรือสั่งรันคำสั่งระดับ OS
+   - **วิธีแก้:** สร้าง Role แยกต่างหาก (`butcher_app`) ที่มีเฉพาะสิทธิ์ `SELECT, INSERT, UPDATE, DELETE` เท่านั้น
+
+2. **การเปิดพอร์ต 5432 ของฐานข้อมูล Production ออกสู่อินเทอร์เน็ตสาธารณะ (`0.0.0.0/0`)**
+   - **สาเหตุ:** ต้องการความสะดวกในการเชื่อมต่อจากเครื่องคอมพิวเตอร์ส่วนตัวโดยไม่ต้องต่อ VPN
+   - **ผลกระทบ:** บอทอัตโนมัติทั่วโลกจะทำการสแกนและยิง Brute-force รหัสผ่านตลอด 24 ชั่วโมง รวมถึงเสี่ยงต่อช่องโหว่ Zero-day
+   - **วิธีแก้:** วางฐานข้อมูลใน Private Subnet ที่เข้าถึงได้เฉพาะจาก Application Server และใช้ SSH Bastion หรือ VPN สำหรับผู้ดูแลระบบ
+
+3. **การใช้ `$queryRawUnsafe` ร่วมกับ Template Literal `${...}`**
+   - **สาเหตุ:** สับสนไวยากรณ์ระหว่าง `$queryRaw\`...\`` (Tagged Template ที่ปลอดภัย) กับ `$queryRawUnsafe(\`...\`)`
+   - **ผลกระทบ:** เปิดช่องโหว่ SQL Injection เต็มรูปแบบให้ผู้โจมตีดึงข้อมูลทุกตารางออกไปได้
+   - **วิธีแก้:** ใช้ `$queryRaw` แบบ Tagged Template เสมอ และใช้ Strict Allowlist สำหรับชื่อคอลัมน์ใน `ORDER BY`
+
+4. **การเก็บไฟล์ `.env` หรือรหัสผ่านฐานข้อมูลไว้ใน Git Repository**
+   - **สาเหตุ:** ลืมเพิ่ม `.env` ลงใน `.gitignore` หรือเผลอใส่รหัสผ่านจริงลงในไฟล์ตัวอย่างและไฟล์ CI
+   - **ผลกระทบ:** รหัสผ่านฝังอยู่ในประวัติ Git ตลอดไปแม้จะลบไฟล์ใน Commit ถัดมาแล้วก็ตาม
+   - **วิธีแก้:** ใช้ Secret Manager ของผู้ให้บริการคลาวด์ และติดตั้งตัวสแกนหาความลับอัตโนมัติ (เช่น `gitleaks`) ใน Pre-commit Hook
+
+5. **การตั้ง `ON DELETE CASCADE` บนตารางการเงิน (`orders` / `payments`) เพื่อลบข้อมูลลูกค้า**
+   - **สาเหตุ:** คิดว่าการทำตามกฎหมาย PDPA คือต้องสั่ง `DELETE` แถวข้อมูลทิ้งทั้งหมด
+   - **ผลกระทบ:** ยอดรวมรายได้และประวัติใบเสร็จของบริษัทหายไปจากระบบบัญชี ผิดกฎหมายภาษีอากร
+   - **วิธีแก้:** ใช้ `ON DELETE RESTRICT` และใช้วิธีเขียนทับข้อมูลระบุตัวตน (PII Anonymization) แทนการลบแถว
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+ตรวจสอบความมั่นคงปลอดภัยของฐานข้อมูล **Smart Butcher Marketplace** ก่อนเปิดให้บริการจริงตามรายการต่อไปนี้:
+
+- [ ] **Role Separation:** แยกบัญชี `butcher_migrator` (สำหรับรัน Migration) และ `butcher_app` (สำหรับรันแอปพลิเคชันที่มีเฉพาะสิทธิ์ DML) ออกจากกันอย่างเด็ดขาด และไม่มีการใช้ `postgres` ในแอปพลิเคชัน
+- [ ] **Default Privileges Configured:** ตั้งค่า `ALTER DEFAULT PRIVILEGES` เพื่อให้ตารางใหม่ที่สร้างโดย Migration มอบสิทธิ์ DML แก่ `butcher_app` อัตโนมัติ
+- [ ] **Public Schema Hardened:** เพิกถอนสิทธิ์ `CREATE` บน Schema `public` ออกจากกลุ่ม `PUBLIC` (`REVOKE CREATE ON SCHEMA public FROM PUBLIC;`)
+- [ ] **TLS & SCRAM Enforced:** บังคับใช้ `hostssl` และ `scram-sha-256` ใน `pg_hba.conf` พร้อมระบุ `sslmode=verify-full` (หรือ `require`) ใน Connection String
+- [ ] **Network Isolated:** ฐานข้อมูลอยู่ใน Private Subnet ที่ไม่มี Public IP หรือจำกัด Firewall อนุญาตเฉพาะ IP ของเซิร์ฟเวอร์แอปพลิเคชันและ Pooler เท่านั้น
+- [ ] **Zero Unsafe Raw SQL:** โค้ดทั้งหมดใช้ Parameterized Queries ผ่าน Prisma Client หรือ `$queryRaw` Tagged Template และมีการใช้ Allowlist สำหรับ Dynamic `ORDER BY`
+- [ ] **PDPA & Audit Ready:** มีกระบวนการทำ Data Anonymization สำหรับคำขอลบข้อมูลลูกค้าโดยไม่กระทบตารางบัญชี และมีตาราง Audit Log แบบ Append-Only สำหรับธุรกรรมสำคัญ
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อฐานข้อมูลของคุณได้รับการปกป้องอย่างรัดกุมแล้ว ขั้นตอนต่อไปคือการออกแบบระบบจัดการการเชื่อมต่อให้สามารถรองรับผู้ใช้งานพร้อมกันจำนวนมากได้โดยที่ฐานข้อมูลไม่ล่ม:
+
+<Callout type="tip" title="เส้นทางการศึกษาต่อสำหรับระบบฐานข้อมูลระดับ Production">
+1. **การบริหารจัดการการเชื่อมต่อและป้องกันปัญหาฐานข้อมูลล่มเมื่อคนเข้าเยอะ:**  
+   👉 **[Connection Pooling](/docs/database/connection-pooling)** — เจาะลึกต้นทุนของโปรเซสใน PostgreSQL 16, สูตรคำนวณขนาด Pool และสถาปัตยกรรม PgBouncer
+
+2. **การใช้งาน Row Level Security (RLS) และระบบความปลอดภัยบน Supabase:**  
+   👉 **[Supabase](/docs/database/supabase)** — เรียนรู้การเขียนนโยบายบังคับสิทธิ์ระดับแถวข้อมูล (RLS Policies) บนแพลตฟอร์ม Supabase
+
+3. **การรักษาความปลอดภัยในฝั่ง Application Layer (Backend Security):**  
+   👉 **[Security (Backend)](/docs/backend/security)** และ **[Prisma ORM](/docs/backend/prisma-orm)** — ศึกษาการทำ Authentication, Authorization (RBAC), การแฮชรหัสผ่านด้วย Argon2id และการตรวจสอบ Input ในฝั่งเซิร์ฟเวอร์
+</Callout>

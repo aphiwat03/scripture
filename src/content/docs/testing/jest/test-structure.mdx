@@ -1,0 +1,257 @@
+---
+title: Test Structure
+category: TESTING & QUALITY
+parentTitle: Jest
+version: Jest v29 & ts-jest
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+หากเปรียบเทียบห้องปฏิบัติการตัดแต่งเนื้อสเต๊กพรีเมียมของ **Smart Butcher Marketplace**:
+- **Test File (`*.spec.ts` / `*.test.ts`)**: เปรียบเหมือน "คู่มือการควบคุมคุณภาพประจำแผนก" (เช่น แผนกคำนวณการแล่เนื้อ หรือแผนกตัดสต็อกเนื้อดรายเอจ)
+- **`describe` (Test Suite)**: เปรียบเหมือน "โซนปฏิบัติการย่อย" ที่จัดกลุ่มงานทดสอบที่เกี่ยวข้องกันไว้ด้วยกัน เช่น โซนตู้บ่มเนื้อดรายเอจ (Dry-Aging Vault Suite) ซึ่งสามารถซ้อนกลุ่มย่อยลงไปได้ (Nesting Suites) เช่น โซนตรวจนับอายุวันบ่มเนื้อ และโซนคำนวณค่าสูญเสียน้ำหนัก (Moisture Loss)
+- **`it` หรือ `test` (Test Case)**: เปรียบเหมือน "รายการตรวจสอบคุณภาพเฉพาะชิ้น" (Specification Item) ที่ระบุพฤติกรรมที่คาดหวังอย่างชัดเจนเพียงเรื่องเดียว เช่น "ควรคำนวณราคาเนื้อริบอายตามน้ำหนักสุทธิได้อย่างถูกต้องเมื่อระบุความหนา 3.5 ซม."
+
+การใช้คำว่า `it` ช่วยให้เราเขียนชื่อการทดสอบต่อเป็นประโยคภาษาอังกฤษเชิงพฤติกรรม (Behavior-Driven Development: BDD) ได้อย่างลื่นไหล เช่น `it('should calculate subtotal correctly...')` (มันควรจะคำนวณยอดรวมย่อยได้อย่างถูกต้อง...)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+สถาปัตยกรรมการรันเทสต์ของ Jest ทำงานแบบ **Two-Phase Execution**:
+
+```text filename="docs/testing/jest.txt"
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       JEST RUNTIME EXECUTION PHASES                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  [ Phase 1: Test Discovery & Registration ]                                │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │ 1. โหลดไฟล์ *.spec.ts เข้าสู่ Worker Sandboxed VM                      │  │
+│  │ 2. รันคำสั่งระดับ Root ของไฟล์ และโค้ดใน describe() Callback ทันที     │  │
+│  │ 3. บันทึก it() / test() เข้าสู่ Abstract Syntax Tree (Test Hierarchy)  │  │
+│  │    *หมายเหตุ: โค้ดภายใน it() จะยังไม่ถูกรันใน Phase นี้*              │  │
+│  └───────────────────────────────────┬───────────────────────────────────┘  │
+│                                      ▼                                      │
+│  [ Phase 2: Sequential / Isolated Test Execution ]                          │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │ 1. ประมวลผล beforeAll Hooks                                           │  │
+│  │ 2. วนลูปตามคิวการทดสอบ:                                              │  │
+│  │    Parent beforeEach ➔ Child beforeEach ➔ it() Callback                 │  │
+│  │    ➔ Child afterEach ➔ Parent afterEach                              │  │
+│  │ 3. ประมวลผล afterAll Hooks                                            │  │
+│  │ 4. ส่งผลลัพธ์ผ่าน IPC ไปยัง Jest Master Process เพื่อสรุป Report        │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+1. **Sandboxed Worker Isolation:** ในค่าเริ่มต้น Jest จะแตก Worker Process ตามจำนวน CPU Cores (ผ่านแพ็กเกจ `jest-worker`) แต่ละไฟล์ทดสอบจะถูกรันในบริบท Node.js `vm` (Virtual Machine Context) แยกขาดจากกัน ทำให้ State และตัวแปร Global ในไฟล์หนึ่งไม่ปนเปื้อนข้ามไฟล์
+2. **Synchronous Suite Definition:** ใน Phase 1 Jest จะ Execute ทุกฟังก์ชัน Callback ของ `describe` ทันทีเพื่อประกอบเป็น Tree โครงสร้างชุดทดสอบ ดังนั้น ห้ามใส่การคำนวณที่ต้อง `await` หรือ Assertion ไว้ในตัวบอร์ดของ `describe` เด็ดขาด เพราะจะเกิดการรันก่อนที่ Hooks หรือ Fixtures จะถูกเตรียมพร้อม
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การจัดระเบียบ Test Suite ระดับฟังก์ชันคำนวณน้ำหนักเนื้อสเต๊ก
+ในระบบ Smart Butcher ช่างแล่เนื้อต้องคำนวณน้ำหนักเนื้อโดยประมาณจากความหนา (thicknessCm) และพื้นที่หน้าตัดของเนื้อแต่ละเกรด:
+
+```typescript filename="src/services/cut-calculator.spec.ts"
+// Domain Interfaces
+interface SteakCutSpec {
+  cutType: 'RIBEYE' | 'STRIPLOIN' | 'T_BONE';
+  thicknessCm: number;
+  marblingScore: number; // 1 - 5
+}
+
+function estimateSteakWeightGrams(spec: SteakCutSpec): number {
+  if (spec.thicknessCm <= 0) {
+    throw new Error('Steak thickness must be strictly greater than zero');
+  }
+
+  // ปัจจัยความหนาแน่นเฉลี่ยของเนื้อวัวพรีเมียม (กรัมต่อความหนา 1 ซม.)
+  const densityFactors: Record<SteakCutSpec['cutType'], number> = {
+    RIBEYE: 110,
+    STRIPLOIN: 95,
+    T_BONE: 140, // รวมน้ำหนักกระดูกตัวที
+  };
+
+  const baseWeight = spec.thicknessCm * densityFactors[spec.cutType];
+  // ไขมันลายหินอ่อน (Marbling) เพิ่มความหนาแน่น 2% ต่อระดับ Marbling Score
+  const marblingBonus = 1 + (spec.marblingScore * 0.02);
+  
+  return Math.round(baseWeight * marblingBonus);
+}
+
+describe('CutCalculationService - estimateSteakWeightGrams', () => {
+  it('should calculate estimated weight correctly for Ribeye with standard 3cm thickness', () => {
+    // Arrange: จัดเตรียมข้อมูล Input
+    const spec: SteakCutSpec = {
+      cutType: 'RIBEYE',
+      thicknessCm: 3.0,
+      marblingScore: 4,
+    };
+
+    // Act: เรียกฟังก์ชันที่ต้องการทดสอบ
+    const weight = estimateSteakWeightGrams(spec);
+
+    // Assert: ตรวจสอบความถูกต้อง (3.0 * 110 = 330, bonus = 1.08 -> 356.4 -> 356g)
+    expect(weight).toBe(356);
+  });
+
+  it('should throw an explicit error when thickness is zero or negative', () => {
+    const invalidSpec: SteakCutSpec = {
+      cutType: 'STRIPLOIN',
+      thicknessCm: -1.5,
+      marblingScore: 3,
+    };
+
+    expect(() => estimateSteakWeightGrams(invalidSpec)).toThrow(
+      'Steak thickness must be strictly greater than zero'
+    );
+  });
+});
+```
+
+### ตัวอย่างที่ 2: การใช้ Nested Describe จัดกลุ่มตาม Use Cases และสิทธิ์ผู้ใช้งาน
+การจัดกลุ่มคลาส `MeatStockService` เพื่อทดสอบการจองสต็อกเนื้อดรายเอจตามสถานะของคำสั่งซื้อ:
+
+```typescript filename="src/services/meat-stock.service.spec.ts"
+export interface Product {
+  id: string;
+  name: string;
+  sku: string;
+  pricePerKg: number;
+  stockQty: number;
+  dryAgedDays: number;
+  isActive: boolean;
+}
+
+export class MeatStockService {
+  constructor(private inventory: Map<string, Product>) {}
+
+  public reserveStock(productId: string, requestedKg: number): void {
+    const product = this.inventory.get(productId);
+    if (!product) {
+      throw new Error(`Product with ID ${productId} does not exist`);
+    }
+    if (!product.isActive) {
+      throw new Error(`Product ${product.name} is currently inactive and cannot be reserved`);
+    }
+    if (product.stockQty < requestedKg) {
+      throw new Error(
+        `Insufficient stock for ${product.name}. Available: ${product.stockQty}kg, Requested: ${requestedKg}kg`
+      );
+    }
+    product.stockQty -= requestedKg;
+  }
+}
+
+describe('MeatStockService', () => {
+  let inventoryMock: Map<string, Product>;
+  let stockService: MeatStockService;
+
+  beforeEach(() => {
+    inventoryMock = new Map<string, Product>();
+    stockService = new MeatStockService(inventoryMock);
+  });
+
+  describe('when reserving dry-aged beef batches', () => {
+    const productId = 'prd-dry-ribeye-45d';
+
+    beforeEach(() => {
+      inventoryMock.set(productId, {
+        id: productId,
+        name: '45-Day Dry-Aged Black Angus Ribeye',
+        sku: 'BEEF-RIB-45D',
+        pricePerKg: 2850,
+        stockQty: 12.5,
+        dryAgedDays: 45,
+        isActive: true,
+      });
+    });
+
+    it('should successfully decrement available stock quantity when requested within quota', () => {
+      stockService.reserveStock(productId, 3.5);
+
+      const updated = inventoryMock.get(productId);
+      expect(updated?.stockQty).toBe(9.0);
+    });
+
+    it('should throw an error and abort deduction when requested quantity exceeds warehouse capacity', () => {
+      expect(() => {
+        stockService.reserveStock(productId, 20.0);
+      }).toThrow('Insufficient stock for 45-Day Dry-Aged Black Angus Ribeye');
+
+      // ตรวจสอบว่าสต็อกต้องไม่ถูกหักลดลง
+      const updated = inventoryMock.get(productId);
+      expect(updated?.stockQty).toBe(12.5);
+    });
+  });
+
+  describe('when product status is marked inactive', () => {
+    it('should reject reservation regardless of available stock quantity', () => {
+      const inactiveId = 'prd-wagyu-a5-off';
+      inventoryMock.set(inactiveId, {
+        id: inactiveId,
+        name: 'Miyazaki Wagyu A5 Striploin',
+        sku: 'WAGYU-A5-STRIP',
+        pricePerKg: 5200,
+        stockQty: 50.0,
+        dryAgedDays: 0,
+        isActive: false,
+      });
+
+      expect(() => {
+        stockService.reserveStock(inactiveId, 1.0);
+      }).toThrow('is currently inactive and cannot be reserved');
+    });
+  });
+});
+```
+
+## 4. ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+### ❌ สิ่งที่ผิด: รัน Async Setup หรือใส่ Assertion ไว้ในตัว Body ของ `describe` โดยตรง
+```typescript filename="src/jest.spec.ts"
+describe('OrderPricingService', () => {
+  // ผิดมหันต์: โค้ดนี้ถูกเรียกใน Phase 1 (Test Discovery) ทันที
+  // หากคำสั่งนี้ล้มเหลว จะทำให้ Jest พังทั้งไฟล์ก่อนที่ Hooks หรือการจำลอง Mock จะทำงาน
+  const dbConnection = await openDatabase(); 
+  expect(dbConnection.isConnected()).toBe(true); // ห้ามใส่ assertion นอก it()
+
+  it('should calculate tax correctly', () => {
+    // ...
+  });
+});
+```
+
+### ✅ สิ่งที่ถูก: ย้ายงาน Setup ไปไว้ใน `beforeAll` / `beforeEach` และใส่ Assertion ใน `it()`
+```typescript filename="src/jest.spec.ts"
+describe('OrderPricingService', () => {
+  let dbConnection: DatabaseConnection;
+
+  beforeAll(async () => {
+    dbConnection = await openDatabase();
+  });
+
+  afterAll(async () => {
+    await dbConnection.close();
+  });
+
+  it('should have an active database connection before processing', () => {
+    expect(dbConnection.isConnected()).toBe(true);
+  });
+
+  it('should calculate tax correctly', () => {
+    // ...
+  });
+});
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Nested `describe`:** เมื่อต้องการแบ่งกลุ่มสภาวะแวดล้อม เช่น `describe('when user is ADMIN')` และ `describe('when user is BUTCHER')` เพื่อให้สามารถแชร์ `beforeEach` ของแต่ละเงื่อนไขได้อย่างเป็นอิสระ
+- **ไม่ควรใช้ Nesting ลึกเกิน 3 ชั้น:** การซ้อน `describe` 4-5 ชั้นจะทำให้ลืมลำดับการทำงานของ `beforeEach` เกิดความสับสน และสร้างปัญหา "Test Setup Overhead" ที่ยากแก่การดีบัก
+
+## 6. คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: เหตุใด Jest จึงรันโค้ดทั้งหมดที่อยู่ในฟังก์ชัน Callback ของ `describe` ก่อนที่ `beforeAll` หรือ `it` เคสแรกจะเริ่มต้นทำงาน?**
+  - *แนวคำตอบ:* Jest ออกแบบมาให้แยกการทำงานเป็น 2 ขั้นตอนอย่างเคร่งครัด ได้แก่ **Collection Phase (Discovery)** และ **Execution Phase** ในขั้นตอนแรก Jest ต้องการรวบรวมโครงสร้างของชุดทดสอบ (Test Tree Hierarchy) เพื่อนับจำนวนเคส จัดลำดับการรัน รองรับ Filter Flag เช่น `-t "pattern"` และคำนวณการกระจายงานไปยัง Worker Pool ดังนั้นโค้ดใน `describe` จึงถูกสั่งรันแบบ Synchronous ทันทีเพื่อขึ้นรูป Tree ส่วนโค้ดใน `beforeAll`, `beforeEach` และ `it` จะถูกขึ้นทะเบียนไว้ในคิวเพื่อรอรันจริงในขั้นตอนที่สอง
+- **Q2: ระหว่าง `it()` กับ `test()` มีความแตกต่างกันอย่างไรในระดับสถาปัตยกรรม และทีมควรมีแนวปฏิบัติอย่างไร?**
+  - *แนวคำตอบ:* ในเชิงโค้ดของ Jest `it` คือ alias ตรงๆ ของ `test` (`const it = test;`) ทำงานเหมือนกันทุกประการ แต่แนวปฏิบัติระดับสากลแนะนำให้ใช้ `describe` คู่กับ `it` เมื่อเขียนเทสต์แบบ BDD (Behavior-Driven Development) เพื่อให้อ่านประโยคต่อกันได้ เช่น `it('should return 404 when product is missing')` และใช้ `test()` เมื่อทดสอบฟังก์ชันทางคณิตศาสตร์หรือ Utility สั้นๆ เช่น `test('formatVat() adds 7 percent')` สิ่งสำคัญคือการรักษาความสม่ำเสมอทั่วทั้งโปรเจกต์
+
+---

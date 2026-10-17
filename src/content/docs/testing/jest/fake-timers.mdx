@@ -1,0 +1,224 @@
+---
+title: Fake Timers
+category: TESTING & QUALITY
+parentTitle: Jest
+version: Jest v29 & ts-jest
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในร้าน **Smart Butcher Marketplace** ปัจจัยเรื่อง "เวลา" มีความสำคัญอย่างยิ่ง:
+- กระบวนการบ่มเนื้อ Dry-Aging ต้องใช้เวลา 21 วัน, 30 วัน, หรือ 45 วัน ในการควบคุมอุณหภูมิและความชื้น
+- คำสั่งซื้อเนื้อสดจะมีอายุการจองสต็อก (Payment Reservation Window) ภายใน 15 นาที หากลูกค้าไม่ชำระเงิน ระบบต้องปล่อยสต็อกคืนหน้าร้าน
+- ระบบ Cron Job ตรวจสอบเนื้อหมดอายุในห้องเย็นทุกๆ เที่ยงคืน
+
+หากเราต้องทดสอบโค้ดเหล่านี้ในโลกจริง เราไม่สามารถสั่งให้เทสต์หลับ (`sleep`) รอ 15 นาที หรือรอ 45 วันได้ **Fake Timers** เปรียบเหมือน "นาฬิกาวิเศษข้ามมิติเวลา" ที่อนุญาตให้เราหมุนเข็มเวลาไปข้างหน้า 45 วันได้ภายในเสี้ยววินาทีเดียว!
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+Jest 27+ ขับเคลื่อนระบบ Fake Timers ด้วยแพ็กเกจระดับโลก `@sinonjs/fake-timers`:
+
+```text filename="docs/testing/jest.txt"
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       MODERN FAKE TIMERS ARCHITECTURE                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  [ Real Node.js Environment ]                                               │
+│  Global: setTimeout, setInterval, Date.now(), process.hrtime, queueMicrotask│
+│                                      │                                      │
+│                                      ▼ jest.useFakeTimers()                 │
+│  [ Mock Clock Replacement (Sinon Engine) ]                                  │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │ 1. ยึดระบบ Event Loop Scheduler ทั้งหมดมาไว้ในความควบคุม               │  │
+│  │ 2. จำลอง Virtual Timeline (Clock Tick = 0ms)                          │  │
+│  │ 3. ทุกคำสั่ง setTimeout() จะถูกจัดคิวไว้ใน Priority Queue ของ Jest    │  │
+│  │ 4. เมื่อสั่ง jest.advanceTimersByTime(ms)                             │  │
+│  │    Jest จะเลื่อนเวลาจำลองไปข้างหน้า และดีด Callback ที่ครบกำหนดออกมารัน│  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                      │                                      │
+│                                      ▼ jest.useRealTimers()                 │
+│  [ คืนระบบเวลาจริงกลับสู่ Node.js Runtime ]                                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**ฟังก์ชันควบคุมเวลาที่สำคัญ:**
+1. `jest.useFakeTimers()`: เริ่มต้นการสลับมาใช้นาฬิกาจำลอง
+2. `jest.setSystemTime(date)`: ตั้งเวลาปัจจุบันของระบบ (`new Date()`, `Date.now()`) ไปยังจุดเวลาที่กำหนด
+3. `jest.advanceTimersByTime(ms)`: เร่งเวลาในระบบไปข้างหน้าตามจำนวนมิลลิวินาทีที่ระบุ
+4. `jest.runAllTimers()`: สั่งรันทุก Timer ที่กำลังรออยู่ในคิวจนหมด (ระวัง Infinite Loop หากมี `setInterval`)
+5. `jest.runOnlyPendingTimers()`: รันเฉพาะ Timer ที่ถูกจองไว้ ณ วินาทีนี้เท่านั้น ไม่รวม Timer ใหม่ที่อาจถูกสั่งต่อเนี่อง
+6. `jest.useRealTimers()`: สลับคืนสู่นาฬิกาจริงของระบบปฏิบัติการ
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การทดสอบระบบยกเลิกออเดอร์เนื้อและคืนสต็อกอัตโนมัติภายใน 15 นาที
+การทำงานของ `OrderStockReleaseTimer`:
+
+```typescript filename="src/services/stock-reservation-timer.spec.ts"
+export class StockReservationManager {
+  private timers = new Map<string, NodeJS.Timeout>();
+
+  constructor(private onTimeoutCallback: (orderId: string) => void) {}
+
+  public scheduleReservationExpiry(orderId: string, timeoutMinutes = 15): void {
+    const timeoutMs = timeoutMinutes * 60 * 1000;
+
+    const timer = setTimeout(() => {
+      this.onTimeoutCallback(orderId);
+      this.timers.delete(orderId);
+    }, timeoutMs);
+
+    this.timers.set(orderId, timer);
+  }
+
+  public cancelReservation(orderId: string): void {
+    const timer = this.timers.get(orderId);
+    if (timer) {
+      clearTimeout(timer);
+      this.timers.delete(orderId);
+    }
+  }
+}
+
+describe('StockReservationManager - Fake Timers (15-Minute Expiry)', () => {
+  let callbackMock: jest.Mock;
+  let manager: StockReservationManager;
+
+  beforeEach(() => {
+    // 1. เปิดใช้นาฬิกาจำลอง
+    jest.useFakeTimers();
+    callbackMock = jest.fn();
+    manager = new StockReservationManager(callbackMock);
+  });
+
+  afterEach(() => {
+    // 2. ล้าง Timer และคืนสู่นาฬิกาจริงเสมอ
+    jest.clearAllTimers();
+    jest.useRealTimers();
+  });
+
+  it('should not release meat stock before 15 minutes have elapsed', () => {
+    manager.scheduleReservationExpiry('ORD-T-BONE-101', 15);
+
+    // เร่งเวลาไป 14 นาที 59 วินาที
+    jest.advanceTimersByTime(14 * 60 * 1000 + 59 * 1000);
+
+    expect(callbackMock).not.toHaveBeenCalled();
+  });
+
+  it('should trigger stock release callback precisely when 15 minutes pass', () => {
+    manager.scheduleReservationExpiry('ORD-T-BONE-101', 15);
+
+    // เร่งเวลาไปครบ 15 นาทีพอดี
+    jest.advanceTimersByTime(15 * 60 * 1000);
+
+    expect(callbackMock).toHaveBeenCalledTimes(1);
+    expect(callbackMock).toHaveBeenCalledWith('ORD-T-BONE-101');
+  });
+
+  it('should abort timer if customer pays and reservation is cancelled before timeout', () => {
+    manager.scheduleReservationExpiry('ORD-PAID-EARLY', 15);
+
+    // ลูกค้าโอนเงินตอนผ่านไป 5 นาที จึงสั่งยกเลิก Timer
+    jest.advanceTimersByTime(5 * 60 * 1000);
+    manager.cancelReservation('ORD-PAID-EARLY');
+
+    // เร่งเวลาต่อจนเลย 15 นาที
+    jest.advanceTimersByTime(20 * 60 * 1000);
+
+    // ต้องไม่มีการเรียก Callback คืนสต็อก
+    expect(callbackMock).not.toHaveBeenCalled();
+  });
+});
+```
+
+### ตัวอย่างที่ 2: การควบคุม `setSystemTime` เพื่อทดสอบโปรโมชันเนื้อริบอายตามเทศกาลปีใหม่
+การคำนวณโปรโมชันพิเศษที่มีผลเฉพาะช่วงวันที่ 31 ธันวาคม 2026:
+
+```typescript filename="src/services/new-year-promotion.spec.ts"
+export class SeasonalDiscountService {
+  public static getWagyuDiscountPercent(): number {
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth(); // 11 = ธันวาคม
+    const currentDate = now.getDate();
+
+    // โปรโมชันพิเศษต้อนรับปีใหม่: วันที่ 31 ธันวาคม ถึง 1 มกราคม ลด 25%
+    if (currentMonth === 11 && currentDate === 31) {
+      return 25;
+    }
+    if (currentMonth === 0 && currentDate === 1) {
+      return 20;
+    }
+    return 0; // วันปกติไม่มีส่วนลด
+  }
+}
+
+describe('SeasonalDiscountService - Controlled System Time', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('should apply 25% discount when system time is frozen at New Year Eve 2026', () => {
+    // ล็อกเวลาทั้งระบบของ Node.js ไว้ที่ 31 ธันวาคม 2026 เวลา 18:30 น.
+    const newYearEve = new Date('2026-12-31T18:30:00.000Z');
+    jest.setSystemTime(newYearEve);
+
+    const discount = SeasonalDiscountService.getWagyuDiscountPercent();
+
+    expect(discount).toBe(25);
+  });
+
+  it('should return 0% discount on regular business days', () => {
+    // ล็อกเวลาไปที่ 15 ตุลาคม 2026
+    const regularDay = new Date('2026-10-15T10:00:00.000Z');
+    jest.setSystemTime(regularDay);
+
+    const discount = SeasonalDiscountService.getWagyuDiscountPercent();
+
+    expect(discount).toBe(0);
+  });
+});
+```
+
+## 4. ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+### ❌ สิ่งที่ผิด: เรียก `jest.runAllTimers()` กับโค้ดที่มี `setInterval` รันต่อเนื่อง
+```typescript filename="src/jest.spec.ts"
+it('test cron polling', () => {
+  jest.useFakeTimers();
+  setInterval(() => pollVaultTemp(), 1000); // ทำงานวนลูปไม่สิ้นสุด
+
+  // หายนะ: Jest จะพยายามรัน Interval ต่อไปเรื่อยๆ จนเต็มหน่วยความจำ
+  // และเทสต์จะค้างแบบ Infinite Loop (Process Out of Memory)
+  jest.runAllTimers(); 
+});
+```
+
+### ✅ สิ่งที่ถูก: ใช้ `advanceTimersByTime()` หรือกำหนดจำนวนรอบที่ชัดเจน
+```typescript filename="src/jest.spec.ts"
+it('test cron polling', () => {
+  jest.useFakeTimers();
+  setInterval(() => pollVaultTemp(), 1000);
+
+  // ควบคุมได้แม่นยำ: ก้าวไปข้างหน้า 5 วินาที เพื่อทดสอบ 5 รอบเท่านั้น
+  jest.advanceTimersByTime(5000);
+  expect(pollVaultTemp).toHaveBeenCalledTimes(5);
+});
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Fake Timers:** เมื่อทดสอบ Logic ที่เกี่ยวข้องกับ `setTimeout`, `setInterval`, Debounce/Throttle ฟังก์ชันค้นหารายการเนื้อ, ตรวจสอบอายุเนื้อดรายเอจ, และการทดสอบ Expire Token
+- **ไม่ควรใช้ Fake Timers:** เมื่อโค้ดเป็นการรอคำตอบทาง I/O จริง (เช่น รอ Real Database Query หรือ Real HTTP) การใช้ Fake Timers จะไม่ช่วยให้ I/O ทำงานเร็วขึ้น และอาจทำให้ระบบ Network Client เกิดข้อผิดพลาด
+
+## 6. คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: อะไรคือความแตกต่างระหว่าง Modern Fake Timers (`@sinonjs/fake-timers`) กับ Legacy Fake Timers ใน Jest?**
+  - *แนวคำตอบ:* ใน Jest 26 ลงไป ระบบ Legacy Fake Timers จะ Mock เฉพาะฟังก์ชันจับเวลาพื้นฐาน เช่น `setTimeout` และ `setInterval` แต่ไม่แตะต้อง `new Date()`, `Date.now()`, หรือ `process.hrtime` ทำให้การทดสอบโค้ดที่สร้างเวลาปัจจุบันต้องใช้การ Mock Constructor แบบแมนนวล แต่ใน Jest 27+ เป็น Modern Fake Timers แบบเบ็ดเสร็จ ซึ่งทำการ Patch ลึกถึงระดับแกนเวลาของระบบ ทำให้คำสั่ง `jest.setSystemTime(date)` สามารถควบคุมเวลาของ `new Date()` และ High-resolution timers ทั้งหมดได้อย่างแม่นยำ
+- **Q2: หากในเทสต์มีทั้ง Fake Timers และ Promise Microtasks (เช่น `await Promise.resolve()`) เหตุใดการสั่ง `advanceTimersByTime` จึงอาจไม่เรียก Promise ทันที?**
+  - *แนวคำตอบ:* เพราะ Node.js มีการแบ่งลำดับความสำคัญของ Event Loop ต่างกัน: Timers อยู่ใน **Macro-task Queue** ส่วน Promises อยู่ใน **Micro-task Queue** เมื่อเวลาใน Timer ถูกเร่ง Callback ของ Timer จะถูกหย่อนลงใน Macro-task Queue หากใน Callback นั้นมีการสร้าง Promise ซ้อนอยู่ เราอาจจำเป็นต้องคั่นด้วย `await Promise.resolve()` หรือ `jest.advanceTimersByTimeAsync()` ใน Jest 29.5+ เพื่อบังคับให้ Event Loop เคลียร์ Micro-tasks จนหมด
+
+---

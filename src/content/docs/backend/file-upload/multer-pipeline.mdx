@@ -1,0 +1,153 @@
+---
+title: Multer Pipeline
+category: BACKEND
+parentTitle: File Upload
+version: Multer & Supabase Storage
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+การส่งไฟล์ผ่านโปรโตคอล HTTP ไม่สามารถส่งเป็น JSON ปกติที่มีประสิทธิภาพได้ (เพราะการแปลงเป็น Base64 จะทำให้ขนาดข้อมูลใหญ่ขึ้นประมาณ 33% และสิ้นเปลือง CPU ในการ Encode/Decode) มาตรฐานสากลจึงใช้ `multipart/form-data` ซึ่งแบ่งข้อมูลออกเป็นหลายส่วน (Parts) ทั้งข้อมูลข้อความและข้อมูลไบนารีของไฟล์ ใน NestJS 11 เราใช้แพ็กเกจ `@nestjs/platform-express` ซึ่งผสานการทำงานของ **Multer** เข้ากับระบบ Interceptor (`FileInterceptor`, `FilesInterceptor`) เพื่อดักจับและแปลง Stream ของไฟล์ให้กลายเป็นออบเจกต์ `Express.Multer.File` พร้อมใช้งานใน Controller
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อ Client ส่ง HTTP Request ที่มี Header `Content-Type: multipart/form-data; boundary=---WebKitFormBoundary...` เข้ามายัง NestJS:
+1. **Multer Middleware / Interceptor** จะใช้ไลบรารี `busboy` เบื้องหลังในการอ่าน HTTP Request Stream ทีละ Chunk โดยแยกแยะแต่ละฟิลด์ด้วยตัวคั่น `boundary`
+2. หากกำหนดโหมดการจัดเก็บเป็น `memoryStorage()` (ค่าเริ่มต้นของ NestJS เมื่อไม่ระบุ `dest`) Multer จะนำ Chunk ไบนารีมาประกอบรวมกันในหน่วยความจำ RAM ของโพรเซส Node.js ในรูปแบบออบเจกต์ `Buffer` (`file.buffer`)
+3. เมื่ออ่าน Stream จนจบ Interceptor จะแนบออบเจกต์ไฟล์ไว้ที่ `req.file` และส่งต่อไปยังตัวแปรที่ตกแต่งด้วย `@UploadedFile()` ในเมธอดของ Controller เพื่อส่งขึ้น Cloud Storage ต่อไป
+
+<Callout type="note" title="ทำไมต้องใช้ Memory Storage ร่วมกับ Cloud Storage">
+ในสถาปัตยกรรมยุคใหม่ที่รันแอปพลิเคชันบน Docker Container หรือ Serverless ระบบไฟล์ในเครื่อง (Local Disk) มีสถานะเป็นชั่วคราว (Ephemeral) หาก Container ถูกรีสตาร์ทหรือขยายจำนวน (Horizontal Scaling) ไฟล์ที่เก็บในดิสก์จะสูญหายหรือมองไม่เห็นข้ามเครื่อง การพักไฟล์ขนาดเล็กถึงกลางไว้ใน `memoryStorage` ชั่วคราวแล้วส่งต่อขึ้น Supabase Storage ทันทีจึงลดภาระ I/O ของดิสก์และทำให้ระบบเป็น Stateless อย่างแท้จริง
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การตั้งค่า `MulterModule` เบื้องต้นและสร้าง Endpoint รับรูปภาพสินค้า (`Product`) แบบพื้นฐานด้วย `FileInterceptor`
+
+```typescript filename="src/modules/products/product-upload.controller.ts"
+import {
+  Controller,
+  Post,
+  Param,
+  ParseUUIDPipe,
+  UseInterceptors,
+  UploadedFile,
+  BadRequestException,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
+
+@Controller('products')
+export class ProductUploadController {
+  @Post(':id/image')
+  @UseInterceptors(
+    FileInterceptor('image', {
+      storage: memoryStorage(),
+      limits: {
+        fileSize: 5 * 1024 * 1024, // จำกัดขนาดระดับ Multer ที่ 5MB
+        files: 1,
+      },
+    }),
+  )
+  async uploadProductImage(
+    @Param('id', new ParseUUIDPipe({ version: '4' })) productId: string,
+    @UploadedFile() file: Express.Multer.File | undefined,
+  ): Promise<{ productId: string; originalName: string; size: number }> {
+    if (!file) {
+      throw new BadRequestException('กรุณาแนบไฟล์รูปภาพสินค้าในฟิลด์ "image"');
+    }
+
+    return {
+      productId,
+      originalName: file.originalname,
+      size: file.size,
+    };
+  }
+}
+```
+
+ตัวอย่างที่ 2: การรับข้อมูล `multipart/form-data` ที่ประกอบด้วยทั้งข้อมูลข้อความ (DTO สำหรับสร้างสินค้าเนื้อพรีเมียมใหม่) และไฟล์รูปภาพพร้อมกันใน Request เดียว
+
+```typescript filename="src/modules/products/dto/create-product-with-image.dto.ts"
+import { IsString, IsNotEmpty, IsNumber, Min, IsUUID } from 'class-validator';
+import { Type } from 'class-transformer';
+
+export class CreateProductWithImageDto {
+  @IsString()
+  @IsNotEmpty()
+  name!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  sku!: string;
+
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(1)
+  pricePerKg!: number;
+
+  @IsUUID('4')
+  categoryId!: string;
+}
+```
+
+```typescript filename="src/modules/products/products.controller.ts"
+import {
+  Controller,
+  Post,
+  Body,
+  UseInterceptors,
+  UploadedFile,
+  BadRequestException,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
+import { CreateProductWithImageDto } from './dto/create-product-with-image.dto';
+import { ProductsService } from './products.service';
+
+@Controller('products')
+export class ProductsController {
+  constructor(private readonly productsService: ProductsService) {}
+
+  @Post()
+  @UseInterceptors(
+    FileInterceptor('image', {
+      storage: memoryStorage(),
+      limits: {
+        fileSize: 5 * 1024 * 1024, // 5MB
+        fieldSize: 1024 * 100, // จำกัดขนาด Text field ไม่เกิน 100KB
+      },
+    }),
+  )
+  async createProductWithImage(
+    @Body() dto: CreateProductWithImageDto,
+    @UploadedFile() file: Express.Multer.File | undefined,
+  ) {
+    if (!file) {
+      throw new BadRequestException('ต้องอัปโหลดรูปภาพตัวอย่างเนื้อสินค้าเสมอ');
+    }
+
+    // ส่งทั้ง DTO ที่ผ่านการแปลงชนิดข้อมูลแล้ว และ Buffer ของไฟล์ไปยัง Service
+    return this.productsService.createWithImage(dto, file);
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **วิธีการส่งไฟล์** | แปลงไฟล์เป็น Base64 String แล้วส่งใน JSON Body ทำให้ Payload บวมขึ้น 33% และ `JSON.parse()` บล็อก Event Loop | ใช้ `multipart/form-data` ร่วมกับ `FileInterceptor` เพื่ออ่านข้อมูลแบบ Stream |
+| **การจำกัดขนาดที่ Multer** | ไม่ตั้งค่า `limits.fileSize` ใน `FileInterceptor` ทำให้ผู้โจมตีส่งไฟล์ขนาด 2GB เข้ามาจน Node.js เกิด Out-Of-Memory (OOM) | กำหนด `limits.fileSize` ตั้งแต่ระดับ Multer Options เพื่อตัดการเชื่อมต่อทันทีที่ Stream เกินขนาดที่กำหนด |
+| **การจัดเก็บไฟล์ถาวร** | ใช้ `diskStorage({ destination: './uploads' })` เพื่อเก็บไฟล์ถาวรในโฟลเดอร์ของเซิร์ฟเวอร์ | ใช้ `memoryStorage()` สำหรับไฟล์ขนาดเล็ก-กลาง แล้วอัปโหลดขึ้น Cloud Object Storage ทันที |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: อัปโหลดไฟล์รูปภาพสินค้า (`Product`), รูปหมวดหมู่ (`Category`), หรือสลิปโอนเงิน (`Payment`) ที่มีขนาดตั้งแต่ไม่กี่ KB จนถึง ~10 MB และต้องการตรวจสอบหรือประมวลผลที่ฝั่ง Backend ก่อนบันทึก
+- **ไม่ควรใช้เมื่อ**: อัปโหลดไฟล์วิดีโอความละเอียดสูงหรือไฟล์ขนาดใหญ่ระดับหลายร้อย MB ถึงหลาย GB ผ่าน `memoryStorage()` ของ Backend เพราะจะทำให้ RAM ของเซิร์ฟเวอร์เต็มอย่างรวดเร็ว กรณีนั้นควรใช้ **Presigned Upload URL** ให้ Client อัปโหลดตรงไปยัง Cloud Storage แทน
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมการรับไฟล์ใน `multipart/form-data` ร่วมกับ `@Body()` DTO จึงต้องใส่ `@Type(() => Number)` ของ `class-transformer` ในฟิลด์ตัวเลขเสมอ?
+   - **แนวคำตอบ**: เพราะในโปรโตคอล `multipart/form-data` ทุกฟิลด์ที่เป็นข้อความจะถูกแยกส่วนออกมาเป็น `string` ทั้งหมด ต่างจาก JSON ที่มีชนิดข้อมูล `number` หรือ `boolean` ในตัว ดังนั้นหากไม่ใช้ `@Type(() => Number)` หรือเปิด `enableImplicitConversion` ตัว `ValidationPipe` (`@IsNumber()`) จะมองว่าค่า `"1500"` เป็น `string` และตีกลับด้วยสถานะ `400 Bad Request`
+2. **คำถาม**: หากตั้งค่า `limits.fileSize` ใน `FileInterceptor` ต่างจากการตรวจขนาดไฟล์ใน `ParseFilePipe` อย่างไร?
+   - **แนวคำตอบ**: `limits.fileSize` ใน Multer ทำงานในระดับ Stream ขณะกำลังอ่านข้อมูลจาก Network หากจำนวนไบต์ที่ส่งมาเกินกำหนด `busboy` จะหยุดรับข้อมูลทันที ช่วยป้องกัน RAM เต็มตั้งแต่ต้นทาง ส่วน `ParseFilePipe` จะทำงานหลังจาก Multer อ่านไฟล์เสร็จสมบูรณ์และเก็บเข้า `req.file` แล้ว ดังนั้นจึงควรตั้ง `limits.fileSize` ควบคู่กับ `ParseFilePipe` เสมอ
+
+---

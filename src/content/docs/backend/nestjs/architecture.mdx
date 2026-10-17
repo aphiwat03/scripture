@@ -1,0 +1,185 @@
+---
+title: Architecture
+category: BACKEND
+parentTitle: NestJS 11
+version: NestJS 11
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด
+ในยุคแรกเริ่มของ Node.js ไลบรารียอดนิยมอย่าง **Express.js** ชนะใจนักพัฒนาด้วยความเรียบง่าย (Minimalist) และไร้กรอบบังคับ (Unopinionated) คุณสามารถเริ่มสร้างเซิร์ฟเวอร์ได้ด้วยโค้ดเพียง 5 บรรทัด อย่างไรก็ตาม เมื่อระบบขยายตัวสู่ระดับ Enterprise ที่มีนักพัฒนาหลายสิบคน โค้ดเบสหลายแสนบรรทัด ความไร้กรอบของ Express มักกลายเป็นดาบสองคมที่ก่อให้เกิด "Spaghetti Code" โค้ดแต่ละโฟลเดอร์จัดวางไม่เหมือนกัน แต่ละคนเขียนตามความเคยชิน ขาดโครงสร้างเลเยอร์ที่รัดกุม การทดสอบอัตโนมัติ (Automated Testing) ทำได้ยากยิ่ง และเกิดปัญหา Tight Coupling ที่การแก้ไขส่วนหนึ่งส่งผลกระทบพังทลายเป็นลูกโซ่
+
+**NestJS** ถูกสร้างขึ้นมาเพื่อแก้ปัญหานี้อย่างสิ้นเชิง โดยนำแนวคิดและสถาปัตยกรรมที่พิสูจน์แล้วจากโลกของ Enterprise (เช่น Spring Boot ใน Java และ Angular ใน Frontend) มาสู่ Node.js โดยยึดหลัก:
+1. **Architectural Rigidity & Structure**: มีรูปแบบที่ชัดเจนในการจัดระเบียบโค้ด ไม่ต้องเสียเวลาเถียงกันในทีมเรื่องการวางไฟล์
+2. **Modular Design**: แบ่งระบบออกเป็นโมดูลอิสระที่มีขอบเขตชัดเจน (Encapsulated Modules)
+3. **Inversion of Control (IoC) & Dependency Injection (DI)**: ถอดแยกการสร้างอ็อบเจกต์ออกจากคลาสที่เรียกใช้ ทำให้เขียน Unit Test และ Mock ข้อมูลได้อย่างง่ายดาย
+4. **Platform-Agnostic Abstraction**: ทำงานเป็นชั้น Abstraction ครอบ HTTP Server ดั้งเดิมไว้ ทำให้สามารถสลับเครื่องยนต์พื้นฐานระหว่าง **Express** (ค่าเริ่มต้น รองรับระบบนิเวศกว้างขวาง) และ **Fastify** (เน้นประสิทธิภาพและความเร็วระดับสูงสุด) ได้โดยแทบไม่ต้องแตะต้อง Business Logic
+
+## 2. หลักการเบื้องหลัง
+เบื้องหลังของ NestJS คือการประยุกต์ใช้ **3-Tier Layered Architecture** ผสานเข้ากับ **Adapter Pattern**:
+- **Presentation Layer (Controllers)**: รับผิดชอบการติดต่อกับโลกภายนอก (HTTP Routing, Request Parsing, Status Codes)
+- **Business Logic Layer (Services / Providers)**: หัวใจของระบบ เก็บกฎเกณฑ์ทางธุรกิจ การคำนวณราคาเนื้อสเต็กตามน้ำหนัก โปรโมชั่น และสิทธิ์ผู้ใช้งาน
+- **Data Access Layer (Repositories / ORM)**: ติดต่อกับฐานข้อมูล เช่น Prisma หรือ TypeORM
+- **HTTP Platform Adapters**: NestJS กำหนดอินเทอร์เฟซ `HttpServer` ขึ้นมาเป็นตัวกลาง เมื่อรันบน Express จะใช้ `@nestjs/platform-express` และเมื่อเปลี่ยนเป็น Fastify จะใช้ `@nestjs/platform-fastify` โดย Fastify สามารถทำ Throughput (Request/วินาที) ได้สูงกว่า Express ราว 2-3 เท่าด้วยสถาปัตยกรรม Schema-based JSON Serialization
+
+## 3. ตัวอย่างโค้ด
+
+### ตัวอย่างที่ 1: การ Bootstrap แอปพลิเคชันด้วย Express vs Fastify Adapter
+```typescript filename="src/main.ts"
+// ตัวอย่างที่ 1.1: เริ่มต้นระบบด้วย Express Adapter (Default)
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+
+async function bootstrapExpress() {
+  const app = await NestFactory.create(AppModule);
+  app.setGlobalPrefix('api/v1');
+  await app.listen(process.env.PORT ?? 3000);
+  console.log('Smart Butcher API (Express) is running on port 3000');
+}
+bootstrapExpress();
+```
+
+```typescript filename="src/main-fastify.ts"
+// ตัวอย่างที่ 1.2: สลับเป็น Fastify Adapter สำหรับระบบ High-Throughput Flash Sale
+import { NestFactory } from '@nestjs/core';
+import {
+  FastifyAdapter,
+  NestFastifyApplication,
+} from '@nestjs/platform-fastify';
+import { AppModule } from './app.module';
+
+async function bootstrapFastify() {
+  // สลับเป็น Fastify Adapter โดยโค้ดใน Controller และ Service ยังคงเดิม 100%
+  const app = await NestFactory.create<NestFastifyApplication>(
+    AppModule,
+    new FastifyAdapter({ logger: true })
+  );
+  app.setGlobalPrefix('api/v1');
+  // Fastify จำเป็นต้องผูกกับ 0.0.0.0 เพื่อให้ Docker และภายนอกเข้าถึงได้
+  await app.listen(process.env.PORT ?? 3000, '0.0.0.0');
+  console.log('Smart Butcher API (Fastify Engine) running at max throughput');
+}
+bootstrapFastify();
+```
+
+### ตัวอย่างที่ 2: สถาปัตยกรรมแบ่งชั้นความรับผิดชอบ (Clean 3-Layer)
+```typescript filename="src/modules/products/products.service.ts"
+import { Injectable, NotFoundException } from '@nestjs/common';
+
+export interface MeatCut {
+  id: string;
+  name: string;
+  grade: 'A5' | 'A4' | 'Wagyu_Cross' | 'Prime';
+  weightGrams: number;
+  pricePerKg: number;
+  inStock: boolean;
+}
+
+@Injectable()
+export class ProductsService {
+  // จำลองการดึงข้อมูลจาก Database Layer
+  private readonly inventory: MeatCut[] = [
+    {
+      id: 'meat-001',
+      name: 'Miyazaki Wagyu Ribeye',
+      grade: 'A5',
+      weightGrams: 350,
+      pricePerKg: 7800,
+      inStock: true,
+    },
+    {
+      id: 'meat-002',
+      name: 'Dry-Aged T-Bone 45 Days',
+      grade: 'Prime',
+      weightGrams: 500,
+      pricePerKg: 3200,
+      inStock: true,
+    },
+  ];
+
+  // Business Logic: คำนวณราคาเนื้อตัดชิ้นตามน้ำหนักจริง (กรัม)
+  calculateCutPrice(cut: MeatCut): number {
+    const rawPrice = (cut.pricePerKg / 1000) * cut.weightGrams;
+    // คิดภาษีมูลค่าเพิ่ม 7% สำหรับสินค้าแปรรูป
+    return Math.round(rawPrice * 1.07);
+  }
+
+  findProductById(id: string): MeatCut & { finalPriceThb: number } {
+    const cut = this.inventory.find((item) => item.id === id);
+    if (!cut) {
+      throw new NotFoundException(`ไม่พบชิ้นเนื้อรหัส ${id} ในตู้เย็นจัดเก็บ`);
+    }
+    return {
+      ...cut,
+      finalPriceThb: this.calculateCutPrice(cut),
+    };
+  }
+}
+```
+
+```typescript filename="src/modules/products/products.controller.ts"
+import { Controller, Get, Param } from '@nestjs/common';
+import { ProductsService } from './products.service';
+
+@Controller('products')
+export class ProductsController {
+  // Inject Service เข้ามาผ่าน Constructor Injection
+  constructor(private readonly productsService: ProductsService) {}
+
+  @Get(':id')
+  getMeatDetails(@Param('id') id: string) {
+    // Controller ทำหน้าที่เพียงแค่รับ Route Param แล้ว Delegate ให้ Service คำนวณ
+    return this.productsService.findProductById(id);
+  }
+}
+```
+
+## 4. ผิด vs ถูก
+
+```typescript filename="src/nestjs.ts"
+// ❌ ผิด: เขียนแบบ Express บน NestJS (นำตรรกะ Database + Calculation + HTTP Response รวมกันใน Controller)
+@Controller('products')
+export class BadProductsController {
+  @Get(':id')
+  async getMeat(@Param('id') id: string, @Res() res: Response) {
+    // ยึดติดกับ Express Response Object (@Res) และยิง Query คำนวณในนี้
+    const meat = await db.query('SELECT * FROM meats WHERE id = $1', [id]);
+    if (!meat) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    const price = (meat.pricePerKg / 1000) * meat.weightGrams * 1.07;
+    return res.status(200).json({ ...meat, price });
+  }
+}
+// ผลกระทบ: เขียน Unit Test ไม่ได้, เปลี่ยนไปใช้ Fastify ไม่ได้, โค้ดนำกลับมาใช้ซ้ำไม่ได้
+```
+
+```typescript filename="src/nestjs.ts"
+// ✅ ถูก: แยก Layer หน้าที่ชัดเจน Controller รับ Input และคืนค่า Object ให้ NestJS Serialize อัตโนมัติ
+@Controller('products')
+export class GoodProductsController {
+  constructor(private readonly productsService: ProductsService) {}
+
+  @Get(':id')
+  getMeat(@Param('id') id: string) {
+    // คืนค่า Plain Object ทันที ไม่ใช้ @Res() ทำให้รองรับทั้ง Express และ Fastify
+    return this.productsService.findProductById(id);
+  }
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ NestJS เมื่อ**:
+  - พัฒนาระบบ Enterprise หรือผลิตภัณฑ์ขนาดกลางถึงใหญ่ที่ต้องดูแลรักษาต่อเนื่องหลายปี
+  - ทำงานร่วมกันเป็นทีมหลายคนและต้องการความสม่ำเสมอของโครงสร้างโปรเจกต์
+  - ต้องการระบบ Dependency Injection ที่ทรงพลัง และเน้นการทำ Automated Testing (Unit / Integration / E2E)
+  - กำลังพัฒนา Microservices สถาปัตยกรรม Event-driven หรือ WebSockets ร่วมด้วย
+- **ไม่ควรใช้ NestJS เมื่อ**:
+  - สร้างสคริปต์อัตโนมัติขนาดเล็ก (One-off Scripts) หรืองาน Micro-Utility สั้นๆ
+  - ต้องการ Serverless Functions ที่เบาและเริ่มทำงานเร็วระดับเสี้ยววินาที (Cold Start ต่ำมาก) ในกรณีนี้ Hono หรือ Fastify เดี่ยวๆ อาจเหมาะสมกว่า
+
+## 6. คำถามสัมภาษณ์
+**ถาม**: ทำไม NestJS จึงแนะนำให้หลีกเลี่ยงการใช้ `@Res()` หรือ `@Response()` จาก Express โดยตรง หากไม่จำเป็นจริงๆ?
+**ตอบ**: การใช้ `@Res()` จะทำให้ NestJS ปิดการทำงานของ Standard Response Handling แบบอัตโนมัติ (เช่น Interceptors, Response Serializers) และทำให้โค้ดของเราผูกติดกับ Express Engine อย่างถาวร ไม่สามารถสลับไปใช้งาน Fastify เพื่อเพิ่มสมรรถนะของระบบได้ในอนาคต
+
+---

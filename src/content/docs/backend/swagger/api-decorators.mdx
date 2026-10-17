@@ -1,0 +1,258 @@
+---
+title: API Decorators
+category: BACKEND
+parentTitle: Swagger
+version: OpenAPI 3.1 & NestJS Swagger
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เพื่อให้เอกสาร OpenAPI มีความละเอียดและสื่อความหมายทางธุรกิจของ **Smart Butcher Marketplace** ได้อย่างชัดเจน `@nestjs/swagger` ได้เตรียมชุด Decorators สำหรับตกแต่งใน 3 ระดับ:
+1. **ระดับ Controller (`@ApiTags`)**: จัดหมวดหมู่ของ Endpoints เข้าด้วยกัน เช่น หมวด `Products (สินค้าเนื้อพรีเมียม)`, `Orders (คำสั่งซื้อ)`
+2. **ระดับ Method (`@ApiOperation`, `@ApiResponse`, `@ApiParam`, `@ApiQuery`, `@ApiConsumes`)**: อธิบายว่า Endpoint นี้ทำอะไร รับพารามิเตอร์อะไร และมีโอกาสคืนค่า HTTP Status Code ใดบ้าง (เช่น `200`, `201`, `400`, `404`, `409`)
+3. **ระดับ DTO Property (`@ApiProperty`, `@ApiPropertyOptional`)**: อธิบายรายละเอียดของแต่ละฟิลด์ใน Request/Response เช่น ค่าตัวอย่าง (`example`), คำอธิบาย, ค่าต่ำสุด/สูงสุด และชนิดของ `enum` หรือ Array
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อเราใส่ `@ApiProperty({ example: 'A5 Miyazaki Ribeye', minLength: 3 })` ลงบนฟิลด์ของคลาส DTO ตัว Decorator จะใช้แพ็กเกจ `reflect-metadata` บันทึกข้อมูลโครงสร้างนี้ลงใน Metadata Key พิเศษ (`swagger/apiModelProperties`) บน Prototype ของคลาสนั้น เมื่อ `SwaggerModule` สแกนมาพบคลาสนี้ในพารามิเตอร์ `@Body()` หรือในชนิดข้อมูลที่ระบุใน `@ApiOkResponse({ type: ProductResponseDto })` มันจะอ่าน Metadata เหล่านั้นมาแปลงเป็น JSON Schema มาตรฐาน OpenAPI 3.0 โดยอัตโนมัติ
+
+<Callout type="tip" title="การระบุ Type สำหรับ Array และ Enum ใน @ApiProperty">
+由于ข้อจำกัดของ TypeScript Reflection Metadata ที่มองเห็นชนิดข้อมูล `string[]` เป็นเพียง `Array` กว้างๆ โดยไม่รู้ว่าข้างในเป็นชนิดใด ดังนั้นเมื่อประกาศฟิลด์ที่เป็น Array หรือ Enum ใน DTO หากไม่ได้เปิด CLI Plugin จะต้องระบุ `{ type: [OrderItemDto] }` หรือ `{ enum: OrderStatus, enumName: 'OrderStatus' }` ให้ชัดเจนเสมอ
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การเขียน Request DTO และ Response DTO สำหรับการสร้างและแสดงผลสินค้าเนื้อพรีเมียม (`Product`) อย่างครบถ้วนด้วย `@ApiProperty` และ `@ApiPropertyOptional`
+
+```typescript filename="src/modules/products/dto/product-swagger.dto.ts"
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import {
+  IsString,
+  IsNotEmpty,
+  IsNumber,
+  Min,
+  IsUUID,
+  IsEnum,
+  IsOptional,
+} from 'class-validator';
+
+export enum MarblingGrade {
+  A3 = 'A3',
+  A4 = 'A4',
+  A5 = 'A5',
+  PRIME = 'PRIME',
+  CHOICE = 'CHOICE',
+}
+
+export class CreateProductDto {
+  @ApiProperty({
+    description: 'รหัสสินค้า (SKU) ที่ไม่ซ้ำกันในระบบ',
+    example: 'WAGYU-MIYAZAKI-A5-RIBEYE',
+  })
+  @IsString()
+  @IsNotEmpty()
+  sku!: string;
+
+  @ApiProperty({
+    description: 'ชื่อสินค้าเนื้อพรีเมียมสำหรับแสดงหน้าเว็บ',
+    example: 'เนื้อวากิวมิยาซากิ A5 ส่วนริบอาย (สเต็กคัท)',
+  })
+  @IsString()
+  @IsNotEmpty()
+  name!: string;
+
+  @ApiProperty({
+    description: 'เกรดไขมันแทรกของเนื้อ (Marbling Grade)',
+    enum: MarblingGrade,
+    enumName: 'MarblingGrade',
+    example: MarblingGrade.A5,
+  })
+  @IsEnum(MarblingGrade)
+  marblingGrade!: MarblingGrade;
+
+  @ApiProperty({
+    description: 'ราคาขายต่อกิโลกรัม (หน่วย: บาท)',
+    example: 4800.0,
+    minimum: 1,
+  })
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(1)
+  pricePerKg!: number;
+
+  @ApiProperty({
+    description: 'น้ำหนักสต็อกคงเหลือปัจจุบัน (หน่วย: กรัม)',
+    example: 15000,
+    minimum: 0,
+  })
+  @IsNumber()
+  @Min(0)
+  stockWeightGrams!: number;
+
+  @ApiProperty({
+    description: 'รหัสหมวดหมู่เนื้อ (UUID v4 ของตาราง Category)',
+    example: 'd290f1ee-6c54-4b01-90e6-d701748f0851',
+    format: 'uuid',
+  })
+  @IsUUID('4')
+  categoryId!: string;
+
+  @ApiPropertyOptional({
+    description: 'คำแนะนำในการย่างและระดับความสุกที่เหมาะสม',
+    example: 'แนะนำย่างที่ระดับ Medium Rare อุณหภูมิแกนกลาง 54°C',
+  })
+  @IsOptional()
+  @IsString()
+  cookingNote?: string;
+}
+
+export class ProductResponseDto extends CreateProductDto {
+  @ApiProperty({
+    description: 'รหัสอ้างอิงหลักของสินค้า (UUID v4)',
+    example: '7c9e6679-7425-40de-944b-e07fc1f90ae7',
+    format: 'uuid',
+  })
+  id!: string;
+
+  @ApiPropertyOptional({
+    description: 'URL รูปภาพสินค้าจาก Supabase Public Bucket',
+    example: 'https://xyz.supabase.co/storage/v1/object/public/butcher-public-assets/products/wagyu.webp',
+    nullable: true,
+  })
+  imageUrl!: string | null;
+
+  @ApiProperty({
+    description: 'วันและเวลาที่สร้างรายการสินค้า (ISO 8601)',
+    example: '2026-10-17T08:30:00.000Z',
+  })
+  createdAt!: Date;
+}
+```
+
+ตัวอย่างที่ 2: การตกแต่ง Controller ของ `ProductsController` ด้วย `@ApiTags`, `@ApiOperation`, `@ApiCreatedResponse`, `@ApiConflictResponse` และการทำเอกสารสำหรับ Endpoint อัปโหลดไฟล์ (`multipart/form-data`) ด้วย `@ApiConsumes` และ `@ApiBody`
+
+```typescript filename="src/modules/products/products.controller.ts"
+import {
+  Controller,
+  Get,
+  Post,
+  Param,
+  Body,
+  ParseUUIDPipe,
+  UseInterceptors,
+  UploadedFile,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiOkResponse,
+  ApiCreatedResponse,
+  ApiNotFoundResponse,
+  ApiConflictResponse,
+  ApiUnprocessableEntityResponse,
+  ApiParam,
+  ApiConsumes,
+  ApiBody,
+} from '@nestjs/swagger';
+import { CreateProductDto, ProductResponseDto } from './dto/product-swagger.dto';
+import { ProductsService } from './products.service';
+import { createStrictImageParsePipe } from '../../common/pipes/image-upload.pipe';
+
+@ApiTags('Products (สินค้าเนื้อพรีเมียม)')
+@Controller('products')
+export class ProductsController {
+  constructor(private readonly productsService: ProductsService) {}
+
+  @Post()
+  @ApiOperation({
+    summary: 'สร้างรายการสินค้าเนื้อพรีเมียมใหม่',
+    description: 'เพิ่มข้อมูลเนื้อเข้าสู่แคตตาล็อก โดยรหัส SKU ต้องไม่ซ้ำกับรายการที่มีอยู่แล้ว',
+  })
+  @ApiCreatedResponse({
+    description: 'สร้างสินค้าสำเร็จและคืนค่าข้อมูลสินค้าที่ถูกบันทึก',
+    type: ProductResponseDto,
+  })
+  @ApiConflictResponse({
+    description: 'รหัส SKU ซ้ำกับสินค้าที่มีอยู่ในระบบแล้ว',
+  })
+  async create(@Body() dto: CreateProductDto): Promise<ProductResponseDto> {
+    return this.productsService.create(dto);
+  }
+
+  @Get(':id')
+  @ApiOperation({
+    summary: 'ดึงข้อมูลรายละเอียดสินค้าเนื้อตามรหัส ID',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'รหัส UUID v4 ของสินค้าเนื้อ',
+    example: '7c9e6679-7425-40de-944b-e07fc1f90ae7',
+  })
+  @ApiOkResponse({
+    description: 'พบข้อมูลสินค้า',
+    type: ProductResponseDto,
+  })
+  @ApiNotFoundResponse({
+    description: 'ไม่พบสินค้าเนื้อรหัสที่ระบุในระบบ',
+  })
+  async findOne(
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+  ): Promise<ProductResponseDto> {
+    return this.productsService.findOne(id);
+  }
+
+  @Post(':id/image')
+  @UseInterceptors(FileInterceptor('image'))
+  @ApiOperation({
+    summary: 'อัปโหลดหรือเปลี่ยนรูปภาพตัวอย่างสินค้าเนื้อ',
+    description: 'รับไฟล์รูปภาพ (JPEG, PNG, WebP ขนาดไม่เกิน 5MB) และอัปโหลดขึ้น Supabase Storage',
+  })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    description: 'ไฟล์รูปภาพสินค้าเนื้อพรีเมียม',
+    schema: {
+      type: 'object',
+      required: ['image'],
+      properties: {
+        image: {
+          type: 'string',
+          format: 'binary',
+          description: 'ไฟล์รูปภาพจริง (ตรวจด้วย Magic Number)',
+        },
+      },
+    },
+  })
+  @ApiOkResponse({
+    description: 'อัปโหลดรูปภาพและอัปเดต URL ของสินค้าสำเร็จ',
+    type: ProductResponseDto,
+  })
+  @ApiUnprocessableEntityResponse({
+    description: 'ไฟล์มีขนาดเกิน 5MB หรือไม่ใช่ไฟล์รูปภาพที่ถูกต้องตามโครงสร้างไบนารี',
+  })
+  async uploadImage(
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+    @UploadedFile(createStrictImageParsePipe()) file: Express.Multer.File,
+  ): Promise<ProductResponseDto> {
+    return this.productsService.replaceProductImage(id, file);
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การกำหนด Response Model** | ไม่ใส่ `@ApiOkResponse({ type: ... })` ทำให้ใน Swagger UI แสดง Response Body เป็นค่าว่าง `{}` และทีม Frontend ไม่รู้โครงสร้างข้อมูลที่จะได้รับ | สร้างคลาส `ResponseDto` ที่ชัดเจนและระบุใน `@ApiOkResponse` หรือ `@ApiCreatedResponse` เสมอ |
+| **การใส่ `enumName`** | ใส่แค่ `@ApiProperty({ enum: MarblingGrade })` โดยไม่ใส่ `enumName` ทำให้เวลา Generate Code ได้ชื่อ Enum แบบสุ่มซ้ำๆ ในทุก Endpoint | ระบุ `enumName: 'MarblingGrade'` เสมอเพื่อให้ OpenAPI สร้าง Reusable Component Schema เพียงจุดเดียว |
+| **เอกสารสำหรับ File Upload** | ใช้ `@UseInterceptors(FileInterceptor('image'))` โดยไม่ใส่ `@ApiConsumes('multipart/form-data')` และ `@ApiBody` ทำให้ไม่มีปุ่มเลือกไฟล์ใน Swagger UI | ระบุ `@ApiConsumes('multipart/form-data')` และกำหนด Schema `format: 'binary'` เพื่อให้กดเลือกไฟล์ทดสอบจากหน้าเว็บได้ทันที |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: ทุก Public และ Protected Endpoint ที่ทีม Frontend ต้องเชื่อมต่อ โดยเฉพาะ Endpoint ที่มีการส่งข้อมูลซับซ้อน เช่น การสร้างคำสั่งซื้อ (`Order` พร้อม `OrderItem[]`) หรือการอัปโหลดสลิป (`Payment`)
+- **ไม่ควรใช้เมื่อ**: ไม่ควรนำคลาส Entity จากฐานข้อมูลที่มีฟิลด์ความลับ (เช่น `User` ที่มีคอลัมน์ `passwordHash`) มาใส่ใน `@ApiOkResponse({ type: UserEntity })` โดยตรง ให้สร้าง `UserProfileResponseDto` แยกต่างหากเสมอ
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ถ้าเรามี DTO สำหรับแก้ไขข้อมูลบางส่วน (`UpdateProductDto`) ที่สืบทอดมาจาก `CreateProductDto` ด้วย `PartialType(CreateProductDto)` เราควร import `PartialType` มาจาก `@nestjs/mapped-types` หรือ `@nestjs/swagger` เพราะอะไร?
+   - **แนวคำตอบ**: ต้อง import `PartialType` (รวมถึง `PickType`, `OmitType`, `IntersectionType`) มาจาก **`@nestjs/swagger`** เสมอ เพราะถ้า import มาจาก `@nestjs/mapped-types` ตัว `ValidationPipe` จะทำงานได้ถูกต้อง แต่ Metadata ของ Swagger จะไม่ถูกคัดลอกและปรับสถานะเป็น `required: false` ตามไปด้วย ส่งผลให้ในหน้า Swagger UI มองว่า `UpdateProductDto` เป็นคลาสว่างเปล่าไม่มีฟิลด์ใดๆ เลย
+2. **คำถาม**: ทำไมเราควรระบุ HTTP Error Responses เช่น `@ApiNotFoundResponse` หรือ `@ApiConflictResponse` ใน Controller ด้วย?
+   - **แนวคำตอบ**: เพื่อให้ทีม Frontend ทราบสัญญาที่ชัดเจนว่าแต่ละ Endpoint มีโอกาสเกิด Business Error ใดได้บ้าง เช่น การสร้าง `Product` อาจคืน `409 Conflict` เมื่อ SKU ซ้ำ หรือการจ่ายเงิน `Payment` อาจคืน `422 Unprocessable Entity` เมื่อไฟล์สลิปไม่ถูกต้อง ทำให้ฝั่ง Frontend สามารถเขียนโค้ดดักจับและแสดงข้อความแจ้งเตือนผู้ใช้ได้อย่างแม่นยำตามสถานะจริง
+
+---

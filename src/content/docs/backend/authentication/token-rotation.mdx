@@ -1,0 +1,293 @@
+---
+title: Token Rotation
+category: BACKEND
+parentTitle: Authentication
+version: JWT & Passport.js
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+หากเราออก Refresh Token อายุ 7 วันให้ลูกค้า แล้วปล่อยให้ใช้ Refresh Token ใบเดิมซ้ำๆ ได้ตลอด 7 วัน หากวันหนึ่ง Refresh Token ใบนั้นรั่วไหล แฮกเกอร์จะสามารถต่ออายุ Access Token ได้เรื่อยๆ โดยไม่มีใครรู้ตัว
+
+มาตรฐานความปลอดภัยระดับสูงสุดตามแนวทาง **OAuth 2.0 Security Best Current Practice (RFC 9700)** คือการทำ **Refresh Token Rotation พร้อม Reuse Detection**:
+1. **เก็บเฉพาะค่า Hash ของ Refresh Token ล่าสุดในฐานข้อมูล**: ไม่เก็บสตริง Refresh Token ดิบในตารางฐานข้อมูลเด็ดขาด
+2. **One-Time Use & Rotation**: ทุกครั้งที่ไคลเอนต์ส่ง Refresh Token มาขอต่ออายุที่ `POST /api/v1/auth/refresh` เซิร์ฟเวอร์จะตรวจสอบกับค่า Hash ในฐานข้อมูล หากตรงกันจะ **ออกทั้ง Access Token ใบใหม่ และ Refresh Token ใบใหม่** แล้วเขียนทับค่า Hash ในฐานข้อมูลทันที (ทำให้ Refresh Token ใบเก่าหมดสภาพทันทีหลังใช้เพียง 1 ครั้ง)
+3. **Reuse Detection (การตรวจจับการขโมย Token)**: หากมีใครนำ Refresh Token ใบเก่าที่ถูกหมุนเวียนไปแล้วกลับมาใช้อีกครั้ง แปลว่าเกิดการขโมย Token ขึ้นแล้ว! ระบบจะสั่ง **ล้างค่า Refresh Token Hash ในฐานข้อมูลทิ้งทันที (บังคับ Logout ทุกอุปกรณ์)** เพื่อปกป้องบัญชีของลูกค้า
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เนื่องจาก JWT Refresh Token มีความยาวเกินกว่า 72 bytes (ปกติยาวประมาณ 150-250 ตัวอักษร) หากเรานำสตริง JWT Refresh Token ไปเข้า `bcrypt.hash()` ตรงๆ Bcrypt จะตัดคิดเฉพาะ 72 ตัวอักษรแรกเท่านั้น ซึ่งส่วนหัว 72 ตัวแรกของ JWT (`Header` + ต้น `Payload`) แทบจะเหมือนกันหมดทุกใบ! ดังนั้นก่อนนำ Refresh Token ไปเก็บรักษาหรือเข้า Bcrypt เราจึงใช้ **`SHA-256` (HMAC-SHA256)** ย่อสตริง Refresh Token ทั้งใบให้เป็น Hex 64 ตัวอักษรที่มีความเฉพาะตัวสูงและตรวจสอบแบบ Constant-time (`crypto.timingSafeEqual`) ได้อย่างรวดเร็วและปลอดภัย 100%
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การจัดการ Refresh Token Rotation และ Reuse Detection ใน AuthSessionService (พื้นฐาน)
+```typescript filename="src/modules/auth/auth-session.service.ts"
+import {
+  Injectable,
+  UnauthorizedException,
+  ForbiddenException,
+  Logger,
+} from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
+import * as crypto from 'crypto';
+import { PrismaService } from '../../database/prisma.service';
+import { TokenService, RefreshTokenPayload } from './token.service';
+
+@Injectable()
+export class AuthSessionService {
+  private readonly logger = new Logger(AuthSessionService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly jwtService: JwtService,
+    private readonly configService: ConfigService,
+    private readonly tokenService: TokenService,
+  ) {}
+
+  // สร้าง SHA-256 Digest ของ Refresh Token ทั้งใบ (แก้ปัญหาขีดจำกัด 72 bytes ของ Bcrypt)
+  private hashRefreshToken(rawToken: string): string {
+    const secret = this.configService.getOrThrow<string>('JWT_REFRESH_SECRET');
+    return crypto.createHmac('sha256', secret).update(rawToken).digest('hex');
+  }
+
+  // บันทึก Hash ของ Refresh Token ล่าสุดลงในข้อมูลผู้ใช้ตอน Login สำเร็จ
+  async storeRefreshTokenHash(userId: string, rawRefreshToken: string): Promise<void> {
+    const tokenHash = this.hashRefreshToken(rawRefreshToken);
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        // สมมติว่าเพิ่มคอลัมน์ currentRefreshTokenHash ในตาราง users หรือตาราง user_sessions
+        phoneNumber: tokenHash.slice(0, 20), // ใน Production จริงใช้คอลัมน์ refreshTokenHash @db.VarChar(128)
+      },
+    });
+  }
+
+  // หมุนเวียน Refresh Token (Rotation) พร้อมตรวจจับการนำ Token เก่ามาใช้ซ้ำ (Reuse Detection)
+  async rotateTokens(
+    rawRefreshToken: string,
+    storedTokenHashInDb: string | null,
+  ) {
+    let payload: RefreshTokenPayload;
+    try {
+      payload = await this.jwtService.verifyAsync<RefreshTokenPayload>(
+        rawRefreshToken,
+        {
+          secret: this.configService.getOrThrow<string>('JWT_REFRESH_SECRET'),
+          issuer: 'smartbutcher-api',
+          audience: 'smartbutcher-client',
+        },
+      );
+    } catch {
+      throw new UnauthorizedException({
+        code: 'INVALID_OR_EXPIRED_REFRESH_TOKEN',
+        message: 'เซสชันหมดอายุแล้ว กรุณาเข้าสู่ระบบใหม่อีกครั้ง',
+      });
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: payload.sub },
+      select: { id: true, email: true, role: true, isActive: true },
+    });
+
+    if (!user || !user.isActive || !storedTokenHashInDb) {
+      throw new ForbiddenException({
+        code: 'SESSION_REVOKED',
+        message: 'สิทธิ์การใช้งานเซสชันนี้ถูกเพิกถอนแล้ว',
+      });
+    }
+
+    const incomingHash = this.hashRefreshToken(rawRefreshToken);
+    const isMatch = crypto.timingSafeEqual(
+      Buffer.from(incomingHash, 'utf8'),
+      Buffer.from(storedTokenHashInDb, 'utf8'),
+    );
+
+    // 🚨 REUSE DETECTION: ลายเซ็น JWT ถูกต้อง แต่ไม่ตรงกับค่า Hash ล่าสุดใน DB!
+    // แปลว่า Refresh Token ใบนี้ถูกใช้ไปแล้วและกำลังเกิดการขโมยสวมรอย!
+    if (!isMatch) {
+      this.logger.warn(
+        `Security Alert: Refresh token reuse detected for user ${user.id}! Revoking all sessions.`,
+      );
+      await this.revokeUserSession(user.id);
+      throw new ForbiddenException({
+        code: 'REFRESH_TOKEN_REUSE_DETECTED',
+        message: 'ตรวจพบความผิดปกติของเซสชัน ระบบได้ทำการออกจากระบบทุกอุปกรณ์เพื่อความปลอดภัยของคุณ',
+      });
+    }
+
+    // ออกคู่ Access Token + Refresh Token ใบใหม่ทันที (Rotation)
+    const newTokens = await this.tokenService.generateTokenPair(user);
+    const newRefreshTokenHash = this.hashRefreshToken(newTokens.refreshToken);
+
+    return {
+      user,
+      newTokens,
+      newRefreshTokenHash,
+    };
+  }
+
+  async revokeUserSession(userId: string): Promise<void> {
+    // ล้างค่า Refresh Token Hash ในฐานข้อมูลให้เป็น null เพื่อบังคับ Logout ทันที
+    this.logger.log(`Revoked refresh session for user ${userId}`);
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การประกอบ AuthController สำหรับ Login, Refresh และ Logout ครบวงจร (ขั้นสูง)
+```typescript filename="src/modules/auth/auth.controller.ts"
+import {
+  Controller,
+  Post,
+  Body,
+  Req,
+  Res,
+  HttpCode,
+  HttpStatus,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { Request, Response } from 'express';
+import { Public } from './guards/jwt-auth.guard';
+import { CurrentUser } from './decorators/current-user.decorator';
+import { AuthenticatedUser } from './strategies/jwt.strategy';
+import { AuthRegistrationService } from './auth-registration.service';
+import { TokenService } from './token.service';
+import { AuthSessionService } from './auth-session.service';
+import {
+  AuthCookieManager,
+  REFRESH_TOKEN_COOKIE_NAME,
+} from './cookie-manager.helper';
+
+export class LoginDto {
+  email!: string;
+  password!: string;
+}
+
+@Controller('auth')
+export class AuthController {
+  // จำลองคลังเก็บ Hash ล่าสุดของ Refresh Token รายผู้ใช้ (ในระบบจริงเก็บในตาราง user_sessions หรือ Redis)
+  private readonly activeRefreshHashes = new Map<string, string>();
+
+  constructor(
+    private readonly authRegService: AuthRegistrationService,
+    private readonly tokenService: TokenService,
+    private readonly sessionService: AuthSessionService,
+  ) {}
+
+  @Public()
+  @Post('login')
+  @HttpCode(HttpStatus.OK)
+  async login(
+    @Body() dto: LoginDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const user = await this.authRegService.validateUserCredentials(
+      dto.email,
+      dto.password,
+    );
+
+    const tokens = await this.tokenService.generateTokenPair(user);
+
+    // บันทึก Hash ของ Refresh Token ไว้ตรวจสอบตอน Rotation
+    const rotated = await this.sessionService.rotateTokens(
+      tokens.refreshToken,
+      // สร้าง Hash เริ่มต้นสำหรับเซสชันใหม่
+      crypto
+        .createHmac('sha256', process.env.JWT_REFRESH_SECRET ?? 'secret')
+        .update(tokens.refreshToken)
+        .digest('hex'),
+    );
+    this.activeRefreshHashes.set(user.id, rotated.newRefreshTokenHash);
+
+    // แนบ HttpOnly Cookies ทั้ง Access และ Refresh Token
+    AuthCookieManager.attachAuthCookies(
+      res,
+      rotated.newTokens.accessToken,
+      rotated.newTokens.refreshToken,
+    );
+
+    return {
+      user,
+      expiresInSeconds: 900,
+    };
+  }
+
+  @Public()
+  @Post('refresh')
+  @HttpCode(HttpStatus.OK)
+  async refreshTokens(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const cookies = req.cookies as Record<string, string> | undefined;
+    const rawRefreshToken = cookies?.[REFRESH_TOKEN_COOKIE_NAME];
+
+    if (!rawRefreshToken) {
+      throw new UnauthorizedException({
+        code: 'MISSING_REFRESH_TOKEN_COOKIE',
+        message: 'ไม่พบข้อมูล Refresh Token กรุณาเข้าสู่ระบบใหม่',
+      });
+    }
+
+    // สกัด userId เบื้องต้นเพื่อดึง Hash ล่าสุดจากฐานข้อมูล
+    const decoded = JSON.parse(
+      Buffer.from(rawRefreshToken.split('.')[1], 'base64url').toString('utf8'),
+    ) as { sub: string };
+    const storedHash = this.activeRefreshHashes.get(decoded.sub) ?? null;
+
+    const { user, newTokens, newRefreshTokenHash } =
+      await this.sessionService.rotateTokens(rawRefreshToken, storedHash);
+
+    // อัปเดต Hash ใบใหม่ลงฐานข้อมูล (ใบเก่าใช้ไม่ได้อีกต่อไป)
+    this.activeRefreshHashes.set(user.id, newRefreshTokenHash);
+
+    // แนบ Cookie ใบใหม่กลับไปให้เบราว์เซอร์
+    AuthCookieManager.attachAuthCookies(
+      res,
+      newTokens.accessToken,
+      newTokens.refreshToken,
+    );
+
+    return {
+      refreshed: true,
+      expiresInSeconds: 900,
+    };
+  }
+
+  @Post('logout')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async logout(
+    @CurrentUser() user: AuthenticatedUser,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<void> {
+    // 1. เพิกถอนสิทธิ์ Refresh Token ในฐานข้อมูลทันที
+    this.activeRefreshHashes.delete(user.id);
+    await this.sessionService.revokeUserSession(user.id);
+
+    // 2. สั่งเบราว์เซอร์ลบ HttpOnly Cookies ทั้งหมด
+    AuthCookieManager.clearAuthCookies(res);
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/auth/logout-comparison.ts"
+// ❌ ผิด (Anti-pattern): ระบบ Logout ที่ทำแค่สั่งลบ Cookie ฝั่ง Browser แต่ไม่เพิกถอน Refresh Token ในเซิร์ฟเวอร์
+// ปัญหา: หากแฮกเกอร์คัดลอก Refresh Token ไปแล้วก่อนที่ลูกค้าจะกด Logout แฮกเกอร์ยังสามารถยิง /auth/refresh เพื่อออก Access Token ใหม่ได้ตลอด 7 วัน!
+
+// ✅ ถูก (Best Practice): ตอนกด Logout ต้องทำทั้ง 2 ฝั่งเสมอ:
+// 1. ลบหรือตั้งค่า revokedAt ให้กับ Refresh Token Hash ในฐานข้อมูล/Redis
+// 2. เรียก res.clearCookie() ล้าง HttpOnly Cookie บนเบราว์เซอร์
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรทำ Refresh Token Rotation เสมอเมื่อ**: พัฒนาเว็บแอปพลิเคชัน (SPA / Next.js) หรือแอปมือถือที่ต้องการให้ผู้ใช้ล็อกอินค้างไว้ได้นานหลายสัปดาห์โดยยังคงระดับความปลอดภัยเทียบเท่าธนาคาร
+- **ไม่ควรส่งสตริง JWT ยาวเกิน 72 bytes เข้า `bcrypt.hash()` โดยตรง**: ต้องนำสตริง JWT Refresh Token ไปผ่าน `HMAC-SHA256` ก่อนเสมอ เพราะส่วนท้ายของ JWT (ซึ่งคือ Signature ที่แตกต่างกันในแต่ละใบ) อยู่เกินตำแหน่งตัวอักษรที่ 72!
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมการนำสตริง JWT Refresh Token ไปเข้าฟังก์ชัน `bcrypt.hash(refreshToken, 12)` โดยตรงจึงเป็นช่องโหว่ความปลอดภัยที่ร้ายแรงมาก?
+   - **แนวคำตอบ**: เพราะอัลกอริทึม Bcrypt อ่านข้อมูลขาเข้าสูงสุดเพียง **72 bytes แรกเท่านั้น** และตัดส่วนที่เหลือทิ้งทั้งหมด ในขณะที่สตริงของ JWT มีความยาวประมาณ 180–250 ตัวอักษร โดย 72 ตัวอักษรแรกของ JWT ที่ออกให้ผู้ใช้คนเดียวกันคือส่วน `Header` (`eyJhbGciOiJIUzI1NiIs...`) และช่วงต้นของ `Payload` (`sub`, `email`) ซึ่งเหมือนกันทุกตัวอักษร! ส่วนที่ต่างกันอย่าง `iat`, `jti` และ `Signature` อยู่หลังตัวอักษรที่ 72 ทั้งหมด ส่งผลให้ไม่ว่าจะออก Refresh Token ใบใหม่กี่ใบ `bcrypt.compare()` ก็จะมองว่าตรงกับใบเก่าเสมอ ทำให้กลไก Rotation พังทลาย ดังนั้นจึงต้องใช้ `HMAC-SHA256` สำหรับการ Hash Token ที่มีความยาวเกิน 72 bytes เสมอ
+2. **คำถาม**: กลไก Refresh Token Reuse Detection ทำงานอย่างไรเมื่อมีแฮกเกอร์ขโมย Refresh Token ของลูกค้าไป?
+   - **แนวคำตอบ**: สมมติลูกค้ามี `RefreshToken_1` และแฮกเกอร์แอบขโมยสำเนา `RefreshToken_1` ไปได้ ต่อมาแอปของลูกค้าทำการต่ออายุตามปกติด้วย `RefreshToken_1` เซิร์ฟเวอร์จึงออก `RefreshToken_2` ให้ลูกค้าและบันทึก Hash ของใบที่ 2 ทับลงฐานข้อมูล เมื่อแฮกเกอร์นำ `RefreshToken_1` มาใช้งานในภายหลัง เซิร์ฟเวอร์จะพบว่าลายเซ็น JWT ถูกต้องแต่ Hash ไม่ตรงกับใบล่าสุดในฐานข้อมูล เซิร์ฟเวอร์จึงรู้ทันทีว่ามีคนนำ Token ที่ถูกหมุนเวียนไปแล้วกลับมาใช้ซ้ำ (เกิดการรั่วไหล) และสั่งยกเลิก `RefreshToken_2` ในฐานข้อมูลทันที ทำให้แฮกเกอร์ไปต่อไม่ได้ และบังคับให้ลูกค้าตัวจริงยืนยันตัวตนด้วยรหัสผ่านใหม่
+
+---

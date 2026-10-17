@@ -1,0 +1,120 @@
+---
+title: DML RETURNING
+category: DATABASE
+parentTitle: SQL
+version: SQL:2023 & PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+การจัดการข้อมูลในตลาดสดเนื้อพรีเมียมเกี่ยวข้องกับการรับเนื้อเข้าคลัง (INSERT), การปรับราคาหรือตัดสต็อกเมื่อเกิดการขาย (UPDATE), และการยกเลิกรายการที่ไม่ถูกต้อง (DELETE) 
+ในฐานข้อมูลแบบดั้งเดิม เมื่อเราบันทึกข้อมูลเสร็จ เรามักจะต้องยิงคำสั่ง `SELECT` ซ้ำอีกรอบเพื่อดูว่า Primary Key ที่เพิ่งสร้างขึ้นมามีค่าเป็นอะไร แต่ใน **PostgreSQL มีอาวุธลับที่ทรงพลังคือคำสั่ง `RETURNING`** ซึ่งช่วยส่งข้อมูลของแถวที่เพิ่งถูกเพิ่ม แก้ไข หรือลบ กลับคืนมาทันทีในคำสั่งเดียวโดยไม่ต้องส่งคำสั่งถามซ้ำ
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+PostgreSQL จัดการข้อมูลผ่านสถาปัตยกรรม **MVCC (Multi-Version Concurrency Control)**:
+- **INSERT**: สร้างแถวข้อมูล (Tuple) ใหม่ลงใน Data Page พร้อมกำหนดค่า `xmin` (Transaction ID ของผู้สร้าง)
+- **UPDATE**: PostgreSQL จะ **ไม่เขียนทับข้อมูลเดิมในที่เดิม (No In-place Update)** แต่จะทำการกำหนดค่า `xmax` ให้กับ Tuple เก่า (บ่งชี้ว่า Tuple นี้สิ้นอายุขัยแล้ว) แล้วสร้าง Tuple ใหม่ขึ้นมาอีกตัวพร้อมกำหนด `xmin` ใหม่ ซึ่งจะก่อให้เกิด Dead Tuple รอให้ระบบ `VACUUM` มาเคลียร์พื้นที่คืน
+- **DELETE**: ทำการประทับตรา Transaction ID ลงในฟิลด์ `xmax` ของ Tuple นั้นๆ เพื่อไม่ให้ Transaction อื่นมองเห็นแถวนี้อีกต่อไป
+- **RETURNING Clause**: ทำงานในระดับ Executor Engine ทันทีที่คำสั่ง INSERT/UPDATE/DELETE ดำเนินการกับ Tuple ในหน่วยความจำเสร็จ Tuple นั้นจะถูกส่งผ่าน Output Tuple Stream กลับไปยัง Client ทันที ช่วยลด Network Latency ได้ 50% เมื่อเทียบกับการทำ 2 Round-trips (INSERT ตามด้วย SELECT)
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การนำเข้าเนื้อพรีเมียมแบบ Multi-row พร้อมรับค่า ID และ Timestamp ทันที
+การเพิ่มรายการสินค้าใหม่พร้อมกันหลายชิ้นในคำสั่งเดียว พร้อมรับ `id`, `sku`, และ `created_at` ที่ถูกสร้างขึ้นอัตโนมัติ:
+
+```sql filename="sql/sql.sql"
+-- เพิ่มข้อมูลเนื้อวัวนำเข้า 3 ชนิดพร้อมกันและดึงข้อมูลที่สร้างเสร็จกลับมาทันที
+INSERT INTO products (
+    category_id,
+    name,
+    sku,
+    price_per_kg,
+    stock_qty,
+    dry_aged_days,
+    is_active
+) VALUES 
+(1, 'Matsusaka Wagyu A5 Striploin', 'WAGYU-MATSU-STRIP', 5800.00, 10, 0, TRUE),
+(3, '30-Day Dry-Aged Angus Ribeye', 'ANGUS-DA30-RIB', 2400.00, 12, 30, TRUE),
+(4, 'Australian Grain-fed Tenderloin', 'AUS-GRAIN-TEND', 1850.00, 20, 0, TRUE)
+RETURNING 
+    id, 
+    sku, 
+    name, 
+    created_at;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| id | sku | name | created_at |
+| :--- | :--- | :--- | :--- |
+| 6 | WAGYU-MATSU-STRIP | Matsusaka Wagyu A5 Striploin | 2026-10-17 08:30:15.123+07 |
+| 7 | ANGUS-DA30-RIB | 30-Day Dry-Aged Angus Ribeye | 2026-10-17 08:30:15.123+07 |
+| 8 | AUS-GRAIN-TEND | Australian Grain-fed Tenderloin | 2026-10-17 08:30:15.123+07 |
+
+**โค้ดเทียบเคียงใน Prisma Client:**
+```typescript filename="src/sql.ts"
+// Prisma Client รองรับ createManyAndReturn เพื่อรับข้อมูลกลับทันทีผ่าน RETURNING
+const newProducts = await prisma.product.createManyAndReturn({
+  data: [
+    { categoryId: 1, name: 'Matsusaka Wagyu A5 Striploin', sku: 'WAGYU-MATSU-STRIP', pricePerKg: 5800, stockQty: 10, dryAgedDays: 0, isActive: true },
+    { categoryId: 3, name: '30-Day Dry-Aged Angus Ribeye', sku: 'ANGUS-DA30-RIB', pricePerKg: 2400, stockQty: 12, dryAgedDays: 30, isActive: true },
+    { categoryId: 4, name: 'Australian Grain-fed Tenderloin', sku: 'AUS-GRAIN-TEND', pricePerKg: 1850, stockQty: 20, dryAgedDays: 0, isActive: true },
+  ],
+  select: { id: true, sku: true, name: true, createdAt: true },
+});
+```
+
+### ตัวอย่างที่ 2: Atomic Concurrency Update ตัดสต็อกเนื้ออย่างปลอดภัย ป้องกัน Race Condition
+เมื่อมีลูกค้าสั่งซื้อเนื้อ 2 กิโลกรัม เราต้องตัดสต็อกโดยป้องกันไม่ให้สต็อกติดลบ และรับยอดสต็อกคงเหลือล่าสุดกลับมาทันที:
+
+```sql filename="sql/sql.sql"
+-- อัปเดตลดสต็อกเนื้อแบบ Atomic Operation พร้อมคืนค่าสต็อกคงเหลือ
+UPDATE products
+SET stock_qty = stock_qty - 2
+WHERE id = 2 
+  AND stock_qty >= 2 -- ป้องกันปัญหาสต็อกติดลบจากคำสั่งพร้อมกัน (Lost Update Protection)
+RETURNING 
+    id, 
+    sku, 
+    name, 
+    stock_qty AS remaining_stock;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| id | sku | name | remaining_stock |
+| :--- | :--- | :--- | :--- |
+| 2 | ANGUS-DA45-TBONE | 45-Day Dry-Aged Black Angus T-Bone | 6 |
+
+## 4. ผิด vs ถูก (Anti-patterns & Best Practices)
+
+### ❌ โค้ดที่ผิด: INSERT แล้วตามด้วย `SELECT currval` หรือ `SELECT MAX(id)`
+```sql filename="sql/sql.sql"
+-- ผิด: การรัน 2 คำสั่งแยกจากกันเสี่ยงต่อปัญหา Concurrency และเพิ่ม Round-trip Time
+INSERT INTO orders (user_id, order_no, status, total_amount) 
+VALUES (1, 'ORD-20261017-999', 'PENDING', 4500.00);
+
+-- เสี่ยงได้ ID ของผู้ใช้อื่นที่รันชนกันในจังหวะเดียวกัน!
+SELECT MAX(id) FROM orders;
+```
+
+### ✅ โค้ดที่ถูก: ใช้ `RETURNING` เพื่อความสมบูรณ์ระดับ Atomic และรับค่าได้ทันที
+```sql filename="sql/sql.sql"
+-- ถูกต้อง: ได้ค่า id แน่นอน 100% ปลอดภัยจากปัญหา Concurrency และเร็วกว่า 2 เท่า
+INSERT INTO orders (user_id, order_no, status, total_amount) 
+VALUES (1, 'ORD-20261017-999', 'PENDING', 4500.00)
+RETURNING id, order_no, created_at;
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `RETURNING`:** ในทุกคำสั่ง INSERT, UPDATE, DELETE ที่ Application ต้องการนำผลลัพธ์ไปประมวลผลต่อ เช่น บันทึก Audit Log, อัปเดต Cache, หรือส่งตอบกลับ API
+- **ควรใช้ Atomic Concurrency Guard (`AND stock >= qty`):** ในทุกคำสั่งตัดสต็อก ยอดเงิน หรือโควตา
+- **ไม่ควรใช้ Hard DELETE:** กับข้อมูลสำคัญทางการเงินหรือธุรกรรม (orders, payments) ให้เปลี่ยนมาใช้ Soft Delete (`deleted_at TIMESTAMPTZ`) หรือการเปลี่ยนสถานะเป็น `CANCELLED` แทน
+
+## 6. คำถามสัมภาษณ์ (Interview Questions)
+- **Q1: เหตุใดคำสั่ง `UPDATE` ใน PostgreSQL ถึงก่อให้เกิด "Dead Tuples" และกลไกใดที่นำพื้นที่ดิสก์เหล่านั้นกลับมาใช้ใหม่?**
+  - *คำตอบ:* เพราะ PostgreSQL ใช้โมเดล MVCC แบบ Append-only เมื่อมีการ `UPDATE` ระบบจะไม่เขียนทับข้อมูลเดิม แต่จะทำเครื่องหมายว่า Tuple เดิมถูกแทนที่โดย Transaction ปัจจุบัน แล้วสร้าง Tuple เวอร์ชันใหม่ขึ้นมา Tuple เดิมที่ไม่มี Transaction ใดมองเห็นอีกต่อไปจะกลายสภาพเป็น **Dead Tuple** ซึ่งกลไก **Auto-Vacuum Daemon** จะคอยตรวจสอบและทำความสะอาด Dead Tuples เหล่านี้ เพื่อนำพื้นที่ว่างในหน้า Data Page กลับมาหมุนเวียนใช้งานสำหรับแถวใหม่
+- **Q2: ประโยชน์ของ `UPDATE ... RETURNING` ในแง่ของ Database Round-trip และ Isolation Level คืออะไร?**
+  - *คำตอบ:* ช่วยลด Network Round-trip จาก 2 ครั้ง (UPDATE + SELECT) ให้เหลือเพียง 1 ครั้ง และที่สำคัญที่สุดคือรับประกันความถูกต้องของข้อมูลภายใต้สภาพแวดล้อม Concurrency สูง เพราะค่าที่คืนกลับมาจาก `RETURNING` คือสถานะของ Tuple ที่เพิ่งถูกเขียนลง Disk ภายใต้ Row-level Lock เดียวกันนั้นทันที ป้องกันปัญหาการอ่านค่าที่อาจถูก Transaction อื่นแทรกแซงแก้ไขไปแล้ว
+
+---

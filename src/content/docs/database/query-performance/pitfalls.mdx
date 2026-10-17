@@ -1,0 +1,55 @@
+---
+title: Anti-patterns
+category: DATABASE
+parentTitle: Query Performance
+version: EXPLAIN & pg_stat_statements
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **Non-Sargable Predicates:** การนำคอลัมน์ไปใส่ไว้ในฟังก์ชันหรือสมการคณิตศาสตร์ใน `WHERE` เช่น `WHERE DATE(created_at) = CURRENT_DATE` ทำให้ B-Tree Index บน `created_at` ไร้ประโยชน์ทันที
+2. **N+1 Queries inside Application Loops:** การดึงรายการหลักมาแล้ววนลูปยิงคิวรีดึงข้อมูลย่อยทีละรายการผ่าน ORM หรือ SQL ดิบ ทำให้เกิด Network Round-trip หลายร้อยรอบใน 1 API Request
+3. **Deep OFFSET Pagination:** การใช้ `LIMIT 20 OFFSET 100000` บนตารางขนาดใหญ่ ซึ่งบังคับให้ฐานข้อมูลต้องอ่านและโยนทิ้ง 100,000 แถวแรกทุกครั้งที่เปิดหน้า
+4. **Abusing `SELECT DISTINCT` to Hide Bad Joins:** การเขียน `JOIN` ผิดจนข้อมูลซ้ำแล้วแก้ปัญหาปลายเหตุด้วยการเติม `SELECT DISTINCT` ข้างหน้า ซึ่งบังคับให้ PostgreSQL ต้องนำข้อมูลทั้งหมดมา Sort หรือ Hash เพื่อตัดแถวซ้ำออก เสียทั้ง CPU และ `work_mem`
+5. **Ignoring Stale Statistics & Autovacuum:** การปล่อยให้ตารางที่มีการอัปเดตบ่อยเกิด Dead Tuples สะสมโดยไม่ปรับจูน Autovacuum ทำให้ตารางบวมและ Query Planner ประเมินจำนวนแถวผิดพลาดจนเลือกแผนการทำงานที่ช้า
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+- [ ] **Measured with `EXPLAIN (ANALYZE, BUFFERS)`:** คิวรีสำคัญทุกตัวผ่านการตรวจสอบแผนการประมวลผลจริง ยืนยันว่าไม่มี `Seq Scan` บนตารางขนาดใหญ่ และมีอัตราส่วน `shared hit` สูง
+- [ ] **Zero N+1 Queries:** ตรวจสอบการทำงานของ API ทุกจุดว่าไม่มีการยิง SQL ซ้ำในลูป โดยเปลี่ยนเป็น `JOIN`, `LATERAL JOIN`, หรือ Batch Query (`IN` / `ANY`) เรียบร้อยแล้ว
+- [ ] **Sargable `WHERE` Clauses:** ไม่มีคอลัมน์ที่มี Index ตัวใดถูกครอบด้วยฟังก์ชันใน `WHERE` (หรือหากจำเป็นต้องใช้ เช่น `LOWER(email)` ได้มีการสร้าง Expression Index รองรับตรงกันแล้ว)
+- [ ] **Explicit Column Selection:** เลิกใช้ `SELECT *` ในโค้ด Production โดยระบุเฉพาะคอลัมน์ที่ต้องใช้งานจริงเพื่อหลีกเลี่ยง TOAST overhead และเปิดทางให้ทำ Index-Only Scan
+- [ ] **Keyset Pagination for Large Lists:** ระบบแสดงรายการข้อมูลขนาดใหญ่ใช้ Keyset/Cursor Pagination `(created_at, id) < ($1, $2)` แทนการใช้ `OFFSET` ลึกๆ
+- [ ] **`pg_stat_statements` Enabled:** เปิดใช้งาน `pg_stat_statements` และ `log_min_duration_statement` เพื่อติดตามและจัดอันดับคิวรีที่กินเวลาสะสมสูงสุดอย่างต่อเนื่อง
+- [ ] **Autovacuum Tuned for Hot Tables:** ปรับลดค่า `autovacuum_vacuum_scale_factor` และ `autovacuum_analyze_scale_factor` บนตารางที่มีการอัปเดตถี่ (`products`, `orders`) ให้ทำงานสม่ำเสมอ
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อคุณสามารถวิเคราะห์และปรับจูนให้คิวรีทำงานได้อย่างรวดเร็วแล้ว ขั้นตอนต่อไปคือการควบคุมความถูกต้องของข้อมูลเมื่อมีการแก้ไขหลายตารางพร้อมกันด้วย Transactions และการรับมือกับภาวะที่ผู้ใช้หลายพันคนแย่งกันสั่งซื้อสินค้าชิ้นเดียวกันด้วย Concurrency Control:
+
+<Callout type="tip" title="ก้าวต่อไปสู่ความถูกต้องของธุรกรรมและการทำงานพร้อมกัน">
+ความเร็วของคิวรีต้องมาพร้อมกับความถูกต้องของข้อมูล 100% ศึกษาต่อในบท Transactions และ Concurrency เพื่อป้องกันปัญหาสต็อกติดลบหรือการตัดเงินซ้ำซ้อนในระบบจริง
+</Callout>
+
+- **พื้นฐานการออกแบบและดัชนี:**
+  - [Database Design](/docs/database/database-design)
+  - [Indexing](/docs/database/indexing)
+  - [PostgreSQL 16](/docs/database/postgresql)
+  - [SQL](/docs/database/sql)
+- **การควบคุมความถูกต้องของข้อมูลและการทำงานพร้อมกัน (ลำดับถัดไปที่แนะนำ):**
+  - [Transactions](/docs/database/transactions)
+  - [Concurrency](/docs/database/concurrency)
+- **การดูแลรักษาระบบและการเชื่อมต่อฝั่ง Backend:**
+  - [Connection Pooling](/docs/database/connection-pooling)
+  - [Backup & Recovery](/docs/database/backup)
+  - [Prisma ORM](/docs/backend/prisma-orm)
+  - [NestJS](/docs/backend/nestjs)

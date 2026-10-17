@@ -1,0 +1,188 @@
+---
+title: Subquery CTE
+category: DATABASE
+parentTitle: SQL
+version: SQL:2023 & PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เมื่อคำสั่ง SQL มีความซับซ้อน เช่น การค้นหาชิ้นเนื้อที่มียอดขายสูงกว่าค่าเฉลี่ยของร้าน หรือการแกะโครงสร้างหมวดหมู่เนื้อแบบต้นไม้หลายระดับ (Hierarchical Tree) การเขียน Query ก้อนใหญ่ซ้อนกันจะทำให้อ่านยากและบำรุงรักษาลำบาก
+- **Subquery**: การเอาคำสั่ง SELECT ย่อยไปฝังไว้ใน WHERE, FROM หรือ SELECT หลัก
+- **CTE (`WITH ... AS (...)`)**: การตั้งชื่อตารางเสมือนขึ้นมาชั่วคราวเพื่อแบ่งขั้นตอนการคิดออกเป็นท่อนๆ เหมือนการประกาศตัวแปรในฟังก์ชัน
+- **Recursive CTE**: ท่าไม้ตายสำหรับการท่องเข้าไปในโครงสร้างต้นไม้ เช่น หมวดหมู่หลัก (เนื้อวัว) $\rightarrow$ หมวดหมู่ย่อย (เนื้อดรายเอจ) $\rightarrow$ หมวดหมู่ย่อยสุด (โทมาฮอว์ก)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+- **Scalar Subquery**: คืนค่าเพียง 1 แถว 1 คอลัมน์ สามารถนำไปวางแทนที่ค่าคงที่ในนิพจน์เปรียบเทียบได้
+- **Correlated Subquery**: Subquery ที่มีการอ้างอิงคอลัมน์จากตารางภายนอก (Outer Query) ทำให้ PostgreSQL อาจต้องประมวลผล Subquery นี้ซ้ำๆ สำหรับทุกแถวของตารางนอก ($O(N \times M)$) เว้นแต่ Optimizer จะสามารถแปลงเป็น Semi-Join ได้
+- **`IN` vs `EXISTS`**:
+  - `EXISTS` ทำงานแบบ **Short-circuiting**: ทันทีที่พบข้อมูลตรงกันแถวแรกใน Subquery ระบบจะคืนค่า `TRUE` ทันทีและหยุดสแกนแถวที่เหลือ
+  - `NOT IN` มีพฤติกรรมอันตรายอย่างยิ่งเมื่อ Subquery มีค่า `NULL` ติดมาด้วย (ถ้ามี NULL แม้แต่ตัวเดียว เงื่อนไข `NOT IN` จะได้ผลลัพธ์เป็น `UNKNOWN` เสมอ ทำให้ผลลัพธ์หลักกลายเป็นเซตว่าง!) ในขณะที่ `NOT EXISTS` จัดการค่า NULL ได้อย่างแม่นยำ
+- **CTE Optimization ใน PostgreSQL 12+**: ในอดีต CTE จะถูกประเมินเป็น Optimization Fence (บังคับบันทึกผลลงหน่วยความจำ Materialized) แต่ตั้งแต่ PostgreSQL 12 เป็นต้นมา CTE ที่ไม่มีคำสั่งเขียนข้อมูลจะถูก Optimizer นำไป **Inline** รวมกับ Main Query โดยอัตโนมัติ ทำให้ได้ความเร็วเทียบเท่า Subquery ทั่วไป
+
+## 3. โครงสร้างการทำงานของ Recursive CTE
+Recursive CTE ประกอบด้วย 2 ส่วนที่เชื่อมกันด้วย `UNION ALL`:
+1. **Anchor Member (Non-recursive Term)**: Query เริ่มต้นเพื่อดึงจุดราก (Root Nodes) ของข้อมูล
+2. **Recursive Member**: Query ที่อ้างอิงชื่อ CTE ตัวเองเพื่อดึงลูกหลานในระดับถัดไป ทำงานวนซ้ำจนกระทั่งไม่มีแถวใหม่เกิดขึ้น
+
+```text filename="docs/database/sql.txt"
+[Anchor Member: ดึงหมวดหมู่ราก (parent_id IS NULL)]
+                     │
+                     ▼
+             [ ผลลัพธ์รอบที่ 0 ]
+                     │
+         ┌───────────┴───────────┐
+         ▼                       │
+[Recursive Member รอบที่ 1]      │
+         │                       │
+         ▼                       │
+ [ ผลลัพธ์รอบที่ 1 ]              ├──> รวมผลลัพธ์ด้วย UNION ALL
+         │                       │
+         ▼                       │
+[Recursive Member รอบที่ 2]      │
+         │                       │
+         ▼                       │
+    [ แถวว่างเปล่า ]              │
+         │                       │
+         ▼                       │
+   [ หยุดการทำงาน ] <────────────┘
+```
+
+## 4. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การใช้ `EXISTS` หาเนื้อดรายเอจที่มีการสั่งซื้อจริงในระบบ
+ค้นหารายการเนื้อดรายเอจทั้งหมดที่เคยถูกซื้ออย่างน้อย 1 ครั้งในระบบ โดยใช้ `EXISTS` เพื่อประสิทธิภาพสูงสุด:
+
+```sql filename="sql/sql.sql"
+-- ค้นหาสินค้าเนื้อที่มีประวัติการสั่งซื้อด้วย Correlated Subquery (EXISTS)
+SELECT 
+    p.id,
+    p.sku,
+    p.name,
+    p.price_per_kg,
+    p.dry_aged_days
+FROM products p
+WHERE p.dry_aged_days > 0
+  AND EXISTS (
+      -- Short-circuiting: หยุดค้นหาทันทีที่เจอออเดอร์แรกใน order_items
+      SELECT 1 
+      FROM order_items oi 
+      WHERE oi.product_id = p.id
+  )
+ORDER BY p.dry_aged_days DESC;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| id | sku | name | price_per_kg | dry_aged_days |
+| :--- | :--- | :--- | :--- | :--- |
+| 3 | TOMAHAWK-DA60-PRM | 60-Day Dry-Aged Tomahawk Prime | 3600.00 | 60 |
+| 2 | ANGUS-DA45-TBONE | 45-Day Dry-Aged Black Angus T-Bone | 2800.00 | 45 |
+
+### ตัวอย่างที่ 2: Recursive CTE ท่องโครงสร้างหมวดหมู่สินค้าเนื้อแบบลำดับชั้น (Category Tree)
+จำลองโครงสร้างหมวดหมู่เนื้อที่มีลำดับชั้นลึก เช่น จาก `เนื้อวัวพรีเมียม` $\rightarrow$ `เนื้อดรายเอจ` $\rightarrow$ `โทมาฮอว์ก` เพื่อคำนวณระดับความลึก (Depth Level) และเส้นทางเต็ม (Path Breadcrumb):
+
+```sql filename="sql/sql.sql"
+-- ท่องโครงสร้างหมวดหมู่สินค้าแบบ Recursive
+WITH RECURSIVE category_tree AS (
+    -- 1. Anchor Member: หมวดหมู่ระดับบนสุด (ราก)
+    SELECT 
+        id,
+        parent_id,
+        name,
+        slug,
+        1 AS depth_level,
+        name::text AS category_path
+    FROM categories
+    WHERE parent_id IS NULL
+
+    UNION ALL
+
+    -- 2. Recursive Member: เชื่อมหาหมวดหมู่ย่อยในระดับถัดไป
+    SELECT 
+        c.id,
+        c.parent_id,
+        c.name,
+        c.slug,
+        ct.depth_level + 1,
+        ct.category_path || ' > ' || c.name
+    FROM categories c
+    INNER JOIN category_tree ct ON c.parent_id = ct.id
+)
+SELECT 
+    id,
+    name,
+    depth_level,
+    category_path
+FROM category_tree
+ORDER BY category_path ASC;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| id | name | depth_level | category_path |
+| :--- | :--- | :--- | :--- |
+| 1 | เนื้อวัวพรีเมียม | 1 | เนื้อวัวพรีเมียม |
+| 3 | เนื้อดรายเอจพิเศษ | 2 | เนื้อวัวพรีเมียม > เนื้อดรายเอจพิเศษ |
+| 5 | โทมาฮอว์กพรีเมียม | 3 | เนื้อวัวพรีเมียม > เนื้อดรายเอจพิเศษ > โทมาฮอว์กพรีเมียม |
+| 2 | เนื้อนำเข้าออสเตรเลีย | 1 | เนื้อนำเข้าออสเตรเลีย |
+
+**โค้ดเทียบเคียงใน Prisma Client:**
+```typescript filename="src/sql.ts"
+// สำหรับ Recursive Query ที่ซับซ้อน Prisma Client จะใช้ $queryRaw
+const categoryTree = await prisma.$queryRaw<Array<{
+  id: number;
+  name: string;
+  depth_level: number;
+  category_path: string;
+}>>`
+  WITH RECURSIVE category_tree AS (
+    SELECT id, parent_id, name, slug, 1 AS depth_level, name::text AS category_path
+    FROM categories
+    WHERE parent_id IS NULL
+    UNION ALL
+    SELECT c.id, c.parent_id, c.name, c.slug, ct.depth_level + 1, ct.category_path || ' > ' || c.name
+    FROM categories c
+    INNER JOIN category_tree ct ON c.parent_id = ct.id
+  )
+  SELECT id, name, depth_level, category_path
+  FROM category_tree
+  ORDER BY category_path ASC;
+`;
+```
+
+## 5. ผิด vs ถูก (Anti-patterns & Best Practices)
+
+### ❌ โค้ดที่ผิด: ใช้ `NOT IN` กับ Subquery ที่อาจมีค่า NULL ติดมา
+```sql filename="sql/sql.sql"
+-- อันตรายมหันต์: หากตาราง order_items มี product_id เป็น NULL แม้แต่แถวเดียว
+-- เงื่อนไข NOT IN จะคืนค่าผลลัพธ์เป็น EMPTY SET ทันที ไม่มีสินค้าแสดงผลเลย!
+SELECT name 
+FROM products 
+WHERE id NOT IN (SELECT product_id FROM order_items);
+```
+
+### ✅ โค้ดที่ถูก: ใช้ `NOT EXISTS` ที่ปลอดภัยต่อค่า NULL และเร็วกว่า
+```sql filename="sql/sql.sql"
+-- ถูกต้อง: NOT EXISTS จัดการกับค่า NULL ได้อย่างปลอดภัย และใช้ Semi-join optimization
+SELECT p.name 
+FROM products p 
+WHERE NOT EXISTS (
+    SELECT 1 
+    FROM order_items oi 
+    WHERE oi.product_id = p.id
+);
+```
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ CTE (`WITH`):** เมื่อ Query มีความยาวและซับซ้อน เพื่อให้อ่านเข้าใจง่ายเป็นลำดับขั้น (Modular Readability)
+- **ควรใช้ Recursive CTE:** เมื่อโครงสร้างข้อมูลมีความสัมพันธ์แบบลำดับขั้น (Hierarchical Tree / Graph) เช่น หมวดหมู่สินค้า, สายการบังคับบัญชา, หรือ Bill of Materials
+- **ไม่ควรใช้ CTE พร่ำเพรื่อในแบบฉบับย่อยเกินไป:** หากเป็นเพียงเงื่อนไขการกรองอย่างง่าย การเขียน JOIN ธรรมดาจะทำให้ Query สั้นและเข้าใจได้ง่ายกว่า
+
+## 7. คำถามสัมภาษณ์ (Interview Questions)
+- **Q1: เหตุใดคำสั่ง `WHERE id NOT IN (SELECT product_id FROM order_items)` จึงไม่คืนค่าใดๆ ออกมาเลย หากใน Subquery มีค่า `NULL` ติดมาด้วยแม้แต่แถวเดียว?**
+  - *คำตอบ:* เป็นเพราะหลักการ **Three-Valued Logic** ของภาษา SQL โดยนิพจน์ `id NOT IN (1, 2, NULL)` จะถูกแปลงเป็น `id <> 1 AND id <> 2 AND id <> NULL` แต่เนื่องจากการเปรียบเทียบกับ NULL ใดๆ (เช่น `id <> NULL`) จะได้ค่าความจริงเป็น `UNKNOWN` เสมอ และตามกฎของตรรกศาสตร์ `TRUE AND TRUE AND UNKNOWN` จะได้ผลลัพธ์เป็น `UNKNOWN` ซึ่งเงื่อนไขใน `WHERE` จะยอมรับเฉพาะแถวที่เป็น `TRUE` เท่านั้น ส่งผลให้ไม่มีข้อมูลแถวใดผ่านเงื่อนไขได้เลย
+- **Q2: คำสั่งระบุ `AS MATERIALIZED` ในคำสั่ง `WITH cte AS MATERIALIZED (...)` ของ PostgreSQL 12+ มีประโยชน์อย่างไร?**
+  - *คำตอบ:* ในเวอร์ชัน 12+ ค่าเริ่มต้นของ CTE จะถูก Inline รวมกับ Query หลัก แต่ถ้าเราระบุ `MATERIALIZED` จะเป็นการบังคับให้ PostgreSQL คำนวณผลลัพธ์ของ CTE ก้อนนั้นให้เสร็จสิ้นและเก็บไว้ในหน่วยความจำชั่วคราวก่อนรอบเดียว มีประโยชน์เมื่อ CTE นั้นมีการประมวลผลที่หนักและถูกเรียกใช้งานซ้ำหลายครั้งใน Main Query หรือเมื่อต้องการสร้าง **Optimization Fence** ป้องกันไม่ให้ Planner ทำการดันเงื่อนไขภายนอกเข้าไปแทรกแซงจนเกิด Plan ที่แย่ลง
+
+---

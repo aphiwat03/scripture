@@ -1,0 +1,195 @@
+---
+title: JWT HttpOnly
+category: BACKEND
+parentTitle: Authentication
+version: JWT & Passport.js
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+**JSON Web Token (JWT - RFC 7519)** คือมาตรฐานการส่งข้อมูลยืนยันตัวตนในรูปแบบ JSON ที่มีการลงลายมือชื่อดิจิทัล (Cryptographic Signature) กำกับไว้ ทำให้เซิร์ฟเวอร์สามารถตรวจสอบความถูกต้องของ Token ได้ทันทีโดยไม่ต้องคิวรีฐานข้อมูลทุกครั้ง (Stateless Verification)
+
+อย่างไรก็ตาม เนื่องจาก JWT ไม่สามารถสั่งยกเลิกกลางคันได้ง่ายๆ หากตั้งอายุยาวเกินไป ในระบบ Production เราจึงใช้สถาปัตยกรรม **Dual-Token (Access Token + Refresh Token)**:
+1. **Access Token (อายุสั้นมาก: `15 นาที`)**: ใช้แนบไปกับทุกคำขอ API (เช่น สั่งซื้อเนื้อ, ดูประวัติ `Order`) บรรจุข้อมูลพื้นฐาน (`sub`, `email`, `role`) หากถูกขโมยจะมีเวลาใช้งานสั้นมาก
+2. **Refresh Token (อายุยาว: `7 ถึง 30 วัน`)**: ใช้สำหรับขอออก Access Token ใบใหม่เมื่อใบเดิมหมดอายุเท่านั้น โดยจะถูกจัดเก็บHash ไว้ในฐานข้อมูลเพื่อรองรับการสั่งเพิกถอนสิทธิ์ (Revocation) ได้ทันที
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+JWT หนึ่งใบประกอบด้วยสตริง 3 ส่วนคั่นด้วยจุด (`Header.Payload.Signature`) ที่เข้ารหัสแบบ `Base64Url`:
+- **Header**: ระบุอัลกอริทึม เช่น `{"alg": "HS256", "typ": "JWT"}` หรือ `RS256` (Asymmetric Key)
+- **Payload (Claims)**: เก็บข้อมูล เช่น `sub` (Subject = User ID), `role`, `jti` (JWT ID เฉพาะใบ), `iat` (Issued At), `exp` (Expiration Time) **ข้อควรจำ: Payload เป็นเพียง Base64Url ที่ใครก็ถอดอ่านได้ ห้ามใส่รหัสผ่านหรือเลขบัตรเครดิตไว้ใน Payload เด็ดขาด!**
+- **Signature**: ลายเซ็นที่เกิดจากการนำ `Header + "." + Payload` มาเข้าฟังก์ชัน HMAC-SHA256 ร่วมกับ `SECRET_KEY` บนเซิร์ฟเวอร์ หากแฮกเกอร์แอบแก้ `role` ใน Payload จาก `"CUSTOMER"` เป็น `"ADMIN"` ลายเซ็นจะไม่ตรงกับที่เซิร์ฟเวอร์คำนวณได้ และถูกปฏิเสธด้วย `401 Unauthorized` ทันที
+
+สำหรับการจัดเก็บ Token บนเว็บเบราว์เซอร์ การตั้งค่า **`HttpOnly`, `Secure`, `SameSite` Cookie** คือเกราะป้องกันที่แข็งแกร่งที่สุด:
+- `httpOnly: true`: ป้องกันโค้ด JavaScript (`document.cookie`) เข้าถึง Token ได้ 100% จึงปลอดภัยจากการถูกขโมย Token ผ่านช่องโหว่ XSS
+- `secure: true`: บังคับให้ส่ง Cookie ผ่านการเชื่อมต่อที่เข้ารหัส `HTTPS` เท่านั้น
+- `sameSite: 'lax'` หรือ `'strict'`: ป้องกันการส่ง Cookie ข้ามเว็บไซต์โดยไม่ได้รับอนุญาต (ลดความเสี่ยง CSRF)
+- `path: '/api/v1/auth/refresh'`: สำหรับ Refresh Token เราสามารถจำกัด `path` ให้เบราว์เซอร์ส่ง Refresh Token เฉพาะตอนที่เรียก Endpoint ขอต่ออายุหรือ Logout เท่านั้น ไม่ต้องส่งไปกับทุก API ทั่วไป!
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสร้าง TokenService สำหรับออก Access Token และ Refresh Token แยก Secret คนละชุด (พื้นฐาน)
+```typescript filename="src/modules/auth/token.service.ts"
+import { Injectable } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
+import { UserRole } from '@prisma/client';
+import * as crypto from 'crypto';
+
+export interface AccessTokenPayload {
+  sub: string; // User ID
+  email: string;
+  role: UserRole;
+  type: 'ACCESS';
+}
+
+export interface RefreshTokenPayload {
+  sub: string; // User ID
+  jti: string; // Unique Token ID สำหรับทำ Rotation
+  type: 'REFRESH';
+}
+
+export interface GeneratedTokenPair {
+  accessToken: string;
+  refreshToken: string;
+  refreshTokenJti: string;
+}
+
+@Injectable()
+export class TokenService {
+  constructor(
+    private readonly jwtService: JwtService,
+    private readonly configService: ConfigService,
+  ) {}
+
+  async generateTokenPair(user: {
+    id: string;
+    email: string;
+    role: UserRole;
+  }): Promise<GeneratedTokenPair> {
+    const refreshTokenJti = crypto.randomUUID();
+
+    const accessPayload: AccessTokenPayload = {
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+      type: 'ACCESS',
+    };
+
+    const refreshPayload: RefreshTokenPayload = {
+      sub: user.id,
+      jti: refreshTokenJti,
+      type: 'REFRESH',
+    };
+
+    // ใช้ Secret Key คนละตัวกันอย่างเด็ดขาดระหว่าง Access Token และ Refresh Token!
+    const [accessToken, refreshToken] = await Promise.all([
+      this.jwtService.signAsync(accessPayload, {
+        secret: this.configService.getOrThrow<string>('JWT_ACCESS_SECRET'),
+        expiresIn: '15m',
+        issuer: 'smartbutcher-api',
+        audience: 'smartbutcher-client',
+      }),
+      this.jwtService.signAsync(refreshPayload, {
+        secret: this.configService.getOrThrow<string>('JWT_REFRESH_SECRET'),
+        expiresIn: '7d',
+        issuer: 'smartbutcher-api',
+        audience: 'smartbutcher-client',
+      }),
+    ]);
+
+    return {
+      accessToken,
+      refreshToken,
+      refreshTokenJti,
+    };
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การจัดการ HttpOnly Cookie Helper สำหรับแนบและล้าง Token ใน AuthController (ขั้นสูง)
+```typescript filename="src/modules/auth/cookie-manager.helper.ts"
+import { Response, CookieOptions } from 'express';
+
+export const ACCESS_TOKEN_COOKIE_NAME = 'sb_access_token';
+export const REFRESH_TOKEN_COOKIE_NAME = 'sb_refresh_token';
+
+export class AuthCookieManager {
+  private static isProduction(): boolean {
+    return process.env.NODE_ENV === 'production';
+  }
+
+  static attachAuthCookies(
+    res: Response,
+    accessToken: string,
+    refreshToken: string,
+  ): void {
+    const isProd = this.isProduction();
+
+    // 1. ตั้งค่า Cookie สำหรับ Access Token (ส่งไปกับทุก /api)
+    const accessCookieOptions: CookieOptions = {
+      httpOnly: true, // ป้องกัน JavaScript (XSS) อ่านค่า
+      secure: isProd, // บังคับ HTTPS บน Production
+      sameSite: 'lax',
+      path: '/api',
+      maxAge: 15 * 60 * 1000, // 15 นาที (หน่วยเป็นมิลลิวินาที)
+    };
+
+    // 2. ตั้งค่า Cookie สำหรับ Refresh Token (จำกัด Path ให้ส่งเฉพาะตอนเรียก /api/v1/auth เท่านั้น!)
+    const refreshCookieOptions: CookieOptions = {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: 'strict', // เข้มงวดสูงสุดสำหรับ Refresh Token
+      path: '/api/v1/auth',
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 วัน
+    };
+
+    res.cookie(ACCESS_TOKEN_COOKIE_NAME, accessToken, accessCookieOptions);
+    res.cookie(REFRESH_TOKEN_COOKIE_NAME, refreshToken, refreshCookieOptions);
+  }
+
+  static clearAuthCookies(res: Response): void {
+    const isProd = this.isProduction();
+
+    res.clearCookie(ACCESS_TOKEN_COOKIE_NAME, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: 'lax',
+      path: '/api',
+    });
+
+    res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: 'strict',
+      path: '/api/v1/auth',
+    });
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/auth/jwt-cookie-comparison.ts"
+// ❌ ผิด (Anti-pattern): ใช้ Secret Key เดียวกันทั้ง Access/Refresh, ตั้งอายุ Access Token นาน 30 วัน, และใส่ข้อมูลความลับใน Payload
+export const BAD_JWT_PAYLOAD = {
+  sub: 'usr-123',
+  passwordHash: '$2b$12$...', // ห้ามใส่เด็ดขาด! ใครก็เอา JWT ไปถอด Base64 ดูที่ jwt.io ได้!
+  creditCardLast4: '8899',
+  expiresIn: '30d', // ถ้าหลุดไป แฮกเกอร์สวมรอยสั่งเนื้อวากิวฟรีได้ตลอดทั้งเดือน!
+};
+
+// ✅ ถูก (Best Practice): เก็บเฉพาะข้อมูลระบุตัวตนขั้นต่ำ (sub, email, role, type) และแยก Secret Key คนละชุด
+// เพราะถ้าใช้ Secret เดียวกัน แฮกเกอร์สามารถนำ Refresh Token ที่อายุ 7 วัน ไปยัดใส่เป็น Access Token ได้!
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรตั้งค่า `path: '/api/v1/auth'` ให้กับ Refresh Token Cookie เสมอ**: เพื่อไม่ให้เบราว์เซอร์แนบ Refresh Token ที่มีค่าสูงสุดติดไปกับคำขอดึงรูปภาพหรือดึงแคตตาล็อกสินค้าทั่วไป ลดโอกาสที่ Refresh Token จะรั่วไหลผ่าน Log หรือ Network Sniffing
+- **ไม่ควรลืมส่งออปชัน `path`, `sameSite`, `secure` ให้ตรงกันตอนเรียก `res.clearCookie()`**: เพราะตามมาตรฐานของเบราว์เซอร์ หากพารามิเตอร์ `path` ตอนสั่งลบไม่ตรงกับตอนสั่งสร้าง (`res.cookie`) เบราว์เซอร์จะไม่ยอมลบ Cookie นั้นออกจากเครื่องลูกค้า!
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ถ้า JWT มีการเซ็นลายมือชื่อดิจิทัล (Signed) แล้ว แปลว่าข้อมูลข้างในถูกเข้ารหัส (Encrypted) จนคนนอกอ่านไม่ออกใช่หรือไม่?
+   - **แนวคำตอบ**: **ไม่ใช่เด็ดขาด!** มาตรฐาน JWT ปกติ (JWS - JSON Web Signature) เป็นเพียงการ **Signed (ลงลายมือชื่อเพื่อป้องกันการแก้ไขข้อมูล)** เท่านั้น ส่วน Header และ Payload ถูกแปลงด้วย `Base64Url Encoding` ซึ่งใครก็ตามที่เห็นสตริง JWT สามารถถอดรหัสกลับมาอ่าน JSON ข้างในได้ทันทีในเสี้ยววินาที ดังนั้นจึงห้ามเก็บข้อมูลความลับ (เช่น รหัสผ่าน, เลขบัตรประชาชน, ข้อมูลสุขภาพ) ไว้ใน JWT Payload เด็ดขาด
+2. **คำถาม**: ทำไมเราจึงต้องแยก `JWT_ACCESS_SECRET` และ `JWT_REFRESH_SECRET` ออกจากกัน แทนที่จะใช้ตัวแปร `JWT_SECRET` ตัวเดียว?
+   - **แนวคำตอบ**: เพื่อป้องกันการโจมตีแบบ **Token Type Confusion (การสลับชนิด Token)** หากเราใช้ Secret เดียวกันและไม่ได้ตรวจฟิลด์ `type` อย่างรัดกุม ผู้โจมตีที่ได้ Refresh Token (ซึ่งมีอายุยาวถึง 7 วัน) สามารถนำสตริงของ Refresh Token นั้นไปใส่ในช่องของ Access Token เพื่อเรียกใช้งาน API ทั่วไปได้ยาวนานถึง 7 วันโดยไม่ต้องผ่านกระบวนการตรวจสอบการเพิกถอนสิทธิ์ในฐานข้อมูล
+
+---

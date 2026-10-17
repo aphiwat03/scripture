@@ -1,0 +1,169 @@
+---
+title: Controllers
+category: BACKEND
+parentTitle: NestJS 11
+version: NestJS 11
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด
+ถ้า Service คือพ่อครัวและเจ้าหน้าที่ดูแลสต็อกเนื้อในห้องเย็น **Controller** ก็คือ "พนักงานต้อนรับหน้าร้าน" ที่คอยรับออเดอร์จากลูกค้าทางหน้าร้านหรือช่องทางออนไลน์ ตรวจสอบว่าลูกค้าสั่งอะไร ต้องการให้ส่งไปที่ไหน หรือต้องการสอบถามราคาเนื้อส่วนใด แล้วส่งต่อข้อมูลที่เรียบร้อยแล้วไปให้พ่อครัวในห้องครัว โดย Controller จะไม่ลงมือแล่เนื้อเองเด็ดขาด
+
+ใน NestJS หน้าที่ของ Controller มีเพียง:
+1. รับฟัง HTTP Request ตาม Path และ Method ที่กำหนด (`@Controller`, `@Get`, `@Post`, `@Put`, `@Patch`, `@Delete`)
+2. ดึงข้อมูลจากส่วนประกอบของคำขอ เช่น URL Parameters (`@Param`), Query Strings (`@Query`), Request Body (`@Body`), หรือ Headers (`@Headers`)
+3. ส่งข้อมูลต่อไปยัง Service Layer
+4. ส่งผลลัพธ์พร้อม HTTP Status Code (`@HttpCode`) กลับไปยังผู้เรียก
+
+## 2. หลักการเบื้องหลัง
+NestJS แปลง Decorator เมธอดต่างๆ ให้เป็น Routing Table ภายใน Express หรือ Fastify Router เมื่อมี Request เข้ามา ตัว Route Matcher จะทำการจับคู่ URL และแตกตัวแปรออกมาเป็น Parameter ผ่าน Decorators โดยอัตโนมัติ นอกจากนี้ NestJS ยังจัดการเรื่อง Header `Content-Type: application/json` และการแปลง Object เป็น JSON String ให้เสร็จสรรพ
+
+## 3. ตัวอย่างโค้ด
+
+### ตัวอย่างที่ 1: CRUD พื้นฐานสำหรับสินค้าเนื้อพรีเมียม
+```typescript filename="src/modules/products/products.controller.ts"
+import {
+  Controller,
+  Get,
+  Post,
+  Put,
+  Delete,
+  Body,
+  Param,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common';
+import { ProductsService, MeatCut } from './products.service';
+
+export class CreateMeatDto {
+  name: string;
+  grade: 'A5' | 'A4' | 'Wagyu_Cross' | 'Prime';
+  weightGrams: number;
+  pricePerKg: number;
+}
+
+@Controller('products/meats')
+export class ProductsController {
+  constructor(private readonly productsService: ProductsService) {}
+
+  // 1. ดึงรายการเนื้อทั้งหมด: GET /api/v1/products/meats
+  @Get()
+  getAllMeats(): MeatCut[] {
+    return this.productsService.findAll();
+  }
+
+  // 2. ดึงเนื้อชิ้นเดียวตาม ID: GET /api/v1/products/meats/:id
+  @Get(':id')
+  getMeatById(@Param('id') id: string) {
+    return this.productsService.findProductById(id);
+  }
+
+  // 3. สร้างรายการเนื้อชิ้นใหม่: POST /api/v1/products/meats (201 Created)
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  createMeatCut(@Body() dto: CreateMeatDto) {
+    return this.productsService.createCut(dto);
+  }
+
+  // 4. แก้ไขข้อมูลเนื้อทั้งก้อน: PUT /api/v1/products/meats/:id
+  @Put(':id')
+  replaceMeatCut(
+    @Param('id') id: string,
+    @Body() dto: CreateMeatDto
+  ) {
+    return this.productsService.updateCut(id, dto);
+  }
+
+  // 5. ลบชิ้นเนื้อออกจากสต็อก: DELETE /api/v1/products/meats/:id (204 No Content)
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  deleteMeatCut(@Param('id') id: string): void {
+    this.productsService.deleteCut(id);
+  }
+}
+```
+
+### ตัวอย่างที่ 2: Advanced Search Controller รับ Query Params และ Headers
+```typescript filename="src/modules/products/meat-search.controller.ts"
+import { Controller, Get, Query, Headers } from '@nestjs/common';
+import { ProductsService } from './products.service';
+
+export interface MeatSearchFilter {
+  minPrice?: number;
+  maxPrice?: number;
+  grade?: string;
+  isDryAged?: boolean;
+}
+
+@Controller('products/search')
+export class MeatSearchController {
+  constructor(private readonly productsService: ProductsService) {}
+
+  // ตัวอย่าง: GET /products/search?grade=A5&minPrice=2000&maxPrice=8000
+  @Get()
+  searchMeat(
+    @Query('grade') grade?: string,
+    @Query('minPrice') minPrice?: string,
+    @Query('maxPrice') maxPrice?: string,
+    @Query('dryAged') dryAged?: string,
+    @Headers('x-client-platform') platform?: string
+  ) {
+    const filter: MeatSearchFilter = {
+      grade,
+      minPrice: minPrice ? Number(minPrice) : undefined,
+      maxPrice: maxPrice ? Number(maxPrice) : undefined,
+      isDryAged: dryAged === 'true',
+    };
+
+    console.log(`คำค้นหาเนื้อจากแพลตฟอร์ม: ${platform ?? 'Unknown Web Client'}`);
+    return this.productsService.search(filter);
+  }
+}
+```
+
+## 4. ผิด vs ถูก
+
+```typescript filename="src/nestjs.ts"
+// ❌ ผิด: ใส่ Business Logic และคำนวณบิลใน Controller
+@Controller('orders')
+export class BadOrdersController {
+  @Post('checkout')
+  async checkout(@Body() body: any) {
+    let total = 0;
+    for (const item of body.items) {
+      // ❌ คำนวณราคาและตัดสต็อกใน Controller
+      const meat = await db.meat.find(item.id);
+      if (meat.stock < item.qty) throw new Error('Out of stock');
+      total += (meat.pricePerKg / 1000) * meat.weight * item.qty;
+      await db.meat.updateStock(item.id, meat.stock - item.qty);
+    }
+    return { orderId: 'ORD-999', total };
+  }
+}
+```
+
+```typescript filename="src/nestjs.ts"
+// ✅ ถูก: Controller ทำหน้าที่เพียงเป็นทางผ่านข้อมูลไปยัง OrdersService
+@Controller('orders')
+export class GoodOrdersController {
+  constructor(private readonly ordersService: OrdersService) {}
+
+  @Post('checkout')
+  async checkout(@Body() checkoutDto: CheckoutOrderDto) {
+    // ✅ มอบหมายงานให้ Service รับผิดชอบกระบวนการ Transaction และคำนวณราคา
+    return await this.ordersService.processCheckout(checkoutDto);
+  }
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Controller**: สำหรับเป็นตัวรับส่งคำขอทาง HTTP REST เท่านั้น
+- **ไม่ควรใช้ Controller**: เก็บตัวแปรสถานะ (Stateful variables) หรือใส่ Business Logic ที่ซับซ้อน หากเป็นงานประเภท WebSocket ให้ใช้ `@WebSocketGateway()`, งาน Microservice ให้ใช้ `@MessagePattern()`, หรืองานคิวงานพื้นหลังให้ใช้ BullMQ Processor
+
+## 6. คำถามสัมภาษณ์
+**ถาม**: ตามหลักสถาปัตยกรรม RESTful API การใช้ `@Put()` กับ `@Patch()` ใน NestJS Controller มีความแตกต่างในเชิงเจตนารมณ์ (Semantics) อย่างไร และส่งผลต่อการออกแบบ DTO อย่างไร?
+**ตอบ**:
+- `@Put()` ใช้สำหรับการแทนที่ทรัพยากรนั้น "ทั้งชิ้น" (Full Replacement) DTO จะต้องบังคับให้ส่งข้อมูลทุกฟิลด์ที่จำเป็น
+- `@Patch()` ใช้สำหรับการอัปเดตข้อมูล "เฉพาะบางฟิลด์" (Partial Update) ฟิลด์ใน DTO มักจะถูกครอบด้วย `@PartialType(CreateDto)` ทำให้ทุกฟิลด์กลายเป็น Optional
+
+---

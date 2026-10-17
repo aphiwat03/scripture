@@ -1,0 +1,90 @@
+---
+title: pg_dump Restore
+category: DATABASE
+parentTitle: Backup
+version: pg_dump & WAL PITR
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในระบบร้านค้าเนื้อพรีเมียม **Smart Butcher Marketplace** ข้อมูลคำสั่งซื้อ (`orders`), รายการตัดแต่งเนื้อ (`order_items`), และหลักฐานการโอนเงิน (`payments`) มีการเปลี่ยนแปลงตลอดเวลา หากเราใช้วิธีคัดลอกไฟล์ในโฟลเดอร์ฐานข้อมูลดื้อๆ ขณะที่เซิร์ฟเวอร์กำลังทำงาน ข้อมูลที่ได้จะพังเสียหายและเปิดไม่ขึ้นเพราะตารางกำลังถูกเขียนค้างอยู่
+
+PostgreSQL 16 จึงเตรียมเครื่องมือมาตรฐานชื่อว่า **`pg_dump`** ซึ่งทำงานเสมือนการถ่ายภาพนิ่ง (Consistent Snapshot) ของฐานข้อมูลทั้งก้อน ณ วินาทีที่สั่งรัน โดยไม่ต้องหยุดการทำงานของเว็บไซต์ ลูกค้ายังสามารถกดสั่งซื้อเนื้อวากิวได้ตามปกติในขณะที่ `pg_dump` กำลังดึงข้อมูลออกมาอย่างเงียบเชียบ
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **MVCC Snapshot Consistency:**
+   เมื่อเริ่มต้นทำงาน `pg_dump` จะเปิด Transaction แบบอ่านอย่างเดียวในโหมด `REPEATABLE READ` ทำให้มันมองเห็นข้อมูลทุกตาราง (`users`, `categories`, `products`, `orders`, `order_items`, `payments`) ณ จุดเวลาเดียวกันเป๊ะ ไม่มีการล็อกการเขียนของแอปพลิเคชันหน้าร้าน
+2. **รูปแบบไฟล์ของ `pg_dump` และเครื่องมือคู่ใจในการกู้คืน:**
+   - **Plain-Text SQL Format (`-Fp` หรือค่าเริ่มต้น):** สร้างไฟล์สคริปต์ข้อความ `.sql` ที่มีคำสั่ง `CREATE TABLE` และ `COPY ... FROM stdin` ข้อดีคือเปิดอ่านด้วยตาเปล่าได้ แต่ไฟล์มีขนาดใหญ่และไม่สามารถเลือกกู้คืนเฉพาะบางตารางได้ง่าย **ต้องกู้คืนด้วยคำสั่ง `psql`**
+   - **Custom Archive Format (`-Fc` - แนะนำสำหรับ Production):** สร้างไฟล์ไบนารีที่ถูกบีบอัด (ด้วยอัลกอริทึม zlib หรือ `zstd` ซึ่งรองรับอย่างสมบูรณ์ใน PostgreSQL 16) มีสารบัญตาราง (Table of Contents) ฝังอยู่ในไฟล์ ทำให้สามารถเลือกกู้คืนเฉพาะตารางที่ต้องการ และรองรับการแตกไฟล์พร้อมกันหลายซีพียู (`--jobs`) **ต้องกู้คืนด้วยคำสั่ง `pg_restore`**
+   - **Directory Format (`-Fd`):** แยกแต่ละตารางออกเป็นไฟล์ย่อยในโฟลเดอร์ รองรับทั้งการทำ Parallel Dump และการทำ Parallel Restore ความเร็วสูง
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสำรองและกู้คืนแบบ Plain-Text SQL (`pg_dump` + `psql`) และการแยก Schema/Data
+เหมาะสำหรับการสำรองข้อมูลขนาดเล็ก หรือการดึงเฉพาะโครงสร้างตารางไปตรวจสอบ:
+
+```bash filename="01_plain_sql_backup_restore.sh"
+# 1. สำรองฐานข้อมูลทั้งหมดออกมาเป็นไฟล์ข้อความ .sql
+pg_dump -h localhost -p 5432 -U butcher_admin -d smart_butcher_db \
+  --no-owner --no-privileges \
+  -f backup_smart_butcher_20261017.sql
+
+# 2. สำรองเฉพาะโครงสร้างตาราง (Schema-only) ไม่เอาข้อมูลแถว
+pg_dump -h localhost -U butcher_admin -d smart_butcher_db \
+  --schema-only -f schema_only_20261017.sql
+
+# 3. สำรองเฉพาะข้อมูลในตารางสินค้าและหมวดหมู่ (Data-only + Specific Tables)
+pg_dump -h localhost -U butcher_admin -d smart_butcher_db \
+  --data-only -t public.categories -t public.products \
+  -f catalog_data_20261017.sql
+
+# 4. การกู้คืนไฟล์ .sql เข้าสู่ฐานข้อมูลใหม่ด้วย psql (บังคับหยุดทันทีหากพบ Error และทำงานใน 1 Transaction)
+psql -h localhost -U butcher_admin -d smart_butcher_recovery_db \
+  -v ON_ERROR_STOP=1 --single-transaction \
+  -f backup_smart_butcher_20261017.sql
+```
+
+### ตัวอย่างที่ 2: การสำรองระดับ Production ด้วย Custom Format (`-Fc` + Zstandard) และการกู้คืนความเร็วสูงด้วย `pg_restore`
+ใน PostgreSQL 16 เราสามารถใช้การบีบอัดแบบ `zstd` ร่วมกับ `-Fc` และสั่งกู้คืนแบบขนานหลายคอร์ (`-j 4`) หรือเลือกกู้คืนเฉพาะตาราง `orders` ที่เผลอทำข้อมูลหายได้ทันที:
+
+```bash filename="02_custom_format_production.sh"
+# 1. สร้าง Backup แบบ Custom Format (-Fc) พร้อมบีบอัดด้วย Zstandard ระดับ 5 (ฟีเจอร์เด่นใน PG 16)
+pg_dump -h localhost -p 5432 -U butcher_admin -d smart_butcher_db \
+  -Fc --compress=zstd:5 --no-owner --no-privileges \
+  -f smart_butcher_prod_20261017.dump
+
+# 2. ตรวจสอบสารบัญ (Table of Contents) ข้างในไฟล์ .dump โดยไม่ต้องกู้คืนจริง
+pg_restore --list smart_butcher_prod_20261017.dump | grep -E "TABLE|INDEX"
+
+# 3. กู้คืนทั้งฐานข้อมูลด้วยความเร็วสูงโดยใช้ CPU 4 Cores ช่วยกันทำงานขนานกัน (-j 4)
+# --clean --if-exists จะลบตารางเก่าในฐานข้อมูลปลายทางก่อนสร้างใหม่
+pg_restore -h localhost -p 5432 -U butcher_admin -d smart_butcher_recovery_db \
+  --clean --if-exists --no-owner --no-privileges \
+  -j 4 smart_butcher_prod_20261017.dump
+
+# 4. กรณีฉุกเฉิน: กู้คืนเฉพาะข้อมูลของตาราง orders และ order_items จากไฟล์ .dump ก้อนใหญ่
+pg_restore -h localhost -p 5432 -U butcher_admin -d smart_butcher_recovery_db \
+  --data-only -t orders -t order_items \
+  smart_butcher_prod_20261017.dump
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การเลือกใช้เครื่องมือกู้คืน** | นำไฟล์ที่สร้างด้วย `-Fc` (`.dump`) ไปรันเข้า `psql -f` ทำให้เกิด Syntax Error เพราะเป็นไฟล์ไบนารี | ไฟล์ `.sql` (Plain) ใช้คู่กับ `psql` เสมอ ส่วนไฟล์ `.dump` (`-Fc`) ใช้คู่กับ `pg_restore` เสมอ |
+| **การจัดการสิทธิ์เจ้าของตาราง** | ไม่ใส่ `--no-owner --no-privileges` ทำให้เวลานำไฟล์ไปกู้คืนบนเซิร์ฟเวอร์ใหม่ที่มีชื่อ User ต่างกันเกิด Error | ใส่ `--no-owner --no-privileges` เสมอเพื่อให้ตารางที่กู้คืนตกเป็นของ Role ที่กำลังรันคำสั่งกู้คืน |
+| **เวอร์ชันของเครื่องมือ `pg_dump`** | ใช้ `pg_dump` เวอร์ชัน 14 ไปดึงข้อมูลจากเซิร์ฟเวอร์ PostgreSQL 16 ทำให้ทำงานไม่ได้ | ใช้ `pg_dump` ที่มีเวอร์ชัน **เท่ากับหรือใหม่กว่า** เวอร์ชันของเซิร์ฟเวอร์ PostgreSQL เสมอ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `pg_dump -Fc` คู่กับ `pg_restore` เมื่อ:** สำรองฐานข้อมูลระดับ Production ที่มีขนาดตั้งแต่หลักเมกะไบต์ไปจนถึงระดับ 100-300 GB เพราะประหยัดพื้นที่ดิสก์ กู้คืนแบบขนานได้เร็ว และเลือกกู้เฉพาะตารางได้
+- **ไม่ควรใช้ `pg_dump` เพียงอย่างเดียวเมื่อ:** ฐานข้อมูลมีขนาดใหญ่ระดับหลาย Terabytes (TB) หรือระบบห้ามมีข้อมูลสูญหายแม้แต่วินาทีเดียวระหว่างวัน (ในกรณีนั้นต้องใช้ Physical Backup ร่วมกับ WAL Archiving / PITR)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ในขณะที่รันคำสั่ง `pg_dump` บนฐานข้อมูล Production ที่มีลูกค้ากำลังสั่งซื้อสินค้าอยู่ มันจะทำให้ตาราง `orders` ถูกล็อกจนลูกค้าสั่งซื้อไม่ได้หรือไม่?**
+  - **แนวคำตอบ:** ไม่บล็อกการอ่านและการเขียนข้อมูลปกติของลูกค้าเลย เพราะ `pg_dump` อาศัยกลไก MVCC ของ PostgreSQL โดยถือล็อกเพียงระดับ `ACCESS SHARE LOCK` (ระดับเดียวกับคำสั่ง `SELECT` ธรรมดา) ดังนั้นคำสั่ง `INSERT`, `UPDATE`, `DELETE` ของแอปพลิเคชันยังคงทำงานได้ตามปกติ จะมีเพียงคำสั่งแก้ไขโครงสร้างตารางระดับ `ACCESS EXCLUSIVE LOCK` (เช่น `DROP TABLE` หรือ `ALTER TABLE`) เท่านั้นที่ไม่ควรรันชนกับจังหวะที่ทำ `pg_dump`
+- **Q2: ทำไมในการใช้งานจริงบน Production วิศวกรจึงนิยมใช้ `pg_dump -Fc` มากกว่าการออกไฟล์เป็น `.sql` ธรรมดา?**
+  - **แนวคำตอบ:** เพราะ Custom Format (`-Fc`) มีข้อได้เปรียบหลัก 3 ประการ: (1) ข้อมูลถูกบีบอัดโดยอัตโนมัติทำให้ขนาดไฟล์เล็กลงมาก (2) สามารถใช้ `pg_restore -j <จำนวนคอร์>` เพื่อแบ่งงานการสร้าง Index และการใส่ข้อมูลให้ทำงานพร้อมกันหลาย Thread ทำให้เวลาในการกู้คืน (RTO) สั้นลงหลายเท่า และ (3) สามารถเลือกกู้คืนเฉพาะบางตาราง (`-t`) หรือเรียงลำดับการกู้คืนใหม่ได้โดยไม่ต้องไปตัดแก้ไฟล์ข้อความขนาดหลายกิกะไบต์
+
+---

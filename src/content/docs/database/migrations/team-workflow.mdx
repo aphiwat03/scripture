@@ -1,0 +1,137 @@
+---
+title: Team Workflow
+category: DATABASE
+parentTitle: Migrations
+version: Prisma Migrate & Zero-Downtime
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เมื่อทีมวิศวกรของ **Smart Butcher Marketplace** ขยายใหญ่ขึ้น มีนักพัฒนาหลายคนแยกกิ่ง Git (Feature Branches) ไปทำฟีเจอร์ของตัวเองพร้อมๆ กัน:
+- **นักพัฒนา A (กิ่ง `feat/loyalty-tier`):** สร้าง Migration เวลา `10:00` เพื่อเพิ่มคอลัมน์ระดับสมาชิกในตาราง `users`
+- **นักพัฒนา B (กิ่ง `feat/cold-chain-tracking`):** สร้าง Migration เวลา `10:30` เพื่อเพิ่มตารางบันทึกอุณหภูมิรถขนส่ง
+
+เมื่อทั้งสองคนรวมโค้ดเข้าสู่กิ่ง `main` ลำดับของโฟลเดอร์ Migration และการเปลี่ยนแปลงในไฟล์ `schema.prisma` จะต้องสอดคล้องกันอย่างสมบูรณ์ก่อนที่จะถูกส่งต่อไปยังสภาพแวดล้อม **Staging** และ **Production** ผ่านระบบ CI/CD อัตโนมัติ
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **การเรียงลำดับการรันด้วยชื่อโฟลเดอร์ (Lexicographical Sorting):**
+   Prisma Migrate เรียงลำดับการรันไฟล์ `migration.sql` ตามตัวอักษรของชื่อโฟลเดอร์ซึ่งขึ้นต้นด้วยประทับเวลา `YYYYMMDDHHMMSS_name` ในรูปแบบ UTC เสมอ
+2. **การตรวจจับความขัดแย้งด้วย `prisma migrate diff` และ `status`:**
+   ในขั้นตอน Continuous Integration (CI) ก่อนที่จะอนุญาตให้รวม Pull Request เข้ากิ่งหลัก เราสามารถใช้คำสั่งตรวจสอบว่าโฟลเดอร์ `prisma/migrations` มีความสมบูรณ์ตรงกับ `schema.prisma` หรือไม่ หากนักพัฒนาสองคนแก้ตารางเดียวกันขัดแย้งกัน นักพัฒนาคนที่รวมโค้ดทีหลังจะต้องดึงกิ่ง `main` ล่าสุดลงมา (`git rebase origin/main`), ลบโฟลเดอร์ Migration ของตัวเองออกชั่วคราว แล้วสั่ง `npx prisma migrate dev` ใหม่เพื่อให้ได้ประทับเวลาล่าสุดที่ต่อท้ายกิ่ง `main` อย่างถูกต้อง
+3. **การแยกขั้นตอน Migration ออกจาก Application Startup:**
+   ห้ามตั้งค่าให้แอปพลิเคชันสั่ง `prisma migrate deploy` ในสคริปต์ `CMD` ตอนเปิด Container (Application Startup) เพราะหากเราสั่งขยาย Container ออกเป็น 10 Instances พร้อมกัน ทั้ง 10 ตัวจะแย่งกันรัน Migration จนเกิด Race Condition (แม้ Prisma จะใช้ Advisory Lock ของ PostgreSQL `pg_advisory_lock(72707369)` ช่วยกั้นไว้ แต่หาก Migration ใช้เวลานาน Container อื่นอาจเกิด Healthcheck Timeout และรีสตาร์ทวนลูป) จึงต้องรัน Migration ในขั้นตอน **Pre-deploy Job บน CI/CD** เพียงจุดเดียวเท่านั้น
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: ขั้นตอนการแก้ไขความขัดแย้งของ Migration เมื่อทำงานเป็นทีม (Git Rebase Workflow)
+เมื่อนักพัฒนา B พบว่ากิ่ง `main` มี Migration ใหม่ของนักพัฒนา A เพิ่งถูก Merge เข้าไปก่อนหน้า:
+
+```bash filename="team_conflict_resolution.sh"
+# 1. ดึงโค้ดล่าสุดจากกิ่ง main
+git fetch origin main
+
+# 2. ลบโฟลเดอร์ Migration ในกิ่งของตัวเองที่ยังไม่ได้ Merge ออกชั่วคราว
+rm -rf prisma/migrations/20261017103000_add_cold_chain_tracking
+
+# 3. ทำการ Rebase กิ่งของตัวเองบน origin/main (และแก้ Conflict ในไฟล์ schema.prisma หากมี)
+git rebase origin/main
+
+# 4. รีเซ็ตฐานข้อมูล Local ให้รับ Migration ของเพื่อนร่วมทีมเข้ามา แล้วสร้าง Migration ของเราต่อท้ายใหม่
+npx prisma migrate reset --force
+npx prisma migrate dev --name add_cold_chain_tracking
+```
+
+### ตัวอย่างที่ 2: ไปป์ไลน์ CI/CD อัตโนมัติด้วย GitHub Actions สำหรับ Staging และ Production
+ไฟล์ตั้งค่า GitHub Actions ที่แยกขั้นตอนการตรวจสอบบน Pull Request และการรัน `prisma migrate deploy` ผ่าน Direct Connection ก่อนสั่งอัปเดตแอปพลิเคชัน:
+
+```yaml filename=".github/workflows/database-deploy.yml"
+name: Smart Butcher - Database Migration & Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate-migrations:
+    name: Validate Schema & Migrations on PR
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: butcher_ci
+          POSTGRES_PASSWORD: ci_secret_password
+          POSTGRES_DB: smart_butcher_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+
+      - name: Apply all existing migrations to clean PostgreSQL 16
+        env:
+          DATABASE_URL: postgresql://butcher_ci:ci_secret_password@localhost:5432/smart_butcher_ci
+          DIRECT_URL: postgresql://butcher_ci:ci_secret_password@localhost:5432/smart_butcher_ci
+        run: npx prisma migrate deploy
+
+      - name: Verify no ungenerated schema changes exist
+        env:
+          DATABASE_URL: postgresql://butcher_ci:ci_secret_password@localhost:5432/smart_butcher_ci
+        run: |
+          npx prisma migrate diff \
+            --from-migrations ./prisma/migrations \
+            --to-schema-datamodel ./prisma/schema.prisma \
+            --shadow-database-url postgresql://butcher_ci:ci_secret_password@localhost:5432/postgres \
+            --exit-code
+
+  deploy-production-db:
+    name: Run Production Migration
+    needs: validate-migrations
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+
+      - name: Execute Prisma Migrate Deploy on Production
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_POOLER_URL }}
+          DIRECT_URL: ${{ secrets.PROD_DATABASE_DIRECT_URL }}
+        run: npx prisma migrate deploy
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การตรวจสอบก่อน Merge PR** | Merge โค้ดที่แก้ `schema.prisma` แต่ลืมรัน `migrate dev` ทำให้บน Production ไม่มีการสร้างคอลัมน์ | ใช้ `prisma migrate diff --exit-code` ใน CI เพื่อบังคับให้ `schema.prisma` ต้องตรงกับโฟลเดอร์ `migrations` เสมอ |
+| **ตำแหน่งที่สั่งรัน Migration** | ใส่ `"start": "prisma migrate deploy && node dist/main.js"` ใน `package.json` ทุก Container | รัน `prisma migrate deploy` ใน Dedicated CI/CD Step หรือ Kubernetes Init Job เพียง 1 Instance ก่อนสลับ Traffic |
+| **การจัดการโฟลเดอร์ Migration** | ใส่ `prisma/migrations` ไว้ใน `.gitignore` แล้วให้แต่ละเครื่องสร้างไฟล์เอาเอง | Commit โฟลเดอร์ `prisma/migrations` ทั้งหมดและไฟล์ `migration_lock.toml` เข้าสู่ Git เสมอ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Dedicated Migration Step ใน CI/CD เมื่อ:** ระบบรันแบบ Multi-instance, Auto-scaling หรือ Serverless เพื่อป้องกันปัญหาการแย่งกันล็อกฐานข้อมูลตอนเริ่มต้นระบบ
+- **ไม่ควรรวม Migration ที่มีทั้ง Schema Change และ Breaking Code Change ไว้ใน Deploy รอบเดียวกัน:** หากการเปลี่ยนแปลงนั้นทำลายความเข้ากันได้กับโค้ดเวอร์ชันเก่าที่ยังทำงานอยู่ระหว่างการสลับ Container
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ในขณะที่รัน `prisma migrate deploy` หากมีโปรเซสสองตัวเผลอรันคำสั่งนี้เข้าหา PostgreSQL พร้อมกัน Prisma มีกลไกป้องกันอย่างไร?**
+  - **แนวคำตอบ:** Prisma Migrate ใช้กลไก **PostgreSQL Advisory Lock** (`pg_advisory_lock(72707369)`) ทันทีที่เริ่มเชื่อมต่อเพื่อทำ Migration โปรเซสแรกที่ได้รับ Lock จะสามารถอ่านตาราง `_prisma_migrations` และรันสคริปต์ SQL ได้ ส่วนโปรเซสที่สองจะต้องรอจนกว่าโปรเซสแรกจะปล่อย Lock (หรือเกิด Timeout หลังผ่านไป 10 วินาทีพร้อมแจ้งรหัสข้อผิดพลาด `P1002`)
+- **Q2: ทำไมใน CI Pipeline เราจึงใช้คำสั่ง `prisma migrate diff --exit-code` เปรียบเทียบระหว่างโฟลเดอร์ `migrations` กับ `schema.prisma`?**
+  - **แนวคำตอบ:** เพื่อป้องกันกรณีที่นักพัฒนาแก้ไขไฟล์ `schema.prisma` บนเครื่องตัวเองแล้วเผลอ Commit ขึ้น Git โดยลืมรัน `npx prisma migrate dev` เพื่อสร้างไฟล์ `.sql` คำสั่ง `migrate diff --exit-code` จะคืนค่า Exit Code ที่ไม่ใช่ 0 (คือ 2) ทันทีหากพบว่าโครงสร้างจากการรันไฟล์ Migration ทั้งหมดไม่ตรงกับ `schema.prisma` ทำให้ CI ตกและเตือนให้นักพัฒนาสร้างไฟล์ Migration ให้ครบถ้วนก่อน Merge
+
+---

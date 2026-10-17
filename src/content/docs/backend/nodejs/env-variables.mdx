@@ -1,0 +1,130 @@
+---
+title: Env Variables
+category: BACKEND
+parentTitle: Node.js
+version: Node.js 22 LTS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+สูตรหมักเนื้อซอสพริกไทยดำที่เป็นความลับทางการค้า รหัสเปิดตู้เซฟเก็บเงินสด หรือกุญแจ API ตัดบัตรเครดิตของ **Smart Butcher Marketplace** จะต้องไม่ถูกเขียนแปะไว้ที่เคาน์เตอร์ให้ลูกค้าทุกคนเห็น:
+- ในโลกของการเขียนโปรแกรม ซอร์สโค้ดจะถูกส่งขึ้น Git Repository (ซึ่งทีมงานทุกคนเข้าถึงได้)
+- ข้อมูลที่เป็นความลับ (Secrets), ข้อมูลการเชื่อมต่อฐานข้อมูล (Database Credentials) และการตั้งค่าที่เปลี่ยนแปลงตามสภาพแวดล้อม (Local vs Production) จะต้องแยกออกมาเก็บใน **Environment Variables** ตามหลักการ **The Twelve-Factor App**
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **`process.env`:** วัตถุในตัวของ Node.js ที่แมปตัวแปร Environment จากระดับ Operating System เข้ามาตอนโปรเซสเริ่มต้นทำงาน
+2. **การโหลดค่า `.env`:**
+   - **ดั้งเดิม:** ใช้ไลบรารี `dotenv` (เช่น `import 'dotenv/config'`)
+   - **Node.js Built-in (Node v20.6.0+):** สามารถรันด้วย Flag `--env-file=.env` โดยไม่ต้องติดตั้งไลบรารีภายนอกเลย เช่น `node --env-file=.env dist/server.js`
+3. **Type-safe Validation ด้วย Zod (Fail-Fast Principle):**
+   บ่อยครั้งที่ Developer ลืมใส่ค่า Config ใน `.env` บน Production เซิร์ฟเวอร์เปิดติด แต่พอลูกค้ากดจ่ายเงินระบบถึงจะพัง การทำ **Type-safe Validation** ร่วมกับ Zod จะช่วยตรวจสอบความถูกต้องของค่าคอนฟิกทั้งหมดตั้งแต่เสี้ยววินาทีแรกที่บูตแอปพลิเคชัน หากค่าไม่ครบจะสั่งหยุดระบบทันทีก่อนเปิดรับทราฟฟิก
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: Schema Validation ของ Environment Variables ด้วย Zod
+```typescript filename="src/config/env.ts"
+import { z } from 'zod';
+
+// ประกาศ Schema ที่เข้มงวดสำหรับระบบ Smart Butcher
+const envSchema = z.object({
+  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  PORT: z.coerce.number().default(4000),
+  
+  // Database Configuration
+  DATABASE_URL: z.string().url('DATABASE_URL ต้องเป็นรูปแบบ Database URI ที่ถูกต้อง (เช่น postgresql://...)'),
+  
+  // Security Secrets
+  JWT_SECRET: z.string().min(32, 'JWT_SECRET ต้องมีความยาวอย่างน้อย 32 ตัวอักษรเพื่อความปลอดภัย'),
+  JWT_EXPIRES_IN: z.string().default('1d'),
+  
+  // Payment Gateway
+  OMISE_PUBLIC_KEY: z.string().startsWith('pkey_', 'Omise Public Key ต้องขึ้นต้นด้วย pkey_'),
+  OMISE_SECRET_KEY: z.string().startsWith('skey_', 'Omise Secret Key ต้องขึ้นต้นด้วย skey_'),
+  
+  // Business Settings
+  BUTCHER_MARKET_TAX_RATE: z.coerce.number().min(0).max(1).default(0.07),
+});
+
+// ฟังก์ชันตรวจสอบและสกัดค่า Config
+function validateEnv() {
+  const result = envSchema.safeParse(process.env);
+
+  if (!result.success) {
+    console.error('❌ ข้อผิดพลาดในการตรวจสอบ Environment Variables ของระบบ Smart Butcher:');
+    console.error(JSON.stringify(result.error.format(), null, 2));
+    // หยุดการทำงานทันทีตามหลัก Fail-Fast
+    process.exit(1);
+  }
+
+  return result.data;
+}
+
+// Export ค่า Config ที่เป็น Type-safe 100%
+export const ENV = validateEnv();
+export type Environment = z.infer<typeof envSchema>;
+```
+
+### ตัวอย่างที่ 2: การนำ Object Config ไปใช้ใน Service Layer
+```typescript filename="src/services/payment.service.ts"
+import { ENV } from '../config/env.js';
+
+export class ButcherPaymentService {
+  private secretKey: string;
+  private taxRate: number;
+
+  constructor() {
+    // ปลอดภัย ไม่ต้องกังวลว่า undefined หรือค่าไม่ถูกต้อง
+    this.secretKey = ENV.OMISE_SECRET_KEY;
+    this.taxRate = ENV.BUTCHER_MARKET_TAX_RATE;
+  }
+
+  public calculateFinalAmount(subtotalThb: number): number {
+    const taxAmount = subtotalThb * this.taxRate;
+    return subtotalThb + taxAmount;
+  }
+
+  public getMaskedKey(): string {
+    return this.secretKey.slice(0, 8) + '********';
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-patterns & Best Practices)
+
+### ❌ โค้ดที่ผิด: เรียกใช้ `process.env` กระจัดกระจายและใช้ Non-null Assertion (`!`)
+```typescript filename="bad-env-usage.ts"
+// ผิด: เรียก process.env ตรงๆ กลางโค้ดธุรกิจ และใช้เครื่องหมาย ! บังคับ
+// หากลืมตั้งค่าในเซิร์ฟเวอร์ โค้ดจะไม่แจ้งเตือนตอนสตาร์ต แต่จะพัง Runtime ตอนลูกค้ากำลังตัดบัตร
+export function chargeCustomer(amount: number) {
+  const apiKey = process.env.PAYMENT_API_KEY!;
+  const gatewayUrl = process.env.GATEWAY_URL || 'https://default-gateway.com';
+  // ถ้า apiKey เป็น undefined จะเกิด Error: Unauthorized ที่ยากต่อการสืบหา
+  return fetch(`${gatewayUrl}/charge`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+}
+```
+
+### ✅ โค้ดที่ถูก: โหลดผ่าน Validated Config เสมอ
+```typescript filename="good-env-usage.ts"
+import { ENV } from './config/env.js';
+
+// ถูกต้อง: เรียกใช้ผ่านโมดูล ENV ที่ถูก Validate ด้วย Zod ตั้งแต่เริ่มแอปพลิเคชัน
+// มั่นใจได้ 100% ว่ามีค่า และ Type เป็น String ชัดเจน
+export async function chargeCustomer(amount: number) {
+  const apiKey = ENV.OMISE_SECRET_KEY;
+  // ...
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้:** ค่า Credentials ทุกชนิด, Port ของ Server, Database Connection String, URL ของ External APIs, Secret สำหรับ Sign JWT Tokens
+- **ไม่ควรใช้:** ห้ามเก็บค่าคงที่ทางตรรกะธุรกิจที่ไม่เปลี่ยนแปลงตามสภาพแวดล้อม (เช่น ประเภทเนื้อที่รองรับ: Beef, Pork, Poultry) ไว้ใน `.env` เพราะควรประกาศเป็น Enum หรือ Constant ในโค้ด
+
+## 6. คำถามสัมภาษณ์ (Interview Questions)
+- **Q1: ใน Node.js v20.6.0+ เราสามารถอ่านค่าจากไฟล์ `.env` ได้โดยไม่ต้องติดตั้งแพ็กเกจ `dotenv` ได้อย่างไร?**
+  - *คำตอบ:* สามารถใช้ Flag `--env-file` ที่มีมาในตัวของ Node.js Runtime ได้โดยตรง เช่น รันคำสั่ง `node --env-file=.env app.js` ซึ่งสามารถระบุไฟล์ซ้อนกันได้ เช่น `--env-file=.env --env-file=.env.local`
+- **Q2: ทำไมการใช้ Type-safe Schema Validation (เช่น Zod) กับ `process.env` จึงเป็นข้อบังคับในระบบ Production?**
+  - *คำตอบ:* เพราะ `process.env` คืนค่าข้อมูลทุกอย่างเป็น `string | undefined` ทำให้ไม่มี Type Safety นอกจากนี้ยังช่วยให้ระบบปฏิบัติตามหลักการ **Fail-Fast** หากขาดตัวแปรสำคัญ ระบบจะ Crash ทันทีในขั้นตอนการบูต ทำให้วิศวกรแก้ไขได้ทันก่อนที่ทราฟฟิกจริงของผู้ใช้จะเข้ามาเจอ Runtime Error
+
+---

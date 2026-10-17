@@ -1,0 +1,125 @@
+---
+title: Jest vs Vitest
+category: TESTING & QUALITY
+parentTitle: Jest
+version: Jest v29 & ts-jest
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+การเลือกระบบทดสอบสำหรับสถาปัตยกรรมระดับ Enterprise:
+- **Jest (รถบรรทุกสิบล้อเกรดอุตสาหกรรม)**: ผ่านการทดสอบสมบุกสมบันมานานกว่า 10 ปี มีระบบนิเวศขนาดใหญ่ที่สุดในโลก เสถียรอย่างยิ่ง และเป็นค่าเริ่มต้นของเฟรมเวิร์กยอดนิยมอย่าง NestJS
+- **Vitest (รถสปอร์ตไฟฟ้าพลังสูง)**: ถูกสร้างขึ้นมาสำหรับยุคสมัยใหม่ โดยใช้ขุมพลังของ **Vite Engine** ทำงานกับโมดูลแบบ ESM ได้อย่างเป็นธรรมชาติ มีความเร็วในการเปิดระบบและ Hot Module Replacement (HMR) ที่เร็วกว่ามาก และสามารถแชร์ Configuration ร่วมกับ Vite ได้ 100%
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **Module Bundling:** Jest เกิดขึ้นในยุค CommonJS (CJS) จึงต้องใช้ Babel หรือ `ts-jest` แปลงโค้ดทั้งหมดใหม่ก่อนนำไปรันใน Node.js `vm` ในขณะที่ Vitest รันบน Vite Pipeline ซึ่งประมวลผลโค้ดผ่าน ES Modules (ESM) และใช้ esbuild/Rollup แปลงโค้ดด้วยความเร็วสูง
+2. **API Parity (ความเหมือนของชุดคำสั่ง):** Vitest ถูกออกแบบมาให้เป็น Drop-in Replacement ของ Jest แทบจะ 98% ฟังก์ชัน `describe`, `it`, `expect`, `beforeEach` เขียนเหมือนกันทุกประการ ต่างกันเพียงแค่ฟังก์ชัน Mock ใน Vitest จะใช้ `vi` แทน `jest` (เช่น `vi.fn()`, `vi.spyOn()`, `vi.mock()`)
+
+## 3. ตารางเปรียบเทียบเชิงลึก: Jest vs Vitest
+
+| มิติการเปรียบเทียบ | Jest 29.x | Vitest 1.x / 2.x |
+| :--- | :--- | :--- |
+| **หัวใจการทำงาน (Core Engine)** | Custom Sandboxed VM + jest-worker | Vite Dev Server + Worker Threads / Tinypool |
+| **การรองรับ Native ESM** | ยังคงเป็น Experimental Flag (ตั้งค่ายาก) | **รองรับ Native ESM 100%** ตั้งแต่วินาทีแรก |
+| **ความเร็วในการเริ่มรัน (Startup Speed)** | ปานกลาง (มี Overhead ในการสร้าง VM Sandbox) | **รวดเร็วมาก** (Instant Transformation ผ่าน esbuild) |
+| **Watch Mode Performance** | ดี (วิเคราะห์ผ่าน Git Changes) | **เป็นเลิศ** (ใช้ Vite HMR Re-run เฉพาะ Function Graph) |
+| **ระบบนิเวศ Backend (NestJS)** | **มาตรฐานหลัก (First-class Citizen)** | ต้องปรับแต่ง Config เพิ่มเติมเพื่อรองรับ Decorators |
+| **ระบบนิเวศ Frontend (Vite/Next.js)** | ต้องตั้งค่า Babel/SWC แยกต่างหาก | **แชร์ Config เดียวกันกับ Vite ได้ทันที** |
+| **ความพร้อมในการใช้งานระดับ Enterprise** | **สูงมาก** มีเอกสาร ชุมชน และปลั๊กอินรองรับทุกปัญหา | เติบโตอย่างรวดเร็ว นิยมมากในโปรเจกต์สมัยใหม่ |
+
+## 4. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การเขียนชุดทดสอบเดียวกันใน Jest vs Vitest
+การคำนวณส่วนลดเนื้อสเต๊กพรีเมียม:
+
+```typescript filename="src/services/discount-comparison.spec.ts"
+// === ฝั่ง JEST ===
+// ไม่ต้อง import describe, it, expect (Jest Inject เป็น Global ให้อัตโนมัติ)
+describe('Jest Discount Calculator', () => {
+  it('should calculate member discount', () => {
+    const mockNotifier = jest.fn();
+    mockNotifier('VIP_DISCOUNT');
+    expect(mockNotifier).toHaveBeenCalledWith('VIP_DISCOUNT');
+  });
+});
+
+// === ฝั่ง VITEST ===
+// ใน Vitest แนะนำให้ Import Explicitly หรือเปิด globals: true ในคอนฟิก
+import { describe, it, expect, vi } from 'vitest';
+
+describe('Vitest Discount Calculator', () => {
+  it('should calculate member discount', () => {
+    // เปลี่ยนจาก jest.fn() เป็น vi.fn()
+    const mockNotifier = vi.fn();
+    mockNotifier('VIP_DISCOUNT');
+    expect(mockNotifier).toHaveBeenCalledWith('VIP_DISCOUNT');
+  });
+});
+```
+
+### ตัวอย่างที่ 2: แนวทางการ Migration จาก `jest.config.ts` สู่ `vitest.config.ts`
+การแปลงคอนฟิกของ Smart Butcher:
+
+```typescript filename="vitest.config.ts"
+import { defineConfig } from 'vitest/config';
+import path from 'path';
+
+export default defineConfig({
+  test: {
+    // 1. เปิดให้ใช้ describe, it, expect เป็น Global ได้เหมือน Jest
+    globals: true,
+
+    // 2. สภาพแวดล้อมการทำงาน
+    environment: 'node',
+
+    // 3. กำหนด Setup File
+    setupFiles: ['./test/vitest.setup.ts'],
+
+    // 4. ตั้งค่า Code Coverage ผ่าน v8 engine
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'json', 'html'],
+    },
+  },
+  resolve: {
+    // 5. รองรับ Path Aliases อัตโนมัติ
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+  },
+});
+```
+
+## 5. ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+### ❌ สิ่งที่ผิด: ตัดสินใจย้ายโปรเจกต์ NestJS Enterprise ขนาดยักษ์ไป Vitest โดยไม่ประเมินความเสี่ยง
+```typescript filename="src/jest.spec.ts"
+// สถาปัตยกรรม NestJS ผูกติดกับ reflect-metadata และ TypeScript Experimental Decorators อย่างแน่นหนา
+// การย้ายไป Vitest ในระบบเดิมที่มี Jest Custom Matchers นับร้อยตัวอาจทำให้เสียเวลาแก้ปัญหา Tooling 
+// มากกว่าเวลาที่ประหยัดได้จากการรันเทสต์
+```
+
+### ✅ สิ่งที่ถูก: เลือกเครื่องมือให้ตรงกับสแต็กเทคโนโลยีของระบบ
+- ใช้ **Jest** เป็นแกนหลักสำหรับ **Backend NestJS / Express Enterprise Services**
+- ใช้ **Vitest** เป็นแกนหลักสำหรับ **Frontend (Vite, React, Vue, SvelteKit)** หรือโมเดิร์น Fast-Paced Next.js Apps
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **เลือกใช้ Jest เมื่อ:**
+  - กำลังพัฒนาแอปพลิเคชัน Backend ด้วย NestJS ซึ่งมี Template และ Best Practices ส่วนใหญ่ผูกติดกับ Jest
+  - โปรเจกต์เดิมใช้ CommonJS หรือมี Dependency ภายนอกที่ยังไม่รองรับ ESM อย่างสมบูรณ์
+- **เลือกใช้ Vitest เมื่อ:**
+  - โปรเจกต์พัฒนาด้วย Vite เป็น Build Tool อยู่แล้ว
+  - ต้องการความเร็วสูงสุดในการทำ TDD บนเครื่องพัฒนา
+  - โปรเจกต์เขียนด้วยโมเดิร์น Pure ESM (`"type": "module"`)
+
+## 7. คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: เหตุใดการทดสอบโค้ดที่เป็น Pure ESM (`"type": "module"`) ใน Jest จึงมีความซับซ้อนกว่าใน Vitest?**
+  - *แนวคำตอบ:* สถาปัตยกรรมดั้งเดิมของ Jest ถูกสร้างขึ้นบนพื้นฐานของ CommonJS (`require`) การที่จะรองรับ Native ESM ใน Node.js ตัว Jest จำเป็นต้องพึ่งพา Node.js Experimental VM Modules API (`--experimental-vm-modules`) ซึ่งยังคงมีข้อจำกัดเรื่อง Module Mocking และไม่เสถียร 100% ในขณะที่ Vitest ถูกสร้างขึ้นบน Vite ซึ่งใช้ Rollup และ esbuild ในการจัดการ Module Graph ทำให้สามารถ Resolve โค้ดแบบ ESM ได้อย่างเป็นธรรมชาติและไร้รอยต่อ
+- **Q2: หากต้องการทยอยย้าย (Gradual Migration) จาก Jest ไปยัง Vitest ในองค์กร มีกลยุทธ์อย่างไรที่ไม่กระทบการส่งมอบงาน?**
+  - *แนวคำตอบ:*
+    1. เริ่มต้นด้วยการเปิดใช้งาน `globals: true` ใน `vitest.config.ts` เพื่อให้สามารถใช้คำสั่ง `describe`, `it`, `expect` ร่วมกันได้โดยไม่ต้องแก้ Source Code ของไฟล์ทดสอบเดิม
+    2. ใช้ Codemod เช่น `jest-to-vitest` เพื่อแปลงคำสั่งจำลองจาก `jest.` เป็น `vi.` แบบอัตโนมัติ
+    3. ปรับแต่ง Path Aliases ให้ตรงกัน
+    4. ย้ายไปทีละ Package ในกรณีของ Monorepo โดยเริ่มจาก Shared Utilities และ Frontend ก่อนจะขยับเข้าสู่ Backend Services
+
+---

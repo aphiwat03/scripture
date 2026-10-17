@@ -1,0 +1,30 @@
+---
+title: Anti-patterns
+category: TESTING & QUALITY
+parentTitle: ESLint
+version: ESLint 9 (Flat Config)
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การไม่เปิดใช้ Type-Checked Rules ในโปรเจกต์ TypeScript**: ใช้เพียง `tseslint.configs.recommended` ธรรมดาซึ่งตรวจได้แค่ระดับ Syntax เบื้องต้น ทำให้พลาดการตรวจจับบั๊กร้ายแรงอย่าง `@typescript-eslint/no-floating-promises` ที่ต้องอาศัยข้อมูล Type จาก Compiler
+2. **การใช้ `// eslint-disable` โดยไม่ระบุชื่อกฎ**: การเขียน `/* eslint-disable */` ที่หัวไฟล์เป็นการปิดการตรวจจับบั๊กทุกชนิดในไฟล์นั้นทั้งหมด หากจำเป็นต้องยกเว้นจริงๆ ต้องระบุชื่อกฎให้ชัดเจน เช่น `// eslint-disable-next-line @typescript-eslint/no-explicit-any -- รองรับ payload จาก legacy webhook`
+3. **การลืมติดตั้ง `eslint-config-prettier`**: ทำให้กฎการจัดรูปแบบหน้าตาโค้ดของ ESLint ขัดแย้งกับ Formatter ภายนอก ส่งผลให้เกิดการแจ้งเตือนเท็จใน IDE
+
+---
+
+## 2. Checklist สรุป
+
+- [ ] อัปเกรดเป็น **ESLint v9 Flat Config (`eslint.config.mjs`)** และลบไฟล์ `.eslintrc.*` รวมถึง `.eslintignore` เดิมออกทั้งหมด
+- [ ] เปิดใช้งาน `tseslint.configs.strictTypeChecked` พร้อมตั้งค่า `parserOptions: { projectService: true }`
+- [ ] เปิดกฎเหล็ก `@typescript-eslint/no-floating-promises`, `@typescript-eslint/no-misused-promises` และ `react-hooks/exhaustive-deps` เป็นระดับ `error`
+- [ ] ตั้งค่าสคริปต์ `lint` ใน `package.json` ให้มี `--max-warnings 0` เสมอ
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+1. **[Prettier](/docs/testing/prettier)**: วางระบบจัดรูปแบบโค้ดอัตโนมัติควบคู่กับ ESLint
+2. **[Git Hooks](/docs/testing/git-hooks)**: นำคำสั่ง `eslint` ไปผูกกับ Husky และ lint-staged
+3. **[Type Checking](/docs/testing/type-checking)**: ตรวจสอบความถูกต้องของ Type ด้วย `tsc --noEmit`

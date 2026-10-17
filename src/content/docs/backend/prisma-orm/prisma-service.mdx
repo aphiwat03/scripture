@@ -1,0 +1,181 @@
+---
+title: PrismaService
+category: BACKEND
+parentTitle: Prisma ORM
+version: Prisma 6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในการนำ Prisma ORM มาใช้งานร่วมกับ **NestJS 11** ในระดับ Production เราต้องออกแบบโมดูลฐานข้อมูล (`DatabaseModule` และ `PrismaService`) ให้เป็น Singleton Provider ที่ผูกเข้ากับวงจรชีวิตของแอปพลิเคชัน (`OnModuleInit` และ `OnModuleDestroy`) เพื่อจัดการการเปิดและปิด Database Connection Pool อย่างสะอาด (Graceful Shutdown) รวมถึงการเชื่อมต่อผ่าน **Node-postgres Driver Adapter (`@prisma/adapter-pg` และ `pg`)** และการสร้าง Exception Filter สำหรับแปลงรหัสข้อผิดพลาดของ Prisma (เช่น `P2002`, `P2025`) ให้เป็น HTTP Status Code ที่เหมาะสม
+
+<Callout type="note" title="การ Generate Prisma Client และการเชื่อมต่อผ่าน Driver pg ใน Prisma 5/6">
+ใน Prisma 5 และ Prisma 6 คุณสามารถเลือกเชื่อมต่อกับ PostgreSQL ได้ 2 รูปแบบหลัก คือ (1) รูปแบบ Standard PrismaClient ที่ใช้ Rust Query Engine จัดการ Connection Pool ผ่านพารามิเตอร์ใน DATABASE_URL และ (2) รูปแบบ Driver Adapter ที่ใช้แพ็กเกจ @prisma/adapter-pg ร่วมกับ pg.Pool ของ Node.js โดยตรง ซึ่งช่วยให้คุณควบคุมการตั้งค่า Connection Pool, SSL/TLS, และทำงานบน Serverless/Edge หรือ Node.js Runtime ได้อย่างยืดหยุ่น ทั้งนี้ ก่อนเริ่มโปรเจกต์ใหม่ทุกครั้ง แนะนำให้ตรวจสอบเอกสารทางการล่าสุดของ Prisma (Prisma Official Docs) เนื่องจากสถาปัตยกรรมของ Prisma 6+ มีการพัฒนาประสิทธิภาพของ Driver Adapters และ Prisma ORM อย่างต่อเนื่อง
+</Callout>
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **ขั้นตอนการเตรียมและ Generate Prisma Client**:
+   - ติดตั้งแพ็กเกจ: `npm install @prisma/client @prisma/adapter-pg pg` และ `npm install -D prisma @types/pg`
+   - ทุกครั้งที่มีการแก้ไขไฟล์ `prisma/schema.prisma` จะต้องรันคำสั่ง `npx prisma generate` (หรือตั้งไว้ในสคริปต์ `postinstall` ของ `package.json`) เพื่อสร้างโค้ด TypeScript ของ `PrismaClient` ให้ตรงกับ Schema ล่าสุด
+2. **การบริหารจัดการ Connection Pool ด้วย `pg.Pool` + `@prisma/adapter-pg`**:
+   - แทนที่จะให้แต่ละ Request สร้างการเชื่อมต่อ TCP/SSL ใหม่กับ PostgreSQL (ซึ่งใช้เวลา Handshake นาน 20-50ms) `pg.Pool` จะเปิดการเชื่อมต่อเตรียมไว้ล่วงหน้า (เช่น `max: 20` connections) และหมุนเวียนให้แต่ละคิวรีของ `PrismaService` ยืมไปใช้งานแล้วคืนกลับเข้า Pool ทันที
+3. **รหัสข้อผิดพลาดสำคัญของ Prisma (`PrismaClientKnownRequestError`)**:
+   - `P2002`: ข้อมูลซ้ำกับ Unique Constraint (เช่น อีเมลซ้ำ หรือรหัส SKU ซ้ำ) -> ควรแปลงเป็น `409 Conflict`
+   - `P2003`: Foreign Key Constraint ล้มเหลว (เช่น ระบุ `categoryId` ที่ไม่มีอยู่จริง หรือพยายามลบข้อมูลแม่ที่ติด `Restrict`) -> ควรแปลงเป็น `400 Bad Request` หรือ `409 Conflict`
+   - `P2025`: ไม่พบแถวข้อมูลที่ต้องการอัปเดตหรือลบ -> ควรแปลงเป็น `404 Not Found`
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสร้าง PrismaService ที่เชื่อมต่อผ่าน `pg.Pool` และ `@prisma/adapter-pg` ใน NestJS 11 (พื้นฐาน)
+```typescript filename="src/database/prisma.service.ts"
+import {
+  Injectable,
+  OnModuleInit,
+  OnModuleDestroy,
+  Logger,
+} from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { Pool } from 'pg';
+
+@Injectable()
+export class PrismaService
+  extends PrismaClient
+  implements OnModuleInit, OnModuleDestroy
+{
+  private readonly logger = new Logger(PrismaService.name);
+  private readonly pgPool: Pool;
+
+  constructor() {
+    // 1. สร้าง Node-postgres Connection Pool พร้อมตั้งค่า Timeout ที่รัดกุมสำหรับ Production
+    const connectionString = process.env.DATABASE_URL;
+    const pool = new Pool({
+      connectionString,
+      max: Number(process.env.DB_POOL_MAX ?? 20), // จำนวน Connection สูงสุดใน Pool ต่อ 1 Instance
+      idleTimeoutMillis: 30000, // ปิด Connection ที่ว่างเกิน 30 วินาที
+      connectionTimeoutMillis: 5000, // หากขอ Connection จาก Pool ไม่ได้ใน 5 วินาทีให้โยน Error ทันที
+    });
+
+    // 2. ห่อหุ้ม pg.Pool ด้วย PrismaPg Driver Adapter (ตรวจสอบวิธีตั้งค่าล่าสุดได้จากเอกสารทางการของ Prisma)
+    // หมายเหตุ: หากไม่ใช้ Driver Adapter สามารถส่ง { datasources: { db: { url: connectionString } } } แบบมาตรฐานได้เช่นกัน
+    const adapter = new PrismaPg(pool);
+
+    super({
+      adapter,
+      log:
+        process.env.NODE_ENV === 'development'
+          ? ['query', 'info', 'warn', 'error']
+          : ['warn', 'error'],
+    });
+
+    this.pgPool = pool;
+  }
+
+  async onModuleInit(): Promise<void> {
+    await this.$connect();
+    this.logger.log(
+      'Connected to PostgreSQL 16 via @prisma/adapter-pg Pool successfully',
+    );
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    this.logger.log('Closing Prisma Client and PostgreSQL Connection Pool...');
+    await this.$disconnect();
+    await this.pgPool.end();
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การสร้าง DatabaseModule และการดักจับ Prisma Known Errors แปลงเป็น HTTP Exceptions อัตโนมัติ (ขั้นสูง)
+```typescript filename="src/common/filters/prisma-client-exception.filter.ts"
+import {
+  ArgumentsHost,
+  Catch,
+  ConflictException,
+  ExceptionFilter,
+  NotFoundException,
+  BadRequestException,
+  Logger,
+} from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+
+@Catch(Prisma.PrismaClientKnownRequestError)
+export class PrismaClientExceptionFilter implements ExceptionFilter {
+  private readonly logger = new Logger(PrismaClientExceptionFilter.name);
+
+  catch(
+    exception: Prisma.PrismaClientKnownRequestError,
+    _host: ArgumentsHost,
+  ): void {
+    this.logger.warn(
+      `Prisma Error [${exception.code}]: ${exception.message.replace(/\n/g, ' ')}`,
+    );
+
+    switch (exception.code) {
+      case 'P2002': {
+        // Unique constraint violation (เช่น SKU หรือ Email ซ้ำ)
+        const targetFields = Array.isArray(exception.meta?.target)
+          ? (exception.meta?.target as string[]).join(', ')
+          : 'ข้อมูลสำคัญ';
+        throw new ConflictException({
+          code: 'UNIQUE_CONSTRAINT_VIOLATION',
+          message: `ข้อมูลในฟิลด์ (${targetFields}) มีอยู่ในระบบ Smart Butcher แล้ว ไม่สามารถสร้างซ้ำได้`,
+        });
+      }
+
+      case 'P2003': {
+        // Foreign key constraint violation
+        throw new BadRequestException({
+          code: 'FOREIGN_KEY_CONSTRAINT_FAILED',
+          message:
+            'ข้อมูลอ้างอิงที่เกี่ยวข้องไม่ถูกต้อง หรือไม่สามารถลบข้อมูลได้เนื่องจากมีรายการสั่งซื้อผูกอยู่',
+        });
+      }
+
+      case 'P2025': {
+        // Record to update/delete or findOrThrow not found
+        throw new NotFoundException({
+          code: 'DATABASE_RECORD_NOT_FOUND',
+          message: 'ไม่พบข้อมูลที่ต้องการดำเนินการในฐานข้อมูล',
+        });
+      }
+
+      default:
+        // โยนต่อไปให้ Global Exception Filter หลักจัดการเป็น 500 Internal Server Error
+        throw exception;
+    }
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/database/prisma-lifecycle-comparison.ts"
+// ❌ ผิด (Anti-pattern): สร้าง new PrismaClient() ใหม่ทุกครั้งใน Controller หรือฟังก์ชัน
+import { PrismaClient } from '@prisma/client';
+
+export async function badFetchProducts() {
+  // ทุกครั้งที่ถูกเรียกจะสร้าง Connection Pool ชุดใหม่ขึ้นมา จน PostgreSQL พ่น Error:
+  // "FATAL: sorry, too many clients already" ภายในไม่กี่วินาที!
+  const prisma = new PrismaClient();
+  return prisma.product.findMany();
+}
+
+// ✅ ถูก (Best Practice): ลงทะเบียน PrismaService เป็น Singleton Provider ใน DatabaseModule
+// และเปิด app.enableShutdownHooks() ใน main.ts เพื่อให้ onModuleDestroy ปิด Pool อย่างสะอาดเวลา Deploy ใหม่
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `@prisma/adapter-pg` ร่วมกับ `pg.Pool` เมื่อ**: ต้องการควบคุมพารามิเตอร์ของ Connection Pool ฝั่ง Node.js อย่างละเอียด (เช่น `idleTimeoutMillis`, Custom SSL Certificates ของ Cloud Database) หรือเตรียมพร้อมสำหรับสถาปัตยกรรม Prisma ยุคใหม่
+- **ไม่ควรตั้งค่า `DB_POOL_MAX` สูงเกินไปต่อ 1 Node.js Instance**: หากรัน NestJS บน Kubernetes จำนวน 10 Pods และตั้ง `max: 50` ต่อ Pod จะใช้ Connection รวมถึง 500 เส้น ซึ่งอาจเกินขีดจำกัดของ PostgreSQL (ปกติควรตั้ง 10-20 ต่อ Pod หรือใช้ PgBouncer คั่นกลาง)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมเราจึงต้องเปิด `app.enableShutdownHooks()` ในไฟล์ `main.ts` ของ NestJS เมื่อใช้งาน `PrismaService` ที่ Implement `OnModuleDestroy`?
+   - **แนวคำตอบ**: โดยค่าเริ่มต้นของ NestJS การดักจับสัญญาณปิดโปรเซสจากระบบปฏิบัติการหรือ Docker/Kubernetes (เช่น `SIGTERM` หรือ `SIGINT` เวลา Rolling Deployment) จะไม่ถูกเปิดใช้งานเพื่อประหยัดทรัพยากร หากเราไม่เรียก `app.enableShutdownHooks()` เมื่อ Kubernetes สั่งหยุด Container เมธอด `onModuleDestroy()` ใน `PrismaService` จะไม่ถูกเรียก ทำให้ `this.$disconnect()` และ `pgPool.end()` ไม่ทำงาน ส่งผลให้ PostgreSQL มี Zombie Connections ค้างอยู่จนกว่าจะหมด TCP Timeout
+2. **คำถาม**: เมื่อเราแก้ไขไฟล์ `prisma/schema.prisma` ในระหว่างการพัฒนา กับการนำขึ้น Production คำสั่ง `prisma db push`, `prisma migrate dev` และ `prisma migrate deploy` มีหน้าที่ต่างกันอย่างไร?
+   - **แนวคำตอบ**:
+     - `prisma db push`: ซิงค์โครงสร้าง Schema ไปยังฐานข้อมูลโดยตรงโดยไม่สร้างไฟล์ประวัติ Migration เหมาะสำหรับการทำ Prototype ช่วงแรกเท่านั้น (ห้ามใช้บน Production)
+     - `prisma migrate dev`: สร้างไฟล์ SQL Migration เก็บลงโฟลเดอร์ `prisma/migrations/`, รัน SQL กับฐานข้อมูลเครื่องนักพัฒนา และสั่ง `prisma generate` อัตโนมัติ
+     - `prisma migrate deploy`: ใช้ใน CI/CD Pipeline สำหรับ Production เท่านั้น โดยจะอ่านเฉพาะไฟล์ SQL Migration ที่ยังไม่เคยรันไปประมวลผลกับฐานข้อมูลจริงโดยไม่มีการล้างข้อมูล (No reset) และไม่ถามโต้ตอบใดๆ
+
+---

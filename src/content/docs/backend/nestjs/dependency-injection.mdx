@@ -1,0 +1,168 @@
+---
+title: Dependency Inject
+category: BACKEND
+parentTitle: NestJS 11
+version: NestJS 11
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด
+ในระบบแบบดั้งเดิม หาก `OrdersService` ต้องการใช้งาน `PaymentGateway` ตัว `OrdersService` จะต้องสั่ง `new StripePaymentGateway()` ด้วยตนเอง การทำเช่นนี้เรียกว่า **Tight Coupling** เพราะหากวันหนึ่งเราต้องการเปลี่ยนไปใช้ `OmisePaymentGateway` หรือต้องการส่ง `MockPaymentGateway` เข้าไปตอนเขียน Unit Test เราจะต้องเข้าไปรื้อแก้โค้ดใน `OrdersService` ทั้งหมด
+
+**Inversion of Control (IoC)** ทำการสลับขั้วอำนาจนี้ โดย `OrdersService` จะไม่เป็นผู้สร้าง Dependency เอง แต่จะทำเพียงแค่ "ประกาศความต้องการ" ผ่าน Constructor ว่าต้องการอ็อบเจกต์ที่มีหน้าตาตามอินเทอร์เฟซที่กำหนด แล้วมอบหน้าที่ให้ **DI Container** ของ NestJS เป็นผู้สร้างและหยิบส่ง (Inject) อ็อบเจกต์ตัวจริงเข้ามาให้ในตอนรัน
+
+## 2. หลักการเบื้องหลัง
+
+### 1. Provider Scopes
+NestJS รองรับ 3 Scopes:
+- `Scope.DEFAULT` (Singleton): ใช้ร่วมกันทั้งแอปพลิเคชัน สร้างครั้งเดียวตอนบูต (แนะนำสูงสุด)
+- `Scope.REQUEST`: สร้าง Instance ใหม่แยกตามแต่ละคำขอ HTTP เหมาะกับงานที่ต้องการ Multi-tenancy แยกตาม Subdomain
+- `Scope.TRANSIENT`: สร้าง Instance ใหม่ทุกครั้งที่มีการ Inject ไปยัง Provider อื่น
+
+### 2. Custom Providers
+นอกจากการใส่ชื่อ Class ใน `providers: [OrdersService]` ซึ่งเป็นรูปย่อของ `useClass` แล้ว NestJS ยังรองรับ:
+- `useClass`: เลือกระบุคลาสที่จะใช้งานจริง เช่น สลับระหว่าง Production กับ Mock
+- `useValue`: กำหนดค่าคงที่, Configuration Object หรือ External Library ที่ไม่ได้เขียนด้วย Class
+- `useFactory`: ใช้ฟังก์ชันคำนวณหรือรอการเชื่อมต่อแบบ Asynchronous ก่อนคืนค่า Instance
+- `useExisting`: กำหนด Alias ให้ชี้ไปยัง Provider ตัวอื่นที่มีอยู่แล้ว
+
+### 3. Circular Dependency (การพึ่งพาซึ่งกันและกันแบบงูกินหาง)
+หาก `OrdersService` ต้องเรียก `ProductsService` และในขณะเดียวกัน `ProductsService` ก็ต้องเรียก `OrdersService` เพื่อดูสถิติยอดขาย NestJS จะพบปัญหา Dependency Cycle ทำให้ระบบบูตไม่ขึ้น เราแก้ไขปัญหานี้ด้วยฟังก์ชัน `forwardRef()`
+
+## 3. ตัวอย่างโค้ด
+
+### ตัวอย่างที่ 1: การใช้ `useFactory` เชื่อมต่อ Payment Gateway แบบ Async
+```typescript filename="src/modules/payment/payment-client.provider.ts"
+import { Provider } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+
+export const SMART_BUTCHER_PAYMENT_CLIENT = 'SMART_BUTCHER_PAYMENT_CLIENT';
+
+export interface PaymentClient {
+  charge(amountThb: number, description: string): Promise<{ transactionId: string }>;
+}
+
+export const PaymentClientProvider: Provider = {
+  provide: SMART_BUTCHER_PAYMENT_CLIENT,
+  // ฉีด ConfigService เข้ามาใน Factory เพื่ออ่านค่า ENV
+  inject: [ConfigService],
+  useFactory: async (configService: ConfigService): Promise<PaymentClient> => {
+    const isMock = configService.get<boolean>('MOCK_PAYMENT', true);
+    const secretKey = configService.get<string>('PAYMENT_GATEWAY_SECRET', 'test_key');
+
+    if (isMock) {
+      console.log('⚡ ติดตั้ง FakeButcherPaymentClient สำหรับโหมดทดสอบ');
+      return {
+        async charge(amount, desc) {
+          return { transactionId: `MOCK-TX-${Date.now()}` };
+        },
+      };
+    }
+
+    // จำลองการเชื่อมต่อ SDK ภายนอกแบบ Async
+    console.log('🔒 เชื่อมต่อ Live Omise/Stripe Gateway สำหรับระบบจริง');
+    return {
+      async charge(amount, desc) {
+        // โค้ดยิง API จริงไปยัง Payment Gateway
+        return { transactionId: `LIVE-OMISE-TX-${Date.now()}` };
+      },
+    };
+  },
+};
+```
+
+```typescript filename="src/modules/orders/orders.service.ts"
+import { Injectable, Inject } from '@nestjs/common';
+import {
+  SMART_BUTCHER_PAYMENT_CLIENT,
+  PaymentClient,
+} from '../payment/payment-client.provider';
+
+@Injectable()
+export class OrdersService {
+  constructor(
+    // ใช้งาน @Inject ร่วมกับ Token String/Symbol ที่ตั้งขึ้น
+    @Inject(SMART_BUTCHER_PAYMENT_CLIENT)
+    private readonly paymentClient: PaymentClient
+  ) {}
+
+  async payOrder(orderId: string, amount: number) {
+    const result = await this.paymentClient.charge(
+      amount,
+      `ชำระค่าเนื้อสเต็กคำสั่งซื้อ ${orderId}`
+    );
+    return { orderId, success: true, txn: result.transactionId };
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การแก้ไข Circular Dependency ด้วย `forwardRef()`
+```typescript filename="src/modules/orders/orders.service.ts"
+import { Injectable, Inject, forwardRef } from '@nestjs/common';
+import { ProductsService } from '../products/products.service';
+
+@Injectable()
+export class OrdersService {
+  constructor(
+    // ใช้ forwardRef เพื่อเลื่อนการค้นหา ProductsService ไปตอนที่ Graph ถูก resolve เสร็จแล้ว
+    @Inject(forwardRef(() => ProductsService))
+    private readonly productsService: ProductsService
+  ) {}
+
+  getRecentBuyerCount(productId: string): number {
+    return 42; // มีลูกค้าซื้อเนื้อชิ้นนี้ไปแล้ว 42 คน
+  }
+}
+```
+
+```typescript filename="src/modules/products/products.service.ts"
+import { Injectable, Inject, forwardRef } from '@nestjs/common';
+import { OrdersService } from '../orders/orders.service';
+
+@Injectable()
+export class ProductsService {
+  constructor(
+    // ฝั่ง ProductsService ก็ต้องครอบ forwardRef เช่นเดียวกัน
+    @Inject(forwardRef(() => OrdersService))
+    private readonly ordersService: OrdersService
+  ) {}
+
+  getProductPopularity(productId: string) {
+    const buyers = this.ordersService.getRecentBuyerCount(productId);
+    return { productId, buyersCount: buyers, isHotItem: buyers > 30 };
+  }
+}
+```
+
+## 4. ผิด vs ถูก
+
+```typescript filename="src/nestjs.ts"
+// ❌ ผิด: กำหนด Provider เป็น Request Scope โดยไม่จำเป็น
+@Injectable({ scope: Scope.REQUEST }) // ❌ อันตราย
+export class MeatTaxCalculatorService {
+  // การทำแบบนี้จะทำให้ทุก Service และ Controller ที่ Inject ตัวนี้กลายเป็น Request Scope ไปด้วย
+  // เกิด Cascading Scope Effect ส่งผลให้ระบบช้าลง 3-5 เท่า และกิน RAM มหาศาล
+}
+```
+
+```typescript filename="src/nestjs.ts"
+// ✅ ถูก: ใช้ Default Singleton Scope เสมอ และส่ง Request Context ผ่านพารามิเตอร์ของเมธอด
+@Injectable() // ✅ Default Singleton
+export class MeatTaxCalculatorService {
+  calculateTax(amount: number, customerVatId?: string): number {
+    // คำนวณแบบ Pure Function ปลอดภัยและรวดเร็วที่สุด
+    return customerVatId ? amount * 0.07 : 0;
+  }
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `useFactory`**: เมื่อ Dependency ต้องพึ่งพาค่า Configuration จาก Environment หรือต้องต่อ Database Pool ก่อนสร้างอ็อบเจกต์
+- **ควรใช้ `useValue`**: เมื่อต้องการ Mock Service ในไฟล์ทดสอบ `*.spec.ts`
+- **ไม่ควรใช้ `forwardRef()` พร่ำเพรื่อ**: การเกิด Circular Dependency มักเป็นสัญญาณเตือน (Code Smell) ว่าสถาปัตยกรรมกำลังสับสน ควรพิจารณาแยก Business Logic ส่วนกลางออกเป็น Service ที่สาม (เช่น `OrderStatsService`) ให้ทั้งสองฝ่ายเรียกใช้งาน
+
+## 6. คำถามสัมภาษณ์
+**ถาม**: อธิบายปรากฏการณ์ "Scope Bubbling" หรือ "Cascading Effect" ของ `Scope.REQUEST` ใน NestJS ว่าส่งผลต่อสถาปัตยกรรมอย่างไร?
+**ตอบ**: เมื่อ Provider ตัวใดตัวหนึ่งถูกประกาศเป็น `Scope.REQUEST` คลาสอื่นใดก็ตามใน Dependency Graph ที่ทำการ Inject Provider ตัวนั้น (รวมถึง Controller ที่เรียกใช้มัน) จะถูกยกระดับกลายเป็น Request Scope ตามไปด้วยโดยอัตโนมัติ ส่งผลให้ NestJS ต้องสร้าง Instance ใหม่ของห่วงโซ่นั้นทั้งหมดในทุกๆ HTTP Request ทำให้ประสิทธิภาพการประมวลผลลดลงอย่างรุนแรง
+
+---

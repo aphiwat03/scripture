@@ -1,0 +1,79 @@
+---
+title: Slow Query Logs
+category: DATABASE
+parentTitle: Query Performance
+version: EXPLAIN & pg_stat_statements
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในระบบ Production ที่มีคิวรีวิ่งเข้าออกหลายพันคำสั่งต่อวินาที เราไม่สามารถรู้ได้เลยว่าคิวรีตัวไหนเป็นต้นเหตุที่ทำให้ฐานข้อมูลทำงานหนัก หากไม่มีระบบเฝ้าติดตาม (Observability) โดยใน PostgreSQL 16 มี 2 กลไกหลักที่ต้องเปิดใช้งานคู่กันเสมอ:
+1. **`pg_stat_statements` Extension:** ส่วนขยายมาตรฐานที่ฝังตัวอยู่ในหน่วยความจำเพื่อรวบรวมสถิติของทุกคิวรีที่รันในระบบ โดยจะทำการ Normalize คิวรี (แทนที่ค่าพารามิเตอร์ด้วย `$1, $2`) แล้วเก็บสถิติว่าแต่ละคิวรีถูกเรียกไปกี่ครั้ง (`calls`) ใช้เวลารวมทั้งหมดเท่าไหร่ (`total_exec_time`) เวลาเฉลี่ยเท่าไหร่ (`mean_exec_time`) และอ่านบล็อกข้อมูลไปเท่าไหร่
+2. **Slow Query Logging (`log_min_duration_statement`):** การตั้งค่าให้ PostgreSQL บันทึกคิวรีที่ใช้เวลารันนานเกินเกณฑ์ที่กำหนด (เช่น เกิน 200ms หรือ 500ms) ลงในไฟล์ Log พร้อมค่าพารามิเตอร์จริง เพื่อให้นักพัฒนานำไปจำลองเหตุการณ์ซ้ำได้
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ทำไมเราต้องดูทั้ง **`total_exec_time` (เวลารวมสะสม)** และ **`mean_exec_time` (เวลาเฉลี่ยต่อครั้ง)** ใน `pg_stat_statements`?
+- **กรณีที่ 1 (คิวรีช้าแต่รันนานๆ ครั้ง):** คิวรีรายงานประจำเดือนใช้เวลา `mean_exec_time = 5,000 ms` (5 วินาที) แต่ถูกรันแค่วันละ 1 ครั้ง (`calls = 1`) กินเวลา CPU รวมแค่วันละ 5 วินาที
+- **กรณีที่ 2 (คิวรีระดับปานกลางแต่ถูกเรียกถี่มหาศาล - Death by a Thousand Cuts):** คิวรีเช็คสต็อกหน้าแรกใช้เวลา `mean_exec_time = 25 ms` (ดูเหมือนไม่ช้ามากจนไม่ติด Slow Query Log ที่ตั้งไว้ 200ms) แต่ถูกเรียกถึง 100,000 ครั้งต่อชั่วโมง! ส่งผลให้ `total_exec_time = 2,500,000 ms` ซึ่งเผาผลาญ CPU ของฐานข้อมูลไปมากกว่าคิวรีแรกถึง 500 เท่า!
+
+`pg_stat_statements` ช่วยให้เราจับผู้ร้ายทั้งสองกลุ่มนี้ได้อย่างแม่นยำ
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การเปิดใช้งานและตั้งค่า Slow Query Log และ `pg_stat_statements`
+การตั้งค่าระดับฐานข้อมูลหรือเซิร์ฟเวอร์เพื่อให้ PostgreSQL 16 เก็บสถิติและบันทึกคิวรีที่ช้าเกิน 250 มิลลิวินาที:
+
+```sql filename="sql/07_configure_slow_query_logging.sql"
+-- 1. สร้าง Extension pg_stat_statements ในฐานข้อมูล (ต้องมี shared_preload_libraries = 'pg_stat_statements' ใน postgresql.conf)
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
+-- 2. ตั้งค่าให้ฐานข้อมูล smart_butcher_db บันทึกทุกคิวรีที่ใช้เวลานานเกิน 250 ms ลงใน Log
+ALTER DATABASE smart_butcher_db SET log_min_duration_statement = '250ms';
+
+-- 3. ตั้งค่าให้บันทึกการรอ Lock ที่นานเกิน 1 วินาที เพื่อตรวจจับปัญหาคอขวดจากการแย่งทรัพยากร
+ALTER DATABASE smart_butcher_db SET log_lock_waits = 'on';
+```
+
+### ตัวอย่างที่ 2: คิวรีวิเคราะห์หา Top 10 คิวรีที่กินเวลาสะสมและอ่านดิสก์สูงสุดจาก `pg_stat_statements`
+สคริปต์สำหรับ Senior DBA / Fullstack Engineer ใช้รันตรวจสอบหาคิวรีที่เป็นคอขวดอันดับต้นๆ ของระบบ:
+
+```sql filename="sql/08_analyze_top_slow_queries.sql"
+-- ดึง 10 อันดับคิวรีที่ใช้เวลาประมวลผลรวม (total_exec_time) สูงที่สุดในระบบ พร้อมอัตราส่วน Cache Hit
+SELECT 
+    calls,
+    ROUND(total_exec_time::numeric, 2) AS total_time_ms,
+    ROUND(mean_exec_time::numeric, 2) AS avg_time_ms,
+    ROUND(max_exec_time::numeric, 2) AS max_time_ms,
+    rows AS total_rows_returned,
+    ROUND(
+        (shared_blks_hit::numeric / NULLIF(shared_blks_hit + shared_blks_read, 0)) * 100, 
+        2
+    ) AS cache_hit_ratio_pct,
+    LEFT(query, 120) AS query_snippet
+FROM pg_stat_statements
+WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+ORDER BY total_exec_time DESC
+LIMIT 10;
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การตั้งค่า `log_statement = 'all'`** | เปิดบันทึกทุกคิวรี (`all`) บน Production ตลอดเวลา ทำให้ Disk I/O เต็มและฐานข้อมูลช้าลงจากภาระการเขียน Log | ใช้ `log_min_duration_statement = '250ms'` เพื่อบันทึกเฉพาะคิวรีที่ช้าผิดปกติเท่านั้น |
+| **การดูแต่ `max_exec_time`** | สนใจแต่คิวรีที่เคยช้าสุดเพียงครั้งเดียว แต่ละเลยคิวรีที่ถูกเรียกนาทีละหมื่นครั้ง | จัดอันดับตาม `total_exec_time DESC` เพื่อหาคิวรีที่กินสัดส่วน CPU รวมของระบบมากที่สุดก่อน |
+| **การไม่รีเซ็ตสถิติหลังปรับจูน** | ปรับจูน Index เสร็จแล้วแต่ยังดูตัวเลขสะสมเก่าใน `pg_stat_statements` จนแยกไม่ออกว่าดีขึ้นหรือไม่ | เรียก `SELECT pg_stat_statements_reset();` หลังการ Deploy การปรับจูนใหญ่เพื่อเริ่มเก็บสถิติรอบใหม่ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรเปิด `pg_stat_statements` เมื่อ:** รันระบบบน Staging และ Production ทุกสภาพแวดล้อม (มี Overhead ต่ำมากเพียง ~1-2% แต่ให้ข้อมูลที่มีคุณค่ามหาศาล)
+- **ไม่ควรตั้ง `log_min_duration_statement = 0` บน Production เมื่อ:** ระบบมี Traffic สูง เพราะการเขียนไฟล์ Log ลงดิสก์ทุกคิวรีจะกลายเป็นคอขวด I/O เสียเอง
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: หากคุณได้รับแจ้งเตือนว่า CPU ของเซิร์ฟเวอร์ PostgreSQL พุ่งขึ้นไปที่ 95% ในขณะนี้ คุณจะใช้คำสั่งหรือขั้นตอนใดเพื่อหาสาเหตุทันทีและในระยะยาว?**
+  - **แนวคำตอบ:** 
+    1. **แก้ปัญหาเฉพาะหน้าทันที (Real-time):** คิวรีตาราง `pg_stat_activity` เพื่อดูว่ามีคิวรีใดกำลังรันค้างอยู่ (`state = 'active'`) หรือติดรอ Lock (`wait_event_type = 'Lock'`) นานผิดปกติ หากพบคิวรีที่ค้างและทำให้ระบบล่ม สามารถสั่งยกเลิกคิวรีนั้นอย่างปลอดภัยด้วย `SELECT pg_cancel_backend(pid);`
+    2. **วิเคราะห์หาต้นตอ (Root Cause):** คิวรีตาราง `pg_stat_statements` โดยเรียงตาม `total_exec_time DESC` และ `shared_blks_read DESC` เพื่อหาคิวรีที่เผาผลาญ CPU และ I/O สูงสุด แล้วนำคิวรีนั้นไปรัน `EXPLAIN (ANALYZE, BUFFERS)` เพื่อสร้าง Index หรือเขียนคิวรีใหม่
+- **Q2: ความแตกต่างระหว่าง `pg_cancel_backend(pid)` กับ `pg_terminate_backend(pid)` คืออะไร?**
+  - **แนวคำตอบ:** `pg_cancel_backend(pid)` จะส่งสัญญาณ `SIGINT` ไปยกเลิกเฉพาะ **คิวรีปัจจุบันที่กำลังรันอยู่** โดยที่ Connection ของแอปพลิเคชันยังคงไม่หลุด (ปลอดภัยกว่า ควรใช้เป็นอันดับแรก) ส่วน `pg_terminate_backend(pid)` จะส่ง `SIGTERM` เพื่อ **ตัดการเชื่อมต่อและฆ่า Process นั้นทิ้งทันที** ซึ่งจะทำการ Rollback ทั้ง Transaction ที่ค้างอยู่ (ใช้เมื่อ `pg_cancel_backend` ไม่สามารถหยุดการทำงานได้ หรือเมื่อ Process ค้างอยู่ในสถานะ `idle in transaction`)
+
+---

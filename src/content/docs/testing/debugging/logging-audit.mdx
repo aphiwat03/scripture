@@ -1,0 +1,186 @@
+---
+title: Logging Audit
+category: TESTING & QUALITY
+parentTitle: Debugging
+version: Node Inspector & DevTools
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+บนเซิร์ฟเวอร์ Production เราไม่สามารถแนบ VS Code Debugger เข้าไปหยุดการทำงานของระบบที่มีลูกค้ากำลังสั่งซื้อเนื้อพร้อมกันหลายร้อยคนได้ ดังนั้นเครื่องมือเดียวที่จะบอกเราได้ว่าเกิดอะไรขึ้นคือ **Structured Logging** ควบคู่ไปกับการดูแลความปลอดภัยของ Dependencies ด้วย **`npm audit`**:
+1. **Structured JSON Logging (เช่น Pino ใน NestJS 11)**: แทนที่จะพิมพ์ข้อความธรรมดาอย่าง `console.log("Order created")` เราจะบันทึกเป็นออบเจกต์ JSON บรรทัดเดียวที่มีฟิลด์มาตรฐาน เช่น `level`, `timestamp`, `correlationId`, `orderId`, `userId` เพื่อให้ระบบอย่าง Grafana Loki, Datadog หรือ CloudWatch สามารถค้นหาและกรองข้อมูลได้ทันที
+2. **Sensitive Data Redaction**: ปิดบังข้อมูลส่วนบุคคล (PII) เช่น อีเมลลูกค้า เบอร์โทรศัพท์ หรือเลขบัตรเครดิตใน Log โดยอัตโนมัติ
+3. **Dependency Vulnerability Scanning (`npm audit`)**: ตรวจสอบแพ็กเกจใน `package-lock.json` เทียบกับฐานข้อมูลช่องโหว่สากล (CVE / GitHub Advisory Database)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+- **ทำไม `console.log` จึงเป็นคอขวดใน Production**: `console.log` ใน Node.js ทำงานแบบ Synchronous เมื่อเขียนออกไปยังปลายทางบางประเภท และสร้างข้อความที่ไม่มีโครงสร้างตายตัว ในขณะที่ไลบรารีอย่าง **Pino** จัดการ Serialization เป็น JSON ด้วยความเร็วสูงและรองรับออปชัน `redact` ที่เดินสำรวจคีย์ในออบเจกต์เพื่อแทนที่ค่าความลับด้วย `"[Redacted]"` ก่อนส่งออกไปยัง Standard Output (`stdout`)
+- **กลไกของ `npm audit`**: อ่านต้นไม้ของแพ็กเกจทั้งหมดใน `package-lock.json` (รวมถึง Transitive Dependencies ที่แพ็กเกจอื่นดึงมาอีกทอดหนึ่ง) แล้วส่งรายการชื่อและเลขเวอร์ชันไปตรวจสอบกับ Registry หากพบช่องโหว่ระดับ `high` หรือ `critical` คำสั่ง `npm audit --audit-level=high` จะคืนค่า Exit Code ที่ไม่ใช่ 0 เพื่อหยุด CI Pipeline ทันที
+
+<Callout type="warning" title="ระวังการใช้ npm audit fix --force โดยไม่ตรวจสอบ">
+คำสั่ง npm audit fix --force อาจทำการอัปเกรดแพ็กเกจข้าม Major Version (Breaking Change) โดยอัตโนมัติซึ่งอาจทำให้โปรเจกต์พังได้ หากช่องโหว่อยู่ในแพ็กเกจย่อยระดับลึก (Transitive Dependency) ที่ผู้พัฒนายังไม่ออกเวอร์ชันหลักใหม่ แนะนำให้ใช้ฟีเจอร์ overrides ในไฟล์ package.json เพื่อบังคับอัปเกรดเฉพาะแพ็กเกจย่อยตัวที่มีปัญหาอย่างจำเพาะเจาะจง
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1 (ระดับพื้นฐาน): ตัวจัดการ Structured JSON Logger พร้อมระบบ Redaction ข้อมูลความลับและ Correlation ID
+โค้ดสร้าง Logger มาตรฐานสำหรับระบบร้านค้าเนื้อพรีเมียมที่ซ่อนข้อมูลอ่อนไหวของ `User` และ `Payment` โดยอัตโนมัติ
+
+```typescript filename="src/observability/structured-butcher-logger.ts"
+export type LogLevel = 'info' | 'warn' | 'error';
+
+export interface StructuredLogEntry {
+  timestamp: string;
+  level: LogLevel;
+  correlationId: string;
+  service: 'smart-butcher-api';
+  event: string;
+  context: Record<string, unknown>;
+}
+
+const SENSITIVE_KEYS = new Set([
+  'password',
+  'creditCardNumber',
+  'cvv',
+  'promptPayQrRaw',
+  'email',
+]);
+
+export function redactSensitiveFields(
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  const safeCopy: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(input)) {
+    if (SENSITIVE_KEYS.has(key)) {
+      safeCopy[key] = '[REDACTED]';
+    } else if (
+      typeof value === 'object' &&
+      value !== null &&
+      !Array.isArray(value)
+    ) {
+      safeCopy[key] = redactSensitiveFields(value as Record<string, unknown>);
+    } else {
+      safeCopy[key] = value;
+    }
+  }
+
+  return safeCopy;
+}
+
+export function createStructuredLog(
+  level: LogLevel,
+  correlationId: string,
+  event: string,
+  context: Record<string, unknown>,
+): StructuredLogEntry {
+  return {
+    timestamp: new Date().toISOString(),
+    level,
+    correlationId,
+    service: 'smart-butcher-api',
+    event,
+    context: redactSensitiveFields(context),
+  };
+}
+```
+
+### ตัวอย่างที่ 2 (ระดับ Production): การบันทึก Audit Log ครบวงจรของธุรกรรมสั่งซื้อเนื้อและการตั้งค่า `overrides` ใน `package.json` เพื่อแก้ช่องโหว่ `npm audit`
+ตัวอย่างการผูก `correlationId` เข้ากับการทำงานของ `User`, `Product`, `Order` และ `Payment` เพื่อให้สามารถค้นหาเหตุการณ์ทั้งหมดของคำสั่งซื้อเดียวได้ทันที
+
+```typescript filename="src/services/observable-checkout.service.ts"
+import type { Order, Payment, Product, User } from '../domain/strict-payment-Guard';
+import {
+  createStructuredLog,
+  type StructuredLogEntry,
+} from '../observability/structured-butcher-logger';
+
+export class ObservableCheckoutService {
+  private readonly logs: StructuredLogEntry[] = [];
+
+  recordCheckoutTransaction(
+    correlationId: string,
+    user: User,
+    product: Product,
+    order: Order,
+    payment: Payment,
+  ): StructuredLogEntry {
+    const entry = createStructuredLog(
+      payment.status === 'FAILED' ? 'error' : 'info',
+      correlationId,
+      'butcher.order.checkout.processed',
+      {
+        userId: user.id,
+        email: user.email, // จะถูกแปลงเป็น "[REDACTED]" โดยอัตโนมัติ!
+        productId: product.id,
+        sku: product.sku,
+        orderId: order.id,
+        totalAmount: order.totalAmount,
+        paymentId: payment.id,
+        paymentStatus: payment.status,
+      },
+    );
+
+    this.logs.push(entry);
+    return entry;
+  }
+
+  getLogsByCorrelationId(correlationId: string): readonly StructuredLogEntry[] {
+    return this.logs.filter((log) => log.correlationId === correlationId);
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/observability/logging.compare.ts"
+import type { Payment, User } from '../domain/strict-payment-Guard';
+
+// ❌ ผิด (Anti-pattern): ใช้ console.log พิมพ์ข้อความปนกับข้อมูลส่วนบุคคลของลูกค้าโดยไม่มี Correlation ID
+export function logPaymentBad(user: User, payment: Payment): void {
+  console.log(
+    'User ' +
+      user.email +
+      ' paid ' +
+      String(payment.amount) +
+      ' status=' +
+      payment.status,
+  );
+}
+
+// ✅ ถูก (Best Practice): ใช้ Structured JSON Log ที่มี Correlation ID และปิดบัง PII เสมอ
+export function logPaymentGood(
+  correlationId: string,
+  user: User,
+  payment: Payment,
+): string {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    level: 'info',
+    correlationId,
+    event: 'payment.status.recorded',
+    userId: user.id,
+    orderId: payment.orderId,
+    amount: payment.amount,
+    status: payment.status,
+  };
+  return JSON.stringify(entry);
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+- **ควรใช้ Structured Logging พร้อม `correlationId` เสมอเมื่อ**: รันระบบบน Staging และ Production เพื่อให้สามารถติดตาม Request หนึ่งตัวที่วิ่งจาก Next.js 16 มายัง NestJS 11 ไปจนถึงฐานข้อมูลได้ครบทุกขั้นตอน
+- **ควรรัน `npm audit --omit=dev --audit-level=high` ใน CI เสมอ**: เพื่อตรวจสอบเฉพาะแพ็กเกจที่จะถูกนำขึ้นรันบน Production จริง (`dependencies`) และบล็อกการ Deploy ทันทีหากพบช่องโหว่ระดับรุนแรง
+- **ไม่ควรใช้**: ห้ามบันทึกข้อมูลรหัสผ่าน, JWT Token, เลขบัตรเครดิต หรือ QR Payload ดิบลงในระบบ Log เด็ดขาดเพราะเป็นการละเมิดมาตรฐานความปลอดภัยและกฎหมายคุ้มครองข้อมูลส่วนบุคคล (PDPA / GDPR)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+
+**Q1: `Correlation ID` (หรือ `Request ID` / `Trace ID`) คืออะไร และช่วยชีวิตนักพัฒนาอย่างไรเมื่อต้อง Debug ปัญหาบน Production ที่มีผู้ใช้งานพร้อมกัน 10,000 คน?**
+- **แนวคำตอบ**: ในระบบที่มีผู้ใช้งานพร้อมกันจำนวนมาก Log ของลูกค้าทุกคนจะไหลปนกันในเวลาเดียวกันระดับมิลลิวินาที การสร้าง `Correlation ID` (เช่น UUID ที่สร้างตั้งแต่หน้าประตู API Gateway หรือ Next.js Middleware แล้วส่งต่อผ่าน HTTP Header `x-correlation-id` ไปยังทุกบริการ) ช่วยให้นักพัฒนาสามารถกรองดู Log เฉพาะของคำสั่งซื้อที่มีปัญหาเพียงรายการเดียวตั้งแต่ต้นจนจบได้ภายในคลิกเดียว
+
+**Q2: ทำไมใน CI Pipeline เรามักใช้คำสั่ง `npm audit --omit=dev --audit-level=high` แทนการใช้ `npm audit` เปล่าๆ?**
+- **แนวคำตอบ**: เพราะ `npm audit` เปล่าๆ จะตรวจสอบรวมถึง `devDependencies` (เช่น เครื่องมือสร้างเอกสารหรือ Linter ที่รันเฉพาะในเครื่องนักพัฒนาแต่ไม่ได้ถูกนำขึ้นเซิร์ฟเวอร์ Production) และจะทำให้ CI พังแม้พบช่องโหว่ระดับ `low` (เช่น Regular Expression DoS ในเครื่องมือ CLI) การระบุ `--omit=dev --audit-level=high` ช่วยให้ทีมโฟกัสแก้ไขช่องโหว่ที่มีความเสี่ยงจริงต่อระบบ Production โดยไม่เกิดอาการล้าจากการแจ้งเตือนที่เกินจริง (Alert Fatigue)
+
+---

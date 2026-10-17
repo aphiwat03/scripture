@@ -1,0 +1,47 @@
+---
+title: Anti-patterns
+category: BACKEND
+parentTitle: Docker
+version: Docker v27 & Compose v2
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การใช้แท็ก `:latest` สำหรับ Base Image (`FROM node:latest` หรือ `postgres:latest`)**:
+   ทำให้การ Build ขาดความแน่นอน (Non-deterministic) วันหนึ่งเมื่อ Node.js หรือ PostgreSQL ออก Major Version ใหม่ ระบบอาจพังทันทีโดยที่ไม่ได้แก้โค้ดเลย ต้องระบุเวอร์ชันให้ชัดเจน เช่น `node:22-alpine` และ `postgres:16-alpine`
+2. **การคัดลอกโค้ดทั้งหมดก่อนรัน `pnpm install` ใน Dockerfile**:
+   ทำให้เสียประโยชน์จาก Docker Layer Cache อย่างสิ้นเชิง ส่งผลให้ทุกครั้งที่แก้โค้ดต้องดาวน์โหลดแพ็กเกจใหม่ทั้งหมด
+3. **การลืมรัน `prisma generate` ในขั้นตอน Build สำหรับ Alpine Linux**:
+   ทำให้ Prisma Client ไม่มี Binary Engine ที่ตรงกับสถาปัตยกรรมของ Container (`linux-musl-openssl-3.0.x`) และเกิดข้อผิดพลาดทันทีที่เริ่มรันแอปพลิเคชัน
+4. **การรัน Container ด้วยสิทธิ์ `root` โดยไม่เปลี่ยนเป็น `USER node`**:
+   เพิ่มความเสี่ยงด้านความปลอดภัยอย่างมากหากแอปพลิเคชันถูกโจมตี
+5. **การไม่กำหนด Resource Limits (`cpus`, `memory`)**:
+   หากโพรเซสหนึ่งเกิด Memory Leak หรือใช้ CPU เต็ม 100% จะดึงทรัพยากรของเครื่องโฮสต์จนทำให้ฐานข้อมูล PostgreSQL ที่อยู่บนเครื่องเดียวกันล่มตามไปด้วย
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+- [ ] มีไฟล์ `.dockerignore` ที่คัดกรอง `node_modules`, `dist`, `.git` และไฟล์ `.env` ออกจากการ Build เสมอ
+- [ ] ใช้ Multi-stage `Dockerfile` ที่แยกขั้นตอน `deps`, `builder` และ `runner` เพื่อลดขนาด Image และตัด `devDependencies` ออก
+- [ ] รัน `prisma generate` ในขั้นตอน Build และใช้ `prisma migrate deploy` สำหรับการอัปเดตฐานข้อมูลใน Production
+- [ ] ตั้งค่า `USER node` ใน Stage สุดท้ายของ `Dockerfile` และใช้ `dumb-init` ร่วมกับ `app.enableShutdownHooks()`
+- [ ] ผูกพอร์ตของ NestJS เข้ากับ `0.0.0.0` (`await app.listen(port, '0.0.0.0')`)
+- [ ] กำหนด Named Volume สำหรับเก็บข้อมูลของ PostgreSQL 16 และผูกพอร์ตฐานข้อมูลบนโฮสต์ไว้ที่ `127.0.0.1` เท่านั้น
+- [ ] ตั้งค่า `healthcheck` ให้กับทั้งฐานข้อมูลและ API พร้อมใช้ `depends_on: { condition: service_healthy }`
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+หลังจากจัดเตรียมสภาพแวดล้อมด้วย Docker และ Docker Compose เรียบร้อยแล้ว แนะนำให้ศึกษาต่อในหัวข้อต่อไปนี้เพื่อดูแลระบบระดับ Production อย่างครบวงจร:
+
+1. **การบริหารจัดการฐานข้อมูล PostgreSQL 16 เชิงลึก**: ศึกษาการตั้งค่าฐานข้อมูล การทำ Migration และการสำรองข้อมูลใน Volume เพิ่มเติมที่ [PostgreSQL](/docs/database/postgresql), [Migrations](/docs/database/migrations) และ [Backup](/docs/database/backup)
+2. **การจัดการ Connection Pool ในระบบ Container**: เรียนรู้การตั้งค่าจำนวนการเชื่อมต่อฐานข้อมูลที่เหมาะสมเมื่อขยายจำนวน Container ของ NestJS ที่ [Connection Pooling](/docs/database/connection-pooling)
+3. **การทำเอกสาร API มาตรฐานและการเชื่อมต่อ AI**: ดูวิธีการเปิดหน้าเอกสาร OpenAPI และการเชื่อมต่อบริการภายนอกได้ที่ [Swagger](/docs/backend/swagger) และ [AI Integration](/docs/backend/ai-integration)
+4. **การผสาน Docker เข้ากับระบบ CI/CD และการทดสอบ**: ศึกษาการรัน Automated Test และ Pipeline อัตโนมัติได้ที่ [Git Hooks & CI](/docs/testing/git-hooks) และ [Backend Testing](/docs/testing/backend-testing)

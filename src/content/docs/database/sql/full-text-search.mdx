@@ -1,0 +1,143 @@
+---
+title: Full-Text Search
+category: DATABASE
+parentTitle: SQL
+version: SQL:2023 & PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เมื่อลูกค้าค้นหาเนื้อชิ้นโปรดบนหน้าเว็บ **Smart Butcher Marketplace**:
+- หากค้นหาด้วยรหัสบาร์โค้ดที่ทราบคำขึ้นต้น เช่น `WAGYU%` คำสั่ง **`LIKE` / `ILIKE`** จะทำงานได้ดีมาก
+- แต่หากลูกค้าพิมพ์คำว่า `"เนื้อวัว ออสเตรเลีย ดรายเอจ สเต๊ก"` การใช้ `LIKE '%คำ%'` จะล้มเหลวทันที ทั้งทำงานช้ามาก ไม่เข้าใจรากศัพท์ และไม่สามารถเรียงลำดับความตรงเป้าหมาย (Relevance Ranking) ได้ การใช้ **Full-Text Search (FTS)** ใน PostgreSQL จึงเป็นคำตอบระดับ Enterprise
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **ปัญหาของ Leading Wildcard (`%pattern`)**:
+   โครงสร้าง B-Tree Index ถูกจัดเรียงตามลำดับตัวอักษรจากซ้ายไปขวา:
+   - `WHERE name LIKE 'Wagyu%'` (Trailing Wildcard) สามารถใช้ประโยชน์จาก B-Tree Index ค้นหาแบบ Range Seek ได้ ($O(\log N)$)
+   - `WHERE name LIKE '%Wagyu%'` (Leading Wildcard) **ไม่สามารถใช้ B-Tree Index ได้เลย!** ฐานข้อมูลถูกบังคับให้ต้องสแกนอ่านข้อความทุกแถวในตารางมาแกะดูทีละตัวอักษร
+2. **กลไกของ Full-Text Search (FTS)**:
+   - **`to_tsvector('simple', text)`**: แปลงข้อความเป็นเวกเตอร์ของคำ (Lexemes) พร้อมบันทึกตำแหน่งของคำในประโยค
+   - **`to_tsquery('simple', query)`**: แปลงคำค้นหาเป็นเงื่อนไขทางตรรกศาสตร์ เช่น `เนื้อ & วากิว` (AND), `สเต๊ก | ทีโบน` (OR), `!หมู` (NOT)
+   - **Match Operator `@@`**: ตัวดำเนินการตรวจสอบว่าเวกเตอร์ของเอกสารตรงกับเงื่อนไขของ Query หรือไม่
+   - **`ts_rank(vector, query)`**: คำนวณคะแนนความเกี่ยวข้อง (Relevance Score) ตามความถี่และตำแหน่งของคำ
+   - **GIN Index (Generalized Inverted Index)**: อินเด็กซ์แบบกลับด้านที่ทำหน้าที่เป็นสารบัญเก็บคำศัพท์ทุกคำ พร้อมรายการแถวที่คำนั้นปรากฏอยู่ ทำให้การค้นหาข้อความรวดเร็วในระดับเสี้ยววินาที
+
+```text filename="docs/database/sql.txt"
++─────────────────────────────────────────────────────────────────────────────+
+|               การทำงานของ FULL-TEXT SEARCH (GIN INDEX)                      |
++─────────────────────────────────────────────────────────────────────────────+
+| ข้อความ: "เนื้อวากิว ดรายเอจ 45 วัน พรีเมียม"                                     |
+|                       │                                                     |
+|                       ▼ to_tsvector                                         |
+| '45':4 'ดรายเอจ':3 'พรีเมียม':6 'วัน':5 'เนื้อวากิว':1,2                          |
+|                       │                                                     |
+|                       ▼ จัดทำ GIN Index (สารบัญแบบกลับด้าน)                     |
+| คำว่า 'ดรายเอจ'   ──> [ ปรากฏใน Product ID: 2, 3, 7 ]                         |
+| คำว่า 'เนื้อวากิว' ──> [ ปรากฏใน Product ID: 1, 4, 6 ]                         |
+|                       │                                                     |
+|                       ▼ เมื่อ User ค้นหา: to_tsquery('ดรายเอจ & เนื้อวากิว')   |
+| Engine นำ List มา Intersect กันทันทีในหน่วยความจำ ไม่ต้องอ่าน Full Table Scan!  |
++─────────────────────────────────────────────────────────────────────────────+
+```
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การค้นหารหัสสินค้าแบบ Case-insensitive ด้วย `ILIKE`
+ค้นหาสินค้าที่มีรหัส SKU ขึ้นต้นด้วยคำว่า `'wagyu'` โดยไม่สนใจตัวพิมพ์เล็ก-พิมพ์ใหญ่:
+
+```sql filename="sql/sql.sql"
+-- ค้นหาแบบ Prefix Match ซึ่งสามารถใช้ประโยชน์จาก B-Tree Index ได้
+SELECT 
+    id,
+    sku,
+    name,
+    price_per_kg
+FROM products
+WHERE sku ILIKE 'WAGYU%' -- Trailing wildcard สามารถใช้ Index ได้
+ORDER BY sku ASC;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| id | sku | name | price_per_kg |
+| :--- | :--- | :--- | :--- |
+| 1 | WAGYU-A5-RIB | Miyazaki Wagyu A5 Ribeye | 4500.00 |
+
+### ตัวอย่างที่ 2: ระบบ Full-Text Search พร้อมจัดอันดับความตรงเป้าหมายด้วย `ts_rank`
+สร้างระบบค้นหาเนื้อขั้นสูง รองรับคำเชื่อมทางตรรกะ และเรียงลำดับผลลัพธ์ตามความเกี่ยวข้อง:
+
+```sql filename="sql/sql.sql"
+-- ค้นหาชิ้นเนื้อด้วย Full-Text Search รองรับการตัดคำและคำนวณ Ranking
+SELECT 
+    id,
+    sku,
+    name,
+    price_per_kg,
+    -- คำนวณคะแนนความตรงเป้าหมายของคำค้น
+    ts_rank(
+        to_tsvector('simple', name), 
+        to_tsquery('simple', 'Dry-Aged & Tomahawk')
+    ) AS relevance_score
+FROM products
+WHERE to_tsvector('simple', name) @@ to_tsquery('simple', 'Dry-Aged & Tomahawk')
+ORDER BY relevance_score DESC;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| id | sku | name | price_per_kg | relevance_score |
+| :--- | :--- | :--- | :--- | :--- |
+| 3 | TOMAHAWK-DA60-PRM | 60-Day Dry-Aged Tomahawk Prime | 3600.00 | 0.0991032 |
+
+### การสร้าง GIN Index สำหรับ Full-Text Search บนตารางจริง
+```sql filename="sql/sql.sql"
+-- สร้าง Functional GIN Index เพื่อเร่งความเร็วการค้นหาให้เร็วขึ้นหลายร้อยเท่า
+CREATE INDEX idx_products_name_fts 
+ON products 
+USING GIN (to_tsvector('simple', name));
+```
+
+**โค้ดเทียบเคียงใน Prisma Client:**
+```typescript filename="src/sql.ts"
+// Prisma Client รองรับ Mode insensitive สำหรับการค้นหาข้อความ
+const products = await prisma.product.findMany({
+  where: {
+    name: {
+      contains: 'wagyu',
+      mode: 'insensitive', // เทียบเท่า ILIKE '%wagyu%'
+    },
+  },
+});
+```
+
+## 4. ผิด vs ถูก (Anti-patterns & Best Practices)
+
+### ❌ โค้ดที่ผิด: ใช้ `LIKE '%คำค้น%'` บนตารางขนาดใหญ่โดยไม่มี Index พิเศษ
+```sql filename="sql/sql.sql"
+-- ผิด: การมี % อยู่ข้างหน้า ทำให้ B-Tree Index ใช้งานไม่ได้ เกิด Full Table Scan ทุกครั้ง
+SELECT * 
+FROM products 
+WHERE name LIKE '%Wagyu%';
+```
+
+### ✅ โค้ดที่ถูก: ใช้ Full-Text Search ร่วมกับ GIN Index หรือ Trigram Index
+```sql filename="sql/sql.sql"
+-- ถูกต้อง: ใช้ FTS ร่วมกับ GIN Index หรือ extension pg_trgm เพื่อการค้นหาระดับมิลลิวินาที
+SELECT id, sku, name 
+FROM products 
+WHERE to_tsvector('simple', name) @@ to_tsquery('simple', 'Wagyu');
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `LIKE 'prefix%'`:** ค้นหารหัสสินค้า, เลขที่ใบเสร็จ, หรือคำค้นที่ทราบส่วนหน้าแน่นอน
+- **ควรใช้ Full-Text Search (FTS):** ระบบค้นหาสินค้าในหน้าร้าน, แคตตาล็อกเนื้อ, บทความรีวิว, หรือเมื่อต้องการคะแนนความเกี่ยวข้อง (Relevance Ranking)
+- **ควรใช้ `pg_trgm` (Trigram):** เมื่อต้องการทำระบบค้นหาแบบแนะนำคำผิด (Fuzzy Search / Auto-complete)
+
+## 6. คำถามสัมภาษณ์ (Interview Questions)
+- **Q1: เหตุใด B-Tree Index จึงไม่สามารถช่วยเร่งความเร็วคำสั่ง `WHERE name LIKE '%wagyu'` ได้?**
+  - *คำตอบ:* เพราะโครงสร้างข้อมูลแบบ B-Tree ทำการจัดเรียงลำดับคีย์จากซ้ายไปขวาตามตัวอักษรแรกสุด การค้นหาจะใช้ประโยชน์จาก Index ได้ก็ต่อเมื่อทราบจุดเริ่มต้นของข้อมูล (Prefix) เพื่อวิ่งนำทางลงไปในกิ่งของ Tree ได้ เมื่อมีตัว Wildcard `%` อยู่หน้าสุด ฐานข้อมูลจะไม่ทราบว่าตัวอักษรแรกคืออะไร จึงไม่สามารถกระโดดข้ามกิ่งใน B-Tree ได้ และถูกบังคับให้ต้องอ่านข้อมูลทุกแถว
+- **Q2: โครงสร้างภายในของ GIN Index (Generalized Inverted Index) แตกต่างจาก B-Tree Index อย่างไร?**
+  - *คำตอบ:* B-Tree Index จะเก็บคู่ของ `(Index Key -> Row Pointer)` โดย 1 แถวจะมี 1 Entry ใน Index แต่ **GIN Index** เป็น **Inverted Index (ดัชนีแบบกลับด้าน)** โดยตัว Index จะแตกองค์ประกอบย่อยของข้อมูล (เช่น แตกประโยคออกเป็นคำแต่ละคำ) แล้วเก็บสารบัญว่า `(คำแต่ละคำ -> รายการของแถวทั้งหมดที่พบคำนี้)` เมื่อมีการค้นหาคำ ตัว GIN Index จะวิ่งไปดึงรายการแถวของคำนั้นออกมาผสานกันได้ทันทีในหน่วยความจำ
+
+---

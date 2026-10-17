@@ -1,0 +1,250 @@
+---
+title: Jest Matchers
+category: TESTING & QUALITY
+parentTitle: Jest
+version: Jest v29 & ts-jest
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+หากเปรียบเทียบการตรวจสอบสินค้าในร้านขายเนื้อ:
+- **`toBe` (Referential Identity)**: เปรียบเหมือน "การตรวจเลขไมโครชิปประจำตัววัว" ต้องเป็นวัวตัวเดียวกันที่ตำแหน่งหน่วยความจำเดียวกันเท่านั้น
+- **`toEqual` (Deep Structural Equality)**: เปรียบเหมือน "การเทียบสเปกชิ้นเนื้อ" แม้เนื้อสองชิ้นจะตัดมาจากวัวคนละตัว แต่ถ้าเป็นเนื้อสันนอก หนัก 300 กรัม ความหนา 2.5 ซม. เท่ากันทุกประการ ถือว่าตรงกัน
+- **`toStrictEqual` (Strict Prototype & Key Check)**: เปรียบเหมือน "การตรวจลึกถึงระดับ DNA และเอกสารรับรองมาตรฐานฟาร์ม" หากอ็อบเจกต์หนึ่งเป็น Class Instance แต่อีกอ็อบเจกต์เป็น Plain Object ธรรมดา หรือมีคีย์ที่เก็บค่า `undefined` ซ่อนอยู่ จะถือว่าไม่ผ่านทันที
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **`toBe(expected)`**: ทำงานผ่าน `Object.is(received, expected)` ใน JavaScript Runtime โดยไม่แปลงชนิดข้อมูล (No Type Coercion) และจัดการ Edge Cases ทางคณิตศาสตร์ได้แม่นยำ เช่น `Object.is(NaN, NaN)` ได้ `true` (ต่างจาก `===` ที่ได้ `false`) และ `Object.is(+0, -0)` ได้ `false`
+2. **`toEqual(expected)`**: ใช้อัลกอริทึม Deep Recursive Comparison วนสำรวจทุก Enumerable Property ของอ็อบเจกต์และอาร์เรย์ แต่มีข้อยกเว้นคือ:
+   - ไม่สนใจ `undefined` property: `{ a: undefined, b: 2 }` จะเท่ากับ `{ b: 2 }`
+   - ไม่เช็คความต่างของ Class Constructor: อ็อบเจกต์ที่สร้างจาก `new ButcherOrder()` จะเทียบเท่ากับ Plain Object `{ ... }` หากค่าข้างในเหมือนกัน
+3. **`toStrictEqual(expected)`**: ออกแบบมาเพื่อปิดช่องโหว่ของ `toEqual` โดยตรวจสอบ:
+   - ตรวจสอบ Constructor Prototype (`a.constructor === b.constructor`)
+   - ตรวจสอบคีย์ที่เป็น `undefined` อย่างเข้มงวด
+   - ตรวจสอบ Sparse Arrays (ช่องว่างที่ไม่ได้ถูกกำหนดค่าใน Array)
+4. **Floating Point Tolerance (`toBeCloseTo`)**: การคำนวณราคาและน้ำหนักเนื้อต้องเจอกับปัญหา Binary Floating-Point Arithmetic ตามมาตรฐาน IEEE 754 เช่น `0.1 + 0.2 === 0.30000000000000004` ฟังก์ชัน `toBeCloseTo(expected, numDigits)` จะคำนวณค่าคลาดเคลื่อนสัมพัทธ์ `|expected - received| < (10 ** -numDigits) / 2`
+
+## 3. ตารางสรุป Jest Matchers ยอดนิยมในระบบ Enterprise
+
+| หมวดหมู่ Matcher | เมธอด Matcher | วัตถุประสงค์การใช้งาน | ตัวอย่างการใช้งานใน Smart Butcher |
+| :--- | :--- | :--- | :--- |
+| **Identity & Deep Equality** | `toBe(val)` | ตรวจสอบ Primitive Types หรือ Object Reference เดียวกัน | `expect(order.status).toBe('COMPLETED')` |
+| | `toEqual(obj)` | ตรวจสอบโครงสร้างและค่าภายในแบบ Deep Comparison | `expect(cutSpec).toEqual({ thickness: 3, marbling: 4 })` |
+| | `toStrictEqual(obj)` | ตรวจสอบเข้มงวด รวม Constructor และ undefined keys | `expect(createdUser).toStrictEqual(new UserEntity(...))` |
+| **Truthiness & Nullability** | `toBeNull()` | ต้องมีค่าเป็น `null` เท่านั้น | `expect(payment.slipUrl).toBeNull()` |
+| | `toBeUndefined()` | ต้องยังไม่ถูกประกาศค่า (`undefined`) | `expect(product.discountReason).toBeUndefined()` |
+| | `toBeDefined()` | ต้องไม่ใช่ `undefined` (อาจเป็น null ได้) | `expect(order.confirmedAt).toBeDefined()` |
+| | `toBeTruthy()` | แปลงเป็น Boolean แล้วได้ค่าจริง (`true`) | `expect(product.isActive).toBeTruthy()` |
+| | `toBeFalsy()` | แปลงเป็น Boolean แล้วได้ค่าเท็จ (`false`) | `expect(product.isExpired).toBeFalsy()` |
+| **Numbers & Math** | `toBeGreaterThan(n)` | ตัวเลขต้องมากกว่า | `expect(product.stockQty).toBeGreaterThan(0)` |
+| | `toBeCloseTo(n, p)` | ตรวจสอบทศนิยมโดยไม่ให้บั๊ก IEEE 754 ทำลายผลลัพธ์ | `expect(totalAmount).toBeCloseTo(2450.75, 2)` |
+| **Strings & Regex** | `toMatch(regex)` | ตรวจสอบรูปแบบข้อความด้วย Regular Expression | `expect(order.orderNo).toMatch(/^ORD-2026-\d{6}$/)` |
+| | `toContain(str)` | ตรวจสอบ Substring หรือสมาชิกใน Primitive Array | `expect(order.tags).toContain('DRY_AGED')` |
+| **Arrays & Objects** | `toHaveLength(n)` | ตรวจสอบขนาดของ Array หรือ String | `expect(order.items).toHaveLength(2)` |
+| | `toHaveProperty(path, val)` | ตรวจสอบว่ามีคีย์ที่ระบุ และมีค่าตรงกันหรือไม่ | `expect(item).toHaveProperty('cutType', 'RIBEYE')` |
+| | `toMatchObject(partial)` | ตรวจสอบเฉพาะฟิลด์ที่สนใจ (Partial Matching) | `expect(order).toMatchObject({ status: 'PAID' })` |
+| **Asymmetric Matchers** | `expect.objectContaining` | จับคู่อ็อบเจกต์ย่อยที่ฝังอยู่ใน Arguments | `expect.objectContaining({ userId: 'usr-123' })` |
+| | `expect.arrayContaining` | จับคู่อาร์เรย์ที่มีสมาชิกเหล่านี้อยู่ครบ (ไม่สนลำดับ) | `expect(cutList).toEqual(expect.arrayContaining(['RIBEYE']))` |
+| | `expect.any(Constructor)` | จับคู่ชนิดข้อมูล เช่น สตริงที่สร้างขึ้นใหม่หรือ UUID | `expect(order.id).toEqual(expect.any(String))` |
+| **Exceptions & Errors** | `toThrow(ErrorClass/Msg)` | ฟังก์ชันต้องโยน Error ออกมาตรงตามที่ระบุ | `expect(() => cut()).toThrow(InvalidThicknessException)` |
+
+## 4. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การตรวจสอบความแม่นยำของราคา น้ำหนัก และความเข้มงวดของ Object
+การคำนวณราคายอดรวมคำสั่งซื้อที่มีส่วนลดโปรโมชันและภาษีมูลค่าเพิ่ม (VAT 7%):
+
+```typescript filename="src/services/pricing-calculator.spec.ts"
+export interface OrderItem {
+  id: string;
+  productId: string;
+  cutType: 'RIBEYE' | 'STRIPLOIN' | 'T_BONE' | 'TENDERLOIN' | 'PICANHA';
+  thicknessCm: number;
+  unitPrice: number;
+  quantity: number;
+  subtotal: number;
+}
+
+export class PricingCalculator {
+  public static calculateSubtotal(items: OrderItem[]): number {
+    return items.reduce((sum, item) => sum + (item.unitPrice * item.quantity), 0);
+  }
+
+  public static calculateVat(subtotal: number): number {
+    return subtotal * 0.07;
+  }
+
+  public static calculateGrandTotal(items: OrderItem[], discountPercent = 0): {
+    subtotal: number;
+    discountAmount: number;
+    netBeforeVat: number;
+    vatAmount: number;
+    grandTotal: number;
+  } {
+    const subtotal = this.calculateSubtotal(items);
+    const discountAmount = (subtotal * discountPercent) / 100;
+    const netBeforeVat = subtotal - discountAmount;
+    const vatAmount = this.calculateVat(netBeforeVat);
+    const grandTotal = netBeforeVat + vatAmount;
+
+    return {
+      subtotal,
+      discountAmount,
+      netBeforeVat,
+      vatAmount,
+      grandTotal,
+    };
+  }
+}
+
+describe('PricingCalculator', () => {
+  const sampleItems: OrderItem[] = [
+    {
+      id: 'itm-001',
+      productId: 'prd-dry-ribeye',
+      cutType: 'RIBEYE',
+      thicknessCm: 3.5,
+      unitPrice: 1250.50,
+      quantity: 2,
+      subtotal: 2501.00,
+    },
+    {
+      id: 'itm-002',
+      productId: 'prd-wagyu-picanha',
+      cutType: 'PICANHA',
+      thicknessCm: 2.0,
+      unitPrice: 850.25,
+      quantity: 1,
+      subtotal: 850.25,
+    },
+  ];
+
+  it('should calculate floating point VAT and grand total accurately without IEEE 754 precision issues', () => {
+    const result = PricingCalculator.calculateGrandTotal(sampleItems, 10); // ลด 10%
+
+    // subtotal = 2501.00 + 850.25 = 3351.25
+    expect(result.subtotal).toBeCloseTo(3351.25, 2);
+
+    // discount 10% = 335.125
+    expect(result.discountAmount).toBeCloseTo(335.125, 2);
+
+    // netBeforeVat = 3016.125
+    expect(result.netBeforeVat).toBeCloseTo(3016.125, 2);
+
+    // vat 7% = 3016.125 * 0.07 = 211.12875
+    expect(result.vatAmount).toBeCloseTo(211.13, 2);
+
+    // grandTotal = 3016.125 + 211.12875 = 3227.25375
+    expect(result.grandTotal).toBeCloseTo(3227.25, 2);
+  });
+
+  it('should differentiate between undefined properties and missing properties with toStrictEqual', () => {
+    class MeatDeliveryOrder {
+      constructor(
+        public orderId: string,
+        public specialInstructions: string | undefined
+      ) {}
+    }
+
+    const orderWithUndefined = new MeatDeliveryOrder('ORD-101', undefined);
+    const orderWithoutKey = { orderId: 'ORD-101' };
+
+    // toEqual มองข้าม undefined keys จึงผ่าน (Loose)
+    expect(orderWithUndefined).toEqual(orderWithoutKey);
+
+    // toStrictEqual ตรวจสอบละเอียดทั้ง Class Type และ Property จึงตรวจพบความต่างและไม่ผ่าน (Strict)
+    expect(orderWithUndefined).not.toStrictEqual(orderWithoutKey);
+  });
+});
+```
+
+### ตัวอย่างที่ 2: การใช้ Asymmetric Matchers ตรวจสอบ Payload ที่ซับซ้อนและการดักจับ Exceptions
+การตรวจสอบการออกใบแจ้งหนี้คำสั่งซื้อเนื้อสัตว์ที่ประกอบด้วยรหัส UUID สุ่ม และ Timestamp ของระบบ:
+
+```typescript filename="src/services/order-dispatch.spec.ts"
+import { randomUUID } from 'crypto';
+
+interface DispatchOrderResult {
+  orderId: string;
+  orderNo: string;
+  dispatchTimestamp: Date;
+  warehouseHub: string;
+  shippedItems: Array<{ sku: string; cutType: string; netWeightKg: number }>;
+}
+
+function dispatchButcherOrder(orderNo: string, items: Array<{ sku: string; cutType: string; netWeightKg: number }>): DispatchOrderResult {
+  if (!items || items.length === 0) {
+    throw new Error('Cannot dispatch an order with zero items');
+  }
+
+  return {
+    orderId: randomUUID(),
+    orderNo,
+    dispatchTimestamp: new Date(),
+    warehouseHub: 'CENTRAL_COLD_VAULT_BKK',
+    shippedItems: items,
+  };
+}
+
+describe('OrderDispatch - Asymmetric Matching', () => {
+  it('should dispatch order and match payload using asymmetric matchers for dynamic attributes', () => {
+    const rawItems = [
+      { sku: 'BEEF-WAGYU-RIB', cutType: 'RIBEYE', netWeightKg: 1.25 },
+      { sku: 'BEEF-ANGUS-TENDER', cutType: 'TENDERLOIN', netWeightKg: 0.85 },
+    ];
+
+    const result = dispatchButcherOrder('ORD-2026-998811', rawItems);
+
+    // ตรวจสอบโครงสร้างโดยไม่ต้อง Hardcode UUID และ Date เวลาจริง
+    expect(result).toEqual({
+      orderId: expect.any(String),
+      orderNo: expect.stringMatching(/^ORD-2026-\d{6}$/),
+      dispatchTimestamp: expect.any(Date),
+      warehouseHub: 'CENTRAL_COLD_VAULT_BKK',
+      shippedItems: expect.arrayContaining([
+        expect.objectContaining({
+          cutType: 'RIBEYE',
+          netWeightKg: expect.toBeCloseTo(1.25, 2),
+        }),
+      ]),
+    });
+  });
+
+  it('should throw an explicit error wrapped inside an invocation callback', () => {
+    // ต้องครอบด้วยลูกศร () => ... เพื่อให้ Jest ดักจับ Error ได้ตอนฟังก์ชันทำงาน
+    expect(() => dispatchButcherOrder('ORD-EMPTY', [])).toThrow(
+      'Cannot dispatch an order with zero items'
+    );
+  });
+});
+```
+
+## 5. ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+### ❌ สิ่งที่ผิด: ส่งผลลัพธ์ของฟังก์ชันที่โยน Error เข้า `expect()` ตรงๆ
+```typescript filename="src/jest.spec.ts"
+// พังทันที: ฟังก์ชัน execute ทันที และโยน Uncaught Exception ทำให้ Test Runner แครช
+// ก่อนที่ Matcher toThrow() จะมีโอกาสทำงาน
+expect(dispatchButcherOrder('ORD-EMPTY', [])).toThrow();
+```
+
+### ✅ สิ่งที่ถูก: ห่อหุ้มฟังก์ชันด้วย Arrow Function Callback
+```typescript filename="src/jest.spec.ts"
+// ถูกต้อง: Jest จะนำ Callback ไปสั่งรันในบล็อก try/catch ของ Matcher Engine
+expect(() => dispatchButcherOrder('ORD-EMPTY', [])).toThrow(
+  'Cannot dispatch an order with zero items'
+);
+```
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `toBeCloseTo`:** ในทุกการทดสอบที่เกี่ยวข้องกับเงิน (Currency, Subtotal, VAT, Discounts) หรือน้ำหนักเนื้อ (Gram, Kilogram) เสมอ
+- **ควรใช้ `toMatchObject`:** เมื่อรับ Response จาก API หรือ Database แล้วต้องการตรวจสอบเฉพาะฟิลด์ที่เป็นหัวใจหลัก (Core Business Attributes) เพื่อป้องกันไม่ให้เทสต์เปราะบาง (Brittle) เมื่อมีฟิลด์เสริมใหม่ๆ ถูกเพิ่มเข้ามาใน Entity
+- **ไม่ควรใช้ `toBe` กับ Object หรือ Array:** เพราะการเปรียบเทียบ Object References จะล้มเหลวเสมอแม้ข้อมูลข้างในจะเหมือนกันทุกประการ
+
+## 7. คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: จงยกตัวอย่างสถานการณ์ที่ `toEqual` ให้ผลลัพธ์ว่าผ่าน (Passed) แต่ `toStrictEqual` กลับแจ้งว่าล้มเหลว (Failed)?**
+  - *แนวคำตอบ:* เกิดขึ้นได้ใน 2 กรณีหลัก:
+    1. **ความแตกต่างของ Type Constructor:** เช่น การเปรียบเทียบ Object ที่สร้างจากคลาส `class MeatItem { sku = 'BEEF-01' }` กับ Plain Object `{ sku: 'BEEF-01' }` ในกรณีนี้ `toEqual` จะผ่านเพราะโครงสร้างคีย์-ค่าเหมือนกัน แต่ `toStrictEqual` จะล้มเหลวเพราะ Constructor ไม่ตรงกัน
+    2. **คีย์ที่เป็น `undefined`:** วัตถุ `{ id: 1, note: undefined }` กับ `{ id: 1 }` ตัว `toEqual` จะมองข้ามคีย์ที่มีค่า `undefined` และตัดสินว่าเท่ากัน แต่ `toStrictEqual` จะมองว่าโครงสร้างคีย์ไม่เท่ากันอย่างเข้มงวด
+- **Q2: ทำไมการใช้ `expect.objectContaining()` จึงเป็นแนวทางที่ดีกว่าการ Assert อ็อบเจกต์ทั้งก้อนใน Integration Testing?**
+  - *แนวคำตอบ:* เพราะช่วยลดปัญหา **Test Brittleness** ในระบบจริง Entity มีการพัฒนาอยู่ตลอดเวลาและอาจมีฟิลด์จำพวก `createdAt`, `updatedAt`, `auditId` หรือ Metadata เพิ่มเติม การ Assert ทั้งก้อนด้วย `toEqual` จะทำให้เทสต์พังทุกครั้งที่มีการเพิ่มคอลัมน์ใหม่ในฐานข้อมูล การใช้ `expect.objectContaining()` ช่วยให้เทสต์โฟกัสเฉพาะ Business Invariants (สิ่งที่ฟังก์ชันนั้นต้องรับประกันจริงๆ) ทำให้ชุดทดสอบดูแลรักษาง่ายและทนทานต่อการ Refactor โค้ด
+
+---

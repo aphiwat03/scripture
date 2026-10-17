@@ -1,0 +1,250 @@
+---
+title: N1 Query Fix
+category: BACKEND
+parentTitle: Prisma ORM
+version: Prisma 6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+1. **ปัญหา N+1 Query**: เกิดขึ้นเมื่อโค้ดดึงรายการหลักมา 1 ครั้ง (ได้ $N$ แถว เช่น ดึง `Category` 20 หมวดหมู่) แล้วนำมาวนลูป `for...of` หรือ `.map()` เพื่อยิงคิวรีดึงข้อมูลตารางลูกทีละแถวอีก $N$ ครั้ง รวมเป็น $N+1$ คิวรี ส่งผลให้ Latency พุ่งสูงขึ้นหลายสิบเท่าตามจำนวนแถว
+2. **Parameterized Raw Queries (`$queryRaw`, `$executeRaw`)**: แม้ Prisma Client จะรองรับคิวรีทั่วไปได้กว่า 95% แต่ในบางกรณีที่ต้องการใช้ฟีเจอร์ขั้นสูงของ PostgreSQL 16 เช่น Common Table Expressions (CTEs), Window Functions (`RANK() OVER (...)`), หรือ `FOR UPDATE SKIP LOCKED` เราสามารถเขียน SQL โดยตรงได้อย่างปลอดภัยผ่าน Tagged Template Literals ที่ป้องกัน SQL Injection อัตโนมัติ
+3. **Idempotent Seeding (`prisma/seed.ts`)**: การเตรียมข้อมูลตั้งต้นของระบบ (เช่น หมวดหมู่เนื้อมาตรฐาน, บัญชีผู้ดูแลระบบ) ที่สามารถรันซ้ำกี่ครั้งก็ได้โดยไม่เกิดข้อมูลซ้ำซ้อน ด้วยคำสั่ง `upsert`
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อคุณใช้ `include` หรือ Nested `select` ใน Prisma Client (เช่น ดึง 20 `Order` พร้อม `items`) Prisma จะไม่เกิดปัญหา N+1 เพราะ Query Engine ของ Prisma มีกลไก **Built-in Dataloader / Batching** ที่รวบรวม `orderId` ทั้ง 20 รายการไปคิวรีตาราง `order_items` รวดเดียวด้วย `WHERE order_id IN ($1, $2, ..., $20)` (รวมเป็น 2 คิวรีเสมอไม่ว่าจะมีกี่แถว) หรือใช้กลไก Relation Load Strategy แบบ Database `LATERAL JOIN` ในเวอร์ชันใหม่
+
+สำหรับการเขียน Raw SQL เมื่อใช้ `` prisma.$queryRaw`SELECT * FROM products WHERE sku = ${sku}` `` ตัวแปร `${sku}` จะไม่ได้ถูกนำไปต่อสตริงตรงๆ แต่จะถูกแปลงเป็น Parameterized Query (`$1`) ส่งแยกไปให้ PostgreSQL Engine ประมวลผล จึงปลอดภัยจาก SQL Injection 100%
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การเขียน Parameterized `$queryRaw` สำหรับจัดอันดับเนื้อขายดีด้วย PostgreSQL Window Function (พื้นฐาน)
+```typescript filename="src/modules/analytics/raw-ranking.service.ts"
+import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import { PrismaService } from '../../database/prisma.service';
+
+export interface TopSellingMeatRow {
+  productId: string;
+  sku: string;
+  productName: string;
+  categoryName: string;
+  totalSoldGrams: bigint;
+  totalRevenueThb: Prisma.Decimal;
+  rankInCategory: bigint;
+}
+
+@Injectable()
+export class RawRankingService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  // ใช้ Tagged Template Literal ($queryRaw`...`) ปลอดภัยจาก SQL Injection เสมอ
+  async getTopSellingMeatsPerCategory(
+    minSoldGrams: number,
+    topLimitPerCategory: number,
+  ) {
+    const rows = await this.prisma.$queryRaw<TopSellingMeatRow[]>`
+      WITH product_sales AS (
+        SELECT
+          p.id AS "productId",
+          p.sku AS "sku",
+          p.name AS "productName",
+          c.name AS "categoryName",
+          COALESCE(SUM(oi.weight_grams), 0) AS "totalSoldGrams",
+          COALESCE(SUM(oi.line_total_thb), 0) AS "totalRevenueThb",
+          DENSE_RANK() OVER (
+            PARTITION BY c.id
+            ORDER BY COALESCE(SUM(oi.line_total_thb), 0) DESC
+          ) AS "rankInCategory"
+        FROM products p
+        INNER JOIN categories c ON c.id = p.category_id
+        LEFT JOIN order_items oi ON oi.product_id = p.id
+        LEFT JOIN orders o ON o.id = oi.order_id AND o.status IN ('PAID', 'PREPARING_CUT', 'SHIPPED', 'DELIVERED')
+        WHERE p.deleted_at IS NULL
+        GROUP BY p.id, p.sku, p.name, c.id, c.name
+        HAVING COALESCE(SUM(oi.weight_grams), 0) >= ${minSoldGrams}
+      )
+      SELECT
+        "productId",
+        "sku",
+        "productName",
+        "categoryName",
+        "totalSoldGrams",
+        "totalRevenueThb",
+        "rankInCategory"
+      FROM product_sales
+      WHERE "rankInCategory" <= ${topLimitPerCategory}
+      ORDER BY "categoryName" ASC, "rankInCategory" ASC
+    `;
+
+    // แปลง BigInt และ Decimal จาก Raw SQL ให้เป็น JSON-safe numbers
+    return rows.map((row) => ({
+      productId: row.productId,
+      sku: row.sku,
+      productName: row.productName,
+      categoryName: row.categoryName,
+      totalSoldGrams: Number(row.totalSoldGrams),
+      totalRevenueThb: Number(row.totalRevenueThb),
+      rankInCategory: Number(row.rankInCategory),
+    }));
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การเขียนสคริปต์ Idempotent Database Seeding ด้วย `upsert` (ขั้นสูง)
+```typescript filename="prisma/seed.ts"
+import { PrismaClient, MeatGrade, UserRole, Prisma } from '@prisma/client';
+import * as bcrypt from 'bcrypt';
+
+const prisma = new PrismaClient();
+
+async function main() {
+  console.log('🌱 Starting Smart Butcher Marketplace Idempotent Seed...');
+
+  // 1. Upsert ผู้ดูแลระบบและหัวหน้าเชฟแล่เนื้อ (รันซ้ำกี่ครั้งก็ไม่พังด้วย unique email)
+  const adminPasswordHash = await bcrypt.hash('ButcherAdmin@2026!', 12);
+
+  const adminUser = await prisma.user.upsert({
+    where: { email: 'admin@smartbutcher.co.th' },
+    update: {
+      fullName: 'Master Butcher Admin',
+      role: UserRole.ADMIN,
+      isActive: true,
+    },
+    create: {
+      email: 'admin@smartbutcher.co.th',
+      passwordHash: adminPasswordHash,
+      fullName: 'Master Butcher Admin',
+      phoneNumber: '0819998888',
+      role: UserRole.ADMIN,
+      isActive: true,
+    },
+  });
+
+  // 2. Upsert หมวดหมู่เนื้อพรีเมียมมาตรฐาน
+  const categoriesData = [
+    {
+      slug: 'japanese-wagyu-a5',
+      name: 'Japanese Wagyu A5',
+      description: 'เนื้อวากิวสายพันธุ์ขนดำแท้นำเข้าจากประเทศญี่ปุ่น เกรด A5 BMS 10-12',
+      displaySort: 1,
+    },
+    {
+      slug: 'dry-aged-craft-cuts',
+      name: 'Dry-Aged Craft Cuts',
+      description: 'เนื้อบ่มในห้องควบคุมอุณหภูมิและความชื้นพิเศษนาน 30 ถึง 60 วัน',
+      displaySort: 2,
+    },
+  ];
+
+  const categoryMap = new Map<string, string>();
+
+  for (const cat of categoriesData) {
+    const record = await prisma.category.upsert({
+      where: { slug: cat.slug },
+      update: {
+        name: cat.name,
+        description: cat.description,
+        displaySort: cat.displaySort,
+      },
+      create: cat,
+    });
+    categoryMap.set(cat.slug, record.id);
+  }
+
+  // 3. Upsert รายการสินค้าเนื้อตั้งต้นโดยอ้างอิงตามรหัส SKU ที่เป็น Unique
+  const wagyuCategoryId = categoryMap.get('japanese-wagyu-a5')!;
+  const dryAgedCategoryId = categoryMap.get('dry-aged-craft-cuts')!;
+
+  const initialProducts = [
+    {
+      sku: 'SB-MIYAZAKI-RIB-A5',
+      name: 'Miyazaki Wagyu A5 Ribeye Crown',
+      categoryId: wagyuCategoryId,
+      grade: MeatGrade.JAPANESE_A5,
+      marblingScore: 12,
+      dryAgedDays: null,
+      pricePerKgThb: new Prisma.Decimal('7800.00'),
+      stockWeightGrams: 15000,
+    },
+    {
+      sku: 'SB-USDA-TOMAHAWK-45D',
+      name: '45-Day Dry-Aged USDA Prime Tomahawk',
+      categoryId: dryAgedCategoryId,
+      grade: MeatGrade.DRY_AGED_SPECIAL,
+      marblingScore: 9,
+      dryAgedDays: 45,
+      pricePerKgThb: new Prisma.Decimal('4500.00'),
+      stockWeightGrams: 22000,
+    },
+  ];
+
+  for (const prod of initialProducts) {
+    await prisma.product.upsert({
+      where: { sku: prod.sku },
+      update: {
+        name: prod.name,
+        pricePerKgThb: prod.pricePerKgThb,
+        marblingScore: prod.marblingScore,
+      },
+      create: prod,
+    });
+  }
+
+  console.log(`✅ Seed completed successfully (Admin ID: ${adminUser.id})`);
+}
+
+main()
+  .catch((error) => {
+    console.error('❌ Seed failed:', error);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/orders/n-plus-one-and-raw-sql-comparison.ts"
+// ❌ ผิด (Anti-pattern 1): ก่อให้เกิด N+1 Queries ด้วยการยิง Prisma ในลูป for...of
+export async function getOrdersWithItemsNPlusOne(prisma: any, userId: string) {
+  const orders = await prisma.order.findMany({ where: { userId } }); // 1 Query
+  for (const order of orders) {
+    // ถ้ายูสเซอร์มี 50 ออเดอร์ บรรทัดนี้จะยิง DB เพิ่มอีก 50 ครั้ง!
+    order.items = await prisma.orderItem.findMany({ where: { orderId: order.id } });
+  }
+  return orders;
+}
+
+// ❌ ผิด (Anti-pattern 2): ใช้ $queryRawUnsafe ต่อสตริงตรงๆ เปิดช่องโหว่ SQL Injection ร้ายแรง!
+export async function unsafeRawSearch(prisma: any, skuInput: string) {
+  return prisma.$queryRawUnsafe(`SELECT * FROM products WHERE sku = '${skuInput}'`);
+}
+
+// ✅ ถูก (Best Practice): ใช้ include/select เพื่อแก้ N+1 และใช้ Tagged Template $queryRaw เสมอ
+export async function getOrdersAndSafeRawSearch(prisma: any, userId: string, skuInput: string) {
+  const orders = await prisma.order.findMany({
+    where: { userId },
+    include: { items: true }, // จบในคิวรีชุดเดียว ไม่เกิด N+1!
+  });
+
+  const products = await prisma.$queryRaw`
+    SELECT id, sku, name FROM products WHERE sku = ${skuInput}
+  `;
+
+  return { orders, products };
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `$queryRaw` เมื่อ**: ต้องใช้ฟีเจอร์เฉพาะของ PostgreSQL ที่ Query Builder ของ Prisma ยังไม่รองรับ เช่น Window Functions (`ROW_NUMBER()`, `DENSE_RANK()`), Full-Text Search ขั้นสูง, PostGIS, หรือ `SELECT ... FOR UPDATE`
+- **ไม่ควรใช้ `$queryRawUnsafe` หรือ `$executeRawUnsafe` เด็ดขาด**: ในทุกกรณีที่ตัวแปรมีที่มาจากผู้ใช้ภายนอก เพราะเสี่ยงต่อการถูกโจมตีด้วย SQL Injection ทันที
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ในเมื่อ JavaScript มี `Promise.all` อยู่แล้ว ถ้าเราเปลี่ยนจากลูป `for...of` มาเป็น `await Promise.all(orders.map(o => prisma.orderItem.findMany(...)))` จะถือว่าแก้ปัญหา N+1 Query ได้หรือไม่?
+   - **แนวคำตอบ**: **ไม่ได้แก้ปัญหา N+1 และในระบบจริงอาจทำให้ระบบล่มเร็วกว่าเดิม!** เพราะการใช้ `Promise.all` ยิง 100 คิวรีพร้อมกันยังคงส่งคำสั่ง SQL ไปที่ฐานข้อมูล 100 ครั้งเท่าเดิม แถมยังเป็นการแย่งชิง Connection ใน Database Connection Pool พร้อมกันในเสี้ยววินาทีเดียว (เช่น ถ้า Pool มี 20 Connections คำขอของผู้ใช้คนเดียวจะยึด Pool จนเต็มทันที) วิธีแก้ที่แท้จริงคือใช้ `include` ของ Prisma หรือรวม ID ไปคิวรีด้วย `WHERE orderId IN (...)` เพียงครั้งเดียว
+2. **คำถาม**: ทำไมผลลัพธ์ของ `COUNT(*)` หรือ `SUM(int_column)` จาก `prisma.$queryRaw` จึงคืนค่ากลับมาเป็นชนิด `bigint` ใน TypeScript และเราต้องจัดการอย่างไรก่อนส่งออกเป็น JSON ใน NestJS?
+   - **แนวคำตอบ**: เพราะฟังก์ชัน `COUNT(*)` และ `SUM()` ของ PostgreSQL คืนค่าเป็นชนิดข้อมูล `BIGINT` (64-bit integer) ซึ่งมีค่าสูงสุดเกินกว่า `Number.MAX_SAFE_INTEGER` (53-bit) ของ JavaScript ดังนั้น Prisma จึงแปลงเป็น `bigint` เพื่อไม่ให้ข้อมูลสูญหาย แต่เนื่องจาก `JSON.stringify()` มาตรฐานไม่สามารถแปลง `bigint` เป็น JSON ได้ (จะโยน `TypeError: Do not know how to serialize a BigInt`) เราจึงต้องแปลงค่าด้วย `Number(row.totalCount)` (หากมั่นใจว่าค่าไม่เกิน $9 \times 10^{15}$) หรือแปลงเป็น `.toString()` ในระดับ Service/Mapper ก่อนส่งออกไปยัง Controller
+
+---

@@ -1,0 +1,278 @@
+---
+title: Response Envelope
+category: BACKEND
+parentTitle: REST API Design
+version: RESTful API Standards
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+การที่แต่ละ Endpoint ในระบบส่งข้อมูลกลับมาคนละโครงสร้างกัน (เช่น บางเส้นคืน Array เปล่าๆ `[...]`, บางเส้นคืน `{ data: [...] }`, บางเส้นเมื่อเกิด Error คืน `{ msg: "..." }`, อีกเส้นคืน `{ errors: [...] }`) คือฝันร้ายของนักพัฒนา Frontend การกำหนด **Standard Response Envelope** และ **Error Envelope ตามมาตรฐาน RFC 9457 (Problem Details for HTTP APIs)** จะช่วยให้ฝั่ง Frontend เขียน Type-safe HTTP Client และ Global Error Handler เพียงครั้งเดียวแล้วใช้งานได้ทั้งโปรเจกต์
+
+<Callout type="tip" title="มาตรฐาน RFC 9457 (เดิมคือ RFC 7807)">
+RFC 9457 คือมาตรฐานสากลในการออกแบบ JSON Error Response สำหรับ HTTP API โดยกำหนดฟิลด์มาตรฐาน ได้แก่ type, title, status, detail, instance และเปิดให้เราขยายฟิลด์เพิ่มเติม เช่น code, timestamp, traceId และ fieldErrors สำหรับฟอร์มฝั่ง Frontend ได้อย่างเป็นระเบียบ
+</Callout>
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ใน **NestJS 11** เราไม่จำเป็นต้องเขียนโค้ดห่อหุ้ม `{ success: true, data: ... }` ซ้ำๆ ในทุก Controller Method แต่เราจะใช้กลไกของ Framework 2 ส่วนคือ:
+1. **Global Response Transform Interceptor (`NestInterceptor`)**: ดักจับข้อมูลขาออกจาก Controller ทุกตัว แล้วห่อเข้าสู่โครงสร้างมาตรฐานพร้อมแนบ `meta` (เช่น `timestamp`, `requestId` และข้อมูล Pagination) โดยอัตโนมัติ
+2. **Global Exception Filter (`ExceptionFilter`)**: ดักจับทุก Exception ที่เกิดขึ้นในระบบ (ทั้ง `HttpException`, Validation Error จาก `class-validator`, และ Prisma Database Error) แล้วแปลงให้อยู่ในรูป Error Envelope มาตรฐานเดียวกันทั้งหมด
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสร้าง Global Response Transform Interceptor (พื้นฐาน)
+```typescript filename="src/common/interceptors/transform-response.interceptor.ts"
+import {
+  Injectable,
+  NestInterceptor,
+  ExecutionContext,
+  CallHandler,
+} from '@nestjs/common';
+import { Observable } from 'rxjs';
+import { map } from 'rxjs/operators';
+import { Request } from 'express';
+
+export interface PaginationMeta {
+  page?: number;
+  limit?: number;
+  totalItems?: number;
+  totalPages?: number;
+  nextCursor?: string | null;
+}
+
+export interface ApiSuccessResponse<T> {
+  success: true;
+  data: T;
+  meta: {
+    timestamp: string;
+    path: string;
+    requestId: string;
+    pagination?: PaginationMeta;
+  };
+}
+
+// โครงสร้างที่ Service สามารถส่งกลับมาได้หากมีข้อมูล Pagination
+export interface PaginatedResult<T> {
+  items: T[];
+  pagination: PaginationMeta;
+}
+
+function isPaginatedResult<T>(value: unknown): value is PaginatedResult<T> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'items' in value &&
+    'pagination' in value &&
+    Array.isArray((value as PaginatedResult<T>).items)
+  );
+}
+
+@Injectable()
+export class TransformResponseInterceptor<T>
+  implements NestInterceptor<T, ApiSuccessResponse<T | unknown[]>>
+{
+  intercept(
+    context: ExecutionContext,
+    next: CallHandler<T>,
+  ): Observable<ApiSuccessResponse<T | unknown[]>> {
+    const req = context.switchToHttp().getRequest<Request>();
+    const requestId =
+      (req.headers['x-request-id'] as string) ?? crypto.randomUUID();
+
+    return next.handle().pipe(
+      map((payload) => {
+        if (isPaginatedResult(payload)) {
+          return {
+            success: true,
+            data: payload.items,
+            meta: {
+              timestamp: new Date().toISOString(),
+              path: req.originalUrl,
+              requestId,
+              pagination: payload.pagination,
+            },
+          };
+        }
+
+        return {
+          success: true,
+          data: payload,
+          meta: {
+            timestamp: new Date().toISOString(),
+            path: req.originalUrl,
+            requestId,
+          },
+        };
+      }),
+    );
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การสร้าง Global RFC 9457 Problem Details Exception Filter (ขั้นสูง)
+```typescript filename="src/common/filters/global-problem-details.filter.ts"
+import {
+  ExceptionFilter,
+  Catch,
+  ArgumentsHost,
+  HttpException,
+  HttpStatus,
+  Logger,
+} from '@nestjs/common';
+import { Request, Response } from 'express';
+
+export interface FieldValidationError {
+  field: string;
+  message: string;
+}
+
+export interface ProblemDetailsErrorEnvelope {
+  success: false;
+  error: {
+    type: string;
+    title: string;
+    status: number;
+    code: string;
+    detail: string;
+    instance: string;
+    timestamp: string;
+    traceId: string;
+    fieldErrors?: FieldValidationError[];
+  };
+}
+
+@Catch()
+export class GlobalProblemDetailsFilter implements ExceptionFilter {
+  private readonly logger = new Logger(GlobalProblemDetailsFilter.name);
+
+  catch(exception: unknown, host: ArgumentsHost): void {
+    const ctx = host.switchToHttp();
+    const res = ctx.getResponse<Response>();
+    const req = ctx.getRequest<Request>();
+
+    const traceId =
+      (req.headers['x-request-id'] as string) ?? crypto.randomUUID();
+
+    let status = HttpStatus.INTERNAL_SERVER_ERROR;
+    let code = 'INTERNAL_SERVER_ERROR';
+    let title = 'เกิดข้อผิดพลาดภายในเซิร์ฟเวอร์';
+    let detail = 'ระบบไม่สามารถประมวลผลคำขอได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง';
+    let fieldErrors: FieldValidationError[] | undefined;
+
+    if (exception instanceof HttpException) {
+      status = exception.getStatus();
+      const responseObj = exception.getResponse();
+
+      if (typeof responseObj === 'string') {
+        detail = responseObj;
+        title = exception.name;
+      } else if (typeof responseObj === 'object' && responseObj !== null) {
+        const record = responseObj as Record<string, unknown>;
+        code = (record.code as string) ?? this.mapStatusToDefaultCode(status);
+        title = (record.error as string) ?? exception.name;
+
+        // กรณีเกิด Validation Error จาก ValidationPipe
+        if (Array.isArray(record.message)) {
+          code = 'VALIDATION_FAILED';
+          title = 'ข้อมูลที่ส่งมาไม่ผ่านการตรวจสอบ (Validation Failed)';
+          detail = 'กรุณาตรวจสอบความถูกต้องของข้อมูลในฟอร์มสั่งซื้อเนื้อพรีเมียม';
+          fieldErrors = (record.message as string[]).map((msg) => {
+            const [fieldPart, ...rest] = msg.split(':');
+            return {
+              field: rest.length > 0 ? fieldPart.trim() : 'general',
+              message: rest.length > 0 ? rest.join(':').trim() : msg,
+            };
+          });
+        } else if (typeof record.message === 'string') {
+          detail = record.message;
+        }
+      }
+    } else if (exception instanceof Error) {
+      // บันทึก Stack Trace เต็มรูปแบบลง Server Log เท่านั้น ห้ามส่งออกไปให้ Client เด็ดขาด
+      this.logger.error(
+        `Unhandled Error on ${req.method} ${req.originalUrl}: ${exception.message}`,
+        exception.stack,
+      );
+    }
+
+    const envelope: ProblemDetailsErrorEnvelope = {
+      success: false,
+      error: {
+        type: `https://api.smartbutcher.co.th/errors/${code.toLowerCase()}`,
+        title,
+        status,
+        code,
+        detail,
+        instance: req.originalUrl,
+        timestamp: new Date().toISOString(),
+        traceId,
+        ...(fieldErrors ? { fieldErrors } : {}),
+      },
+    };
+
+    res
+      .status(status)
+      .setHeader('Content-Type', 'application/problem+json; charset=utf-8')
+      .json(envelope);
+  }
+
+  private mapStatusToDefaultCode(status: number): string {
+    switch (status) {
+      case HttpStatus.BAD_REQUEST:
+        return 'BAD_REQUEST';
+      case HttpStatus.UNAUTHORIZED:
+        return 'UNAUTHENTICATED';
+      case HttpStatus.FORBIDDEN:
+        return 'PERMISSION_DENIED';
+      case HttpStatus.NOT_FOUND:
+        return 'RESOURCE_NOT_FOUND';
+      case HttpStatus.CONFLICT:
+        return 'RESOURCE_CONFLICT';
+      case HttpStatus.UNPROCESSABLE_ENTITY:
+        return 'BUSINESS_RULE_VIOLATION';
+      case HttpStatus.TOO_MANY_REQUESTS:
+        return 'RATE_LIMIT_EXCEEDED';
+      default:
+        return 'INTERNAL_SERVER_ERROR';
+    }
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/common/filters/error-envelope-comparison.ts"
+// ❌ ผิด (Anti-pattern): ส่ง Stack Trace และโครงสร้างตารางฐานข้อมูลออกไปใน Error Response
+export const INSECURE_ERROR_RESPONSE = {
+  error:
+    'PrismaClientKnownRequestError: Unique constraint failed on the fields: (`email`) at /app/node_modules/@prisma/client/runtime/library.js:123:45',
+  sql: 'INSERT INTO "public"."users" ("email", "password_hash") VALUES ($1, $2)',
+};
+
+// ✅ ถูก (Best Practice): ส่ง Error Envelope ที่ปลอดภัย มีรหัส Machine-readable (code) และ traceId สำหรับให้ทีม Support ค้นหาใน Log
+export const SECURE_ERROR_RESPONSE = {
+  success: false,
+  error: {
+    type: 'https://api.smartbutcher.co.th/errors/duplicate_email',
+    title: 'Conflict',
+    status: 409,
+    code: 'DUPLICATE_USER_EMAIL',
+    detail: 'อีเมลนี้ถูกลงทะเบียนในระบบสมาชิก Smart Butcher แล้ว',
+    instance: '/api/v1/users',
+    timestamp: '2026-10-17T08:30:00.000Z',
+    traceId: 'req-99887766-5544-3322-1100',
+  },
+};
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Response & Error Envelope มาตรฐานเมื่อ**: พัฒนา REST API ทุกประเภทที่เชื่อมต่อกับ Web Frontend, Mobile App หรือ Third-party Partners เพื่อให้การดักจับข้อผิดพลาดและการทำ Type Narrowing (`if (res.success)`) แม่นยำ 100%
+- **ไม่ควรใช้ Transform Interceptor เมื่อ**: เป็น Endpoint ที่ต้องส่งข้อมูลแบบ Raw Stream, ไฟล์ CSV/PDF ดาวน์โหลด, หรือ Webhook ปลายทางที่ผู้ให้บริการภายนอก (เช่น Stripe / Omise) กำหนดรูปแบบ Response เฉพาะเจาะจงไว้แล้ว (สามารถสร้าง `@SkipEnvelope()` Decorator เพื่อยกเว้นเฉพาะ Route ได้)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมเราควรมีทั้ง `status` (เช่น `409`) และ `code` ที่เป็นข้อความ (เช่น `INSUFFICIENT_WAGYU_STOCK`) ใน Error Response?
+   - **แนวคำตอบ**: เพราะ HTTP Status Code `409 Conflict` บอกเพียงหมวดหมู่กว้างๆ ว่าเกิดความขัดแย้งของสถานะ แต่ในหนึ่งหน้าจอของการสั่งซื้ออาจเกิด `409` ได้จากหลายสาเหตุ เช่น สต็อกเนื้อหมด (`INSUFFICIENT_WAGYU_STOCK`), คูปองถูกใช้ไปแล้ว (`COUPON_ALREADY_REDEEMED`), หรือราคาเนื้อมีการเปลี่ยนแปลง (`PRICE_CHANGED`) การมี Machine-readable `code` ช่วยให้ Frontend เขียนเงื่อนไข `switch (error.code)` เพื่อแสดง UI หรือเปิด Modal แก้ไขปัญหาให้ลูกค้าได้ตรงจุดโดยไม่ต้องผูกโค้ดกับข้อความภาษาไทยที่อาจเปลี่ยนไปมา
+2. **คำถาม**: ประโยชน์ของการแนบ `traceId` (หรือ `requestId`) กลับมาใน Error Envelope คืออะไร?
+   - **แนวคำตอบ**: เมื่อลูกค้าเจอปัญหาการชำระเงินล้มเหลว (500 Internal Server Error) หน้าเว็บสามารถแสดงข้อความว่า *"เกิดข้อผิดพลาด (รหัสอ้างอิง: req-998877)"* เมื่อลูกค้าแจ้งรหัสนี้แก่ทีม Support วิศวกรสามารถนำ `traceId` ไปค้นหาในระบบ Centralized Logging (เช่น Grafana Loki หรือ Elasticsearch) เพื่อดู Stack Trace และลำดับเหตุการณ์ทั้งหมดของคำขอนั้นได้ภายในไม่กี่วินาที โดยไม่ต้องเปิดเผยข้อมูลความลับของเซิร์ฟเวอร์ออกสู่สาธารณะ
+
+---

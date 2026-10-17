@@ -1,0 +1,162 @@
+---
+title: Branch Protection
+category: TESTING & QUALITY
+parentTitle: GitHub Actions
+version: GitHub Actions CI
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+แม้เราจะเขียนไฟล์ `.github/workflows/ci-quality.yml` ไว้อย่างดีเยี่ยม แต่หากไม่ได้ตั้งค่า **Branch Protection Rules (หรือ Repository Rulesets)** บน GitHub นักพัฒนาก็ยังสามารถกดปุ่ม **"Merge pull request" ทั้งที่ CI ขึ้นสีแดง** หรือแอบสั่ง `git push --force origin main` ทับโค้ดของเพื่อนร่วมทีมได้อยู่ดี
+
+การกำกับดูแลระดับ Production จึงประกอบด้วย 3 เสาหลัก:
+1. **Branch Protection Rules**: บล็อกการ Merge จนกว่า Required Status Checks (เช่น `quality-and-build` และ `e2e-tests`) จะผ่านเป็นสีเขียวทั้งหมด, บังคับให้มี Code Review อย่างน้อย 1–2 คน และปิดกั้นการ Force Push ลงสาขา `main`
+2. **GitHub Actions Secrets & Variables**: แยกค่าความลับ (`secrets.PAYMENT_WEBHOOK_SECRET`, `secrets.PROD_DATABASE_URL`) ออกจากตัวแปรทั่วไป (`vars.NEXT_PUBLIC_API_URL`) โดย GitHub จะทำการปิดบัง (Masking `***`) ค่าจาก `secrets` ในหน้าจอ Log อัตโนมัติ
+3. **CI Status Badges**: แสดงป้ายสถานะการทำงานล่าสุดของ Pipeline บนไฟล์ `README.md` เพื่อให้ทีมเห็นสุขภาพของโปรเจกต์ได้ทันที
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+- **กลไก Secret Masking และการป้องกัน Fork PR**: GitHub Actions เก็บค่า `secrets` โดยเข้ารหัสด้วย Libsodium Sealed Boxes และถอดรหัสเฉพาะในหน่วยความจำของ Runner ขณะทำงาน พร้อมสั่งให้ Log Output Filter ดักจับสตริงที่ตรงกับค่า Secret แล้วแทนที่ด้วย `***` ทันที นอกจากนี้ เพื่อป้องกันผู้ไม่หวังดีเปิด Pull Request จาก Forked Repository แล้วแก้ไฟล์ `.yml` ให้พิมพ์ค่า Secret ออกมา GitHub จะไม่ส่งค่า `secrets` ให้กับ PR ที่มาจาก External Fork โดยอัตโนมัติ
+- **Require branches to be up to date before merging**: ตัวเลือกนี้ใน Branch Protection ป้องกันปัญหา **"Semantic Merge Conflict"** เช่น PR ก. เปลี่ยนชื่อฟิลด์ `pricePerKg` ใน `Product` ส่วน PR ข. เรียกใช้ `pricePerKg` แบบเดิม แม้ทั้งคู่จะรัน CI ผ่านในสาขาตัวเองและไม่มี Git Conflict ตอนรวมไฟล์ แต่ถ้านำมารวมกันโค้ดจะพังทันที การเปิดออปชันนี้บังคับให้ PR ข. ต้องดึงโค้ดล่าสุดจาก `main` มาทดสอบ CI ใหม่ก่อนอนุญาตให้กด Merge
+
+<Callout type="warning" title="ห้ามพิมพ์ออบเจกต์ process.env ทั้งก้อนออกทาง console.log บน CI">
+แม้ GitHub Actions จะพยายามปิดบังค่า Secret ด้วยเครื่องหมายดอกจัน แต่หากคุณแปลงค่า Secret เป็น Base64 หรือพิมพ์โครงสร้างออบเจกต์ที่ถูกตัดบรรทัดออกทาง Log ระบบตรวจจับข้อความอาจพลาดและทำให้ความลับรั่วไหลสู่สาธารณะได้ จึงต้องตรวจสอบตัวแปรแวดล้อมผ่านฟังก์ชัน Validation เท่านั้นโดยห้ามพิมพ์ค่าจริงออกมา
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1 (ระดับพื้นฐาน): การฉีด GitHub Secrets และ Variables เข้าสู่ Workflow และการแสดง Status Badge
+ตัวอย่างการอ้างอิง `secrets` และ `vars` อย่างปลอดภัยในขั้นตอนการทดสอบเชื่อมต่อระบบชำระเงินและการแสดงผลสถานะใน `README.md`
+
+```yaml filename=".github/workflows/staging-deploy-verify.yml"
+name: Smart Butcher - Staging Verification
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  verify-staging-config:
+    name: Validate Production-Grade Environment & Secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: staging
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Clean Install
+        run: npm ci
+
+      - name: Verify Required Secrets Without Logging Sensitive Values
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          PROMPTPAY_MERCHANT_SECRET: ${{ secrets.PROMPTPAY_MERCHANT_SECRET }}
+          NEXT_PUBLIC_MARKETPLACE_URL: ${{ vars.NEXT_PUBLIC_MARKETPLACE_URL }}
+        run: npx tsx src/devops/verify-ci-env.ts
+```
+
+### ตัวอย่างที่ 2 (ระดับ Production): สคริปต์ตรวจสอบความครบถ้วนของ Environment Variables และการจำลองการตรวจสอบ Branch Protection Readiness
+โค้ด TypeScript สำหรับตรวจสอบความพร้อมของตัวแปรแวดล้อมและจำลองเงื่อนไขการอนุมัติ Merge ของคำสั่งซื้อระดับวิกฤตโดยไม่เปิดเผยข้อมูลความลับ
+
+```typescript filename="src/devops/verify-ci-env.ts"
+export interface RequiredCiEnvironment {
+  DATABASE_URL: string;
+  PROMPTPAY_MERCHANT_SECRET: string;
+  NEXT_PUBLIC_MARKETPLACE_URL: string;
+}
+
+export interface EnvValidationResult {
+  isValid: boolean;
+  missingOrInvalidKeys: string[];
+}
+
+export function validateCiEnvironment(
+  env: NodeJS.ProcessEnv,
+): EnvValidationResult {
+  const missingOrInvalidKeys: string[] = [];
+
+  if (
+    typeof env.DATABASE_URL !== 'string' ||
+    !env.DATABASE_URL.startsWith('postgresql://')
+  ) {
+    missingOrInvalidKeys.push('DATABASE_URL (ต้องขึ้นต้นด้วย postgresql://)');
+  }
+
+  if (
+    typeof env.PROMPTPAY_MERCHANT_SECRET !== 'string' ||
+    env.PROMPTPAY_MERCHANT_SECRET.trim().length < 32
+  ) {
+    missingOrInvalidKeys.push(
+      'PROMPTPAY_MERCHANT_SECRET (ต้องมีความยาวไม่ต่ำกว่า 32 ตัวอักษร)',
+    );
+  }
+
+  if (
+    typeof env.NEXT_PUBLIC_MARKETPLACE_URL !== 'string' ||
+    !env.NEXT_PUBLIC_MARKETPLACE_URL.startsWith('https://')
+  ) {
+    missingOrInvalidKeys.push(
+      'NEXT_PUBLIC_MARKETPLACE_URL (ต้องเป็น URL ที่ใช้ https://)',
+    );
+  }
+
+  return {
+    isValid: missingOrInvalidKeys.length === 0,
+    missingOrInvalidKeys,
+  };
+}
+
+// ใช้ตรวจสอบสถานะก่อนอนุญาตให้ผ่านขั้นตอน CI โดยไม่สั่ง console.log ค่า Secret ออกมาเด็ดขาด!
+export function assertCiEnvironmentOrThrow(env: NodeJS.ProcessEnv): void {
+  const result = validateCiEnvironment(env);
+  if (!result.isValid) {
+    throw new Error(
+      `การตั้งค่า GitHub Secrets/Variables ไม่สมบูรณ์: ${result.missingOrInvalidKeys.join(', ')}`,
+    );
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```yaml filename=".github/workflows/secrets-handling.compare.yml"
+# ❌ ผิด (Anti-pattern): ฮาร์ดโค้ดรหัสผ่านไว้ในไฟล์ .yml หรือสั่ง echo ค่า Secret ออกมาดูตอน Debug
+steps:
+  - name: Bad Debug Step
+    env:
+      PAYMENT_KEY: ${{ secrets.PROMPTPAY_MERCHANT_SECRET }}
+    run: |
+      echo "Debugging key: $PAYMENT_KEY"
+
+# ✅ ถูก (Best Practice): ตรวจสอบเฉพาะความมีอยู่หรือความยาวของตัวแปรโดยไม่พิมพ์ค่าจริงออกมา
+steps:
+  - name: Safe Secret Presence Check
+    env:
+      PAYMENT_KEY: ${{ secrets.PROMPTPAY_MERCHANT_SECRET }}
+    run: |
+      if [ -z "$PAYMENT_KEY" ]; then
+        echo "::error::Missing PROMPTPAY_MERCHANT_SECRET in GitHub Secrets"
+        exit 1
+      fi
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+- **ควรเปิด Branch Protection Rules บนสาขา `main` เสมอ**: โดยบังคับทั้ง `Require a pull request before merging`, `Require status checks to pass before merging` และ `Require branches to be up to date before merging`
+- **ไม่ควรใช้**: ห้ามนำค่า Private Key หรือรหัสผ่านของฐานข้อมูลไปใส่ใน GitHub **Variables (`vars.*`)** เพราะค่าใน `vars` จะแสดงผลเป็นข้อความปกติ (Plain text) ในหน้า Log ของทุกคนที่เข้ามาดู Actions ให้ใส่ใน **Secrets (`secrets.*`)** เท่านั้น
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+
+**Q1: ทำไมเราต้องเปิดออปชัน `"Require branches to be up to date before merging"` ใน Branch Protection Rules ทั้งที่ Git ไม่ได้แจ้งเตือนว่ามี Merge Conflict เลย?**
+- **แนวคำตอบ**: เพราะ Git ตรวจจับเฉพาะ Physical Text Conflict (การแก้บรรทัดเดียวกันในไฟล์เดียวกัน) แต่ไม่สามารถตรวจจับ **Logical / Semantic Conflict** ได้ เช่น PR ที่ 1 ลบฟังก์ชัน `calculateVipDiscount()` ทิ้งและ Merge เข้า `main` ไปแล้ว ส่วน PR ที่ 2 เขียนโค้ดใหม่ที่เรียกใช้ `calculateVipDiscount()` โดยแตกสาขาไปตั้งแต่ก่อนที่ PR ที่ 1 จะ Merge หากไม่บังคับให้ PR ที่ 2 ดึงโค้ดล่าสุดจาก `main` มารัน CI ใหม่ก่อน ทันทีที่กด Merge โค้ดบน `main` จะพังทันที
+
+---

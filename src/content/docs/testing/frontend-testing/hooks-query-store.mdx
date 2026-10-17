@@ -1,0 +1,241 @@
+---
+title: Hooks Query Store
+category: TESTING & QUALITY
+parentTitle: Frontend Testing
+version: RTL & MSW v2
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในสถาปัตยกรรม Frontend สมัยใหม่ เรามักแยก Business Logic และ State Management ออกจาก UI Component ไปไว้ใน 3 ส่วนหลัก:
+1. **Custom React Hooks:** ฟังก์ชันที่จัดการตรรกะเฉพาะทาง (เช่น `useDryAgeCalculator`)
+2. **[TanStack Query v5](/docs/tanstack-query):** การจัดการ Server State, Caching และการดึงข้อมูลแค็ตตาล็อกเนื้อพรีเมียม
+3. **[Zustand Store](/docs/zustand):** การจัดการ Client State เช่น ตะกร้าสินค้า (`useButcherCartStore`) และการคำนวณราคารวม
+
+สำหรับการทดสอบ Custom Hooks ที่ไม่ได้ผูกกับ UI ตัวเดียว เราสามารถใช้ฟังก์ชัน **`renderHook()`** จาก `@testing-library/react` เพื่อรัน Hook ภายใต้บริบทของ React และใช้ `act()` เมื่อต้องการเรียกฟังก์ชันที่เปลี่ยนแปลง State
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+- **การตั้งค่า `QueryClient` สำหรับเทสต์ใน TanStack Query v5:** ในโหมดปกติ เมื่อ Query ล้มเหลว TanStack Query จะทำการ Retry อัตโนมัติ 3 ครั้งพร้อมหน่วงเวลาแบบ Exponential Backoff หากเราไม่ปิด `retry: false` ในเทสต์ การทดสอบเคส API Error เพียงข้อเดียวจะทำให้ Jest ค้างรอไปกว่า 7 วินาทีจนเกิด Timeout นอกจากนี้ใน TanStack Query v5 ชื่อตัวเลือก `cacheTime` เดิมถูกเปลี่ยนเป็น **`gcTime`** ซึ่งควรตั้งค่าเป็น `0` หรือ `Infinity` เพื่อป้องกันปัญหา Cache รั่วไหลข้ามเคสทดสอบ
+- **การรีเซ็ต Zustand Store:** เนื่องจาก Zustand Store ถูกสร้างเป็น Singleton ในระดับ Module Scope หากเทสต์ข้อที่ 1 เพิ่มเนื้อริบอายลงตะกร้าไปแล้ว และไม่ทำการรีเซ็ตค่าเริ่มต้นใน `beforeEach` เทสต์ข้อที่ 2 จะเห็นเนื้อริบอายค้างอยู่ในตะกร้าทันที (State Pollution)
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1 (พื้นฐาน): การทดสอบ Custom Hook และ Zustand Butcher Cart Store พร้อมการรีเซ็ต State
+ตัวอย่างการสร้าง Store ตะกร้าสินค้าด้วย Zustand และการเขียนเทสต์ด้วย `renderHook` และ `act` ที่รับประกันว่าสถานะตะกร้าถูกล้างใหม่ทุกครั้งก่อนเริ่มเทสต์:
+
+```typescript filename="src/stores/useButcherCartStore.spec.ts"
+import { create } from 'zustand';
+import { renderHook, act } from '@testing-library/react';
+
+export interface CartOrderItem {
+  productId: string;
+  name: string;
+  pricePerKg: number;
+  weightKg: number;
+}
+
+interface ButcherCartState {
+  items: CartOrderItem[];
+  isChilledBoxIncluded: boolean;
+  addItem: (item: CartOrderItem) => void;
+  toggleChilledBox: () => void;
+  getTotalAmount: () => number;
+  resetCart: () => void;
+}
+
+const initialCartState = {
+  items: [] as CartOrderItem[],
+  isChilledBoxIncluded: true, // ค่าเริ่มต้นมีกล่องเก็บความเย็นราคา 120 บาท
+};
+
+export const useButcherCartStore = create<ButcherCartState>((set, get) => ({
+  ...initialCartState,
+  addItem: (newItem) =>
+    set((state) => {
+      const existing = state.items.find((i) => i.productId === newItem.productId);
+      if (existing) {
+        return {
+          items: state.items.map((i) =>
+            i.productId === newItem.productId
+              ? { ...i, weightKg: Number((i.weightKg + newItem.weightKg).toFixed(2)) }
+              : i,
+          ),
+        };
+      }
+      return { items: [...state.items, newItem] };
+    }),
+  toggleChilledBox: () =>
+    set((state) => ({ isChilledBoxIncluded: !state.isChilledBoxIncluded })),
+  getTotalAmount: () => {
+    const state = get();
+    const meatTotal = state.items.reduce(
+      (sum, item) => sum + Math.round(item.pricePerKg * item.weightKg),
+      0,
+    );
+    const boxFee = state.isChilledBoxIncluded && state.items.length > 0 ? 120 : 0;
+    return meatTotal + boxFee;
+  },
+  resetCart: () => set(initialCartState),
+}));
+
+describe('useButcherCartStore (Zustand State Management)', () => {
+  beforeEach(() => {
+    // รีเซ็ต Zustand Store ให้กลับสู่ค่าเริ่มต้นก่อนรันทุก Test Case
+    act(() => {
+      useButcherCartStore.getState().resetCart();
+    });
+  });
+
+  it('should add wagyu cut to cart and include 120 THB chilled box fee in total amount', () => {
+    const { result } = renderHook(() => useButcherCartStore());
+
+    act(() => {
+      result.current.addItem({
+        productId: 'prod-kobe-01',
+        name: 'Kobe A5 Ribeye',
+        pricePerKg: 6000,
+        weightKg: 0.5, // 3,000 บาท
+      });
+    });
+
+    expect(result.current.items).toHaveLength(1);
+    // 3,000 + ค่ากล่องเก็บความเย็น 120 = 3,120 บาท
+    expect(result.current.getTotalAmount()).toBe(3120);
+  });
+
+  it('should start with an empty cart in subsequent test without state pollution and merge duplicate products', () => {
+    const { result } = renderHook(() => useButcherCartStore());
+
+    // ยืนยันว่าข้อมูลจากเทสต์ข้อแรกไม่รั่วไหลมาที่เทสต์ข้อนี้
+    expect(result.current.items).toHaveLength(0);
+
+    act(() => {
+      result.current.addItem({
+        productId: 'prod-angus-02',
+        name: 'Dry-Aged Black Angus Striploin',
+        pricePerKg: 2800,
+        weightKg: 0.4,
+      });
+      result.current.addItem({
+        productId: 'prod-angus-02',
+        name: 'Dry-Aged Black Angus Striploin',
+        pricePerKg: 2800,
+        weightKg: 0.6,
+      });
+      result.current.toggleChilledBox(); // ปิดการเลือกกล่องเก็บความเย็น
+    });
+
+    expect(result.current.items).toHaveLength(1);
+    expect(result.current.items[0].weightKg).toBe(1.0);
+    expect(result.current.getTotalAmount()).toBe(2800);
+  });
+});
+```
+
+### ตัวอย่างที่ 2 (ขั้นสูง): การทดสอบ Custom Hook ที่ใช้ TanStack Query v5 (`useWagyuInventoryQuery`)
+ตัวอย่างการสร้าง `createTestQueryClient` ที่ปิด `retry: false` และตั้งค่า `gcTime: 0` เพื่อทดสอบทั้งกรณีดึงข้อมูลสต็อกเนื้อสำเร็จและกรณีที่เกิด Error:
+
+```tsx filename="src/hooks/useWagyuInventoryQuery.spec.tsx"
+import React, { ReactNode } from 'react';
+import { renderHook, waitFor } from '@testing-library/react';
+import {
+  QueryClient,
+  QueryClientProvider,
+  useQuery,
+} from '@tanstack/react-query';
+
+export interface WagyuStockResponse {
+  sku: string;
+  availableKg: number;
+  agingChamber: string;
+}
+
+export function useWagyuInventoryQuery(
+  sku: string,
+  fetcher: (sku: string) => Promise<WagyuStockResponse>,
+) {
+  return useQuery({
+    queryKey: ['wagyu-stock', sku],
+    queryFn: () => fetcher(sku),
+    enabled: Boolean(sku),
+  });
+}
+
+function createTestQueryWrapper() {
+  const testQueryClient = new QueryClient({
+    defaultOptions: {
+      queries: {
+        retry: false, // ปิดการ Retry เพื่อให้เทสต์เคส Error จบได้ทันที
+        gcTime: 0, // ล้าง Garbage Collection ของ Cache ทันทีหลังจบเทสต์
+      },
+    },
+  });
+
+  return function TestQueryWrapper({ children }: { children: ReactNode }) {
+    return (
+      <QueryClientProvider client={testQueryClient}>
+        {children}
+      </QueryClientProvider>
+    );
+  };
+}
+
+describe('useWagyuInventoryQuery (TanStack Query v5 Hook)', () => {
+  it('should resolve wagyu stock data when fetcher succeeds', async () => {
+    const mockFetcher = jest.fn().mockResolvedValue({
+      sku: 'WAGYU-A5-CHATEAU',
+      availableKg: 3.2,
+      agingChamber: 'CHAMBER-01',
+    });
+
+    const { result } = renderHook(
+      () => useWagyuInventoryQuery('WAGYU-A5-CHATEAU', mockFetcher),
+      { wrapper: createTestQueryWrapper() },
+    );
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data).toEqual({
+      sku: 'WAGYU-A5-CHATEAU',
+      availableKg: 3.2,
+      agingChamber: 'CHAMBER-01',
+    });
+    expect(mockFetcher).toHaveBeenCalledWith('WAGYU-A5-CHATEAU');
+  });
+
+  it('should transition to isError state immediately without retrying when fetcher rejects', async () => {
+    const mockFetcher = jest
+      .fn()
+      .mockRejectedValue(new Error('Cold storage sensor database offline'));
+
+    const { result } = renderHook(
+      () => useWagyuInventoryQuery('WAGYU-A5-CHATEAU', mockFetcher),
+      { wrapper: createTestQueryWrapper() },
+    );
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+
+    expect(result.current.error).toBeInstanceOf(Error);
+    expect(mockFetcher).toHaveBeenCalledTimes(1); // ยืนยันว่าไม่เกิดการ Retry ซ้ำ
+  });
+});
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การสร้าง `QueryClient` ในเทสต์** | สร้าง `const queryClient = new QueryClient()` ไว้นอก `describe` ตัวเดียวแล้วใช้ร่วมกันทุกเทสต์ ทำให้ข้อมูล Cache ข้ามไปกวนเคสอื่น | สร้าง `new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })` ใหม่ในทุกๆ Test Case |
+| **การอัปเดต State ใน `renderHook`** | เรียก `result.current.addItem(...)` โดยไม่ครอบด้วย `act(() => ...)` จนเกิดคำเตือน `Warning: An update to TestComponent inside a test was not wrapped in act(...)` | ครอบคำสั่งที่เปลี่ยนแปลงค่าใน Hook หรือ Store ด้วย `act(() => { ... })` เสมอ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `renderHook` เมื่อ:** Custom Hook นั้นเป็น Shared Hook ที่ถูกเรียกใช้ในหลายหน้าจอ หรือมีตรรกะการคำนวณที่ซับซ้อนหลายกิ่งเงื่อนไข
+- **ไม่ควรใช้ `renderHook` เมื่อ:** Hook นั้นถูกสร้างขึ้นมาใช้เฉพาะกับ Component เดียวเท่านั้น ในกรณีนี้การทดสอบผ่านการเรนเดอร์ Component จริงด้วย `render(<MyComponent />)` จะให้ความมั่นใจได้ครบถ้วนกว่า
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: เหตุใดการลืมตั้งค่า `retry: false` ใน `QueryClient` สำหรับเทสต์จึงทำให้การทดสอบ Error State ของ TanStack Query ล้มเหลวด้วย Timeout?**
+  - *แนวคำตอบ:* เพราะค่าเริ่มต้นของ TanStack Query กำหนด `retry: 3` พร้อม Exponential Delay (1000ms -> 2000ms -> 4000ms รวมเวลารอมากกว่า 7 วินาที) ในขณะที่ `waitFor` ของ React Testing Library มีค่า Timeout เริ่มต้นเพียง `1000ms` และ Jest มี Timeout เริ่มต้นที่ `5000ms` ทำให้ `waitFor` หมดเวลาก่อนที่ TanStack Query จะยอมเปลี่ยนสถานะจาก `isLoading` เป็น `isError`
+- **Q2: ทำไม Zustand Store จึงเกิดปัญหา State รั่วไหลข้าม Test Cases ในไฟล์เดียวกันได้ แม้เราจะเรียก `renderHook` ใหม่ทุกครั้ง?**
+  - *แนวคำตอบ:* เพราะฟังก์ชัน `create()` ของ Zustand เก็บตัวแปร `state` ไว้ใน Closure ระดับ Module (นอก React Component Tree) การ Unmount Component หรือการเรียก `renderHook` ใหม่จึงไม่ได้ทำลายสถานะที่อยู่ในตัวแปรระดับ Module นั้น เราจึงต้องเก็บ `initialState` ไว้และสั่ง `useStore.setState(initialState, true)` หรือเรียก Action `reset()` ใน `beforeEach` เสมอ
+
+---

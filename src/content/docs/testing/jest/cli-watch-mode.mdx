@@ -1,0 +1,128 @@
+---
+title: CLI Watch Mode
+category: TESTING & QUALITY
+parentTitle: Jest
+version: Jest v29 & ts-jest
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+แผงหน้าปัดควบคุมและเครื่องมือวัดผลในโรงงาน **Smart Butcher Marketplace**:
+- **Watch Mode (`jest --watch`)**: เปรียบเหมือน "ช่างตรวจสอบคุณภาพที่ยืนเฝ้าสายการผลิตตลอดเวลา" เมื่อไหร่ก็ตามที่มีการตัดเนื้อชิ้นใหม่หรือแก้ไขโค้ด ตัว Watcher จะฉลาดพอที่จะรันเฉพาะเทสต์ของไฟล์ที่เพิ่งถูกบันทึกเท่านั้น โดยไม่ต้องเสียเวลารันใหม่ทั้งโรงงาน
+- **Filter Flag (`jest -t "pattern"`)**: เปรียบเหมือน "คำสั่งตรวจเฉพาะเนื้อริบอาย" ไม่ต้องเสียเวลาตรวจเนื้อส่วนอื่น
+- **Code Coverage Report**: เปรียบเหมือน "รายงานการตรวจสอบความปลอดภัยของอาหารอย่างละเอียด" ที่ระบุเป็นเปอร์เซ็นต์ว่า ในโรงงานมีเนื้อกี่ชิ้นที่ผ่านการตรวจ มีทางแยกหรือเงื่อนไขตรงไหนที่ยังไม่เคยถูกทดสอบเลยแม้แต่ครั้งเดียว
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **Git-Aware Watch Engine:** Jest เชื่อมต่อกับ Git Tracking โดยตรง ในโหมด Watch Jest จะวิเคราะห์ `git status` และ Dependency Graph เพื่อตรวจสอบว่าไฟล์ใดบ้างที่มีความเปลี่ยนแปลง (Uncommitted Changes) และรันเฉพาะไฟล์ที่มีผลกระทบ
+2. **Interactive CLI Controls ใน Watch Mode:**
+   - กด `a` : สั่งรันทุก Test Suites ในระบบ
+   - กด `o` : รันเฉพาะไฟล์ที่มีการแก้ไขตามสถานะ Git (ค่าเริ่มต้น)
+   - กด `p` : พิมพ์ Regex กรองชื่อไฟล์ทดสอบ (Filename Pattern)
+   - กด `t` : พิมพ์ Regex กรองชื่อเคสการทดสอบ (Test Name Pattern)
+   - กด `u` : สั่งอัปเดต Snapshot ที่ล้มเหลวทั้งหมด
+   - กด `q` : ออกจาก Watch Mode
+3. **การอ่านตาราง Code Coverage Matrix (Istanbul Engine):**
+
+```text filename="docs/testing/jest.txt"
+-----------------------------|---------|----------|---------|---------|-------------------
+File                         | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s 
+-----------------------------|---------|----------|---------|---------|-------------------
+All files                    |   92.85 |    83.33 |     100 |   92.85 |                   
+ meat-cutting.service.ts     |   92.85 |    83.33 |     100 |   92.85 | 42-45             
+-----------------------------|---------|----------|---------|---------|-------------------
+```
+
+- **% Stmts (Statement Coverage):** เปอร์เซ็นต์ของคำสั่งโปรแกรมทั้งหมดที่ถูกประมวลผล
+- **% Branch (Branch Coverage):** เปอร์เซ็นต์ของเส้นทางการตัดสินใจเงื่อนไข (`if/else`, `switch/case`, `ternary ? :`) ที่ถูกรันครบทุกทิศทาง **(ตัวชี้วัดที่สำคัญที่สุดในระบบ Enterprise)**
+- **% Funcs (Function Coverage):** เปอร์เซ็นต์ของฟังก์ชันหรือเมธอดที่ถูกเรียกใช้งาน
+- **% Lines (Line Coverage):** เปอร์เซ็นต์ของบรรทัดโค้ดที่ถูกคอมไพล์และรัน
+- **Uncovered Line #s:** ระบุเลขบรรทัดอย่างแม่นยำที่ยังไม่เคยมี Test Case ใดวิ่งผ่านเลย
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การกำหนด Scripts ใน `package.json` สำหรับการพัฒนาและการทำงานบน CI
+ชุดคำสั่งสำหรับทีมวิศวกร Smart Butcher:
+
+```json filename="package.json"
+{
+  "name": "smart-butcher-marketplace",
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:cov": "jest --coverage",
+    "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
+    "test:ci": "jest --ci --coverage --maxWorkers=2 --runInBand",
+    "test:filter": "jest -t"
+  }
+}
+```
+
+ตัวอย่างการสั่งรันเฉพาะเคสที่ต้องการผ่าน CLI:
+```bash filename="terminal.sh"
+# 1. รันเฉพาะเคสที่มีคำว่า 'Dry-Aged' อยู่ใน describe หรือ it
+npm run test:filter "Dry-Aged"
+
+# 2. รันเฉพาะไฟล์ที่ชื่อลงท้ายด้วย stock.spec.ts
+npx jest src/services/meat-stock.service.spec.ts
+
+# 3. รันเทสต์แบบเรียงลำดับทีละตัวใน Process เดียวกัน (เหมาะกับระบบที่ต่อ Test Database)
+npx jest --runInBand
+```
+
+### ตัวอย่างที่ 2: การตั้งค่า Coverage Thresholds เป็นประตูกั้นคุณภาพ (Quality Gatekeeper)
+บังคับให้ CI ล้มเหลวทันทีหากความครอบคลุมของโค้ดต่ำกว่ามาตรฐานที่กำหนด:
+
+```typescript filename="jest.coverage.config.ts"
+import type { Config } from 'jest';
+
+const config: Config = {
+  coverageThreshold: {
+    // กฎเกณฑ์ระดับทั้งโปรเจกต์ (Global)
+    global: {
+      branches: 80,
+      functions: 85,
+      lines: 85,
+      statements: 85,
+    },
+    // กฎเกณฑ์เข้มงวดพิเศษสำหรับโมดูลคิดเงินและตัดสต็อก (Core Financial Domain)
+    './src/services/pricing-calculator.ts': {
+      branches: 100,
+      functions: 100,
+      lines: 100,
+      statements: 100,
+    },
+  },
+};
+
+export default config;
+```
+
+## 4. ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+### ❌ สิ่งที่ผิด: รัน Multi-worker ขนานกันใน CI Container ที่มี CPU เพียง 1 Core
+```bash filename="terminal.sh"
+# ในเครื่อง GitHub Actions ที่มี 2 vCPU: หากสั่ง 'jest' ธรรมดา
+# ตัวระบบอาจแตก Worker ไป 4-8 ตัว เกิด CPU Context Switching มหาศาล
+# ทำให้เทสต์ทำงานช้าลงอย่างมาก หรือติด Out of Memory (OOM) จนรันไม่ผ่าน
+jest
+```
+
+### ✅ สิ่งที่ถูก: จำกัด Worker หรือใช้ `--runInBand` บน CI Server
+```bash filename="terminal.sh"
+# ปลอดภัย รวดเร็ว และประหยัด RAM บน CI
+jest --ci --maxWorkers=2
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Watch Mode:** ตลอดเวลาในขณะเขียนโค้ดเพื่อทำ Test-Driven Development (TDD) ได้รับฟีดแบ็กทันทีภายในหลักร้อยมิลลิวินาที
+- **ควรโฟกัสที่ Branch Coverage:** มากกว่า Line Coverage เพราะฟังก์ชันที่มี Line Coverage 100% อาจมี Branch Coverage เพียง 50% หากไม่ได้ทดสอบกรณี `else` หรือกรณี Error Condition
+
+## 6. คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: เหตุใดการที่โค้ดมี Line Coverage 100% จึงไม่ได้การันตีว่าระบบจะปราศจากข้อผิดพลาดใน Production?**
+  - *แนวคำตอบ:* Line Coverage ตรวจสอบเพียงว่าบรรทัดนั้นเคยถูกอ่านผ่านหรือไม่ แต่ไม่ได้การันตีว่า **Condition Combinations** หรือขอบเขตของข้อมูล (Boundary Values) ถูกทดสอบครบถ้วน ตัวอย่างเช่น โค้ด `if (isVip && hasCoupon) { ... }` หากเราส่งเฉพาะกรณีที่เป็นจริงทั้งคู่ บรรทัดนั้นจะถูกรันและได้ Line Coverage 100% ทันที แต่ระบบจะยังไม่เคยถูกทดสอบเลยว่าเกิดอะไรขึ้นถ้า `isVip` เป็นจริงแต่ `hasCoupon` เป็นเท็จ หรือค่าเป็น `null/undefined` ดังนั้น **Branch Coverage** และการคิด Edge Cases จึงเป็นหัวใจสำคัญที่แท้จริง
+- **Q2: คำสั่ง `--runInBand` ใน Jest ทำงานอย่างไร และเมื่อไหร่ที่วิศวกรควรตัดสินใจเลือกใช้คำสั่งนี้?**
+  - *แนวคำตอบ:* ปกติ Jest จะแตก Worker Processes เพื่อรันแต่ละไฟล์ทดสอบแบบขนานกัน (Parallel Execution) แต่เมื่อใส่ Flag `--runInBand` (หรือ `-i`) Jest จะรันทุกไฟล์ทดสอบแบบเรียงคิวทีละไฟล์ (Serially) ภายใน Main Process เดียวกัน ควรเลือกใช้ใน 2 กรณี:
+    1. **Integration Tests ที่ใช้ฐานข้อมูลร่วมกัน:** เพื่อป้องกัน Race Conditions ที่ไฟล์เทสต์ 2 ไฟล์แย่งกันเขียนทับตารางเดียวกัน
+    2. **สภาพแวดล้อม CI ที่มีทรัพยากรจำกัด:** เช่น Docker Container ที่มี RAM 1-2GB การรัน Process เดียวจะเร็วกว่าและไม่เสี่ยงต่อการถูกระบบปฏิบัติการสั่ง Kill เพราะ Memory หมด
+
+---

@@ -1,0 +1,55 @@
+---
+title: Anti-patterns
+category: DATABASE
+parentTitle: Indexing
+version: PostgreSQL 16 B-Tree
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **Over-Indexing (สร้าง Index มากเกินความจำเป็น):** การสร้าง Index 10-15 ตัวในตารางเดียวโดยหวังว่าจะทำให้ทุกคิวรีเร็วขึ้น แต่ผลลัพธ์จริงคือทำลายความเร็วในการ `INSERT`/`UPDATE` ขัดขวางการทำ HOT Update และแย่งพื้นที่หน่วยความจำ `shared_buffers` ไปจากตารางสำคัญ
+2. **Wrapping Indexed Columns in Functions (ครอบฟังก์ชันทับคอลัมน์ใน `WHERE`):** การเขียน `WHERE DATE(created_at) = '2026-10-17'` หรือ `WHERE UPPER(sku) = 'WGY-01'` บนคอลัมน์ที่สร้าง B-Tree Index ปกติไว้ ทำให้ PostgreSQL ไม่สามารถใช้ Index ได้เลยและต้องถอยกลับไปทำ Sequential Scan เต็มตาราง
+3. **Leading Wildcard on B-Tree (`LIKE '%keyword%'`):** การเข้าใจผิดคิดว่าการสร้าง B-Tree Index บนคอลัมน์ `name` จะช่วยให้คำสั่ง `WHERE name LIKE '%Wagyu%'` เร็วขึ้น ทั้งที่ B-Tree รองรับเฉพาะคำขึ้นต้น (`LIKE 'Wagyu%'`) เท่านั้น หากมี `%` อยู่ข้างหน้าต้องใช้ GIN Index คู่กับ `pg_trgm`
+4. **Blocking Production with Standard `CREATE INDEX`:** การรัน Migration ที่มีคำสั่ง `CREATE INDEX` ปกติ (ไม่มี `CONCURRENTLY`) บนตารางที่มีธุรกรรมหนาแน่นในเวลางาน ส่งผลให้ตารางติด `SHARE` lock บล็อกคำสั่งเขียนข้อมูลทั้งหมดจน API Timeout ทั้งระบบ
+5. **Misordered Composite Index:** การวางคอลัมน์ที่มีเงื่อนไขแบบช่วง (Range เช่น `created_at > ...`) ไว้หน้าคอลัมน์ที่เช็คความเท่ากัน (`=`) ใน Composite Index ทำให้คอลัมน์ด้านหลังไม่สามารถช่วยคัดกรองขอบเขตใน B-Tree ได้อย่างเต็มประสิทธิภาพ
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+- [ ] **Foreign Key Indexes:** คอลัมน์ Foreign Key ทุกตัวในตาราง `products`, `orders`, `order_items`, `payments` มี B-Tree Index รองรับครบถ้วนทั้งใน SQL และ `@@index` ของ Prisma
+- [ ] **ESR Composite Ordering:** Composite Index ทุกตัวจัดลำดับคอลัมน์ตามกฎ Equality (`=`) ก่อน ตามด้วย Sort (`ORDER BY`) หรือ Range (`>`, `<`, `BETWEEN`) เสมอ
+- [ ] **Right Index Type Selected:** ใช้ B-Tree สำหรับข้อมูลทั่วไป, ใช้ GIN (`jsonb_path_ops`) สำหรับคอลัมน์ `JSONB`, และใช้ GIN (`gin_trgm_ops`) สำหรับคิวรีที่มี `ILIKE '%...%'`
+- [ ] **Partial Indexes for Skewed Data:** ใช้ Partial Index (`WHERE ...`) สำหรับการค้นหาข้อมูลกลุ่มย่อยที่มีสัดส่วนน้อย (เช่น ออเดอร์ที่อยู่ในสถานะรอดำเนินการ หรือแถวที่ `deleted_at IS NULL`)
+- [ ] **Covering Indexes for Hot Paths:** พิจารณาใช้ `INCLUDE (...)` บนคิวรีความถี่สูงที่ต้องการทำ Index-Only Scan เพื่อลด Random I/O บนตารางหลัก
+- [ ] **HOT Update Friendly:** ไม่มีการสร้าง Index บนคอลัมน์ที่ถูกอัปเดตค่าตลอดเวลาโดยไม่จำเป็นในการค้นหา (เช่น `stock_qty` หรือ `updated_at`)
+- [ ] **Zero-Downtime Index Creation:** การเพิ่มหรือซ่อมแซม Index บนตารางที่มีข้อมูลจำนวนมากใน Production ใช้คำสั่ง `CREATE INDEX CONCURRENTLY` หรือ `REINDEX INDEX CONCURRENTLY` เสมอ
+- [ ] **Unused Index Cleanup:** มีการตรวจสอบ `pg_stat_user_indexes` เพื่อลบ Index ที่ `idx_scan = 0` และซ้ำซ้อนออกเป็นระยะ
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อคุณเข้าใจกลไกการสร้างและเลือกใช้ Index ทุกชนิดใน PostgreSQL 16 แล้ว ขั้นตอนต่อไปคือการนำเครื่องมือ `EXPLAIN ANALYZE` มาใช้วิเคราะห์แผนการประมวลผลจริงและปรับจูนคิวรีให้ทำงานได้เร็วที่สุด:
+
+<Callout type="tip" title="ก้าวต่อไปสู่การทำ Query Optimization">
+การสร้าง Index จะสมบูรณ์ก็ต่อเมื่อเรายืนยันได้ว่า Query Planner ของ PostgreSQL นำ Index นั้นไปใช้งานจริงตามที่ออกแบบไว้ ศึกษาวิธีการอ่าน Execution Plan และแก้ปัญหา Slow Queries ได้ในบทถัดไป
+</Callout>
+
+- **พื้นฐานการออกแบบและภาษา SQL:**
+  - [Database Design](/docs/database/database-design)
+  - [PostgreSQL 16](/docs/database/postgresql)
+  - [SQL](/docs/database/sql)
+- **การวิเคราะห์ประสิทธิภาพและการจัดการธุรกรรม (ลำดับถัดไปที่แนะนำ):**
+  - [Query Performance](/docs/database/query-performance)
+  - [Transactions](/docs/database/transactions)
+  - [Concurrency](/docs/database/concurrency)
+- **การจัดการโครงสร้างและการเชื่อมต่อฝั่ง Backend:**
+  - [Database Migrations](/docs/database/migrations)
+  - [Prisma ORM](/docs/backend/prisma-orm)
+  - [NestJS](/docs/backend/nestjs)

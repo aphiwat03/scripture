@@ -1,0 +1,154 @@
+---
+title: Prisma Schema
+category: BACKEND
+parentTitle: Prisma ORM
+version: Prisma 6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+หัวใจสำคัญของ Prisma ORM คือแนวคิด **Schema-First Declarative Data Modeling** โดยใช้ไฟล์ `prisma/schema.prisma` เป็นแหล่งอ้างอิงความจริงเพียงหนึ่งเดียว (Single Source of Truth) ของโครงสร้างฐานข้อมูลและ TypeScript Types ภายในไฟล์นี้ประกอบด้วย 3 ส่วนหลักคือ:
+1. **`datasource`**: กำหนดชนิดฐานข้อมูล (`postgresql`) และ URL การเชื่อมต่อ
+2. **`generator`**: กำหนดวิธีสร้างโค้ด `PrismaClient` (เช่น `prisma-client-js` พร้อม Preview Features สำหรับ Driver Adapters หรือ TypedSQL)
+3. **`model` และ `enum`**: นิยามตาราง, คอลัมน์, ชนิดข้อมูลระดับ Native PostgreSQL (`@db.*`), ค่าเริ่มต้น (`@default`), และการตั้งชื่อแบบ `camelCase` ในโค้ด TypeScript คู่กับ `snake_case` ในตาราง PostgreSQL จริงด้วย `@map` และ `@@map`
+
+<Callout type="note" title="การเลือกใช้ Decimal สำหรับราคาและน้ำหนักเนื้อพรีเมียม">
+ห้ามใช้ชนิดข้อมูล Float สำหรับเก็บราคาเนื้อวากิวหรือยอดชำระเงินเด็ดขาด เพราะเลขทศนิยมฐานสอง (IEEE 754) มีความคลาดเคลื่อนในการปัดเศษ ต้องใช้ Decimal คู่กับ Native Type @db.Decimal(12, 2) เสมอเพื่อความแม่นยำระดับระบบบัญชีการเงิน
+</Callout>
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อเราสั่งรันคำสั่ง `npx prisma generate` เครื่องมือ CLI ของ Prisma จะอ่านไฟล์ `schema.prisma` แล้วใช้ AST Parser สร้างไฟล์ TypeScript Definitions (`index.d.ts`) และ Query Engine Runtime เฉพาะสำหรับโปรเจกต์ของเราโดยตรง ทำให้ทุกๆ โมเดลและฟิลด์กลายเป็น Type-safe ตั้งแต่ตอนเขียนโค้ด (Compile-time) ไม่ใช่เพิ่งมารู้ว่าพิมพ์ชื่อคอลัมน์ผิดตอนรันโปรแกรม (Runtime) นอกจากนี้ การระบุ `@db.Uuid`, `@db.Timestamptz(3)`, และ `@@index` ใน Schema ยังช่วยให้ `prisma migrate` สร้างคำสั่ง DDL ของ PostgreSQL 16 ที่มีประสิทธิภาพสูงสุดโดยไม่สูญเสียขนาดหน่วยความจำโดยเปล่าประโยชน์
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การประกาศ Generator, Datasource, Enums และโมเดลพื้นฐาน User & Category (พื้นฐาน)
+```prisma filename="prisma/schema.prisma"
+// ส่วนที่ 1: กำหนดการสร้าง Prisma Client
+generator client {
+  provider        = "prisma-client-js"
+  // เปิดใช้งาน driverAdapters เพื่อรองรับการเชื่อมต่อผ่าน @prisma/adapter-pg (Node-postgres Pool)
+  previewFeatures = ["driverAdapters"]
+}
+
+// ส่วนที่ 2: กำหนดการเชื่อมต่อฐานข้อมูล PostgreSQL 16
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ส่วนที่ 3: กำหนด Enums สำหรับโดเมน Smart Butcher Marketplace
+enum UserRole {
+  CUSTOMER
+  BUTCHER_CHEF
+  ADMIN
+
+  @@map("user_role")
+}
+
+enum MeatGrade {
+  JAPANESE_A5
+  JAPANESE_A4
+  AUSTRALIAN_MB9
+  USDA_PRIME
+  DRY_AGED_SPECIAL
+
+  @@map("meat_grade")
+}
+
+model User {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email        String    @unique @db.VarChar(255)
+  passwordHash String    @map("password_hash") @db.VarChar(255)
+  fullName     String    @map("full_name") @db.VarChar(150)
+  phoneNumber  String?   @map("phone_number") @db.VarChar(20)
+  role         UserRole  @default(CUSTOMER)
+  isActive     Boolean   @default(true) @map("is_active")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  orders       Order[]
+
+  @@index([email])
+  @@map("users")
+}
+
+model Category {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name        String    @db.VarChar(100)
+  slug        String    @unique @db.VarChar(120)
+  description String?   @db.Text
+  displaySort Int       @default(0) @map("display_sort")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  products    Product[]
+
+  @@index([displaySort])
+  @@map("categories")
+}
+```
+
+### ตัวอย่างที่ 2: การออกแบบโมเดล Product ที่ใช้ Native PostgreSQL Types และ Composite Index (ขั้นสูง)
+```prisma filename="prisma/schema.prisma"
+model Product {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sku                String    @unique @db.VarChar(64)
+  name               String    @db.VarChar(200)
+  categoryId         String    @map("category_id") @db.Uuid
+  grade              MeatGrade
+  marblingScore      Int       @default(1) @map("marbling_score") @db.SmallInt
+  dryAgedDays        Int?      @map("dry_aged_days") @db.SmallInt
+  // ใช้ Decimal(12, 2) เก็บราคาต่อกิโลกรัมอย่างแม่นยำ
+  pricePerKgThb      Decimal   @map("price_per_kg_thb") @db.Decimal(12, 2)
+  // เก็บสต็อกเนื้อเป็นหน่วยกรัม (Integer) และมี version สำหรับทำ Optimistic Concurrency Control
+  stockWeightGrams   Int       @default(0) @map("stock_weight_grams")
+  version            Int       @default(1)
+  isAvailable        Boolean   @default(true) @map("is_available")
+  storageTempCelsius Decimal   @default(1.5) @map("storage_temp_celsius") @db.Decimal(4, 1)
+  metadata           Json?     @db.JsonB
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deletedAt          DateTime? @map("deleted_at") @db.Timestamptz(3)
+
+  category           Category    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  orderItems         OrderItem[]
+
+  // Composite Indexes สำหรับเพิ่มความเร็วในการ Filter และทำ Cursor Pagination
+  @@index([categoryId, isAvailable, pricePerKgThb])
+  @@index([createdAt(sort: Desc), id(sort: Desc)])
+  @@map("products")
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```prisma filename="prisma/schema-comparison.prisma"
+// ❌ ผิด (Anti-pattern): ใช้ Float เก็บราคาเงิน, ไม่ตั้งชื่อตารางเป็น snake_case, และไม่สร้าง Index ให้ Foreign Key
+model BadProduct {
+  id         Int     @id @default(autoincrement())
+  categoryId Int     // ไม่มี @@index([categoryId]) ใน PostgreSQL จะทำให้การ JOIN และ ON DELETE ช้ามาก!
+  price      Float   // เกิดปัญหา 0.1 + 0.2 = 0.30000000000000004
+}
+
+// ✅ ถูก (Best Practice): ใช้ UUID, Decimal(12,2), @map/@@map และระบุ @@index อย่างชัดเจน
+model GoodProduct {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  categoryId    String   @map("category_id") @db.Uuid
+  pricePerKgThb Decimal  @map("price_per_kg_thb") @db.Decimal(12, 2)
+
+  @@index([categoryId])
+  @@map("good_products")
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `@map` และ `@@map` เสมอเมื่อ**: ใช้ฐานข้อมูล PostgreSQL เพื่อรักษามาตรฐานการตั้งชื่อตารางและคอลัมน์แบบ `snake_case` ในระดับ SQL (ไม่ต้องใส่เครื่องหมายคำพูด `"pricePerKgThb"` เวลาเขียน SQL) ขณะที่ในโค้ด TypeScript ยังคงใช้ `camelCase` (`product.pricePerKgThb`) ได้อย่างเป็นธรรมชาติ
+- **ไม่ควรใช้ `Json` (`@db.JsonB`) แทนคอลัมน์หลักที่ต้องใช้ค้นหาและเชื่อมตาราง**: ควรใช้ `JsonB` เฉพาะข้อมูลเสริมที่โครงสร้างยืดหยุ่น เช่น ใบรับรองสายพันธุ์วัวจากฟาร์มญี่ปุ่น (`metadata`) เท่านั้น
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ใน PostgreSQL ถ้าเราประกาศ Foreign Key ใน Prisma Schema แล้ว ทำไมเราจึงยังต้องเขียน `@@index([categoryId])` เพิ่มด้วยตัวเอง?
+   - **แนวคำตอบ**: เพราะต่างจาก MySQL (InnoDB) ที่สร้าง Index ให้กับคอลัมน์ Foreign Key โดยอัตโนมัติ **PostgreSQL จะสร้าง Index อัตโนมัติเฉพาะคอลัมน์ที่เป็น Primary Key และ Unique Constraint เท่านั้น** แต่จะไม่สร้าง Index ให้กับคอลัมน์ฝั่ง Foreign Key (`categoryId`) หากเราไม่ใส่ `@@index([categoryId])` ใน Prisma Schema เวลาที่เราคิวรี `WHERE category_id = ...` หรือมีการลบหมวดหมู่ในตารางแม่ PostgreSQL จะต้องทำ Sequential Scan กวาดอ่านตาราง `products` ทั้งตาราง
+2. **คำถาม**: `@default(uuid())` ของ Prisma กับ `@default(dbgenerated("gen_random_uuid()"))` ของ PostgreSQL 16 ต่างกันอย่างไร?
+   - **แนวคำตอบ**: `@default(uuid())` จะถูกสร้างขึ้นที่ฝั่ง Prisma Client Engine (Application layer) ก่อนส่งคำสั่ง `INSERT` ไปยังฐานข้อมูล ส่วน `@default(dbgenerated("gen_random_uuid()"))` จะกำหนดค่า `DEFAULT gen_random_uuid()` ลงใน DDL ของตาราง PostgreSQL โดยตรง ทำให้แม้จะมีสคริปต์ SQL อื่นหรือระบบคลังสินค้าทำ `INSERT` เข้าตารางโดยไม่ผ่าน Prisma ฐานข้อมูลก็ยังสามารถสร้าง UUID v4 ให้ได้เองอย่างสมบูรณ์
+
+---

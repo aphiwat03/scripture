@@ -1,0 +1,189 @@
+---
+title: Orphan Cleanup
+category: BACKEND
+parentTitle: File Upload
+version: Multer & Supabase Storage
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ปัญหาคลาสสิกของระบบที่แยกฐานข้อมูลเชิงสัมพันธ์ (PostgreSQL) ออกจากระบบจัดเก็บไฟล์ (Supabase Storage) คือทั้งสองระบบไม่ได้อยู่ใน Database Transaction เดียวกัน ทำให้เกิด **Orphaned Files (ไฟล์กำพร้า/ไฟล์ขยะ)** ได้ใน 3 กรณีหลัก:
+1. **การอัปโหลดสำเร็จแต่บันทึก DB ล้มเหลว**: อัปโหลดไฟล์ขึ้น Supabase Storage สำเร็จแล้ว แต่จังหวะที่สั่ง `prisma.product.update()` เกิด Error (เช่น Foreign Key ผิด หรือ Unique Constraint ชน) ทำให้ไฟล์ค้างอยู่บน Cloud โดยไม่มีแถวในฐานข้อมูลอ้างอิงถึง
+2. **การอัปเดตรูปภาพใหม่ทับรูปเดิม**: เมื่อแอดมินเปลี่ยนรูปสินค้า `Product` หรือลูกค้าอัปโหลดสลิป `Payment` ใบใหม่แทนใบเดิมที่ถ่ายไม่ชัด หากไม่ออกคำสั่งลบไฟล์เก่า ไฟล์เก่าจะค้างสะสมและคิดค่าใช้จ่ายพื้นที่จัดเก็บไปเรื่อยๆ
+3. **การลบข้อมูลหลัก (Hard Delete)**: เมื่อลบ `Product` ออกจากฐานข้อมูลแล้วไม่ได้ลบไฟล์ใน Storage ตาม
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เพื่อรักษาความสอดคล้องของข้อมูล (Eventual Consistency) ระหว่าง PostgreSQL และ Supabase Storage เราใช้รูปแบบ **Compensating Action (การกระทำชดเชย)** และ **Safe Post-Commit Cleanup**:
+- **กรณีอัปโหลดแล้วบันทึก DB พัง**: ใช้บล็อก `try / catch` หุ้มส่วนการบันทึกฐานข้อมูล หากเกิดข้อผิดพลาดในขั้นตอน DB ให้สั่งลบไฟล์ที่เพิ่งอัปโหลดขึ้นไปในบล็อก `catch` ทันที (Compensating Rollback) ก่อนโยน Error กลับไปหาผู้ใช้
+- **กรณีเปลี่ยนรูปใหม่หรือลบแถวข้อมูล**: ต้องอัปโหลดรูปใหม่และอัปเดตฐานข้อมูลให้สำเร็จก่อนเสมอ แล้วจึงนำ `oldStoragePath` ไปสั่งลบออกจาก Supabase Storage เป็นขั้นตอนสุดท้าย (หากลบไฟล์เก่าก่อนแล้วอัปเดต DB พัง ข้อมูลเดิมใน DB จะชี้ไปหาไฟล์ที่ถูกลบไปแล้ว ทำให้รูปหน้าเว็บพังทันที)
+
+<Callout type="tip" title="ทำไมต้องลบไฟล์เก่าหลังจากอัปเดตฐานข้อมูลสำเร็จแล้วเท่านั้น">
+อย่าสั่งลบไฟล์เก่าบน Storage ก่อนที่คำสั่ง `prisma.product.update()` จะสำเร็จ เพราะหากเกิดปัญหาที่ฐานข้อมูลและเกิดการ Rollback แถวข้อมูลในตาราง `Product` จะยังคงชี้ไปที่ `imageStoragePath` เดิม ซึ่งถ้าเราเผลอลบไฟล์นั้นไปแล้ว หน้าเว็บไซต์จะแสดงรูปภาพที่แตก (404 Broken Image) ทันที
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: เมธอด `removeFiles` แบบปลอดภัยใน `StorageService` ที่ไม่ทำให้ Request หลักพังหากการลบไฟล์ขยะล้มเหลวชั่วคราว (แต่บันทึก Log ไว้สำหรับตรวจสอบ)
+
+```typescript filename="src/modules/storage/storage.service.ts"
+import { Injectable, Logger } from '@nestjs/common';
+import { SupabaseClient } from '@supabase/supabase-js';
+
+@Injectable()
+export class StorageCleanupService {
+  private readonly logger = new Logger(StorageCleanupService.name);
+
+  constructor(private readonly supabase: SupabaseClient) {}
+
+  async removeFileSafely(bucket: string, storagePath: string | null | undefined): Promise<void> {
+    if (!storagePath) {
+      return;
+    }
+
+    const { error } = await this.supabase.storage
+      .from(bucket)
+      .remove([storagePath]);
+
+    if (error) {
+      // บันทึก Structured Warning Log เพื่อให้ระบบ Cron Job เก็บกวาดภายหลังได้ โดยไม่ทำให้ Request ของผู้ใช้ล้มเหลว
+      this.logger.warn(
+        JSON.stringify({
+          event: 'ORPHAN_FILE_CLEANUP_FAILED',
+          bucket,
+          storagePath,
+          reason: error.message,
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    }
+  }
+}
+```
+
+ตัวอย่างที่ 2: การจัดการ Lifecycle การเปลี่ยนรูปสินค้าและการลบสินค้าใน `ProductsService` พร้อม Compensating Rollback เมื่อ DB ล้มเหลว
+
+```typescript filename="src/modules/products/products.service.ts"
+import {
+  Injectable,
+  NotFoundException,
+  ConflictException,
+} from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
+import { StorageCleanupService } from '../storage/storage-cleanup.service';
+
+@Injectable()
+export class ProductsLifecycleService {
+  private readonly PRODUCT_BUCKET = 'butcher-public-assets';
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storageService: StorageService,
+    private readonly storageCleanup: StorageCleanupService,
+  ) {}
+
+  async replaceProductImage(productId: string, newFile: Express.Multer.File) {
+    const existingProduct = await this.prisma.product.findUnique({
+      where: { id: productId },
+      select: { id: true, imageStoragePath: true },
+    });
+
+    if (!existingProduct) {
+      throw new NotFoundException(`ไม่พบสินค้าเนื้อรหัส ${productId}`);
+    }
+
+    const oldStoragePath = existingProduct.imageStoragePath;
+
+    // 1. อัปโหลดไฟล์ใหม่ขึ้น Supabase Storage ก่อน
+    const uploaded = await this.storageService.uploadPublicFile({
+      bucket: this.PRODUCT_BUCKET,
+      folderPrefix: 'products',
+      entityId: existingProduct.id,
+      file: newFile,
+    });
+
+    try {
+      // 2. อัปเดต Path และ URL ใหม่ลงในฐานข้อมูล PostgreSQL
+      const updatedProduct = await this.prisma.product.update({
+        where: { id: existingProduct.id },
+        data: {
+          imageUrl: uploaded.publicUrl,
+          imageStoragePath: uploaded.path,
+        },
+      });
+
+      // 3. เมื่อ DB อัปเดตสำเร็จแล้ว จึงค่อยลบไฟล์เก่าออกจาก Storage (ถ้ามี)
+      if (oldStoragePath && oldStoragePath !== uploaded.path) {
+        await this.storageCleanup.removeFileSafely(
+          this.PRODUCT_BUCKET,
+          oldStoragePath,
+        );
+      }
+
+      return updatedProduct;
+    } catch (dbError) {
+      // Compensating Action: หากบันทึก DB ล้มเหลว ต้องลบไฟล์ใหม่ที่เพิ่งอัปโหลดขึ้นไปทันทีเพื่อไม่ให้เป็นไฟล์ขยะ
+      await this.storageCleanup.removeFileSafely(
+        this.PRODUCT_BUCKET,
+        uploaded.path,
+      );
+      throw dbError;
+    }
+  }
+
+  async deleteProductAndCleanupImage(productId: string): Promise<{ deletedId: string }> {
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+      include: {
+        _count: {
+          select: { orderItems: true },
+        },
+      },
+    });
+
+    if (!product) {
+      throw new NotFoundException(`ไม่พบสินค้าเนื้อรหัส ${productId}`);
+    }
+
+    // ป้องกันการลบสินค้าที่มีประวัติการสั่งซื้อแล้วใน OrderItem
+    if (product._count.orderItems > 0) {
+      throw new ConflictException(
+        'ไม่สามารถลบสินค้าที่มีประวัติการสั่งซื้อแล้วได้ กรุณาเปลี่ยนสถานะเป็นยกเลิกการขาย (Soft Delete / isActive: false) แทน',
+      );
+    }
+
+    // 1. ลบข้อมูลในฐานข้อมูลให้สำเร็จก่อน
+    await this.prisma.product.delete({
+      where: { id: product.id },
+    });
+
+    // 2. ลบไฟล์รูปภาพออกจาก Supabase Storage
+    await this.storageCleanup.removeFileSafely(
+      this.PRODUCT_BUCKET,
+      product.imageStoragePath,
+    );
+
+    return { deletedId: product.id };
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **ลำดับการลบไฟล์เก่า** | สั่งลบไฟล์รูปเก่าออกจาก Storage ก่อน แล้วค่อยสั่งอัปเดตฐานข้อมูล หาก DB พัง ข้อมูลเดิมจะชี้ไปหาไฟล์ที่หายไปแล้ว | อัปโหลดไฟล์ใหม่ -> อัปเดต DB ให้สำเร็จ -> ลบไฟล์เก่าออกจาก Storage |
+| **เมื่ออัปเดต DB ล้มเหลว** | ปล่อยให้ Error เด้งออกเลยโดยไม่สนใจไฟล์ที่เพิ่งอัปโหลดขึ้นไป ทำให้เกิด Orphaned File ทันที | ใช้ `try / catch` เพื่อทำ Compensating Delete ลบไฟล์ใหม่ที่เพิ่งอัปโหลดทิ้งหากขั้นตอน DB ล้มเหลว |
+| **การลบสินค้าที่มีออเดอร์แล้ว** | สั่ง Hard Delete ลบทั้งแถว `Product` และลบรูปภาพทิ้ง ทำให้หน้าประวัติคำสั่งซื้อ (`OrderItem`) ของลูกค้าพัง | เช็คความสัมพันธ์กับ `OrderItem` ก่อน หากมีการสั่งซื้อแล้วให้ใช้ Soft Delete (`isActive: false`) และเก็บไฟล์รูปภาพไว้ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้การลบไฟล์จริง (Hard Cleanup) เมื่อ**: เป็นการเปลี่ยนรูปภาพใหม่แทนที่รูปเดิมของ `Product` หรือ `Category` หรือเมื่อลบสินค้าที่เพิ่งสร้างผิดและยังไม่เคยถูกนำไปผูกกับ `OrderItem` ใดๆ
+- **ไม่ควรใช้การลบไฟล์จริงเมื่อ**: เป็นหลักฐานการชำระเงิน (`Payment`) ที่ได้รับการตรวจสอบแล้ว หรือรูปภาพของสินค้าที่เคยถูกซื้อไปแล้วในอดีตและธุรกิจต้องการเก็บภาพอ้างอิงตามสภาพสินค้าขณะซื้อขาย
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: เนื่องจาก PostgreSQL และ Supabase Storage ไม่สามารถทำ ACID Transaction ร่วมกันได้โดยตรง คุณมีวิธีแก้ปัญหา Orphaned Files อย่างไรในระดับ Production?
+   - **แนวคำตอบ**: ใช้การป้องกัน 2 ชั้น ชั้นแรกคือ **Synchronous Compensating Action** ในโค้ด: อัปโหลดไฟล์ใหม่ก่อน แล้วหุ้มการบันทึก DB ด้วย `try / catch` หาก DB ล้มเหลวจะสั่งลบไฟล์ที่เพิ่งอัปโหลดทันที และจะลบไฟล์เก่าก็ต่อเมื่อการบันทึก DB สำเร็จแล้วเท่านั้น ชั้นที่สองสำหรับระบบขนาดใหญ่คือ **Asynchronous Reconciliation Job (Cron Job)**: รันงานเบื้องหลัง (เช่น สัปดาห์ละครั้ง) เพื่อดึงรายการไฟล์ใน Storage ที่มีอายุมากกว่า 24 ชั่วโมงมาเทียบกับคอลัมน์ `imageStoragePath` / `slipStoragePath` ในฐานข้อมูล หากไฟล์ใดไม่มีการอ้างอิงเลยจึงทำการลบออก
+2. **คำถาม**: ทำไมในเมธอด `removeFileSafely()` เมื่อการลบไฟล์เก่าในขั้นตอนสุดท้ายล้มเหลว เราจึงเลือกทำ `logger.warn()` แทนที่จะ `throw InternalServerErrorException`?
+   - **แนวคำตอบ**: เพราะในจุดนั้น ข้อมูลในฐานข้อมูล PostgreSQL ได้ถูก Commit เปลี่ยนไปใช้รูปภาพใหม่สำเร็จเรียบร้อยแล้ว หากเราโยน HTTP 500 กลับไปหาผู้ใช้เพราะแค่ลบไฟล์เก่าไม่สำเร็จ ผู้ใช้จะเข้าใจผิดว่าการเปลี่ยนรูปสินค้าล้มเหลวและกดอัปโหลดซ้ำอีก ทั้งที่ความจริงการเปลี่ยนรูปสำเร็จแล้ว ส่วนไฟล์เก่าที่ตกค้างสามารถตามเก็บกวาดภายหลังผ่าน Log หรือ Scheduled Cleanup Job ได้โดยไม่กระทบประสบการณ์ของผู้ใช้
+
+---

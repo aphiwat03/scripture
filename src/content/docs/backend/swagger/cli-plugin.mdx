@@ -1,0 +1,144 @@
+---
+title: CLI Plugin
+category: BACKEND
+parentTitle: Swagger
+version: OpenAPI 3.1 & NestJS Swagger
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในโปรเจกต์ขนาดใหญ่ที่มี DTO หลายสิบคลาส การต้องเขียน `@ApiProperty()` และ `@ApiPropertyOptional()` กำกับทุกฟิลด์ด้วยมือ (Boilerplate Code) ทำให้ไฟล์ DTO ยาวขึ้นเป็นสองเท่าและเสี่ยงต่อการที่แก้ชนิดข้อมูลใน TypeScript แล้วลืมแก้ใน `@ApiProperty()` **NestJS Swagger CLI Plugin** ช่วยแก้ปัญหานี้ด้วยการวิเคราะห์โครงสร้างโค้ด (AST - Abstract Syntax Tree) ในจังหวะคอมไพล์เพื่อเติม `@ApiProperty()` และ `@ApiResponse()` ให้โดยอัตโนมัติ
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อเราเปิดใช้งานปลั๊กอิน `@nestjs/swagger` ในไฟล์ `nest-cli.json` ตัวคอมไพเลอร์ของ NestJS จะแทรก TypeScript Compiler Plugin เข้าไปในขั้นตอนการ Build เพื่อทำงานดังนี้:
+1. สแกนไฟล์ทั้งหมดที่มีนามสกุลตรงกับ `dtoFileNameSuffix` (ค่าเริ่มต้นคือ `['.dto.ts', '.entity.ts']`)
+2. อ่านเครื่องหมาย `?` (เช่น `cookingNote?: string`) เพื่อตัดสินใจอัตโนมัติว่าเป็น `required: false` หรือ `required: true`
+3. อ่านชนิดข้อมูล (`string`, `number`, `boolean`, `OrderItemDto[]`, `OrderStatus` Enum) และค่าเริ่มต้น (Default Value)
+4. หากเปิด `introspectComments: true` ปลั๊กอินจะดึงข้อความจากคอมเมนต์ **JSDoc (`/** ... */`)** และแท็ก `@example` มาใส่เป็น `description` และ `example` ใน OpenAPI Schema ให้ทันทีโดยไม่ต้องเขียน `@ApiProperty()` เลยแม้แต่บรรทัดเดียว
+
+<Callout type="note" title="การทำงานร่วมกันของ CLI Plugin และ @ApiProperty ที่เขียนเอง">
+เมื่อเปิดใช้งาน CLI Plugin แล้ว หากฟิลด์ใดมีความต้องการพิเศษที่ต้องการกำหนดค่าเอง คุณยังสามารถใส่ `@ApiProperty({ ... })` ทับลงไปที่ฟิลด์นั้นได้ตามปกติ ค่าที่คุณเขียนระบุเองจะมีความสำคัญสูงสุดและไป Override ค่าที่ CLI Plugin สร้างให้อัตโนมัติ
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การตั้งค่า `nest-cli.json` เพื่อเปิดใช้งาน `@nestjs/swagger` CLI Plugin พร้อมออปชันอ่าน JSDoc Comments และตรวจสอบ `class-validator`
+
+```json filename="nest-cli.json"
+{
+  "$schema": "https://json.schemastore.org/nest-cli",
+  "collection": "@nestjs/schematics",
+  "sourceRoot": "src",
+  "compilerOptions": {
+    "deleteOutDir": true,
+    "assets": [],
+    "watchAssets": false,
+    "plugins": [
+      {
+        "name": "@nestjs/swagger",
+        "options": {
+          "dtoFileNameSuffix": [".dto.ts", ".entity.ts"],
+          "controllerFileNameSuffix": [".controller.ts"],
+          "classValidatorShim": true,
+          "introspectComments": true
+        }
+      }
+    ]
+  }
+}
+```
+
+ตัวอย่างที่ 2: การเขียน `CreateOrderDto` และ `OrderItemInputDto` ที่สะอาดตาและได้เอกสาร OpenAPI ครบถ้วน 100% ด้วยการใช้ JSDoc ร่วมกับ `class-validator` (โดยไม่ต้องเขียน `@ApiProperty` ซ้ำซ้อน)
+
+```typescript filename="src/modules/orders/dto/create-order.dto.ts"
+import {
+  IsArray,
+  IsEnum,
+  IsInt,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Min,
+  ValidateNested,
+  ArrayMinSize,
+} from 'class-validator';
+import { Type } from 'class-transformer';
+
+export enum DeliveryTimeSlot {
+  MORNING_09_12 = 'MORNING_09_12',
+  AFTERNOON_13_17 = 'AFTERNOON_13_17',
+  EVENING_18_20 = 'EVENING_18_20',
+}
+
+export class OrderItemInputDto {
+  /**
+   * รหัสสินค้าเนื้อพรีเมียมที่ต้องการสั่งซื้อ (UUID v4)
+   * @example "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+   */
+  @IsUUID('4')
+  productId!: string;
+
+  /**
+   * น้ำหนักเนื้อที่สั่งซื้อ (หน่วยเป็นกรัม ขั้นต่ำ 200 กรัม)
+   * @example 500
+   */
+  @IsInt()
+  @Min(200)
+  weightGrams!: number;
+
+  /**
+   * รูปแบบการหั่นเนื้อที่ลูกค้าต้องการ
+   * @example "หั่นสเต็กความหนา 2.5 ซม. แพ็กสุญญากาศแยกชิ้น"
+   */
+  @IsOptional()
+  @IsString()
+  cuttingInstruction?: string;
+}
+
+export class CreateOrderDto {
+  /**
+   * ที่อยู่สำหรับจัดส่งรถควบคุมอุณหภูมิ (Cold Chain Delivery)
+   * @example "88/9 ถนนสุขุมวิท แขวงคลองตันเหนือ เขตวัฒนา กรุงเทพฯ 10110"
+   */
+  @IsString()
+  @IsNotEmpty()
+  shippingAddress!: string;
+
+  /**
+   * ช่วงเวลาที่สะดวกรับสินค้าแช่เย็น
+   * @example "AFTERNOON_13_17"
+   */
+  @IsEnum(DeliveryTimeSlot)
+  deliverySlot: DeliveryTimeSlot = DeliveryTimeSlot.AFTERNOON_13_17;
+
+  /**
+   * รายการเนื้อที่สั่งซื้อในออเดอร์นี้ (ต้องมีอย่างน้อย 1 รายการ)
+   */
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => OrderItemInputDto)
+  items!: OrderItemInputDto[];
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การตั้งชื่อไฟล์ DTO** | ตั้งชื่อไฟล์ว่า `create-order.input.ts` หรือ `order-schema.ts` ซึ่งไม่ตรงกับ `dtoFileNameSuffix` ทำให้ CLI Plugin ข้ามการสแกนไฟล์นั้น | ตั้งชื่อไฟล์ลงท้ายด้วย `.dto.ts` เสมอตามมาตรฐานของ NestJS |
+| **การซิงค์กฎ Validation กับ Swagger** | เขียน `@Min(200)` ของ `class-validator` แล้วต้องมาเขียน `@ApiProperty({ minimum: 200 })` ซ้ำอีกครั้งด้วยมือ | เปิด `"classValidatorShim": true` ใน `nest-cli.json` เพื่อให้ปลั๊กอินดึงกฎจาก `@Min()`, `@Max()`, `@MaxLength()` ไปใส่ใน OpenAPI Schema อัตโนมัติ |
+| **การคืนค่าจาก Controller** | ไม่ระบุ Return Type ของเมธอดใน Controller เช่น `async create(@Body() dto: CreateOrderDto)` | ระบุ Return Type ชัดเจน เช่น `async create(@Body() dto: CreateOrderDto): Promise<OrderResponseDto>` เพื่อให้ CLI Plugin สร้าง `@ApiResponse` ให้ได้ถูกต้อง |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: โปรเจกต์คอมไพล์ด้วย `@nestjs/cli` (`nest build` / `nest start`) และต้องการให้โค้ด DTO สะอาด อ่านง่าย และลดความเสี่ยงที่เอกสารจะไม่ตรงกับ Type จริง
+- **ไม่ควรใช้เมื่อ**: หากคุณใช้ Custom Bundler ที่ไม่ได้รองรับ TypeScript `before` AST Transformers (เช่น การรันผ่านเครื่องมือบางตัวที่ตัด Type ทิ้งโดยไม่ผ่านปลั๊กอิน) กรณีนั้นจะต้องใช้ `@ApiProperty()` แบบ Explicit หรือรันผ่าน SWC Plugin ที่รองรับ Metadata ของ NestJS
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ออปชัน `"classValidatorShim": true` ใน Swagger CLI Plugin ทำงานอย่างไร?
+   - **แนวคำตอบ**: เมื่อเปิดออปชันนี้ ตัว CLI Plugin จะอ่าน Decorators ของแพ็กเกจ `class-validator` ที่แปะอยู่บนฟิลด์ของ DTO เช่น `@Min(1)`, `@Max(100)`, `@MinLength(3)`, `@MaxLength(50)` แล้วแปลงเป็นข้อกำหนด `minimum`, `maximum`, `minLength`, `maxLength` ใน OpenAPI Schema โดยอัตโนมัติ ทำให้กฎการตรวจข้อมูลขาเข้าและเอกสาร API ตรงกันเสมอโดยไม่ต้องเขียนซ้ำสองรอบ
+2. **คำถาม**: หากเปิดใช้งาน CLI Plugin แล้ว ทำไมเมื่อเราแก้ไขโครงสร้าง DTO ในบางครั้งจึงควรลองลบโฟลเดอร์ `dist/` แล้วสั่ง Build ใหม่หากหน้า Swagger ยังไม่อัปเดต?
+   - **แนวคำตอบ**: เพราะ CLI Plugin ทำงานในขั้นตอนการแปลง AST ตอนคอมไพล์เป็นไฟล์ `.js` ในโฟลเดอร์ `dist/` หากระบบ Incremental Build (`tsconfig.build.tsbuildinfo`) แคชไฟล์เก่าไว้ การล้างโฟลเดอร์ `dist/` (`deleteOutDir: true`) จะบังคับให้ TypeScript รัน AST Transformer ของ Swagger ใหม่ทั้งหมดอย่างถูกต้อง
+
+---

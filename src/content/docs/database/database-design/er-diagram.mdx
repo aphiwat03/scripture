@@ -1,0 +1,100 @@
+---
+title: ER Diagram
+category: DATABASE
+parentTitle: Database Design
+version: Relational Modeling
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+การออกแบบฐานข้อมูลไม่ได้เริ่มต้นจากการเปิดโปรแกรมเขียนคำสั่ง `CREATE TABLE` ทันที แต่ต้องเริ่มจากการทำความเข้าใจโจทย์ธุรกิจ (Business Requirements) แล้วสกัดออกมาเป็นคำนามสำคัญซึ่งแทน **Entities** (สิ่งของหรือบุคคลที่เราต้องการเก็บข้อมูล) และคุณลักษณะของสิ่งนั้นซึ่งแทน **Attributes** โดยแบ่งขั้นตอนการออกแบบออกเป็น 3 ระดับ ได้แก่
+1. **Conceptual Design:** การระบุว่าธุรกิจมีองค์ประกอบหลักอะไรบ้างและเกี่ยวข้องกันอย่างไร เช่น ลูกค้าสั่งซื้อสินค้าเนื้อวัว ซึ่งสินค้าอยู่ในหมวดหมู่เนื้อพรีเมียม
+2. **Logical Design:** การกำหนดโครงสร้างรายละเอียดของแต่ละ Entity ว่ามีฟิลด์อะไรบ้าง คีย์หลักคืออะไร และเชื่อมโยงกันด้วยคีย์นอก (Foreign Key) แบบใด โดยยังไม่ยึดติดกับระบบฐานข้อมูลตัวใดตัวหนึ่ง
+3. **Physical Design:** การแปลง Logical Model ให้กลายเป็นโค้ด SQL DDL สำหรับ PostgreSQL 16 โดยระบุชนิดข้อมูลที่แม่นยำ (เช่น `UUID`, `NUMERIC(12,2)`, `TIMESTAMPTZ`) กำหนด `CHECK` constraints และวางแผนสร้าง Indexes
+
+```mermaid filename="docs/database/database-design-diagram.mmd"
+flowchart LR
+    A["1. โจทย์ธุรกิจ (Requirements)"] --> B["2. Conceptual Model (Entities)"]
+    B --> C["3. Logical ERD (Attributes & Keys)"]
+    C --> D["4. Physical Schema (PostgreSQL 16 DDL)"]
+```
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อเรารันคำสั่งสร้างตารางใน PostgreSQL 16 ตัว Database Engine จะนำโครงสร้าง Physical Schema ไปบันทึกไว้ใน System Catalogs เช่น `pg_class` (เก็บข้อมูลตารางและ Index), `pg_attribute` (เก็บข้อมูลคอลัมน์และชนิดข้อมูล) และ `pg_constraint` (เก็บกฎ `PRIMARY KEY`, `FOREIGN KEY`, `UNIQUE`, `CHECK`)
+
+ในระดับการจัดเก็บข้อมูลจริงบนดิสก์ (Storage Layout) PostgreSQL จะจัดเก็บแถวข้อมูล (เรียกว่า Heap Tuples) ลงในบล็อกขนาด 8KB (Pages) การออกแบบคอลัมน์ให้มีชนิดข้อมูลที่กระชับและตรงตามความเป็นจริง เช่น การใช้ `INTEGER` หรือ `SMALLINT` แทนการใช้ `VARCHAR` เก็บตัวเลข หรือการกำหนด `NOT NULL` ให้ชัดเจน จะช่วยให้ PostgreSQL คำนวณขนาดพื้นที่จัดเก็บ (Tuple Header & Data Alignment) ได้อย่างมีประสิทธิภาพ ลดขนาดตาราง และทำให้ดึงข้อมูลขึ้นมาพักบนหน่วยความจำ (`shared_buffers`) ได้มากขึ้น
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การแปลงโจทย์หมวดหมู่และสินค้าเนื้อพรีเมียมเป็นตารางพื้นฐาน
+โจทย์ระบุว่า ร้าน Smart Butcher ต้องจัดหมวดหมู่เนื้อสัตว์ (`categories`) และเก็บรายการสินค้าเนื้อ (`products`) ที่ระบุรหัสสินค้า ราคาต่อกิโลกรัม และจำนวนสต็อกที่ไม่ติดลบ:
+
+```sql filename="sql/01_conceptual_to_physical_basic.sql"
+-- ตารางหมวดหมู่เนื้อสัตว์ (เช่น Wagyu, Dry-Aged, Iberico Pork)
+CREATE TABLE categories (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(100) NOT NULL,
+    slug VARCHAR(120) NOT NULL UNIQUE,
+    description TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ตารางสินค้าเนื้อพรีเมียม เชื่อมกับหมวดหมู่และบังคับกฎความถูกต้องของราคาและสต็อก
+CREATE TABLE products (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    category_id UUID NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+    sku VARCHAR(50) NOT NULL UNIQUE,
+    name VARCHAR(200) NOT NULL,
+    price_per_kg NUMERIC(10, 2) NOT NULL CHECK (price_per_kg > 0),
+    stock_qty INTEGER NOT NULL DEFAULT 0 CHECK (stock_qty >= 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### ตัวอย่างที่ 2: การออกแบบ Physical Table ขั้นสูงพร้อม Domain Constraints และ Metadata
+เมื่อโจทย์ธุรกิจซับซ้อนขึ้น เช่น ต้องเก็บระดับไขมันแทรก (BMS Score 1-12), จำนวนวันดรายเอจ และข้อมูลคุณลักษณะเพิ่มเติมของเนื้อแต่ละล็อต เราสามารถใช้ฟีเจอร์ของ PostgreSQL 16 เพื่อคุมกฎธุรกิจในระดับโครงสร้างตารางได้อย่างรัดกุม:
+
+```sql filename="sql/02_physical_schema_advanced.sql"
+-- ตารางสินค้าขั้นสูงที่บังคับกฎธุรกิจของร้านเนื้อพรีเมียมอย่างครบถ้วน
+CREATE TABLE products_advanced (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    category_id UUID NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+    sku VARCHAR(50) NOT NULL UNIQUE,
+    name VARCHAR(200) NOT NULL,
+    origin_country CHAR(2) NOT NULL DEFAULT 'JP', -- รหัสประเทศ ISO 3166-1 alpha-2
+    marbling_score SMALLINT CHECK (marbling_score BETWEEN 1 AND 12),
+    dry_aged_days SMALLINT NOT NULL DEFAULT 0 CHECK (dry_aged_days >= 0),
+    weight_grams INTEGER NOT NULL CHECK (weight_grams > 0),
+    price_per_kg NUMERIC(10, 2) NOT NULL CHECK (price_per_kg > 0),
+    stock_qty INTEGER NOT NULL DEFAULT 0 CHECK (stock_qty >= 0),
+    specifications JSONB NOT NULL DEFAULT '{}'::jsonb,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- กฎระดับตาราง: หากเป็นเนื้อ Dry-Aged ต้องระบุจำนวนวันบ่มอย่างน้อย 14 วันขึ้นไป
+    CONSTRAINT chk_dry_aged_minimum_days CHECK (
+        dry_aged_days = 0 OR dry_aged_days >= 14
+    )
+);
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การกำหนดชนิดข้อมูล** | ใช้ `TEXT` หรือ `VARCHAR(255)` กับทุกคอลัมน์แม้แต่ราคาและวันที่ | เลือก Data Type ที่ตรงกับข้อมูลจริง เช่น `NUMERIC(10,2)`, `INTEGER`, `TIMESTAMPTZ` |
+| **การบังคับค่าว่าง (Nullability)** | ปล่อยให้คอลัมน์เป็น `NULL` ได้โดยปริยายเพราะกลัวเขียนโปรแกรมติด Error | กำหนด `NOT NULL` เป็นค่าตั้งต้นเสมอ เปิดให้เป็น `NULL` เฉพาะฟิลด์ที่เป็น Optional จริงๆ |
+| **การตรวจสอบค่าติดลบ** | เช็ค `if (price > 0)` เฉพาะใน JavaScript/TypeScript ฝั่ง Backend | เช็คทั้งในฝั่ง Application และใส่ `CHECK (price_per_kg > 0)` ในตารางฐานข้อมูล |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้กระบวนการออกแบบ ER Diagram และ Physical Constraints เต็มรูปแบบเมื่อ:** พัฒนาระบบที่มีความสำคัญต่อธุรกิจ (Core Business Systems) เช่น ระบบ E-Commerce, ระบบจัดการสต็อกสินค้า, ระบบบัญชีและการเงิน ที่ต้องการความถูกต้องของข้อมูลสูงสุด
+- **ไม่ควรใช้โครงสร้างตารางที่ซับซ้อนและเต็มไปด้วย Constraints เมื่อ:** สร้างตารางพักข้อมูลชั่วคราวสำหรับนำเข้าข้อมูลดิบ (Staging Tables สำหรับ ETL/ELT Pipeline) หรือตารางเก็บ Raw Logs ความเร็วสูงที่ต้องการรับข้อมูลเข้ามาก่อนแล้วค่อยนำมาทำความสะอาดภายหลัง
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ทำไมเราต้องใส่ `CHECK` constraint และ `NOT NULL` ในฐานข้อมูล ทั้งที่มีการทำ Validation ด้วย DTO/Zod ในฝั่ง Backend (เช่น NestJS) อยู่แล้ว?**
+  - **แนวคำตอบ:** เพราะฐานข้อมูลเป็นแหล่งเก็บความจริงเพียงหนึ่งเดียว (Single Source of Truth) ที่มักถูกเข้าถึงจากหลายช่องทาง ไม่ใช่แค่ Backend API ตัวหลักตัวเดียว เช่น อาจมี Worker Service, สคริปต์ Cronjob, การรัน Data Migration หรือแม้แต่ทีมงานรันคำสั่ง SQL แก้ไขข้อมูลโดยตรง หากไม่มี Constraints ที่ระดับฐานข้อมูล บั๊กเพียงจุดเดียวในโค้ดหรือการรันสคริปต์ผิดพลาดจะทำให้เกิดข้อมูลขยะ (Data Corruption) เช่น สต็อกติดลบหรือราคาเป็นศูนย์ทันที
+- **Q2: ความแตกต่างระหว่าง Logical ERD กับ Physical ERD คืออะไร?**
+  - **แนวคำตอบ:** Logical ERD มุ่งเน้นการอธิบายโครงสร้างความสัมพันธ์ของข้อมูลตามมุมมองธุรกิจ (Entities, Attributes, Relationships) โดยยังไม่ผูกติดกับเอนจินฐานข้อมูลใดๆ ส่วน Physical ERD คือพิมพ์เขียวสำหรับการนำไปสร้างจริงบน DBMS ที่เลือก (เช่น PostgreSQL 16) ซึ่งต้องระบุชื่อตารางจริงแบบ `snake_case`, ชนิดข้อมูลเฉพาะของเอนจิน (เช่น `TIMESTAMPTZ`, `JSONB`), Indexes, Constraints และ Partitioning
+
+---

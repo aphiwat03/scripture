@@ -1,0 +1,164 @@
+---
+title: Modules
+category: BACKEND
+parentTitle: NestJS 11
+version: NestJS 11
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด
+จินตนาการว่าแอปพลิเคชันของคุณคือ "ห้างสรรพสินค้าจำหน่ายเนื้อสัตว์อัจฉริยะ" แต่ละแผนก เช่น แผนกจัดหาเนื้อ (Products), แผนกแคชเชียร์และคำสั่งซื้อ (Orders), แผนกชำระเงิน (Payments) และแผนกสมาชิก (Users) ต่างก็ทำงานเป็นเอกเทศ มีผู้จัดการและเครื่องมือของตนเอง โดยไม่ต้องเปิดเผยอุปกรณ์ภายในให้แผนกอื่นรับรู้ เว้นแต่จะได้รับอนุญาตอย่างเป็นทางการ
+
+ใน NestJS **Module** คือกล่องประกอบระดับสูง (Lego Brick) ที่ใช้ Decorator `@Module()` เพื่อกำหนดขอบเขตความปลอดภัย (Encapsulation Boundary) ของฟีเจอร์ ป้องกันไม่ให้ Service หรือ Helper ภายในรั่วไหลออกไปสู่ภายนอกโดยไม่ตั้งใจ
+
+## 2. หลักการเบื้องหลัง
+เมื่อ NestJS บูตระบบผ่าน `NestFactory.create(AppModule)` ตัว Framework จะทำการสร้าง **Dependency Injection Graph** ขึ้นมาจาก Root Module (`AppModule`) แล้วไล่ตรวจสอบความเชื่อมโยงของ Metadata ผ่าน Properties ทั้ง 4 ตัวของ `@Module()`:
+1. `imports`: รายชื่อโมดูลอื่นที่โมดูลนี้จำเป็นต้องดึง Service ที่ถูก Export มาใช้งาน
+2. `controllers`: รายชื่อ Controller ประจำโมดูลนี้ที่พร้อมรับ HTTP Request
+3. `providers`: รายชื่อ Services, Repositories, หรือ Helpers ที่ถูกสร้างและบริหารโดย Nest IoC Container ภายในขอบเขตโมดูลนี้
+4. `exports`: รายชื่อ Providers ภายในโมดูลนี้ ที่อนุญาตให้โมดูลอื่นที่ Import โมดูลนี้ไป สามารถนำไป Inject ใช้งานต่อได้
+
+```text filename="docs/backend/nestjs.txt"
+┌────────────────────────────────────────────────────────┐
+│                   AppModule (Root)                     │
+│               imports: [Products, Orders]              │
+└───────────┬────────────────────────────────┬───────────┘
+            │                                │
+            ▼                                ▼
+┌───────────────────────┐        ┌───────────────────────┐
+│     OrdersModule      │        │    ProductsModule     │
+│ imports: [Products]   │───────►│ exports: [ProductSvc] │
+│ controllers: [OrderCtrl]       │ providers: [ProductSvc│
+│ providers: [OrderSvc] │        │             StockCalc]│
+└───────────────────────┘        └───────────────────────┘
+```
+
+## 3. ตัวอย่างโค้ด
+
+### ตัวอย่างที่ 1: การเชื่อมโยง Feature Modules และการทำ Encapsulation
+```typescript filename="src/modules/products/products.module.ts"
+import { Module } from '@nestjs/common';
+import { ProductsController } from './products.controller';
+import { ProductsService } from './products.service';
+import { MeatStockAuditorService } from './meat-stock-auditor.service';
+
+@Module({
+  controllers: [ProductsController],
+  providers: [
+    ProductsService,
+    MeatStockAuditorService, // เป็น Private Service ใช้เฉพาะภายใน ProductsModule เท่านั้น
+  ],
+  // ส่งออกเฉพาะ ProductsService ให้โมดูลภายนอก ส่วน MeatStockAuditorService ถูก Encapsulate ไว้
+  exports: [ProductsService],
+})
+export class ProductsModule {}
+```
+
+```typescript filename="src/modules/orders/orders.module.ts"
+import { Module } from '@nestjs/common';
+import { OrdersController } from './orders.controller';
+import { OrdersService } from './orders.service';
+import { ProductsModule } from '../products/products.module';
+
+@Module({
+  // Import ProductsModule เข้ามา ทำให้ OrdersService สามารถเรียกใช้งาน ProductsService ได้
+  imports: [ProductsModule],
+  controllers: [OrdersController],
+  providers: [OrdersService],
+})
+export class OrdersModule {}
+```
+
+### ตัวอย่างที่ 2: Dynamic Module สำหรับระบบ Payment Gateway ด้วย `forRoot` / `forFeature`
+```typescript filename="src/modules/payment/payment.module.ts"
+import { DynamicModule, Module } from '@nestjs/common';
+import { PaymentService } from './payment.service';
+
+export interface PaymentModuleOptions {
+  apiKey: string;
+  merchantId: string;
+  sandboxMode: boolean;
+}
+
+export const PAYMENT_OPTIONS = 'PAYMENT_OPTIONS';
+
+@Module({})
+export class PaymentModule {
+  // สร้าง Dynamic Module สำหรับตั้งค่าระดับแอปพลิเคชัน (forRoot)
+  static forRoot(options: PaymentModuleOptions): DynamicModule {
+    return {
+      module: PaymentModule,
+      providers: [
+        {
+          provide: PAYMENT_OPTIONS,
+          useValue: options,
+        },
+        PaymentService,
+      ],
+      exports: [PaymentService],
+      global: false, // ป้องกันการรั่วไหล แนะนำให้ import ทีละโมดูล
+    };
+  }
+}
+```
+
+```typescript filename="src/app.module.ts"
+import { Module } from '@nestjs/common';
+import { ProductsModule } from './modules/products/products.module';
+import { OrdersModule } from './modules/orders/orders.module';
+import { PaymentModule } from './modules/payment/payment.module';
+
+@Module({
+  imports: [
+    ProductsModule,
+    OrdersModule,
+    // กำหนดค่าคอนฟิกให้กับระบบตัดเงินค่าสเต็ก
+    PaymentModule.forRoot({
+      apiKey: process.env.PAYMENT_SECRET_KEY ?? 'mock_key_sec_999',
+      merchantId: 'SMART_BUTCHER_BANGKOK',
+      sandboxMode: process.env.NODE_ENV !== 'production',
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+## 4. ผิด vs ถูก
+
+```typescript filename="src/nestjs.ts"
+// ❌ ผิด: ใส่ Service ใน providers ของ Module ปลายทางตรงๆ โดยไม่ import ผ่าน Module ต้นทาง
+@Module({
+  imports: [], // ไม่ได้ import ProductsModule
+  controllers: [OrdersController],
+  providers: [
+    OrdersService,
+    ProductsService, // ❌ ผิดมหันต์: การใส่แบบนี้จะทำให้ Nest สร้าง Instance ใหม่ของ ProductsService
+                     // ที่แยกขาดจาก ProductsModule ไม่แชร์ State หรือ Cache และอาจขาด Dependency อื่น
+  ],
+})
+export class BadOrdersModule {}
+```
+
+```typescript filename="src/nestjs.ts"
+// ✅ ถูก: Import ผ่าน ProductsModule และดึง Instance จาก Module เจ้าของ
+@Module({
+  imports: [ProductsModule], // ✅ ถูก: นำเข้าผ่าน Module เจ้าของที่ export ไว้อย่างถูกต้อง
+  controllers: [OrdersController],
+  providers: [OrdersService],
+})
+export class GoodOrdersModule {}
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Feature Module**: กับทุก Business Domain (Products, Orders, Users, Categories)
+- **ควรใช้ Dynamic Module (`forRoot`/`register`)**: เมื่อสร้างโมดูลที่ต้องรับพารามิเตอร์คอนฟิก เช่น ระบบชำระเงิน, ไคลเอนต์ Redis หรือ Mailer
+- **ไม่ควรใช้ `@Global()` พร่ำเพรื่อ**: แม้ว่าการแปะ `@Global()` จะทำให้โมดูลนั้นถูกเรียกใช้ได้ทุกที่โดยไม่ต้องเขียน `imports` แต่มันจะทำลายแนวคิด Encapsulation ทำให้สถาปัตยกรรมโปรเจกต์ตรวจสอบที่มาที่ไปของ Dependency ได้ยาก ให้สงวนไว้เฉพาะโมดูลโครงสร้างพื้นฐานจริงๆ เช่น `DatabaseModule` หรือ `ConfigModule`
+
+## 6. คำถามสัมภาษณ์
+**ถาม**: หากใน `OrdersService` พยายาม Inject `ProductsService` แล้วระบบพ่นข้อผิดพลาด `Nest can't resolve dependencies of the OrdersService (?)` เกิดจากสาเหตุใดได้บ้าง และมีขั้นตอนการแก้ปัญหาอย่างไร?
+**ตอบ**: เกิดจาก 2 สาเหตุหลัก:
+1. `ProductsModule` ลืมระบุ `ProductsService` ในอาร์เรย์ `exports`
+2. `OrdersModule` ลืมระบุ `ProductsModule` ในอาร์เรย์ `imports`
+วิธีแก้คือไปเพิ่ม `exports: [ProductsService]` ใน `ProductsModule` และเพิ่ม `imports: [ProductsModule]` ใน `OrdersModule`
+
+---

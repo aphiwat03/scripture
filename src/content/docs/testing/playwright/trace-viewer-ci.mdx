@@ -1,0 +1,150 @@
+---
+title: Trace Viewer CI
+category: TESTING & QUALITY
+parentTitle: Playwright
+version: Playwright v1.49
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เมื่อชุดทดสอบ E2E ล้มเหลวบนเครื่องเซิร์ฟเวอร์ CI (เช่น GitHub Actions) ที่รันแบบไร้หน้าจอ (Headless Mode) นักพัฒนามักปวดหัวกับคำถามที่ว่า *"ทำไมมันพังบน CI แต่รันบนเครื่องเราผ่านตลอด?"*
+
+Playwright มอบเครื่องมือระดับปฏิวัติวงการที่ชื่อว่า **Playwright Trace Viewer** ซึ่งบันทึกทุกอย่างที่เกิดขึ้นในเทสต์เป็นไฟล์ `.zip` ตั้งแต่:
+- **DOM Snapshots (ไม่ใช่แค่รูปภาพนิ่ง):** เราสามารถคลิกเปิด DevTools เพื่อ Inspect HTML/CSS ของหน้าเว็บ ณ เสี้ยววินาทีก่อนและหลังการคลิกแต่ละครั้งได้เหมือนอยู่ในเหตุการณ์จริง!
+- **Network Tab:** ดูรายการ HTTP Request/Response Headers และ JSON Body ทุกตัว
+- **Console Logs & Action Timeline:** ดูข้อความ Error ใน Console และตำแหน่งพิกัดเมาส์สีแดงที่คลิก
+
+นอกจากนี้ เมื่อจำนวนเทสต์เพิ่มขึ้น เราสามารถแบ่งงานรันขนานข้ามหลายเครื่องบน CI ด้วยฟีเจอร์ **Sharding (`--shard=1/4`)**
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+| มิติการเปรียบเทียบเชิงสถาปัตยกรรม | Playwright | Cypress |
+| :--- | :--- | :--- |
+| **สถาปัตยกรรมการทำงาน** | Out-of-process ผ่าน WebSocket (CDP / BiDi) ควบคุมเบราว์เซอร์จากภายนอก | In-browser รันโค้ดเทสต์อยู่ใน `iframe` เดียวกับแอปพลิเคชัน |
+| **การรองรับเบราว์เซอร์จริง** | Chromium, Firefox และ **WebKit (Safari Engine)** ครบถ้วน | เน้นตระกูล Chromium และ Firefox (การรองรับ WebKit ยังเป็น Experimental) |
+| **Multiple Tabs & Multi-Origin** | รองรับหลายแท็บ หลายหน้าต่าง และหลายผู้ใช้พร้อมกันในเทสต์เดียวได้ 100% | มีข้อจำกัดจากสถาปัตยกรรม `iframe` เดียว |
+| **ความเร็วและการรันขนาน (Parallelism)** | รันขนานหลาย Worker และแบ่ง `--shard` บน CI ได้ฟรีในตัว بدونค่าใช้จ่ายเพิ่ม | การทำ Parallelization เต็มรูปแบบมักผูกกับบริการ Cloud เสริม |
+| **Time-Travel Debugging** | **Trace Viewer** บันทึก DOM Snapshot กลับมาเปิดดูบนเครื่องหรือบนเว็บได้ทันที | มี Interactive Runner ที่ดีบนเครื่องตัวเอง แต่การดูย้อนหลังบน CI ทำได้ยากกว่า |
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1 (พื้นฐาน): คำสั่งการเปิดใช้งาน UI Mode, Trace Viewer และการตรวจสอบ Network Request ในเทสต์
+ตัวอย่างการใช้ `page.waitForResponse()` เพื่อตรวจจับ Payload ที่ส่งกลับมาจาก API จริง พร้อมคำสั่ง CLI สำหรับเปิดดู Trace เมื่อเทสต์ล้มเหลว:
+
+```typescript filename="e2e/trace-and-network-verify.spec.ts"
+import { test as describeTest, expect } from '@playwright/test';
+
+const describe = describeTest.describe;
+const it = describeTest;
+
+describe('Order Submission Network Verification & Trace Debugging', () => {
+  it('should send accurate dry-aged cut payload and receive 201 order confirmation from API', async ({
+    page,
+  }) => {
+    await page.goto('/products/miyazaki-a5-ribeye');
+
+    await page.getByLabel('Cut Weight (kg)').fill('0.8');
+
+    // ดักรอตรวจสอบ HTTP Response จริงคู่ไปกับการคลิกปุ่มด้วย Promise.all
+    const [response] = await Promise.all([
+      page.waitForResponse(
+        (res) =>
+          res.url().includes('/api/v1/cart/items') &&
+          res.request().method() === 'POST',
+      ),
+      page.getByRole('button', { name: 'Add to Chilled Cart' }).click(),
+    ]);
+
+    expect(response.status()).toBe(201);
+    const responseBody = (await response.json()) as {
+      sku: string;
+      weightKg: number;
+    };
+    expect(responseBody).toMatchObject({
+      sku: 'WAGYU-A5-RIB',
+      weightKg: 0.8,
+    });
+  });
+});
+
+/*
+  คำสั่ง CLI สำคัญสำหรับการ Debug ด้วย Playwright:
+  1. รันโหมด Interactive UI พร้อม Time-travel:
+     npx playwright test --ui
+  2. เปิดดูไฟล์ Trace ที่ดาวน์โหลดมาจาก CI Artifact:
+     npx playwright show-trace test-results/trace.zip
+*/
+```
+
+### ตัวอย่างที่ 2 (ขั้นสูง): การตั้งค่า GitHub Actions CI Workflow พร้อม Sharding และอัปโหลด Trace Artifact
+ตัวอย่างไฟล์ไปป์ไลน์ [GitHub Actions](/docs/testing/git-hooks) ระดับ Production ที่แบ่งรันชุดทดสอบ E2E ของ Smart Butcher ออกเป็น 2 เครื่องขนานกัน (`shard: [1/2, 2/2]`) และเก็บไฟล์ Trace ไว้ให้ดาวน์โหลดเมื่อเทสต์พัง:
+
+```yaml filename=".github/workflows/playwright-e2e.yml"
+name: Smart Butcher Playwright E2E Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e-tests:
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shardIndex: [1, 2]
+        shardTotal: [2]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium & WebKit browsers
+        run: npx playwright install --with-deps chromium webkit
+
+      - name: Build Next.js 16 production application
+        run: npm run build
+
+      - name: Run Playwright E2E tests (Shard ${{ matrix.shardIndex }}/${{ matrix.shardTotal }})
+        run: npx playwright test --shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }}
+
+      - name: Upload Playwright Trace & HTML Report on failure
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report-shard-${{ matrix.shardIndex }}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การตั้งค่า `trace` บน CI** | ตั้งค่า `trace: 'on'` สำหรับทุกเทสต์ตลอดเวลา ทำให้เสียเวลาบีบอัดไฟล์ `.zip` ทุกข้อจนไปป์ไลน์ CI ช้าลง | ตั้งค่า `trace: 'on-first-retry'` ร่วมกับ `retries: 2` บน CI เพื่อบันทึก Trace เฉพาะเมื่อเทสต์เริ่มมีอาการล้มเหลว |
+| **การใช้ `waitForResponse` ผิดลำดับ** | เขียน `await button.click()` ก่อน แล้วค่อยเขียน `await page.waitForResponse(...)` บรรทัดถัดมา ซึ่งหาก API ตอบกลับเร็วมากจะทำให้ดักจับไม่ทันและค้างจน Timeout | ใช้ `await Promise.all([page.waitForResponse(...), button.click()])` เพื่อเริ่มตั้งตัวดักฟังก่อนสั่งคลิกเสมอ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Trace Viewer เมื่อ:** วิเคราะห์สาเหตุของเทสต์ที่พังบน CI หรือเทสต์ที่มีการเปลี่ยนสถานะ UI และ Network Requests หลายขั้นตอน
+- **ควรใช้ Sharding (`--shard`) เมื่อ:** ชุดทดสอบ E2E ทั้งหมดใช้เวลารันบนเครื่องเดียวเกินกว่า 5-8 นาที การแบ่งออกเป็น 2-4 Shards จะช่วยลดเวลารอใน Pull Request ลงตามสัดส่วนทันที
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: เหตุใดในการใช้ `page.waitForResponse()` เราจึงต้องใช้รูปแบบ `await Promise.all([page.waitForResponse(...), locator.click()])` แทนที่จะเรียง `await locator.click()` แล้วตามด้วย `await page.waitForResponse(...)`?**
+  - *แนวคำตอบ:* หากเราใส่ `await locator.click()` ให้ทำงานเสร็จก่อน ในจังหวะที่เมาส์คลิกและเบราว์เซอร์ส่ง HTTP Request ออกไป หากเซิร์ฟเวอร์ตอบกลับเร็วมาก (เช่นภายในไม่กี่มิลลิวินาทีบน Localhost) เหตุการณ์ Response อาจเกิดขึ้นและจบไปก่อนที่บรรทัด `await page.waitForResponse(...)` จะเริ่มลงทะเบียน Event Listener ทำให้ `waitForResponse` รอเก้อจนเกิด Timeout การใช้ `Promise.all` จะช่วยให้การลงทะเบียนดักฟัง Response เริ่มขึ้นก่อนที่การคลิกจะเกิดขึ้นจริง จึงไม่พลาดเหตุการณ์ 100%
+- **Q2: อะไรคือความได้เปรียบทางสถาปัตยกรรมที่สำคัญที่สุดของ Playwright เมื่อเทียบกับ Cypress ในการทดสอบระบบที่มีการเชื่อมต่อกับ Payment Gateway ภายนอกหรือการแชทแบบเรียลไทม์ระหว่างลูกค้ากับช่างแล่เนื้อ?**
+  - *แนวคำตอบ:* เนื่องจาก Playwright ทำงานแบบ Out-of-process ผ่าน Browser Debugging Protocol จึงสามารถสร้าง `BrowserContext` สองตัวใน Test Case เดียวกันได้ เช่น ให้ `customerPage` สั่งซื้อเนื้อและส่งข้อความหาช่างแล่เนื้อ แล้วให้ `butcherPage` (อีก Context หนึ่งที่ล็อกอินเป็นช่างแล่เนื้อ) กดรับออร์เดอร์และตอบกลับแบบเรียลไทม์ไปมาในเทสต์ข้อเดียวกันได้ทันที รวมถึงสามารถสลับโดเมนข้ามไปยังหน้าเว็บ 3D Secure ของธนาคารภายนอกแล้วกลับมาที่เว็บหลักได้โดยไม่มีข้อจำกัดเรื่อง `iframe`
+
+---

@@ -1,0 +1,266 @@
+---
+title: Prompt Design
+category: BACKEND
+parentTitle: AI Integration
+version: Groq SDK & Llama 3.3
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ปัญหาใหญ่ของการนำข้อความตอบกลับจาก LLM ไปแสดงผลบนหน้าเว็บไซต์หรือแอปพลิเคชันคือ หากปล่อยให้โมเดลตอบกลับเป็นข้อความอิสระ (Free-form Text / Markdown) บางครั้งโมเดลอาจเกริ่นนำยาวเกินไป หรือเปลี่ยนรูปแบบหัวข้อไปมาจนหน้า UI ของ Next.js แสดงผลไม่ได้ วิธีแก้ปัญหาระดับ Production คือ:
+1. แยกบทบาทของ **`system` prompt** (กำหนดบุคลิก กฎเหล็ก ขอบเขตความรู้ และโครงสร้าง JSON ที่ต้องการ) ออกจาก **`user` prompt** (ข้อมูลสินค้าเนื้อและคำขอของลูกค้า) อย่างชัดเจน
+2. เปิดใช้งาน JSON Mode ด้วยพารามิเตอร์ `response_format: { type: 'json_object' }` ของ Groq API เพื่อบังคับให้โมเดลส่งคืนเฉพาะ JSON ที่ถูกต้องตามไวยากรณ์เท่านั้น แล้วนำมาตรวจสอบโครงสร้างอีกครั้งที่ฝั่ง Backend
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อเรากำหนด `response_format: { type: 'json_object' }` ใน `chat.completions.create()` ของ Groq:
+- ในระดับ Inference Engine จะใช้เทคนิค Constrained Decoding บังคับให้ Token ที่โมเดลเลือกสร้างออกมาต้องสอดคล้องกับไวยากรณ์ของ JSON เสมอ (ไม่มีข้อความทักทายอย่าง `"นี่คือคำแนะนำของคุณครับ:"` นำหน้าปีกกา `{` อีกต่อไป)
+- **ข้อกำหนดสำคัญของ Groq JSON Mode**: ในข้อความ `system` หรือ `user` prompt **จะต้องมีคำว่า `"JSON"` ปรากฏอยู่อย่างชัดเจน** พร้อมระบุตัวอย่างโครงสร้างฟิลด์ที่ต้องการ มิฉะนั้น API ของ Groq จะตีกลับด้วยสถานะ `400 Bad Request`
+
+<Callout type="warning" title="ข้อบังคับเมื่อเปิดใช้ response_format: json_object ใน Groq">
+ทุกครั้งที่ตั้งค่า `response_format: { type: 'json_object' }` คุณต้องเขียนคำว่า `JSON` ไว้ใน System Prompt เสมอ (เช่น *"You must respond strictly in valid JSON format matching this schema..."*) และควรตั้งค่า `temperature` ให้ต่ำ (เช่น `0.2` ถึง `0.4`) เพื่อให้โครงสร้างข้อมูลมีความแม่นยำและสม่ำเสมอที่สุด
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การเขียนเมธอด `generateJsonCompletion` ใน `GroqService` ที่บังคับ JSON Mode และแปลงผลลัพธ์พร้อมจัดการข้อผิดพลาดเมื่อ JSON ไม่สมบูรณ์
+
+```typescript filename="src/modules/ai-butcher/groq-json.helper.ts"
+import {
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+} from '@nestjs/common';
+import { GroqService, GroqChatMessage } from './groq.service';
+
+export interface StructuredCompletionResponse<T> {
+  data: T;
+  usage: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  };
+  model: string;
+}
+
+@Injectable()
+export class GroqJsonHelper {
+  private readonly logger = new Logger(GroqJsonHelper.name);
+
+  constructor(private readonly groqService: GroqService) {}
+
+  async generateStructuredJson<T>(params: {
+    systemPrompt: string;
+    userPrompt: string;
+    temperature?: number;
+    maxCompletionTokens?: number;
+  }): Promise<StructuredCompletionResponse<T>> {
+    const messages: GroqChatMessage[] = [
+      { role: 'system', content: params.systemPrompt },
+      { role: 'user', content: params.userPrompt },
+    ];
+
+    const completion = await this.groqService
+      .getRawClient()
+      .chat.completions.create({
+        model: this.groqService.getDefaultModel(),
+        messages,
+        temperature: params.temperature ?? 0.2,
+        max_tokens: params.maxCompletionTokens ?? 600,
+        response_format: { type: 'json_object' },
+      });
+
+    const rawContent = completion.choices[0]?.message?.content;
+    if (!rawContent) {
+      throw new InternalServerErrorException(
+        'ไม่ได้รับข้อมูลตอบกลับจากระบบประมวลผล AI',
+      );
+    }
+
+    try {
+      const parsedData = JSON.parse(rawContent) as T;
+      return {
+        data: parsedData,
+        usage: {
+          promptTokens: completion.usage?.prompt_tokens ?? 0,
+          completionTokens: completion.usage?.completion_tokens ?? 0,
+          totalTokens: completion.usage?.total_tokens ?? 0,
+        },
+        model: completion.model,
+      };
+    } catch (parseError) {
+      this.logger.error(`Failed to parse JSON from Groq: ${rawContent}`, parseError);
+      throw new InternalServerErrorException(
+        'รูปแบบข้อมูลตอบกลับจาก AI ไม่ถูกต้องตามโครงสร้าง JSON',
+      );
+    }
+  }
+}
+```
+
+ตัวอย่างที่ 2: การสร้าง System Prompt และ User Prompt สำหรับแนะนำการย่างเนื้อวากิวจากข้อมูล `Product` และ `Category` จริงในฐานข้อมูล พร้อมตรวจความถูกต้องของฟิลด์ด้วย `class-validator`
+
+```typescript filename="src/modules/ai-butcher/ai-butcher.service.ts"
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
+import {
+  IsArray,
+  IsInt,
+  IsNotEmpty,
+  IsString,
+  Max,
+  Min,
+  validateSync,
+} from 'class-validator';
+import { PrismaService } from '../prisma/prisma.service';
+import { GroqJsonHelper } from './groq-json.helper';
+import { AskCookingGuideDto } from './dto/ask-cooking-guide.dto';
+
+export class AiCookingGuideOutputDto {
+  @IsInt()
+  @Min(45)
+  @Max(85)
+  targetInternalTempCelsius!: number;
+
+  @IsInt()
+  @Min(1)
+  @Max(60)
+  searTimeMinutesPerSide!: number;
+
+  @IsInt()
+  @Min(2)
+  @Max(20)
+  restingTimeMinutes!: number;
+
+  @IsArray()
+  @IsString({ each: true })
+  stepByStepInstructions!: string[];
+
+  @IsString()
+  @IsNotEmpty()
+  recommendedPairingSauce!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  chefSecretTip!: string;
+}
+
+@Injectable()
+export class AiButcherService {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly groqJsonHelper: GroqJsonHelper,
+  ) {}
+
+  async generateCookingGuideForProduct(
+    userId: string,
+    dto: AskCookingGuideDto,
+  ) {
+    // 1. ดึงข้อมูลสินค้าเนื้อจริงจากฐานข้อมูล PostgreSQL
+    const product = await this.prisma.product.findUnique({
+      where: { id: dto.productId },
+      include: { category: true },
+    });
+
+    if (!product) {
+      throw new NotFoundException(`ไม่พบสินค้าเนื้อรหัส ${dto.productId}`);
+    }
+
+    // 2. กำหนด System Prompt ที่ระบุบทบาท กฎเหล็ก และโครงสร้าง JSON ที่ชัดเจน
+    const systemPrompt = `คุณคือ Master Butcher และเชฟสเต็กมืออาชีพประจำร้าน Smart Butcher Marketplace
+หน้าที่ของคุณคือให้คำแนะนำการปรุงเนื้อพรีเมียมแก่ลูกค้าเป็นภาษาไทยที่สุภาพและเข้าใจง่าย
+คุณต้องตอบกลับเป็นรูปแบบ JSON เท่านั้น (Strict valid JSON object) ตามโครงสร้างดังนี้:
+{
+  "targetInternalTempCelsius": number (อุณหภูมิแกนกลางองศาเซลเซียส ระหว่าง 45 ถึง 85),
+  "searTimeMinutesPerSide": number (เวลาที่ใช้ย่างต่อด้านเป็นนาที ระหว่าง 1 ถึง 60),
+  "restingTimeMinutes": number (เวลาพักเนื้อหลังย่างเป็นนาที ระหว่าง 2 ถึง 20),
+  "stepByStepInstructions": string[] (ลำดับขั้นตอนการเตรียมและย่าง 3-5 ข้อ),
+  "recommendedPairingSauce": string (ซอสหรือเครื่องเคียงที่เข้ากับเกรดไขมันนี้),
+  "chefSecretTip": string (เคล็ดลับพิเศษสำหรับเนื้อชิ้นนี้)
+}
+ห้ามตอบเรื่องอื่นที่ไม่เกี่ยวกับการทำอาหารหรือเนื้อสัตว์โดยเด็ดขาด`;
+
+    // 3. ประกอบ User Prompt จากข้อมูลจริงใน DB + ความต้องการของลูกค้า
+    const userPrompt = `ข้อมูลสินค้าจากฐานข้อมูล:
+- ชื่อเนื้อ: ${product.name}
+- หมวดหมู่: ${product.category.name}
+- เกรดไขมัน (Marbling): ${product.marblingGrade}
+- คำแนะนำพื้นฐานของร้าน: ${product.cookingNote ?? 'ไม่มีระบุ'}
+
+ความต้องการของลูกค้า (User ID: ${userId}):
+- อุปกรณ์ที่ใช้: ${dto.equipment}
+- ระดับความสุกที่ต้องการ: ${dto.doneness}
+- หมายเหตุเพิ่มเติมภายในแท็ก <customer_note>:
+<customer_note>${dto.customNote ?? 'ไม่มี'}</customer_note>
+
+กรุณาวิเคราะห์และส่งคืนผลลัพธ์เป็น JSON ตามโครงสร้างที่กำหนด`;
+
+    const result =
+      await this.groqJsonHelper.generateStructuredJson<AiCookingGuideOutputDto>({
+        systemPrompt,
+        userPrompt,
+        temperature: 0.2,
+        maxCompletionTokens: 500,
+      });
+
+    // 4. ตรวจสอบโครงสร้าง JSON ที่ได้จาก AI ด้วย class-validator อีกชั้นหนึ่ง
+    const validatedOutput = plainToInstance(
+      AiCookingGuideOutputDto,
+      result.data,
+    );
+    const errors = validateSync(validatedOutput);
+
+    if (errors.length > 0) {
+      // หากฟิลด์ไม่ตรงเกณฑ์ ให้คืนค่ามาตรฐานที่ปลอดภัยแทน
+      return {
+        productId: product.id,
+        productName: product.name,
+        guide: this.getFallbackCookingGuide(dto.doneness),
+        source: 'fallback_rule',
+      };
+    }
+
+    return {
+      productId: product.id,
+      productName: product.name,
+      guide: validatedOutput,
+      source: 'groq_ai',
+      tokenUsage: result.usage,
+    };
+  }
+
+  private getFallbackCookingGuide(doneness: string): AiCookingGuideOutputDto {
+    return {
+      targetInternalTempCelsius: doneness === 'RARE' ? 50 : 55,
+      searTimeMinutesPerSide: 2,
+      restingTimeMinutes: 5,
+      stepByStepInstructions: [
+        'ซับผิวเนื้อให้แห้งสนิทด้วยกระดาษทิชชู่สำหรับทำอาหาร โรยเกลือทะเลและพริกไทยดำก่อนย่าง',
+        'ตั้งกระทะให้ร้อนจัดแล้วย่างเนื้อด้านละประมาณ 1.5 - 2 นาทีจนเกิดสีน้ำตาลสวย (Maillard Reaction)',
+        'นำเนื้อขึ้นพักบนตะแกรงเป็นเวลา 5 นาทีเพื่อให้ของเหลวกระจายตัวทั่วชิ้นเนื้อก่อนหั่นเสิร์ฟ',
+      ],
+      recommendedPairingSauce: 'เกลือชมพูหิมาลายันและวาซาบิดองสด',
+      chefSecretTip: 'สำหรับเนื้อวากิวไขมันสูง ไม่จำเป็นต้องใส่น้ำมันเพิ่มมากในการย่าง',
+    };
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การรับผลลัพธ์จาก LLM** | ขอให้โมเดลตอบเป็นข้อความยาวๆ แล้วเขียน Regex ตัดคำเอาเอง ซึ่งพังทันทีเมื่อโมเดลเปลี่ยนสำนวนการเขียน | ใช้ `response_format: { type: 'json_object' }` พร้อมระบุ JSON Schema ใน System Prompt |
+| **การเชื่อถือ JSON จาก AI ทันที** | นำผลลัพธ์จาก `JSON.parse()` ไปบันทึกหรือส่งออกทันทีโดยไม่ตรวจว่ามีฟิลด์ครบตามที่คาดหวังหรือไม่ | ใช้ `plainToInstance()` และ `validateSync()` (หรือ Zod) ตรวจสอบโครงสร้างข้อมูลที่ได้จาก AI เสมอ |
+| **การตั้งค่า `temperature`** | ตั้งค่า `temperature: 1.0` หรือสูงกว่าสำหรับงานที่ต้องการข้อมูลโครงสร้าง JSON ที่แม่นยำ | ตั้งค่า `temperature` ต่ำ (`0.1` - `0.3`) สำหรับงาน Structured Output เพื่อให้คำตอบคงที่ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Structured JSON Output เมื่อ**: ฝั่ง Frontend ต้องการนำข้อมูลแต่ละส่วนไปแสดงผลใน UI Component ที่แยกจากกัน เช่น แสดงตัวเลขอณหภูมิในเกจวัด แสดงรายการขั้นตอนเป็น Stepper และแสดงซอสในป้าย Badge
+- **ไม่ควรใช้ JSON Mode เมื่อ**: ต้องการทำฟีเจอร์แชทบอทที่ค่อยๆ พิมพ์ข้อความทีละตัวอักษรแบบ Streaming (SSE) ให้ผู้ใช้เห็นแบบสดๆ เพราะ JSON ที่ยังสร้างไม่เสร็จจะยังไม่สามารถ `JSON.parse()` ได้จนกว่าจะจบข้อความ
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: แม้เราจะเปิด `response_format: { type: 'json_object' }` ใน Groq แล้ว ทำไมเราจึงยังต้องใช้ `class-validator` (`validateSync`) ตรวจสอบผลลัพธ์ซ้ำอีกครั้งในฝั่ง Backend?
+   - **แนวคำตอบ**: เพราะ `response_format: { type: 'json_object' }` รับประกันเพียงว่าข้อความที่ตอบกลับมาเป็น **Valid JSON Syntax** (สามารถ `JSON.parse()` ผ่านโดยไม่เกิด SyntaxError) เท่านั้น แต่ไม่ได้รับประกัน 100% ว่าโมเดลจะตั้งชื่อคีย์ตรงตามที่เราสั่งครบทุกตัว หรือใส่ค่าตัวเลขอยู่ในช่วงที่ปลอดภัย การตรวจด้วย `validateSync` อีกชั้นจึงช่วยป้องกันไม่ให้ข้อมูลผิดรูปแบบหลุดไปยังฝั่ง Frontend
+2. **คำถาม**: การแยก `system` message และ `user` message ออกจากกันดีกว่าการเอาทุกอย่างมารวมใน `user` message เดียวอย่างไร?
+   - **แนวคำตอบ**: โมเดลตระกูล Llama 3.1 ถูกฝึกฝนมาให้ให้ความสำคัญและยึดถือคำสั่งใน `system` role เป็นกรอบกติกาหลักของบทสนทนา การแยกคำสั่งควบคุมพฤติกรรมและรูปแบบ JSON ไว้ใน `system` message และใส่ข้อมูลแปรผันใน `user` message ช่วยให้โมเดลปฏิบัติตามโครงสร้างได้แม่นยำกว่าและลดโอกาสที่ข้อมูลจากผู้ใช้จะไปรบกวนคำสั่งหลัก
+
+---

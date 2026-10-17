@@ -1,0 +1,208 @@
+---
+title: Flat Config
+category: TESTING & QUALITY
+parentTitle: ESLint
+version: ESLint 9 (Flat Config)
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ตั้งแต่ **ESLint v9** เป็นต้นมา ระบบการตั้งค่ารูปแบบเก่า (`.eslintrc.json`, `.eslintrc.js`) ได้ถูกประกาศเลิกใช้งาน (Deprecated) และเปลี่ยนมาใช้สถาปัตยกรรมใหม่ที่เรียกว่า **Flat Config (`eslint.config.mjs`)** เป็นค่าเริ่มต้น
+
+จุดเด่นสำคัญของ Flat Config สำหรับโปรเจกต์ Fullstack ที่ใช้ทั้ง **Next.js 16** และ **NestJS 11** คือ:
+- **Explicit Imports**: เปลี่ยนจากการอ้างอิงชื่อปลั๊กอินด้วยข้อความลอยๆ (`extends: ["plugin:@typescript-eslint/recommended"]`) มาเป็นการ `import` โมดูล JavaScript มาตรฐานโดยตรง ทำให้เห็นที่มาของกฎชัดเจนและหมดปัญหา Dependency ซ้อนทับกัน (`eslint-patch`)
+- **Single Array Cascade**: การตั้งค่าทั้งหมดเป็นเพียง Array ของออบเจกต์เรียงต่อกัน ออบเจกต์ที่อยู่ด้านล่างสามารถเขียนทับ (Override) กฎของออบเจกต์ด้านบนได้ตามรูปแบบไฟล์ (`files: ["**/*.ts"]`)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+ในระบบ `.eslintrc` แบบเดิม ESLint ต้องเดินค้นหาไฟล์การตั้งค่าตามลำดับโฟลเดอร์ย้อนขึ้นไปเรื่อยๆ (Directory Cascading) และพึ่งพาระบบการโหลดปลั๊กอินผ่าน `require.resolve` ที่ซับซ้อน
+
+แต่ใน **Flat Config (`eslint.config.mjs`)** ESLint จะอ่านไฟล์การตั้งค่าเพียงจุดเดียวที่รากของโปรเจกต์ (Root) แล้วประมวลผลอาร์เรย์ของ Config Objects จากบนลงล่าง:
+1. ออบเจกต์ที่มีเฉพาะคีย์ `ignores` ในระดับบนสุดจะทำหน้าที่เป็น **Global Ignores** แทนที่ไฟล์ `.eslintignore` เดิมทั้งหมด
+2. การเปิดใช้งาน Type-Checked Rules ใน `typescript-eslint` v8+ ใช้ฟีเจอร์ใหม่ชื่อ `parserOptions: { projectService: true }` ซึ่งเชื่อมต่อกับ API ของ TypeScript Server โดยตรง ช่วยลดการใช้หน่วยความจำ (RAM) และทำงานเร็วกว่าการระบุ `project: "./tsconfig.json"` แบบเดิมอย่างเห็นได้ชัด
+
+<Callout type="note" title="ข้อควรระวังเรื่อง Global Ignores ใน eslint.config.mjs">
+หากต้องการให้ ignores มีผลครอบคลุมทั้งโปรเจกต์เหมือนไฟล์ .eslintignore เดิม จะต้องแยกออบเจกต์ที่มีเฉพาะคีย์ ignores ออกมาเป็นออบเจกต์เดี่ยวๆ ตัวแรกสุดของอาร์เรย์ ห้ามใส่ปนกับคีย์ files หรือ rules ในออบเจกต์เดียวกัน เพราะจะกลายเป็นเพียงการยกเว้นเฉพาะกลุ่มกฎนั้นแทน
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1 (ระดับพื้นฐาน): โครงสร้าง `eslint.config.mjs` มาตรฐานสำหรับ TypeScript 5.x และ NestJS 11
+การตั้งค่า Flat Config สำหรับฝั่ง Backend API ของระบบร้านค้าเนื้อพรีเมียม ที่เปิดใช้ Type-Checked Rules เต็มรูปแบบ
+
+```javascript filename="eslint.config.mjs"
+// @ts-check
+import eslint from '@eslint/js';
+import tseslint from 'typescript-eslint';
+import eslintConfigPrettier from 'eslint-config-prettier';
+import globals from 'globals';
+
+export default tseslint.config(
+  // 1. Global Ignores (แทนที่ไฟล์ .eslintignore เดิม)
+  {
+    ignores: [
+      '**/dist/**',
+      '**/build/**',
+      '**/.next/**',
+      '**/node_modules/**',
+      '**/coverage/**',
+    ],
+  },
+
+  // 2. กฎพื้นฐานของ JavaScript และ TypeScript Strict Type-Checked
+  eslint.configs.recommended,
+  ...tseslint.configs.strictTypeChecked,
+  ...tseslint.configs.stylisticTypeChecked,
+
+  // 3. ตั้งค่า TypeScript Project Service สำหรับวิเคราะห์ Type เชิงลึก
+  {
+    languageOptions: {
+      globals: {
+        ...globals.node,
+        ...globals.jest,
+      },
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+  },
+
+  // 4. ปรับแต่งกฎเฉพาะสำหรับ NestJS 11 Backend
+  {
+    files: ['apps/api/**/*.ts', 'src/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-extraneous-class': 'off', // อนุญาต Empty Module Class ของ NestJS
+      '@typescript-eslint/explicit-function-return-type': [
+        'error',
+        { allowExpressions: true },
+      ],
+    },
+  },
+
+  // 5. ปิดกฎการจัดหน้าโค้ดทั้งหมดที่อาจตีกับ Prettier (ต้องอยู่ท้ายสุดเสมอ!)
+  eslintConfigPrettier,
+);
+```
+
+### ตัวอย่างที่ 2 (ระดับ Production): NestJS 11 Service ที่ผ่านมาตรฐาน ESLint Flat Config Strict Type-Checked
+โค้ดบริหารจัดการคำสั่งซื้อเนื้อดรายเอจและตรวจสอบอุณหภูมิห้องบ่ม ที่เขียนอย่างรัดกุมตามกฎของ Flat Config ข้างต้นทุกประการ
+
+```typescript filename="src/modules/butcher-inventory/butcher-inventory.service.ts"
+import { Category, Product } from '../../domain/butcher-pricing';
+import { Order, OrderItem } from '../../services/order-checkout.service';
+
+export interface ColdRoomTelemetry {
+  categoryId: string;
+  currentTempCelsius: number;
+  humidityPercent: number;
+  recordedAt: Date;
+}
+
+export class ButcherInventoryService {
+  private readonly products = new Map<string, Product>();
+  private readonly categories = new Map<string, Category>();
+
+  registerCategory(category: Category): void {
+    this.categories.set(category.id, category);
+  }
+
+  registerProduct(product: Product): void {
+    this.products.set(product.id, product);
+  }
+
+  validateColdChainSafety(telemetry: ColdRoomTelemetry): {
+    isSafe: boolean;
+    alertMessage: string | null;
+  } {
+    const category = this.categories.get(telemetry.categoryId);
+    if (!category) {
+      throw new Error(`ไม่พบหมวดหมู่เนื้อรหัส ${telemetry.categoryId}`);
+    }
+
+    // ตรวจสอบอุณหภูมิห้องบ่มเนื้อไม่ให้สูงเกินเกณฑ์มาตรฐานเกิน 1.5 องศาเซลเซียส
+    const maxAllowedTemp = category.storageTempCelsius + 1.5;
+    if (telemetry.currentTempCelsius > maxAllowedTemp) {
+      return {
+        isSafe: false,
+        alertMessage: `แจ้งเตือนฉุกเฉิน: หมวดหมู่ ${category.name} อุณหภูมิสูงถึง ${String(telemetry.currentTempCelsius)}°C (เกณฑ์สูงสุด ${String(maxAllowedTemp)}°C)`,
+      };
+    }
+
+    return {
+      isSafe: true,
+      alertMessage: null,
+    };
+  }
+
+  allocateStockForOrder(order: Order): OrderItem[] {
+    return order.items.map((item): OrderItem => {
+      const product = this.products.get(item.productId);
+      if (!product) {
+        throw new Error(`ไม่พบข้อมูลเนื้อรหัส ${item.productId}`);
+      }
+
+      if (product.stockKg < item.weightKg) {
+        throw new Error(
+          `เนื้อ ${product.name} คงเหลือ ${String(product.stockKg)} กก. ไม่พอสำหรับออเดอร์ ${String(item.weightKg)} กก.`,
+        );
+      }
+
+      this.products.set(product.id, {
+        ...product,
+        stockKg: Number((product.stockKg - item.weightKg).toFixed(3)),
+      });
+
+      return item;
+    });
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```javascript filename="eslint.config.compare.mjs"
+import tseslint from 'typescript-eslint';
+import eslintConfigPrettier from 'eslint-config-prettier';
+
+// ❌ ผิด (Anti-pattern): ใส่ ignores ปนกับ files และวาง eslintConfigPrettier ไว้ด้านบนสุด
+export const badConfig = tseslint.config(
+  eslintConfigPrettier, // วางตรงนี้จะถูก tseslint ด้านล่างเขียนทับกฎจัดหน้ากลับมาใหม่!
+  {
+    files: ['src/**/*.ts'],
+    ignores: ['dist/**'], // ไม่ใช่ Global ignore!ไฟล์ใน dist ที่ไม่ใช่ .ts จะยังถูกตรวจ
+  },
+  ...tseslint.configs.recommended,
+);
+
+// ✅ ถูก (Best Practice): แยก Global ignores ไว้บนสุด และวาง eslintConfigPrettier ไว้ล่างสุดเสมอ
+export const goodConfig = tseslint.config(
+  {
+    ignores: ['**/dist/**', '**/.next/**', '**/node_modules/**'],
+  },
+  ...tseslint.configs.strictTypeChecked,
+  {
+    files: ['src/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-unused-vars': 'error',
+    },
+  },
+  eslintConfigPrettier,
+);
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+- **ควรใช้ Flat Config (`eslint.config.mjs`) เมื่อ**: เริ่มต้นโปรเจกต์ใหม่ทั้งหมด หรืออัปเกรดเข้าสู่ระบบนิเวศของ Next.js 16, NestJS 11 และ ESLint v9 เพื่อให้สามารถใช้งาน `projectService: true` ของ `typescript-eslint` v8 ได้อย่างเต็มประสิทธิภาพ
+- **ไม่ควรใช้**: ไม่ควรสร้างไฟล์ `.eslintrc.json` หรือ `.eslintignore` ขึ้นมาใหม่ในโปรเจกต์ยุคปัจจุบันเด็ดขาด เพราะ ESLint v9 จะไม่อ่านไฟล์เหล่านี้โดยอัตโนมัติอีกต่อไป
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+
+**Q1: `projectService: true` ใน `typescript-eslint` v8 (สำหรับ ESLint v9 Flat Config) ดีกว่าการใช้ `project: './tsconfig.json'` แบบเดิมอย่างไร?**
+- **แนวคำตอบ**: `projectService: true` ใช้กลไกเดียวกับที่ VS Code ใช้ในการทำ Auto-complete และแสดงผล Type Error (`tsserver`) ทำให้ไม่ต้องระบุไฟล์ `tsconfig.eslint.json` แยกต่างหากสำหรับไฟล์เทสต์หรือไฟล์ตั้งค่า และยังช่วยจัดการแคชของ AST และ Type Graph ในหน่วยความจำได้มีประสิทธิภาพกว่าเดิมมาก ลดเวลาการรัน Lint ในโปรเจกต์ขนาดใหญ่ลงได้ 20–40%
+
+**Q2: ทำไมในโปรเจกต์ NestJS 11 เมื่อเปิดใช้ `tseslint.configs.strictTypeChecked` จึงมักต้องปิดหรือปรับแต่งกฎ `@typescript-eslint/no-extraneous-class`?**
+- **แนวคำตอบ**: เพราะสถาปัตยกรรมของ NestJS อาศัย Decorator `@Module({...})` แปะลงบนคลาสเปล่าๆ (เช่น `export class AppModule {}`) เพื่อนิยามขอบเขต Dependency Injection แต่กฎ `no-extraneous-class` มองว่าคลาสที่ไม่มี Property หรือ Method ข้างในเป็นสิ่งฟุ่มเฟือย จึงต้องตั้งค่าปิดกฎนี้หรือเปิดออปชัน `{ allowWithDecorator: true }` เพื่อให้เข้ากับรูปแบบของ NestJS
+
+---

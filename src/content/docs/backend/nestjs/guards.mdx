@@ -1,0 +1,146 @@
+---
+title: Guards
+category: BACKEND
+parentTitle: NestJS 11
+version: NestJS 11
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด
+ลองนึกภาพโซน "ห้องเย็นเก็บเนื้อ Wagyu A5 ลิมิเต็ด" ในร้าน Smart Butcher ที่เปิดให้เฉพาะเชฟระดับสูงและลูกค้าสมาชิกระดับ VIP เท่านั้นที่จะเปิดประตูเข้าไปได้ พนักงานต้อนรับหน้าร้านจะตรวจสอบบัตรหรือลายนิ้วมือก่อนเสมอ หากไม่มีสิทธิ์ จะถูกปฏิเสธตั้งแต่หน้าประตูทันที
+
+ใน NestJS **Guard** คือปราการด่านความปลอดภัย ทำหน้าที่ตรวจสอบว่าคำขอนี้สมควรได้รับอนุญาตให้เข้าสู่ Route Handler หรือไม่ โดยจะทำงานหลังจาก Middleware แต่ทำงานก่อน Interceptors และ Pipes ทั้งหมด
+
+## 2. หลักการเบื้องหลัง
+คลาสที่เป็น Guard จะต้องอิมพลีเมนต์อินเทอร์เฟซ `CanActivate` ซึ่งมีเมธอดเดียวคือ:
+```typescript filename="src/common/guards/auth.guard.ts"
+import { Injectable, CanActivate, ExecutionContext } from '@nestjs/common';
+import { Observable } from 'rxjs';
+
+@Injectable()
+export class CustomGuard implements CanActivate {
+  canActivate(context: ExecutionContext): boolean | Promise<boolean> | Observable<boolean> {
+    return true;
+  }
+}
+```
+- หากคืนค่า `true`: Request จะได้รับอนุญาตให้ไปต่อ
+- หากคืนค่า `false`: NestJS จะตัดบทและโยน `ForbiddenException` (HTTP 403 Forbidden) ให้ทันที
+- **ExecutionContext**: ขยายขีดความสามารถมาจาก `ArgumentsHost` ทำให้ Guard สามารถดึงข้อมูลได้ทั้งระดับคลาส (`context.getClass()`) และระดับเมธอด (`context.getHandler()`)
+- **Reflector**: เครื่องมือสำหรับอ่านค่า Metadata ที่เราสร้างขึ้นผ่าน Custom Decorators (เช่น `@Roles('ADMIN')`)
+
+## 3. ตัวอย่างโค้ด
+
+### ตัวอย่างที่ 1: การสร้าง Custom Decorator สำหรับกำหนดสิทธิ์
+```typescript filename="src/common/decorators/roles.decorator.ts"
+import { SetMetadata } from '@nestjs/common';
+
+export type UserRole = 'CUSTOMER' | 'VIP_MEMBER' | 'BUTCHER_CHEF' | 'ADMIN';
+
+export const ROLES_KEY = 'roles';
+// Decorator สำหรับแนบรายชื่อบทบาทที่อนุญาตลงใน Metadata ของ Route
+export const Roles = (...roles: UserRole[]) => SetMetadata(ROLES_KEY, roles);
+```
+
+### ตัวอย่างที่ 2: Role-Based Guard ควบคุมการเข้าถึงเนื้อสเต็กเกรดหายาก
+```typescript filename="src/common/guards/roles.guard.ts"
+import { Injectable, CanActivate, ExecutionContext, ForbiddenException } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { ROLES_KEY, UserRole } from '../decorators/roles.decorator';
+
+@Injectable()
+export class RolesGuard implements CanActivate {
+  constructor(private readonly reflector: Reflector) {}
+
+  canActivate(context: ExecutionContext): boolean {
+    // 1. อ่านบทบาทที่จำเป็นจาก Decorator @Roles() ทั้งระดับ Method และ Class
+    const requiredRoles = this.reflector.getAllAndOverride<UserRole[]>(ROLES_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+
+    // หากไม่มีการระบุ @Roles แสดงว่าเส้นทางนี้เปิดเป็น Public สำหรับผู้ใช้ที่ผ่าน Auth ทุกคน
+    if (!requiredRoles || requiredRoles.length === 0) {
+      return true;
+    }
+
+    // 2. ดึงข้อมูล User จาก Request Object (ซึ่งถูกถอดรหัสมาโดย JwtAuthGuard ก่อนหน้า)
+    const request = context.switchToHttp().getRequest();
+    const user = request.user as { id: string; role: UserRole } | undefined;
+
+    if (!user) {
+      throw new ForbiddenException('ไม่พบข้อมูลการยืนยันตัวตนของผู้ใช้งาน');
+    }
+
+    // 3. ตรวจสอบว่า Role ของ User ตรงกับสิทธิ์ที่ต้องการหรือไม่
+    const hasPermission = requiredRoles.includes(user.role);
+    if (!hasPermission) {
+      throw new ForbiddenException(
+        `สิทธิ์ของคุณ (${user.role}) ไม่เพียงพอสำหรับการจัดการเนื้อเกรดพรีเมียมนี้`
+      );
+    }
+
+    return true;
+  }
+}
+```
+
+```typescript filename="src/modules/products/exclusive-meat.controller.ts"
+import { Controller, Post, Body, UseGuards } from '@nestjs/common';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { RolesGuard } from '../../common/guards/roles.guard';
+
+@Controller('exclusive-meats')
+@UseGuards(RolesGuard) // ผูก Guard ใช้งานใน Controller
+export class ExclusiveMeatController {
+  @Post('add-auction-wagyu')
+  @Roles('BUTCHER_CHEF', 'ADMIN') // เฉพาะเชฟและแอดมินเท่านั้นที่มีสิทธิ์เพิ่มเนื้อประมูล
+  addAuctionMeat(@Body() meatData: any) {
+    return { message: 'เพิ่มเนื้อเข้าสู่ระบบประมูลสำเร็จ' };
+  }
+}
+```
+
+## 4. ผิด vs ถูก
+
+```typescript filename="src/nestjs.ts"
+// ❌ ผิด: ตรวจสอบ Role ภายใน Controller Handler
+@Controller('meats')
+export class BadMeatController {
+  @Post('delete')
+  deleteMeat(@Body() body: any, @Req() req: any) {
+    // ❌ ผิด: โค้ดเลอะเทอะ เช็คสิทธิ์ปะปนกับ Business Logic
+    if (req.user.role !== 'ADMIN') {
+      throw new ForbiddenException('คุณไม่มีสิทธิ์ลบเนื้อ');
+    }
+    return this.service.delete(body.id);
+  }
+}
+```
+
+```typescript filename="src/nestjs.ts"
+// ✅ ถูก: แยกสิทธิ์การเข้าถึงออกจาก Controller Handler อย่างเด็ดขาดด้วย Guard
+@Controller('meats')
+@UseGuards(RolesGuard)
+export class GoodMeatController {
+  @Post('delete')
+  @Roles('ADMIN') // ✅ ประกาศ Declarative และตรวจสอบผ่าน Guard ก่อนที่โค้ดในฟังก์ชันจะทำงาน
+  deleteMeat(@Body() body: DeleteMeatDto) {
+    return this.service.delete(body.id);
+  }
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Guard**: เมื่อต้องการตรวจสอบสิทธิ์ Authentication (เช่น เช็คความถูกต้องของ JWT Token) และ Authorization (เช่น เช็คสิทธิ์ตาม Role หรือ Permission matrix)
+- **ไม่ควรใช้ Guard**: สำหรับการแปลงชนิดข้อมูลหรือดักจับ Body เพื่อ Validate ฟิลด์ (นั่นคือหน้าที่ของ **Pipes**)
+
+<Callout type="note" title="ดูเพิ่มเติม">
+ศึกษาวิธีการยืนยันตัวตนแบบสมบูรณ์และระบบ Token ได้ที่: [Authentication](/docs/backend/authentication) และ [Security](/docs/backend/security)
+</Callout>
+
+## 6. คำถามสัมภาษณ์
+**ถาม**: ในกรณีที่เราติดตั้ง `@UseGuards(AuthGuard, RolesGuard)` ลำดับการทำงานของ Guard จะเป็นอย่างไร และหาก `AuthGuard` โยน Exception ขึ้นมา `RolesGuard` จะยังทำงานหรือไม่?
+**ตอบ**: Guards จะทำงานตามลำดับจากซ้ายไปขวา โดย `AuthGuard` จะทำงานก่อนเพื่อถอดรหัส Token และแนบ `req.user` หาก `AuthGuard` ไม่ผ่าน (คืนค่า `false` หรือโยน `UnauthorizedException`) ตัว `RolesGuard` จะไม่ถูกเรียกทำงานเลยแม้แต่น้อย
+
+---

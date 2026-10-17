@@ -1,0 +1,110 @@
+---
+title: Managed Postgres
+category: DATABASE
+parentTitle: Supabase
+version: Supabase & PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+หากเราเช่าเซิร์ฟเวอร์เปล่ามาติดตั้ง PostgreSQL 16 เอง เราต้องดูแลตั้งค่าไฟล์ระบบ การทำ Connection Pooling การอัปเดตความปลอดภัย และการตั้งค่าเครือข่ายด้วยตัวเองทั้งหมด ในทางกลับกัน **Supabase** มอบอินสแตนซ์ **PostgreSQL 16 แท้ๆ (Dedicated Instance)** ให้กับทุกโปรเจกต์ พร้อมประกอบร่างบริการเสริมรอบข้างไว้ให้เสร็จสรรพ เปรียบเสมือน **"การเช่าครัวมาตรฐานระดับมิชลินที่มีทั้งห้องเย็น PostgreSQL 16, ระบบจัดการคิวเชฟ (Supavisor), ตู้เก็บภาพถ่ายเนื้อ (Storage) และพนักงานตรวจบัตรเข้างาน (GoTrue Auth) เตรียมไว้ให้พร้อมใช้งานทันที"**
+
+จุดเด่นที่สุดคือ ไม่ว่าคุณจะเลือกใช้บริการเสริมรอบข้างหรือไม่ ตัวฐานข้อมูลข้างในก็คือ PostgreSQL 16 มาตรฐาน 100% ที่คุณสามารถใช้ `pg_dump` ย้ายออกไปรันบน AWS RDS, Google Cloud SQL หรือ Docker ของตัวเองเมื่อไหร่ก็ได้โดยไม่มีการผูกขาดเทคโนโลยี (Zero Vendor Lock-in ในระดับฐานข้อมูล)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ภายใต้หน้าจอ Dashboard ของ Supabase ประกอบด้วยบริการ Open-source 6 ส่วนที่ทำงานประสานกันอยู่หน้าฐานข้อมูล PostgreSQL 16:
+
+```text filename="docs/database/supabase.txt"
+                      ┌─────────────────────────────────────────┐
+                      │         API Gateway (Kong)              │
+                      └────┬──────────┬──────────┬──────────┬───┘
+                           │          │          │          │
+        ┌──────────────────┘          │          │          └──────────────────┐
+        ▼                             ▼          ▼                             ▼
+┌───────────────┐             ┌──────────────┐ ┌──────────────┐        ┌───────────────┐
+│   PostgREST   │             │ GoTrue (Auth)│ │   Realtime   │        │  Storage API  │
+│ (Auto REST/GQL)│             │ (JWT & Users)│ │ (WAL Stream) │        │  (S3 Backed)  │
+└───────┬───────┘             └──────┬───────┘ └──────┬───────┘        └───────┬───────┘
+        │                            │                │                        │
+        └────────────────────────────┴────────┬───────┴────────────────────────┘
+                                              │
+        ┌─────────────────────────┐           ▼
+        │  NestJS / Next.js App   │    ┌───────────────────────────────────────┐
+        │     (Prisma Client)     ├───►│   Supavisor (Connection Pooler)       │
+        └─────────────────────────┘    │   Port 6543 (Tx) / Port 5432 (Session)│
+                                       └──────────────────┬────────────────────┘
+                                                          │
+                                                          ▼
+                                       ┌───────────────────────────────────────┐
+                                       │       Dedicated PostgreSQL 16         │
+                                       │  Schemas: public, auth, storage, etc. │
+                                       └───────────────────────────────────────┘
+```
+
+1. **PostgreSQL 16 Core:** ฐานข้อมูลหลักที่มาพร้อม Extensions ยอดนิยมติดตั้งไว้ให้ล่วงหน้ากว่า 50 ตัว (เช่น `pgcrypto`, `uuid-ossp`, `pg_trgm`, `pg_stat_statements`, และ `pgvector`)
+2. **Supavisor:** ระบบ Cloud-native Connection Pooler ประสิทธิภาพสูง (เขียนด้วยภาษา Elixir) ที่เข้ามาแทนที่ PgBouncer แบบเดิม รองรับการเชื่อมต่อพร้อมกันได้นับหมื่นสาย
+3. **PostgREST:** ตัวแปลงตารางใน Schema `public` ให้กลายเป็น RESTful API อัตโนมัติ (ซึ่งหากเราใช้ Prisma ใน Backend เป็นหลัก เราควรปิดหรือล็อกการเข้าถึงผ่าน RLS)
+4. **GoTrue (Supabase Auth):** ระบบจัดการผู้ใช้และการออก JWT Token ที่เก็บข้อมูลผู้ใช้ไว้ใน Schema `auth.users` ของ PostgreSQL โดยตรง
+5. **Realtime Server:** ดักฟังการเปลี่ยนแปลงจาก Write-Ahead Log (WAL Replication) ของ PostgreSQL เพื่อส่งข้อมูลอัปเดตผ่าน WebSockets ไปยังหน้าเว็บแบบเรียลไทม์
+6. **Storage API:** เก็บไฟล์จริง (เช่น รูปถ่ายลายไขมันเนื้อวากิว) ไว้บน AWS S3 แต่เก็บ Metadata และสิทธิ์การเข้าถึงไว้ใน Schema `storage.objects` ของ PostgreSQL
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การเปิดใช้งาน Extensions ทรงพลังของ PostgreSQL 16 บน Supabase ผ่านไฟล์ Migration
+เนื่องจาก Supabase มี Extensions ติดตั้งเตรียมไว้ให้ในโฟลเดอร์ `extensions` แล้ว เราสามารถสั่งเปิดใช้งาน `pg_trgm` (สำหรับค้นหาชื่อเนื้อแบบพิมพ์ผิดนิดหน่อยได้) และ `pg_stat_statements` ในระบบ **Smart Butcher Marketplace** ได้ทันที:
+
+```sql filename="prisma/migrations/20261017010000_enable_supabase_extensions/migration.sql"
+-- เปิดใช้งาน Extension สำหรับสร้าง UUID และฟังก์ชันเข้ารหัส
+CREATE EXTENSION IF NOT EXISTS "pgcrypto" WITH SCHEMA "extensions";
+
+-- เปิดใช้งาน Trigram Extension สำหรับการค้นหาชื่อเนื้อสเต๊กด้วยความเร็วสูง (Fuzzy Search)
+CREATE EXTENSION IF NOT EXISTS "pg_trgm" WITH SCHEMA "extensions";
+
+-- สร้าง GIN Trigram Index บนชื่อสินค้าในตาราง products เพื่อให้คำสั่ง ILIKE '%wagyu%' ทำงานระดับมิลลิวินาที
+CREATE INDEX IF NOT EXISTS "idx_products_name_trgm"
+ON "public"."products"
+USING GIN ("name" extensions.gin_trgm_ops);
+```
+
+### ตัวอย่างที่ 2: การตรวจสอบรายการ Schemas และ Extensions ที่ทำงานอยู่ภายในโปรเจกต์ Supabase
+คิวรีสำหรับสำรวจโครงสร้างภายในคลัสเตอร์ PostgreSQL 16 บน Supabase เพื่อแยกแยะระหว่าง Schema ของระบบกับ Schema `public` ของร้านเรา:
+
+```sql filename="inspect_supabase_architecture.sql"
+-- 1. แสดงรายการ Schemas ทั้งหมดในโปรเจกต์ Supabase (แยกเห็นชัดเจนระหว่าง public กับระบบของ Supabase)
+SELECT
+    nspname AS schema_name,
+    pg_catalog.pg_get_userbyid(nspowner) AS schema_owner
+FROM pg_catalog.pg_namespace
+WHERE nspname NOT LIKE 'pg_%'
+  AND nspname <> 'information_schema'
+ORDER BY schema_name;
+
+-- 2. แสดงรายการ Extensions ที่เปิดใช้งานอยู่และเวอร์ชันปัจจุบันบน PostgreSQL 16
+SELECT
+    e.extname AS extension_name,
+    e.extversion AS version,
+    n.nspname AS installed_schema
+FROM pg_catalog.pg_extension e
+JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+ORDER BY e.extname;
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การแตะต้อง Schema ระบบ** | ใช้ Prisma Migrate ไปสั่งแก้โครงสร้างตารางใน Schema `auth` หรือ `storage` ของ Supabase โดยตรงจนระบบพัง | จัดการตารางธุรกิจทั้งหมด (`users`, `products`, `orders`, `payments`) ไว้ใน Schema `public` ของเราเอง |
+| **การซิงค์ข้อมูลกับ `auth.users`** | แก้ไขตาราง `auth.users` ด้วยมือเมื่อต้องการเพิ่มข้อมูลระดับสมาชิกของลูกค้า | สร้างตาราง `public.users` (หรือ `profiles`) ใน Schema `public` แล้วผูก Foreign Key หรือ Database Trigger เข้ากับ `auth.users.id` |
+| **การเปิด Data API ทิ้งไว้โดยไม่ใช้** | ใช้แค่ Prisma ต่อจาก Backend แต่เปิด Public Data API (PostgREST) ทิ้งไว้โดยไม่ได้เปิด RLS บนตาราง `public` | เปิดใช้งาน RLS บนทุกตารางใน `public` เสมอ (หรือปิดการเปิดเผย Schema `public` ออกทาง Data API ในตั้งค่าของ Supabase) |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Supabase เมื่อ:** ต้องการฐานข้อมูล Managed PostgreSQL 16 ที่มีระบบ Connection Pooler (Supavisor), ระบบจัดการไฟล์ (Storage) และ Dashboard ตรวจสอบประสิทธิภาพ (`pg_stat_statements` / Query Performance Advisor) พร้อมใช้งานทันทีโดยไม่ต้องจ้างทีม DBA เต็มเวลาในช่วงเริ่มต้นถึงระดับกลาง
+- **ไม่ควรใช้การเรียก PostgREST จากฝั่ง Browser โดยตรงเมื่อ:** เป็นตรรกะทางธุรกิจที่ซับซ้อนและมีความลับสูง เช่น การคำนวณส่วนลดหลายชั้น การตัดสต็อกเนื้อวากิวพร้อมตรวจสอบยอดเงินใน `payments` ซึ่งควรทำผ่าน Backend Server (NestJS / Next.js Server) ด้วย Prisma Transaction เท่านั้น
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: यदिบริษัทตัดสินใจเริ่มต้นด้วย Supabase ในวันนี้ แล้วอีก 2 ปีข้างหน้าต้องการย้ายฐานข้อมูลออกไปรันบน AWS RDS for PostgreSQL 16 จะเกิดปัญหา Vendor Lock-in ในระดับฐานข้อมูลหรือไม่?**
+  - **แนวคำตอบ:** ไม่เกิดปัญหา Vendor Lock-in ในระดับฐานข้อมูลเลยหากเราออกแบบตารางธุรกิจ (`users`, `categories`, `products`, `orders`, `order_items`, `payments`) ไว้ใน Schema `public` และเข้าถึงผ่าน Prisma ORM มาตรฐาน เพราะเนื้อแท้ของ Supabase คือ PostgreSQL 16 แท้ 100% เราสามารถใช้ `pg_dump --schema=public -Fc` ดึงทั้งโครงสร้างและข้อมูลทั้งหมดไป `pg_restore` ลงบน AWS RDS แล้วเปลี่ยนแค่ค่า `DATABASE_URL` ในไฟล์ `.env` ได้ทันที
+- **Q2: บริการ Supavisor ในสถาปัตยกรรมของ Supabase ทำหน้าที่อะไร และเข้ามาแก้ปัญหาใดของ PostgreSQL?**
+  - **แนวคำตอบ:** Supavisor คือ Cloud-native Connection Pooler ที่ทำหน้าที่เป็นตัวกลางรับการเชื่อมต่อจำนวนมากจากแอปพลิเคชันและ Serverless Functions (พอร์ต 6543 และ 5432 บนโฮสต์ Pooler) แล้วทำการสลับหมุนเวียนคำสั่ง (Multiplexing) ส่งต่อไปยังอินสแตนซ์ PostgreSQL 16 ด้วยจำนวนการเชื่อมต่อจริงเพียงไม่กี่สาย ช่วยแก้ปัญหาคอขวด Process-per-Connection และป้องกันข้อผิดพลาด `too many clients already`
+
+---

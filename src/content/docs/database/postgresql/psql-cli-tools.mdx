@@ -1,0 +1,135 @@
+---
+title: psql CLI Tools
+category: DATABASE
+parentTitle: PostgreSQL 16
+version: PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+การบริหารจัดการฐานข้อมูลระดับมืออาชีพ เปรียบเหมือนการขับเครื่องบินพาณิชย์:
+- **GUI Tools (DBeaver, pgAdmin 4):** เปรียบเหมือน "แผงหน้าปัดดิจิทัลและแผนที่การบินบนจอสัมผัส" เหมาะสำหรับการสำรวจข้อมูลภาพรวม ออกแบบความสัมพันธ์ ER Diagram และดู Visual Explain Plan ในช่วงการพัฒนาบนเครื่อง Local
+- **`psql` CLI:** เปรียบเหมือน "คันโยกและระบบควบคุมโดยตรงของเครื่องบิน" ที่วิศวกรทุกคนต้องเชี่ยวชาญ เพราะในโลกความเป็นจริง เมื่อระบบ Production เกิดปัญหาบน Kubernetes Cluster, Docker Container หรือ Remote Linux Server ที่ไม่มี GUI สิ่งเดียวที่คุณจะสามารถเข้าถึงได้ผ่าน SSH หรือ `kubectl exec` คือหน้าจอดำของ **`psql`**
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+- `psql` ทำงานบน Client Library พื้นฐานของ PostgreSQL คือ `libpq`
+- **Meta-Commands (คำสั่งที่ขึ้นต้นด้วย `\`):** คำสั่งเหล่านี้ **ไม่ใช่คำสั่ง SQL** และไม่ได้ถูกประมวลผลบนเซิร์ฟเวอร์โดยตรง แต่ตัวโปรแกรม `psql` ในฝั่ง Client จะเป็นตัวตีความ แล้วแปลงเป็นคำสั่ง SQL สลับซับซ้อนเพื่อวิ่งไปดึงข้อมูลจาก Catalog Tables (`pg_catalog.pg_class`, `pg_catalog.pg_attribute`, `pg_catalog.pg_roles` ฯลฯ) แล้วนำมาจัดรูปแบบเป็นตารางสวยงามบนหน้าจอ Terminal
+
+## 3. รายการคำสั่ง Meta-commands ของ psql ที่ Developer ต้องรู้
+
+| คำสั่ง psql | หน้าที่การทำงาน | ตัวอย่างสถานการณ์ใช้งานจริง |
+| :--- | :--- | :--- |
+| `\l` หรือ `\l+` | แสดงรายชื่อ Database ทั้งหมด พร้อมขนาด พื้นที่จัดเก็บ และ Encoding | เช็กดูว่ามีกี่ฐานข้อมูลในเซิร์ฟเวอร์ และขนาดโตไปกี่ GB |
+| `\c dbname` | สลับการเชื่อมต่อไปยัง Database อื่น (`CONNECT`) | เปลี่ยนจากฐานข้อมูล `postgres` ไปทำงานที่ `smart_butcher_db` |
+| `\dt` หรือ `\dt+` | แสดงรายชื่อตารางทั้งหมดใน Schema ปัจจุบัน พร้อมขนาดตาราง | สำรวจดูว่า Migration ตารางเนื้อสัตว์เข้ามาครบหรือไม่ |
+| `\d+ table_name` | **คำสั่งยอดฮิต:** แสดงรายละเอียดโครงสร้างตารางอย่างลึกซึ้ง | เช็กคอลัมน์, Data Types, Constraints, Default, Indexes, Foreign Keys, Triggers |
+| `\dn` หรือ `\dn+` | แสดงรายชื่อ Schemas ทั้งหมดใน Database | ตรวจสอบว่ามี Schema `tenant_a` หรือ `audit` อยู่หรือไม่ |
+| `\du` หรือ `\du+` | แสดงรายชื่อ Roles ทั้งหมด พร้อมสิทธิ์ (Attributes/Members) | ตรวจดูว่า User แอปพลิเคชันมีสิทธิ์ Superuser หลุดมาหรือไม่ |
+| `\x` หรือ `\x auto` | เปิดโหมด **Expanded Display** (แสดงผลแนวตั้งแทนแนวนอน) | **จำเป็นอย่างยิ่ง:** ใช้เมื่อตารางมีหลายคอลัมน์ หรือมีฟิลด์ JSONB ยาวๆ |
+| `\timing` | เปิด/ปิด ตัวจับเวลาการประมวลผล Query (มิลลิวินาที) | ใช้วัดประสิทธิภาพความเร็วของคำสั่ง SQL ได้ทันที |
+| `\q` | ออกจากโปรแกรม psql | ปิด Terminal เพื่อกลับสู่ OS Shell |
+
+## 4. ตัวอย่างการใช้งานจริง
+
+### 1. การสำรวจโครงสร้างตารางด้วย `\d+ products`
+เมื่อพิมพ์คำสั่ง `\d+ products` ใน Terminal ของ `psql`:
+
+```text filename="docs/database/postgresql.txt"
+smart_butcher_db=# \d+ products
+                                                                Table "public.products"
+     Column     |            Type             | Collation | Nullable |      Default      | Storage  | Compression | Stats target | Description 
+----------------+-----------------------------+-----------+----------+-------------------+----------+-------------+--------------+-------------
+ id             | uuid                        |           | not null | gen_random_uuid() | plain    |             |              | 
+ category_id    | uuid                        |           | not null |                   | plain    |             |              | 
+ name           | text                        |           | not null |                   | extended |             |              | 
+ sku            | character varying(30)       |           | not null |                   | extended |             |              | 
+ price_per_kg   | numeric(10,2)               |           | not null |                   | main     |             |              | 
+ stock_qty      | integer                     |           | not null |                   | plain    |             |              | 
+ dry_aged_days  | integer                     |           | not null | 0                 | plain    |             |              | 
+ is_active      | boolean                     |           | not null | true              | plain    |             |              | 
+ specifications | jsonb                       |           | not null | '{}'::jsonb       | extended |             |              | 
+ available_cuts | text[]                      |           | not null | ARRAY['STEAK'...] | extended |             |              | 
+ created_at     | timestamp with time zone    |           | not null | CURRENT_TIMESTAMP | plain    |             |              | 
+Indexes:
+    "products_pkey" PRIMARY KEY, btree (id)
+    "products_sku_key" UNIQUE CONSTRAINT, btree (sku)
+    "idx_products_name_trgm" gin (name gin_trgm_ops)
+Check constraints:
+    "products_dry_aged_days_check" CHECK (dry_aged_days >= 0)
+    "products_price_per_kg_check" CHECK (price_per_kg > 0::numeric)
+    "products_stock_qty_check" CHECK (stock_qty >= 0)
+Foreign-key constraints:
+    "products_category_id_fkey" FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT
+Referenced by:
+    TABLE "order_items" CONSTRAINT "order_items_product_id_fkey" FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE RESTRICT
+```
+
+### 2. การเปิด Expanded Display (`\x auto`) และรันจับเวลา (`\timing`)
+เมื่อต้องตรวจสอบคำสั่งซื้อที่มีฟิลด์ JSON หรือข้อมูลกว้างมากๆ:
+
+```text filename="docs/database/postgresql.txt"
+smart_butcher_db=# \timing
+Timing is on.
+
+smart_butcher_db=# \x auto
+Expanded display is used automatically.
+
+smart_butcher_db=# SELECT * FROM products WHERE sku = 'WGY-MIYA-A5-STRIP';
+-[ RECORD 1 ]--+---------------------------------------------------------------------------------------
+id             | 8e94fae4-18df-4158-b34e-6e8ebdc5fca1
+category_id    | c1111111-1111-1111-1111-111111111111
+name           | Miyazaki Wagyu A5 Striploin
+sku            | WGY-MIYA-A5-STRIP
+price_per_kg   | 5200.00
+stock_qty      | 15
+dry_aged_days  | 0
+is_active      | t
+specifications | {"halal": true, "bms_score": 9, "feed_type": "Grain-fed 600 days", "origin": "Miyazaki, Japan"}
+available_cuts | {STEAK_1_INCH,STEAK_2_INCH,YAKINIKU,SHABU}
+created_at     | 2026-10-17 04:30:00+07
+Time: 1.245 ms
+```
+
+### 3. การรัน SQL Script จากไฟล์ด้วย `psql -f`
+คำสั่งสำหรับการทำ Automation, Seeding หรือรัน Database Migration:
+
+```bash filename="run_database_setup.sh"
+# 1. รันไฟล์สคริปต์ SQL บนเซิร์ฟเวอร์แบบ Non-interactive
+psql -h localhost -p 5432 -U butcher_app_user -d smart_butcher_db -f 05_production_schema.sql
+
+# 2. รันสคริปต์และหยุดการทำงานทันทีหากพบ Error (สำคัญมากสำหรับ CI/CD!)
+psql -v ON_ERROR_STOP=1 -h localhost -U butcher_app_user -d smart_butcher_db -f 06_seed_data.sql
+
+# 3. สั่ง Export ข้อมูลผลลัพธ์เป็นไฟล์ CSV ตรงๆ จาก CLI
+psql -U butcher_app_user -d smart_butcher_db -c "COPY (SELECT name, sku, price_per_kg FROM products) TO STDOUT WITH CSV HEADER" > products_catalog.csv
+```
+
+## 5. ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+### ❌ สิ่งที่ผิด: รันสคริปต์ขนาดใหญ่บน Production โดยไม่ใส่ `ON_ERROR_STOP=1`
+```bash filename="terminal.sh"
+# เมื่อคำสั่งที่ 2 เกิด Error เช่น Table Duplicate ตัว psql จะยังคงฝืนรันคำสั่งที่ 3, 4, 5 ต่อไป!
+# ส่งผลให้ฐานข้อมูลเกิดสถานะครึ่งๆ กลางๆ (Inconsistent Schema)
+psql -d smart_butcher_db -f migration_v2.sql
+```
+
+### ✅ สิ่งที่ถูก: สั่ง `ON_ERROR_STOP=1` และครอบสคริปต์ทั้งหมดด้วย `BEGIN; ... COMMIT;`
+```bash filename="terminal.sh"
+# เมื่อมีบรรทัดใดเกิด Error ระบบจะหยุดรันทันทีและ Rollback ทุกอย่างกลับสู่จุดเดิม
+psql -v ON_ERROR_STOP=1 -d smart_butcher_db -f migration_v2_safe.sql
+```
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **`psql` CLI:** ควรใช้เป็นเครื่องมือหลักสำหรับ Automation Scripts, CI/CD Deployment, Backup/Restore Verification, และการเข้าแก้ปัญหาเร่งด่วนในเซิร์ฟเวอร์จริง
+- **GUI Tools (DBeaver / pgAdmin):** เหมาะกับการดู Explain Execution Plan แบบ Graphic Tree ในจังหวะที่ทำการ Tuning Query ที่มีความซับซ้อนสูง และการสำรวจ Entity-Relationship Diagrams (ERD) ของระบบ
+
+## 7. คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: ในการเข้าตรวจสอบปัญหา Slow Query ฉุกเฉินบน Production Server ที่ไม่มีหน้าจอ GUI คุณจะใช้คำสั่งและขั้นตอนใดใน `psql` เพื่อวิเคราะห์?**
+  - *แนวคำตอบ:* 
+    1. รันคำสั่ง `\timing` เพื่อเปิดระบบจับเวลา
+    2. รันคำสั่งตรวจสอบการล็อกและคิวรีที่กำลังทำงานค้างอยู่ผ่านแค็ตตาล็อก:
+       `SELECT pid, now() - query_start AS duration, query, state FROM pg_stat_activity WHERE state != 'idle' ORDER BY duration DESC;`
+    3. เมื่อพบคิวรีต้องสงสัย ให้นำคิวรีนั้นมารันด้วย `EXPLAIN (ANALYZE, BUFFERS) <query>;` เพื่อดู Plan จริง เวลาที่ใช้ และจำนวน Shared Buffers Hit/Read บนดิสก์
+    4. ใช้ `\d+ <table_name>` เพื่อตรวจสอบว่าคอลัมน์ในเงื่อนไข `WHERE` หรือ `JOIN` มี Index รองรับหรือไม่
+
+---

@@ -1,0 +1,203 @@
+---
+title: Resource URL
+category: BACKEND
+parentTitle: REST API Design
+version: RESTful API Standards
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในสถาปัตยกรรม REST ทุกสิ่งในระบบถูกมองเป็น **Resource (ทรัพยากรหรือข้อมูล)** ดังนั้นการออกแบบ URL (Uniform Resource Locator) จึงต้องสะท้อนถึง "สิ่งของหรือนามธรรมในโดเมนธุรกิจ" ไม่ใช่ "ชื่อฟังก์ชันในโค้ด" การออกแบบโครงสร้าง URL ที่ดีจะทำให้ API อ่านเข้าใจได้ด้วยตัวเอง (Self-descriptive) และคาดเดาโครงสร้าง Endpoint อื่นๆ ในระบบได้ทันที
+
+กฎเหล็ก 5 ข้อในการตั้งชื่อ URL ของ **Smart Butcher Marketplace**:
+1. **ใช้คำนามพหูพจน์ (Plural Nouns)**: เช่น `/products`, `/categories`, `/orders`, `/users`, `/payments`
+2. **ใช้ตัวพิมพ์เล็กทั้งหมดและคั่นด้วยขีดกลาง (kebab-case)**: เช่น `/meat-categories`, `/delivery-slots` (หลีกเลี่ยง `camelCase` หรือ `snake_case` ใน Path)
+3. **ห้ามมีคำกริยาใน URL ปกติ**: เช่น ใช้ `POST /orders` แทน `/createOrder` หรือใช้ `DELETE /products/:id` แทน `/deleteProduct/:id`
+4. **แสดงความสัมพันธ์เชิงลำดับชั้น (Hierarchical Sub-resources) ไม่เกิน 2-3 ระดับ**: เช่น `/orders/:orderId/items`
+5. **สำหรับ Action พิเศษที่ไม่ใช่ CRUD มาตรฐาน**: ให้แปลงคำกริยาเป็นคำนามของกระบวนการ หรือใช้ Sub-resource Action ที่ปลายทาง เช่น `POST /orders/:id/cancellation` หรือ `POST /payments/:id/refunds`
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+การรักษาความสม่ำเสมอของ URL Structure ช่วยให้การจัดการ Routing Tree ใน NestJS (ซึ่งใช้ `path-to-regexp` หรือ `find-my-way` ใน Fastify) ทำงานได้อย่างมีประสิทธิภาพสูงสุดและไม่เกิดปัญหา Route Collision (เช่น ความสับสนระหว่างพารามิเตอร์ `:id` กับ Sub-path คงที่) นอกจากนี้ การจัดกลุ่มตาม Resource ยังสอดคล้องกับการแบ่งโมดูลตามหลัก Domain-Driven Design (DDD) และการตั้งค่าสิทธิ์ใน API Gateway หรือ CDN Cache Rules (เช่น การตั้งกฎ Cache เฉพาะ `/api/v1/categories/*` และ `/api/v1/products/*`)
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การจัดโครงสร้าง Nested Sub-resources สำหรับ Order และ OrderItem (พื้นฐาน)
+```typescript filename="src/modules/orders/order-items.controller.ts"
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Delete,
+  Param,
+  Body,
+  ParseUUIDPipe,
+} from '@nestjs/common';
+import { CreateOrderItemDto, UpdateOrderItemQuantityDto } from './dto/order-item.dto';
+
+// โครงสร้าง URL: /api/v1/orders/:orderId/items
+// สื่อความหมายชัดเจนว่า OrderItem เป็นส่วนประกอบภายใต้ Order เสมอ
+@Controller('orders/:orderId/items')
+export class OrderItemsController {
+  // GET /api/v1/orders/:orderId/items
+  @Get()
+  async listItems(@Param('orderId', ParseUUIDPipe) orderId: string) {
+    return {
+      orderId,
+      items: [
+        {
+          id: 'item-01',
+          productId: 'prod-wagyu-ribeye',
+          cutStyle: 'STEAK_2.5CM',
+          weightGrams: 400,
+          unitPriceThb: 3200,
+        },
+      ],
+    };
+  }
+
+  // POST /api/v1/orders/:orderId/items
+  @Post()
+  async addItem(
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @Body() dto: CreateOrderItemDto,
+  ) {
+    return {
+      message: 'เพิ่มรายการเนื้อเข้าสู่ใบสั่งซื้อสำเร็จ',
+      orderId,
+      item: dto,
+    };
+  }
+
+  // PATCH /api/v1/orders/:orderId/items/:itemId
+  @Patch(':itemId')
+  async updateQuantity(
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @Param('itemId', ParseUUIDPipe) itemId: string,
+    @Body() dto: UpdateOrderItemQuantityDto,
+  ) {
+    return {
+      orderId,
+      itemId,
+      updatedWeightGrams: dto.weightGrams,
+    };
+  }
+
+  // DELETE /api/v1/orders/:orderId/items/:itemId
+  @Delete(':itemId')
+  async removeItem(
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @Param('itemId', ParseUUIDPipe) itemId: string,
+  ) {
+    return { deleted: true, orderId, itemId };
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การแปลง Business Action ซับซ้อนให้เป็น RESTful Sub-resources (ขั้นสูง)
+```typescript filename="src/modules/payments/payments.controller.ts"
+import {
+  Controller,
+  Post,
+  Get,
+  Param,
+  Body,
+  HttpCode,
+  HttpStatus,
+  ParseUUIDPipe,
+} from '@nestjs/common';
+
+export class CreateRefundRequestDto {
+  reason!: 'DAMAGED_PACKAGING' | 'TEMPERATURE_BREACH' | 'WRONG_MEAT_CUT';
+  amountThb!: number;
+  evidenceImageUrls!: string[];
+}
+
+export class VerifyPromptPaySlipDto {
+  slipPayload!: string;
+  transferredAtIso!: string;
+}
+
+@Controller('payments')
+export class PaymentsController {
+  // แทนที่จะสร้าง URL แบบ RPC เช่น POST /api/v1/refundPaymentById
+  // เราออกแบบให้ "การขอคืนเงิน (refunds)" เป็น Sub-resource ของการชำระเงิน (payments)
+  // POST /api/v1/payments/:paymentId/refunds
+  @Post(':paymentId/refunds')
+  @HttpCode(HttpStatus.CREATED)
+  async createRefund(
+    @Param('paymentId', ParseUUIDPipe) paymentId: string,
+    @Body() dto: CreateRefundRequestDto,
+  ) {
+    return {
+      refundId: 'ref-990011',
+      paymentId,
+      status: 'UNDER_QUALITY_REVIEW',
+      reason: dto.reason,
+      refundAmountThb: dto.amountThb,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  // ดึงประวัติการขอคืนเงินทั้งหมดของรายการชำระเงินนี้
+  // GET /api/v1/payments/:paymentId/refunds
+  @Get(':paymentId/refunds')
+  async getPaymentRefunds(@Param('paymentId', ParseUUIDPipe) paymentId: string) {
+    return {
+      paymentId,
+      refunds: [],
+    };
+  }
+
+  // สำหรับกระบวนการตรวจสอบสลิปโอนเงิน PromptPay ออกแบบเป็น Sub-resource "slip-verifications"
+  // POST /api/v1/payments/:paymentId/slip-verifications
+  @Post(':paymentId/slip-verifications')
+  @HttpCode(HttpStatus.OK)
+  async verifySlip(
+    @Param('paymentId', ParseUUIDPipe) paymentId: string,
+    @Body() dto: VerifyPromptPaySlipDto,
+  ) {
+    return {
+      paymentId,
+      verified: true,
+      bankReferenceNo: '20261017BBL998877',
+      verifiedAt: dto.transferredAtIso,
+    };
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/common/constants/url-design-examples.ts"
+// ❌ ผิด (Anti-pattern): ใช้กริยาปนใน URL, ใช้เอกพจน์ปนพหูพจน์, และซ้อนลำดับชั้นลึกเกินไป
+export const BAD_URLS = [
+  'GET /api/v1/getAllProducts', // เอาชื่อฟังก์ชันมาตั้งเป็น URL
+  'POST /api/v1/product/createNew', // ใช้คำนามเอกพจน์และมีกริยา
+  'POST /api/v1/deleteOrder?order_id=123', // ใช้ POST เพื่อลบข้อมูลผ่าน Query String
+  'GET /api/v1/categories/cat-1/products/prod-2/orders/ord-3/items/item-4/payments', // ซ้อนลึก 5 ชั้น!
+] as const;
+
+// ✅ ถูก (Best Practice): ใช้คำนามพหูพจน์ kebab-case และซ้อนไม่เกิน 2 ชั้น
+export const GOOD_URLS = [
+  'GET /api/v1/products',
+  'POST /api/v1/products',
+  'DELETE /api/v1/orders/ord-123',
+  'GET /api/v1/categories/cat-1/products', // ดึงสินค้าในหมวดหมู่
+  'GET /api/v1/orders/ord-3/payments', // ตัดระดับความลึกให้เริ่มจาก Aggregate Root (orders)
+] as const;
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Nested URL (`/parent/:id/children`) เมื่อ**: ข้อมูลลูกไม่มีความหมายหากขาดข้อมูลแม่ หรือต้องเข้าถึงภายใต้บริบทของข้อมูลแม่เสมอ เช่น `/orders/:orderId/items`
+- **ไม่ควรซ้อน URL เกิน 2 ระดับ**: หากต้องการดึงข้อมูลที่ลึกกว่านั้น เช่น รายละเอียดการชำระเงินของใบสั่งซื้อ ให้ใช้ URL ระดับบนสุดของ Resource นั้นโดยตรง เช่น `GET /payments/:paymentId` หรือใช้ Query Parameter ช่วยกรอง เช่น `GET /payments?orderId=ord-123`
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: หากระบบมีฟีเจอร์ที่ไม่ได้ตรงกับ CRUD (Create, Read, Update, Delete) เช่น "การคำนวณค่าจัดส่งรถห้องเย็น" หรือ "การจองคิวเชฟแล่เนื้อ" เราควรออกแบบ URL ใน REST API อย่างไร?
+   - **แนวคำตอบ**: เราสามารถแปลงกริยาของการกระทำนั้นให้กลายเป็น "คำนามของผลลัพธ์หรือกระบวนการ" (Noun-ified Resource) ได้ เช่น:
+     - การคำนวณค่าจัดส่งรถห้องเย็น -> สร้าง Endpoint `POST /api/v1/cold-chain-shipping-quotes` (ส่งน้ำหนักเนื้อและพิกัดไป แล้วได้ใบเสนอราคาค่าส่งกลับมา)
+     - การจองคิวเชฟแล่เนื้อ -> สร้าง Endpoint `POST /api/v1/butcher-reservations`
+2. **คำถาม**: ทำไมเราจึงไม่ควรระบุดึงข้อมูลที่มีความลึกมากๆ เช่น `/users/1/orders/2/items/3/product`?
+   - **แนวคำตอบ**: เพราะทำให้ URL ยาวเกินความจำเป็น ผูกติดโครงสร้าง API เข้ากับลำดับชั้นของตารางฐานข้อมูลมากเกินไป (Tight Coupling) หากวันหน้าโครงสร้างความสัมพันธ์เปลี่ยน URL จะพังทันที และยังทำให้การจัดการ Caching ยุ่งยาก วิธีที่ถูกต้องคือใช้ Aggregate Root ไม่เกิน 2 ระดับ เช่น `GET /orders/2/items/3` และหากต้องการดูข้อมูลสินค้าก็เรียก `GET /products/:productId` โดยตรง
+
+---

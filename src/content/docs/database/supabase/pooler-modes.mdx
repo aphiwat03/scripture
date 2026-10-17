@@ -1,0 +1,119 @@
+---
+title: Pooler Modes
+category: DATABASE
+parentTitle: Supabase
+version: Supabase & PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในหัวข้อที่แล้วเราเห็นว่าโฮสต์ Supavisor Pooler ตัวเดียวกันของ Supabase เปิดให้เราเชื่อมต่อได้ทั้ง **พอร์ต `6543` (Transaction Mode)** และ **พอร์ต `5432` (Session Mode)**
+เพื่อให้เลือกใช้ได้อย่างแม่นยำในระบบ **Smart Butcher Marketplace** ให้จำเปรียบเทียบง่ายๆ ดังนี้:
+- **Transaction Mode (พอร์ต `6543`):** เหมือน **"ช่องจ่ายเงินด่วน (Express Checkout)"** ลูกค้ายื่นตระกร้าเนื้อ จ่ายเงินเสร็จปุ๊บ ต้องเดินออกจากช่องทันทีเพื่อให้คนถัดไปเข้ามาจ่ายเงินต่อในเสี้ยววินาทีถัดมา รองรับคนต่อแถวได้เป็นหมื่นคน แต่ห้ามวางของจองพื้นที่ค้างไว้ข้ามบิล
+- **Session Mode (พอร์ต `5432`):** เหมือน **"ห้องรับรองส่วนตัว (Private VIP Room)"** ทันทีที่คุณเดินเข้าไป คุณสามารถนั่งอยู่ในห้องนั้นได้ยาวนาน ตั้งค่าอุณหภูมิห้องเฉพาะตัว หรือวางล็อกเกอร์ส่วนตัวค้างไว้ได้จนกว่าคุณจะเดินออกจากตึกไปเอง แต่จำนวนห้องมีจำกัดมาก (เช่น มีแค่ 15 ห้อง)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+การทำงานระดับโปรโตคอลของทั้งสองโหมดใน Supavisor มีความแตกต่างกันใน 4 มิติหลัก:
+
+| คุณสมบัติทางเทคนิค | Transaction Mode (พอร์ต `6543`) | Session Mode (พอร์ต `5432` บน Pooler) |
+| :--- | :--- | :--- |
+| **จังหวะการคืนสายเข้า Pool** | คืนสายทันทีที่จบแต่ละ Transaction (`COMMIT` / `ROLLBACK`) หรือจบคำสั่งเดี่ยว | ยึดสายไว้ตลอดจนกว่า Client จะสั่งปิดการเชื่อมต่อระดับ TCP (`Disconnect`) |
+| **Prepared Statements (ระดับ Protocol)** | ❌ ไม่รองรับข้ามธุรกรรม (ใน Prisma ต้องใส่ `?pgbouncer=true`) | ✅ รองรับเต็มรูปแบบ 100% |
+| **Session-level Advisory Locks** | ❌ ไม่รองรับ (จึงใช้รัน `prisma migrate` ไม่ได้!) | ✅ รองรับเต็มรูปแบบ (ใช้เป็น `DIRECT_URL` สำหรับทำ Migration ได้) |
+| **คำสั่ง `SET` ระดับ Session / `LISTEN`** | ❌ ค่าที่ `SET` ไว้จะหายไปเมื่อจบธุรกรรม (ต้องใช้ `SET LOCAL` ภายใน Transaction แทน) | ✅ รองรับ `SET` ระดับ Session และ `LISTEN/NOTIFY` |
+| **งานที่เหมาะสมที่สุด** | **Prisma Client ใน API Server / Next.js / Serverless Functions** | **Prisma Migrate CLI, เครื่องมือ `pg_dump`, DBeaver/GUI** |
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การตั้งค่าตัวแปรระดับธุรกรรมด้วย `SET LOCAL` เพื่อให้ทำงานบน Transaction Mode (พอร์ต `6543`) ได้อย่างปลอดภัย
+ในโหมด Transaction Pooling (พอร์ต `6543`) หากเราสั่ง `SET timezone = 'Asia/Bangkok';` หรือตั้งค่าตัวแปรลอยๆ นอก Transaction ค่าเหล่านั้นอาจหลุดไปติดกับสายของลูกค้าคนอื่น หรือหายไปในคิวรีถัดไป! ดังนั้นหากต้องการตั้งค่าพารามิเตอร์เฉพาะกิจบนพอร์ต `6543` ต้องใช้คำสั่ง **`SET LOCAL`** ภายในบล็อก `$transaction` เท่านั้น (ค่าจะถูกล้างกลับเป็นปกติทันทีเมื่อจบ `COMMIT`):
+
+```typescript filename="src/orders/localized-report.service.ts"
+import { Injectable } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+
+@Injectable()
+export class LocalizedReportService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async generateHeavyButcherSummaryReport() {
+    // ทำงานบนพอร์ต 6543 (Transaction Mode) อย่างปลอดภัยด้วยการรวมไว้ใน Interactive Transaction
+    return this.prisma.$transaction(async (tx) => {
+      // ✅ ใช้ SET LOCAL เพื่อให้มีผลเฉพาะใน Transaction นี้เท่านั้น และไม่ปนเปื้อนไปหาสายอื่นใน Pool!
+      await tx.$executeRaw`SET LOCAL work_mem = '32MB'`;
+      await tx.$executeRaw`SET LOCAL statement_timeout = '8s'`;
+
+      return tx.$queryRaw`
+        SELECT
+          c.name AS category_name,
+          COUNT(DISTINCT o.id)::int AS total_orders,
+          SUM(oi.subtotal) AS gross_revenue
+        FROM order_items oi
+        INNER JOIN orders o ON o.id = oi.order_id
+        INNER JOIN products p ON p.id = oi.product_id
+        INNER JOIN categories c ON c.id = p.category_id
+        WHERE o.status IN ('PAID', 'PREPARING_CUT', 'SHIPPING', 'DELIVERED')
+        GROUP BY c.id, c.name
+        ORDER BY gross_revenue DESC
+      `;
+    });
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การแยกสคริปต์งานบำรุงรักษาที่ต้องใช้ Session Mode (`DIRECT_URL` พอร์ต `5432`)
+สำหรับงานเบื้องหลังที่ต้องใช้ PostgreSQL Session-level Advisory Lock เพื่อรับประกันว่าจะมี Worker เพียงตัวเดียวที่กำลังซิงค์ราคาเนื้อนำเข้าประจำวัน เราจะสร้างการเชื่อมต่อเฉพาะกิจผ่าน `DIRECT_URL` (พอร์ต 5432 Session Mode):
+
+```typescript filename="src/jobs/daily-wagyu-price-sync.job.ts"
+import { PrismaClient } from '@prisma/client';
+
+export async function runExclusivePriceSyncJob() {
+  // สร้าง Client เฉพาะกิจสำหรับงาน Cronjob ที่ชี้ไปยังพอร์ต 5432 (Session Mode)
+  const sessionClient = new PrismaClient({
+    datasources: {
+      db: { url: process.env.DIRECT_URL },
+    },
+  });
+
+  const LOCK_KEY = 99887766;
+
+  try {
+    // ขอ Session-level Advisory Lock แบบไม่บล็อกรอนาน (pg_try_advisory_lock)
+    const lockResult = await sessionClient.$queryRaw<
+      Array<{ acquired: boolean }>
+    >`SELECT pg_try_advisory_lock(${LOCK_KEY}) AS acquired`;
+
+    if (!lockResult[0]?.acquired) {
+      console.log('⏳ Another worker is already syncing Wagyu prices. Skipping.');
+      return;
+    }
+
+    console.log('🔒 Lock acquired on Session Mode (5432). Syncing exchange rates...');
+    // ทำการอัปเดตราคาสินค้าตามอัตราแลกเปลี่ยนประจำวัน...
+  } finally {
+    // ปลดล็อกและปิดสาย Session Mode ทันทีเมื่อจบงานเพื่อคืนโควตาให้ระบบ
+    await sessionClient.$queryRaw`SELECT pg_advisory_unlock(${LOCK_KEY})`;
+    await sessionClient.$disconnect();
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การใช้คำสั่ง `SET` บนพอร์ต 6543** | รัน `SET statement_timeout = '60s'` นอก Transaction บนพอร์ต 6543 ทำให้ค่าหลุดไปกระทบลูกค้าคนอื่นที่ใช้สายต่อ | ใช้ `SET LOCAL ...` ภายในบล็อก `prisma.$transaction` เสมอเมื่อเชื่อมต่อผ่านพอร์ต 6543 |
+| **การต่อโปรแกรม GUI (DBeaver)** | ใช้พอร์ต `6543` ต่อเข้า DBeaver หรือ TablePlus ทำให้โปรแกรมขึ้น Error เรื่อง Prepared Statement ตลอดเวลา | ใช้พอร์ต `5432` (Session Mode) เสมอเมื่อเชื่อมต่อจากโปรแกรม GUI หรือรัน `pg_dump` |
+| **การเปิดสายพอร์ต 5432 ทิ้งไว้** | ใช้สคริปต์ต่อเข้าพอร์ต `5432` แล้วลืมสั่ง `$disconnect()` ทำให้โควตา Session Pool เต็มจนรัน Migration ไม่ได้ | ปิดการเชื่อมต่อบนพอร์ต `5432` ในบล็อก `finally` ทันทีที่จบงานบำรุงรักษาหรือจบ Migration |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Transaction Mode (พอร์ต `6543`) เมื่อ:** เป็นการเชื่อมต่อของแอปพลิเคชันหลัก (Backend API, Next.js App Router, Serverless Functions) ที่รับโหลดจากลูกค้าหน้าร้าน
+- **ควรใช้ Session Mode (พอร์ต `5432`) เมื่อ:** รันคำสั่ง `prisma migrate`, รัน `pg_dump` / `pg_restore`, เชื่อมต่อผ่านเครื่องมือ GUI (DBeaver) หรือรันงานพิเศษที่ต้องใช้ Session-level Advisory Lock
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ทำไมการสั่ง `SET work_mem = '64MB';` โดยไม่มีคำว่า `LOCAL` บนการเชื่อมต่อแบบ Transaction Pooling (พอร์ต 6543) จึงถือเป็นอันตรายต่อสถาปัตยกรรม (Connection State Pollution)?**
+  - **แนวคำตอบ:** เพราะคำสั่ง `SET` ปกติจะมีผลติดอยู่กับโปรเซสของ PostgreSQL ตัวนั้นไปตลอดอายุของ Session ในโหมด Transaction Pooling ทันทีที่คำสั่งของเราจบลง Supavisor จะนำโปรเซส PostgreSQL ตัวนั้นไปหมุนเวียนให้คำขอของลูกค้ารายอื่นใช้งานต่อ ส่งผลให้ลูกค้ารายอื่นได้รับค่า `work_mem = '64MB'` ติดไปด้วยโดยไม่ตั้งใจ การใช้ `SET LOCAL` บังคับให้ค่าดังกล่าวมีผลเฉพาะภายใน Transaction ปัจจุบันเท่านั้น และ PostgreSQL จะรีเซ็ตค่ากลับสู่ค่าเริ่มต้นทันทีที่สั่ง `COMMIT` หรือ `ROLLBACK`
+- **Q2: หากต้องการใช้คำสั่ง `pg_advisory_lock()` บนพอร์ต 6543 (Transaction Mode) โดยไม่ต้องการเปิดพอร์ต 5432 เพิ่ม สามารถใช้ฟังก์ชันใดของ PostgreSQL แทนได้?**
+  - **แนวคำตอบ:** สามารถเปลี่ยนมาใช้ **Transaction-level Advisory Lock** ด้วยฟังก์ชัน `pg_advisory_xact_lock(key)` หรือ `pg_try_advisory_xact_lock(key)` ภายในบล็อก `BEGIN ... COMMIT` (`prisma.$transaction`) ได้เลย เพราะล็อกชนิดนี้ผูกติดกับอายุของ Transaction ไม่ได้ผูกกับ Session และจะถูกปลดล็อกให้อัตโนมัติทันทีที่ Transaction นั้นจบลง จึงทำงานร่วมกับพอร์ต 6543 ได้อย่างสมบูรณ์ 100%
+
+---

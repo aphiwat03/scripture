@@ -1,0 +1,59 @@
+---
+title: Anti-patterns
+category: DATABASE
+parentTitle: Concurrency
+version: PostgreSQL 16 Row Locks
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **Read-Modify-Write Without Locking:** การดึงค่าสต็อกหรือยอดเงินด้วย `SELECT` ปกติมาเก็บในตัวแปร บวกลบในโค้ด แล้วสั่ง `UPDATE ... SET stock_qty = ค่าใหม่` ซึ่งพังทลายทันทีเมื่อมี Request เข้ามาพร้อมกันเพียง 2 รายการ
+2. **Inconsistent Lock Acquisition Order:** การล็อกหรืออัปเดตหลายแถวใน Transaction โดยไม่เรียงลำดับตาม Primary Key (`ORDER BY id ASC`) ก่อน ส่งผลให้เกิดภาวะ Deadlock (`40P01`) เมื่อมีผู้ใช้ซื้อสินค้าชุดเดียวกันสลับลำดับกัน
+3. **Using Session-Level Advisory Locks with Connection Pooling:** การเรียกใช้ `pg_advisory_lock()` แทนที่จะใช้ `pg_advisory_xact_lock()` ในระบบที่ใช้ PgBouncer หรือ Connection Pool ทำให้กุญแจล็อกค้างติดอยู่กับ Connection ข้าม Request
+4. **Relying Only on Frontend Button Disabling for Idempotency:** การป้องกันการกดสั่งซื้อซ้ำด้วยการปิดปุ่มบนหน้าเว็บเพียงอย่างเดียวโดยไม่มี `idempotency_key UNIQUE` ในฐานข้อมูล ทำให้เมื่อเกิดการ Retry ของเครือข่ายหรือการยิง Webhook ซ้ำ ข้อมูลถูกบันทึกซ้ำซ้อน
+5. **Locking Entire Tables Instead of Rows:** การใช้ `LOCK TABLE products IN EXCLUSIVE MODE` เพื่อแก้ปัญหา Race Condition ซึ่งทำให้ทั้งเว็บไซต์หยุดชะงักไม่สามารถซื้อสินค้าชิ้นอื่นได้เลย แทนที่จะใช้ Row-level Lock หรือ Atomic Update เฉพาะแถวสินค้าที่เกี่ยวข้อง
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+- [ ] **Atomic Counter Updates:** การตัดสต็อกสินค้าและการเพิ่มลดยอดเงินทุกจุดใช้คำสั่งแบบสัมพัทธ์ `SET stock_qty = stock_qty - $1 WHERE id = $2 AND stock_qty >= $1` คู่กับ `CHECK (stock_qty >= 0)` เสมอ
+- [ ] **Right Locking Strategy Chosen:** ใช้ `SELECT ... FOR NO KEY UPDATE` สำหรับ Pessimistic Locking ใน Transaction สั้นๆ, ใช้ `FOR UPDATE SKIP LOCKED` สำหรับระบบคิวงาน, และใช้คอลัมน์ `version` สำหรับ Optimistic Locking ข้าม HTTP Requests
+- [ ] **Transaction-Scoped Advisory Locks:** หากมีการใช้ Advisory Lock จะต้องใช้ฟังก์ชันระดับ Transaction (`pg_advisory_xact_lock`) เท่านั้น ห้ามใช้ระดับ Session
+- [ ] **Deterministic Lock Ordering:** ทุกฟังก์ชันที่มีการล็อกหรืออัปเดตข้อมูลหลายแถวมีการเรียงลำดับตาม `id ASC` เสมอเพื่อป้องกันปัญหา Deadlock 100%
+- [ ] **Idempotency Enforced at DB Level:** ตารางธุรกรรมสำคัญ (`payments`, `orders`) มีคอลัมน์ `idempotency_key` ที่เป็น `UNIQUE` และใช้ `INSERT ... ON CONFLICT` เพื่อป้องกันการทำงานซ้ำซ้อน
+- [ ] **Verified with Concurrent Tests:** มีชุดทดสอบอัตโนมัติที่ใช้ `Promise.allSettled` ยิงคำขอพร้อมกันเพื่อยืนยันว่าไม่มีปัญหา Overselling หรือ Lost Update
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+ยินดีด้วย! คุณได้ศึกษาครบทั้ง 5 เสาหลักของการออกแบบและบริหารจัดการฐานข้อมูลระดับ Production แล้ว ตั้งแต่ Database Design, Indexing, Query Performance, Transactions ไปจนถึง Concurrency Control ขั้นตอนต่อไปคือการศึกษาวิธีการจัดการ Schema Migrations, การทำ Connection Pooling และการรักษาความปลอดภัยของฐานข้อมูล:
+
+<Callout type="tip" title="ก้าวต่อไปสู่การบริหารจัดการฐานข้อมูลบน Production เต็มรูปแบบ">
+เมื่อโค้ดและคิวรีของคุณปลอดภัยจาก Race Condition แล้ว อย่าลืมศึกษาการตั้งค่า Connection Pooling ด้วย PgBouncer/Supavisor เพื่อรองรับผู้ใช้งานพร้อมกันจำนวนมาก และการวางระบบ Backup & Recovery
+</Callout>
+
+- **ทบทวนชุดคู่มือหลักในกลุ่ม DATABASE:**
+  - [Database Design](/docs/database/database-design)
+  - [Indexing](/docs/database/indexing)
+  - [Query Performance](/docs/database/query-performance)
+  - [Transactions](/docs/database/transactions)
+  - [PostgreSQL 16](/docs/database/postgresql)
+  - [SQL](/docs/database/sql)
+- **การดูแลรักษาระบบ Production และความปลอดภัย (ลำดับถัดไปที่แนะนำ):**
+  - [Connection Pooling](/docs/database/connection-pooling)
+  - [Database Migrations](/docs/database/migrations)
+  - [Database Security](/docs/database/security)
+  - [Backup & Recovery](/docs/database/backup)
+  - [Supabase](/docs/database/supabase)
+- **การเชื่อมต่อและพัฒนาฝั่ง Backend:**
+  - [Prisma ORM](/docs/backend/prisma-orm)
+  - [NestJS](/docs/backend/nestjs)
+  - [Node.js](/docs/backend/nodejs)
+  - [Docker](/docs/backend/docker)

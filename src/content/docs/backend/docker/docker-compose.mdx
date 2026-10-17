@@ -1,0 +1,123 @@
+---
+title: Docker Compose
+category: BACKEND
+parentTitle: Docker
+version: Docker v27 & Compose v2
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในระบบจริง แอปพลิเคชัน NestJS ไม่ได้ทำงานลำพัง แต่ต้องเชื่อมต่อกับฐานข้อมูล **PostgreSQL 16** การมานั่งพิมพ์คำสั่ง `docker run` ยาวๆ พร้อมพารามิเตอร์ Network และ Volume ทีละตัวเป็นเรื่องที่เสี่ยงต่อความผิดพลาดสูง **Docker Compose v2** (`compose.yaml`) ช่วยให้เรากำหนดสถาปัตยกรรมของทั้งระบบ (Multi-container Application) ไว้ในไฟล์ YAML เพียงไฟล์เดียว และสั่งรันหรือหยุดทั้งระบบได้ด้วยคำสั่งเดียว (`docker compose up -d`)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อรันคำสั่ง `docker compose up -d`:
+1. Docker Compose จะอ่านไฟล์ `compose.yaml` แล้วสร้าง Bridge Network เฉพาะของโปรเจกต์ขึ้นมาโดยอัตโนมัติ
+2. สร้าง Named Volume สำหรับจัดเก็บข้อมูลของ PostgreSQL 16
+3. ดึงหรือ Build Image ของแต่ละ Service (`postgres_db` และ `butcher_api`)
+4. ตรวจสอบลำดับการพึ่งพากันผ่าน `depends_on` โดยรอให้ `postgres_db` ผ่านเงื่อนไข `condition: service_healthy` (ฐานข้อมูลพร้อมรับการเชื่อมต่อจริง ไม่ใช่แค่ Container เริ่มทำงาน) แล้วจึงค่อยสั่งรัน Migration และเปิดทำงาน `butcher_api`
+
+<Callout type="tip" title="มาตรฐานชื่อไฟล์ของ Docker Compose v2">
+ใน Docker Compose v2 ชื่อไฟล์มาตรฐานที่แนะนำอย่างเป็นทางการคือ `compose.yaml` (หรือยังสามารถใช้ `docker-compose.yml` เดิมได้เพื่อความเข้ากันได้ย้อนหลัง) และไม่ต้องระบุฟิลด์ `version: '3.8'` ที่บรรทัดบนสุดอีกต่อไปเนื่องจากถูกยกเลิก (Deprecated) แล้วใน Compose Specification ยุคใหม่
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: ไฟล์ `compose.yaml` สำหรับประกอบร่างระบบ Smart Butcher Marketplace (NestJS 11 API + PostgreSQL 16 Alpine)
+
+```yaml filename="compose.yaml"
+name: smart-butcher-marketplace
+
+services:
+  postgres_db:
+    image: postgres:16-alpine
+    container_name: butcher_postgres_16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-butcher_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?กรุณากำหนดค่า POSTGRES_PASSWORD ในไฟล์ .env}
+      POSTGRES_DB: ${POSTGRES_DB:-smart_butcher_db}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      # ผูกเฉพาะ 127.0.0.1 บนเครื่องโฮสต์เพื่อไม่ให้พอร์ต 5432 เปิดออกสู่เครือข่ายภายนอกโดยตรง
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/pgdata
+    networks:
+      - butcher_internal_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-butcher_admin} -d $${POSTGRES_DB:-smart_butcher_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  butcher_api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    image: smart-butcher-api:1.0.0
+    container_name: butcher_nestjs_api
+    restart: unless-stopped
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # เชื่อมต่อผ่านชื่อ Service 'postgres_db' ในเครือข่ายภายในของ Docker
+      DATABASE_URL: postgresql://${POSTGRES_USER:-butcher_admin}:${POSTGRES_PASSWORD}@postgres_db:5432/${POSTGRES_DB:-smart_butcher_db}?schema=public&connection_limit=20
+    ports:
+      - "${API_PORT:-3000}:3000"
+    networks:
+      - butcher_internal_net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+volumes:
+  postgres_data:
+    name: smart_butcher_pgdata
+
+networks:
+  butcher_internal_net:
+    name: smart_butcher_network
+    driver: bridge
+```
+
+ตัวอย่างที่ 2: สคริปต์ Entrypoint สำหรับรัน `prisma migrate deploy` อัตโนมัติเพื่ออัปเดตตาราง (`User`, `Product`, `Category`, `Order`, `OrderItem`, `Payment`) ก่อนเปิดรับทราฟฟิกใน `butcher_api`
+
+```sh filename="scripts/docker-entrypoint.sh"
+#!/bin/sh
+set -e
+
+echo "[Entrypoint] กำลังตรวจสอบและรัน Prisma Database Migrations สำหรับ Smart Butcher Marketplace..."
+./node_modules/.bin/prisma migrate deploy
+
+echo "[Entrypoint] Migrations สำเร็จ! กำลังเริ่มต้นระบบ NestJS 11 API..."
+exec "$@"
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การตั้งค่า `DATABASE_URL` ใน Compose** | ใช้ `localhost:5432` ใน `DATABASE_URL` ของ `butcher_api` ทำให้ NestJS พยายามต่อหาฐานข้อมูลใน Container ของตัวเองแล้วพังด้วย `ECONNREFUSED` | ใช้ชื่อ Service ใน Compose เป็น Hostname คือ `postgres_db:5432` |
+| **การใช้ `depends_on` แบบธรรมดา** | เขียนแค่ `depends_on: [postgres_db]` ซึ่ง Docker จะรัน NestJS ทันทีที่ Container ของ Postgres เพิ่งเริ่มสตาร์ทแต่ยังบูต Engine ไม่เสร็จ | ใช้ `depends_on` ร่วมกับ `condition: service_healthy` และตั้งค่า `pg_isready` ใน `healthcheck` |
+| **คำสั่ง Migration บน Production** | รัน `prisma migrate dev` หรือ `prisma db push` ใน Production Container ซึ่งอาจลบข้อมูลตารางทิ้งหากเกิด Schema Drift | ใช้คำสั่ง `prisma migrate deploy` เท่านั้นในสภาพแวดล้อม Production |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: ต้องการจำลองสภาพแวดล้อมแบบครบวงจรบนเครื่องพัฒนา ทดสอบ Integration/E2E Test หรือ Deploy ระบบขนาดเล็กถึงกลางบน Single Node / VPS
+- **ไม่ควรใช้เมื่อ**: หากระบบขยายใหญ่ระดับต้องทำ Auto-scaling หลายสิบเครื่องข้าม Data Center ในกรณีนั้นควรนำ Docker Image ที่สร้างจาก `Dockerfile` เดียวกันนี้ไปรันบน Container Orchestrator หรือใช้ Managed PostgreSQL ควบคู่กัน
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมใน `compose.yaml` การแมปพอร์ตของ PostgreSQL จึงควรเขียนเป็น `"127.0.0.1:5432:5432"` แทนที่จะเป็น `"5432:5432"`?
+   - **แนวคำตอบ**: การเขียน `"5432:5432"` จะผูกพอร์ตเข้ากับ `0.0.0.0` บนเครื่องโฮสต์ และที่สำคัญคือ Docker จะแก้ไขกฎ `iptables` โดยตรงซึ่งมักจะข้าม (Bypass) กฎของ `ufw` (Uncomplicated Firewall) บน Linux Server ทำให้พอร์ต 5432 ของฐานข้อมูลเปิดออกสู่โลกอินเทอร์เน็ตโดยไม่ตั้งใจ การระบุ `127.0.0.1:5432:5432` จะจำกัดให้เชื่อมต่อพอร์ตนี้ได้เฉพาะจากภายในเครื่องโฮสต์เองเท่านั้น ส่วน `butcher_api` ยังคงคุยผ่านพอร์ต `5432` ภายใน `butcher_internal_net` ได้ตามปกติ
+2. **คำถาม**: ไวยากรณ์ `${POSTGRES_PASSWORD:?กรุณากำหนดค่า...}` ในไฟล์ `compose.yaml` มีประโยชน์อย่างไร?
+   - **แนวคำตอบ**: เป็นฟีเจอร์ Required Variable Substitution ของ Docker Compose หากผู้ดูแลระบบลืมตั้งค่า `POSTGRES_PASSWORD` ในไฟล์ `.env` หรือตั้งเป็นค่าว่าง Docker Compose จะหยุดทำงานทันทีพร้อมแสดงข้อความแจ้งเตือนที่กำหนดไว้ แทนที่จะเผลอรันฐานข้อมูลด้วยรหัสผ่านว่างเปล่าหรือค่า Default ที่ไม่ปลอดภัย
+
+---

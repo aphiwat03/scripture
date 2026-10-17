@@ -1,0 +1,160 @@
+---
+title: Schema Roles
+category: DATABASE
+parentTitle: PostgreSQL 16
+version: PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ลองจินตนาการถึงแผนกความปลอดภัยในอาคารสำนักงานใหญ่ของ **Smart Butcher Marketplace**:
+- **Database:** คือ "ตัวอาคารทั้งหลัง" (แยกระหว่างอาคาร Butcher Production กับอาคาร Butcher Staging เด็ดขาด ไม่สามารถเดินทะลุกำแพงหากันได้ใน Query เดียว)
+- **Schema:** คือ "แผนกต่างๆ ภายในอาคาร" (เช่น แผนกหน้าร้าน `public`, แผนกบัญชี `accounting`, แผนกผู้เช่ารายย่อย `tenant_butcher_01`, แผนกกล้องวงจรปิด `audit`) ที่อยู่ภายใต้อาคารเดียวกัน แต่มีประตูล็อกกั้นไว้
+- **Role / User:** คือ "บัตรประจำตัวพนักงาน" ที่ระบุสิทธิ์ชัดเจน
+  - แม่บ้านทำความสะอาด (Reporting App): เข้าได้เฉพาะห้องที่ได้รับอนุญาต และ "ดูได้อย่างเดียว ห้ามหยิบของ" (`SELECT` only)
+  - พนักงานขายหน้าร้าน (Backend NestJS App): บันทึกคำสั่งซื้อและตัดเนื้อได้ (`SELECT`, `INSERT`, `UPDATE`) แต่ "ห้ามทุบตึกหรือรื้อผนังห้อง" (ห้ามสิทธิ์ DDL เช่น `DROP TABLE`)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+```text filename="docs/database/postgresql.txt"
+┌────────────────────────────────────────────────────────────────────────┐
+│                        POSTGRESQL CLUSTER                              │
+│                                                                        │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │                    DATABASE: smart_butcher_db                    │  │
+│  │                                                                  │  │
+│  │  ┌───────────────────────┐             ┌──────────────────────┐  │  │
+│  │  │  SCHEMA: public       │             │  SCHEMA: audit_log   │  │  │
+│  │  │  - users              │             │  - security_events   │  │  │
+│  │  │  - products           │             │  - price_audit_trail │  │  │
+│  │  │  - orders             │             │                      │  │  │
+│  │  └───────────────────────┘             └──────────────────────┘  │  │
+│  │                                                                  │  │
+│  │  ┌───────────────────────┐             ┌──────────────────────┐  │  │
+│  │  │ SCHEMA: tenant_korat  │             │  SCHEMA: reporting   │  │  │
+│  │  │ (Multi-tenant isolate)│             │  - materialized_views│  │  │
+│  │  └───────────────────────┘             └──────────────────────┘  │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                                                                        │
+│  GLOBAL ROLES (ใช้ร่วมกันทั้ง Cluster):                                │
+│  - butcher_admin (Superuser / Migration runner)                        │
+│  - butcher_api_app (DML privileges: SELECT, INSERT, UPDATE, DELETE)    │
+│  - butcher_read_only (Analytics / PowerBI: SELECT only)                │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### 1. Database vs Schema vs Table
+- **Database:** แยกพื้นที่อย่างสมบูรณ์ ข้าม Database ไม่สามารถทำ JOIN ตรงๆ ได้ (ยกเว้นใช้ `dblink` หรือ Foreign Data Wrapper `postgres_fdw`)
+- **Schema:** เป็น Namespace ภายใน Database เดียวกัน สามารถทำ Cross-Schema JOIN ได้ง่าย เช่น `SELECT * FROM public.orders JOIN audit_log.price_changes ...`
+- **`search_path`:** ตัวแปรที่ควบคุมว่าเมื่อผู้ใช้เขียนชื่อตารางลอยๆ เช่น `SELECT * FROM products;` ระบบจะไปค้นหาใน Schema ใดก่อน ค่าตั้งต้นคือ `"$user", public`
+
+### 2. Role vs User
+- ตั้งแต่ PostgreSQL 8.1 เป็นต้นมา คำสั่ง `CREATE USER` และ `CREATE GROUP` เป็นเพียง Alias ของคำสั่ง **`CREATE ROLE`**
+- ข้อแตกต่างเดียวคือ `CREATE ROLE ... LOGIN` จะอนุญาตให้ใช้ชื่อนี้เชื่อมต่อเข้าสู่ Database ได้ (ซึ่งเทียบเท่ากับ User) ส่วน Role ที่ไม่มีคำสั่ง `LOGIN` จะทำหน้าที่เป็น Group ไว้แจกจ่ายสิทธิ์
+
+### 3. Principle of Least Privilege
+- แอปพลิเคชัน Backend (Node.js / NestJS) ในระดับ Production **ต้องไม่ใช้ Superuser หรือ Role `postgres` เด็ดขาด!**
+- หากแอปพลิเคชันถูกโจมตีด้วย SQL Injection และเชื่อมต่อด้วยสิทธิ์ Superuser ผู้โจมตีสามารถสั่ง `DROP DATABASE`, อ่านไฟล์ในระบบปฏิบัติการผ่าน `pg_read_file()`, หรือสั่งรันคำสั่ง OS Shell ผ่าน `COPY ... PROGRAM` ได้ทันที
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสร้าง Custom Schema และจัดการ Search Path
+แยกตาราง Audit Log และตารางสินค้าหน้าร้านออกจากกัน:
+
+```sql filename="09_schema_management.sql"
+-- 1. สร้าง Schema ใหม่สำหรับระบบ Audit และระบบผู้เช่า
+CREATE SCHEMA audit_store;
+CREATE SCHEMA tenant_chiangmai;
+
+-- 2. สร้างตารางบันทึกการเปลี่ยนราคาเนื้อใน Schema audit_store
+CREATE TABLE audit_store.price_change_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    product_id UUID NOT NULL,
+    old_price NUMERIC(10,2) NOT NULL,
+    new_price NUMERIC(10,2) NOT NULL,
+    changed_by TEXT NOT NULL,
+    changed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3. ตรวจสอบและตั้งค่า search_path
+SHOW search_path;
+-- ผลลัพธ์เดิม: "$user", public
+
+-- ตั้งค่าให้ค้นหาใน audit_store ก่อน public สำหรับ Session นี้
+SET search_path TO audit_store, public;
+
+-- ตอนนี้สามารถคิวรีโดยไม่ต้องพิมพ์ชื่อ schema นำหน้าได้
+SELECT * FROM price_change_logs;
+```
+
+### ตัวอย่างที่ 2: การสร้าง Roles ตามหลัก Least Privilege สำหรับ Production
+ออกแบบสิทธิ์ความปลอดภัยสำหรับ Backend Application และ Data Analyst:
+
+```sql filename="10_security_roles.sql"
+-- 1. สร้าง Role สำหรับ Backend API App (ล็อกอินได้ แต่ไม่มีสิทธิ์ DDL สร้าง/ลบตาราง)
+CREATE ROLE butcher_app_user WITH 
+    LOGIN 
+    PASSWORD 'StrongEnterprisePassword#2026'
+    NOSUPERUSER 
+    NOCREATEDB 
+    NOREPLICATION;
+
+-- 2. สร้าง Role สำหรับทีม Data Analytics (อ่านอย่างเดียว)
+CREATE ROLE butcher_analyst_user WITH 
+    LOGIN 
+    PASSWORD 'AnalystReadOnlyPass#2026'
+    NOSUPERUSER;
+
+-- 3. มอบสิทธิ์การเข้าใช้งาน Schema public
+GRANT USAGE ON SCHEMA public TO butcher_app_user;
+GRANT USAGE ON SCHEMA public TO butcher_analyst_user;
+
+-- 4. มอบสิทธิ์ DML เฉพาะตารางธุรกิจให้แก่ Backend App
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO butcher_app_user;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO butcher_app_user;
+
+-- 5. มอบสิทธิ์เฉพาะ SELECT ให้แก่ Analyst
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO butcher_analyst_user;
+
+-- 6. กำหนด Default Privileges เพื่อให้ตารางที่จะถูกสร้างขึ้นในอนาคตได้รับสิทธิ์นี้ด้วยอัตโนมัติ!
+ALTER DEFAULT PRIVILEGES IN SCHEMA public 
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO butcher_app_user;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public 
+GRANT SELECT ON TABLES TO butcher_analyst_user;
+
+-- 7. ป้องกันไม่ให้ใครก็ตามเข้ามาสร้างตารางใน Schema public ตามใจชอบ (ความปลอดภัยสูงสุด)
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+```
+
+## 4. ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+### ❌ สิ่งที่ผิด: Hardcode การเชื่อมต่อ Backend ด้วย Superuser `postgres`
+```env filename=".env.example"
+# ไฟล์ .env ของ NestJS App ที่อันตรายมาก
+DATABASE_URL="postgresql://postgres:rootpassword@db-host:5432/smart_butcher_db"
+# หากมีโค้ดจุดใดเกิด SQL Injection Hacker สามารถสั่ง:
+# '; DROP SCHEMA public CASCADE; --
+# ข้อมูลทั้งร้านค้าจะหายวับไปในเสี้ยววินาที!
+```
+
+### ✅ สิ่งที่ถูก: เชื่อมต่อด้วย Restricted Role และแยก Migration Role
+```env filename=".env.example"
+# 1. สำหรับตัว App ที่รันในชีวิตประจำวัน (รันได้เฉพาะ SELECT, INSERT, UPDATE, DELETE)
+DATABASE_URL="postgresql://butcher_app_user:StrongEnterprisePassword#2026@db-host:5432/smart_butcher_db"
+
+# 2. สำหรับ CI/CD Pipeline ที่ใช้รัน Prisma Migrate / Flyway (มีสิทธิ์ DDL เฉพาะช่วง Deploy)
+MIGRATION_DATABASE_URL="postgresql://butcher_migration_runner:SecureAdminPass#2026@db-host:5432/smart_butcher_db"
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **Schema-based Multi-tenancy:** ควรใช้เมื่อต้องการทำระบบ SaaS ให้ร้านขายเนื้อแต่ละสาขาหรือลูกค้าแต่ละองค์กรแยกข้อมูลออกจากกันอย่างเป็นระเบียบ (`tenant_a`, `tenant_b`) โดยยังคงสามารถแชร์ตารางกลาง (เช่น System Master Data) ได้ และประหยัดทรัพยากรกว่าการเปิด Database แยกก้อน
+- **ข้อควรระวัง:** ไม่ควรสร้าง Schema ย่อยเกินหลักพัน schemas ใน Database เดียว เพราะจะทำให้ PostgreSQL System Catalogs บวม และส่งผลกระทบต่อประสิทธิภาพในการค้นหา Metadata และการทำ Autovacuum
+
+## 6. คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: คำสั่ง `ALTER DEFAULT PRIVILEGES` แก้ปัญหาอะไรใน PostgreSQL ที่คำสั่ง `GRANT` ปกติไม่สามารถทำได้?**
+  - *แนวคำตอบ:* คำสั่ง `GRANT` ปกติจะมีผลเฉพาะกับตารางหรืออ็อบเจกต์ที่ **มีตัวตนอยู่แล้วในปัจจุบัน** เท่านั้น หากในอนาคตทีมงานรันคำสั่ง `CREATE TABLE` ขึ้นมาใหม่ผ่าน Migration Script ผู้ใช้หรือ Role อื่นๆ จะไม่ได้รับสิทธิ์ในตารางใหม่นั้นทันที ส่งผลให้แอปพลิเคชันพังด้วยข้อผิดพลาด `permission denied for relation ...` การใช้ `ALTER DEFAULT PRIVILEGES` จะเป็นการกำหนดกฎแม่แบบล่วงหน้าว่า เมื่อใดก็ตามที่มีการสร้างตารางหรือ Sequence ใหม่ขึ้นใน Schema นั้น ให้ทำการแจกจ่ายสิทธิ์ที่ระบุไปยัง Roles เป้าหมายโดยอัตโนมัติ
+- **Q2: `search_path` สามารถถูกใช้ในการโจมตีแบบ Trojan Horse / Privilege Escalation ได้อย่างไร และมีวิธีป้องกันอย่างไร?**
+  - *แนวคำตอบ:* หาก `search_path` มี Schema ที่อนุญาตให้ผู้ใช้ทั่วไปสร้างตารางได้ (เช่น `$user` หรือ `public` ในเวอร์ชันเก่า) อยู่หน้า Schema จริง ผู้โจมตีสามารถสร้างฟังก์ชันหรือตารางเลียนแบบขึ้นมา เช่น สร้างฟังก์ชัน `schema_user.max()` เมื่อ Superuser มารันคำสั่งที่มีการเรียกฟังก์ชันนั้น ระบบจะไปเรียกใช้ฟังก์ชันอันตรายของผู้โจมตี วิธีป้องกันคือ: (1) ปลดสิทธิ์ `CREATE ON SCHEMA public FROM PUBLIC`, (2) ระบุ Schema นำหน้าการเรียกใช้อ็อบเจกต์เสมอ, หรือ (3) ตั้งค่า `search_path` ในฟังก์ชันที่มี `SECURITY DEFINER` ให้ตายตัว เช่น `SET search_path = pg_catalog, pg_temp`
+
+---

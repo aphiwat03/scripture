@@ -1,0 +1,79 @@
+---
+title: Anti-patterns
+category: DATABASE
+parentTitle: SQL
+version: SQL:2023 & PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+ในการออกแบบและเขียนคำสั่ง SQL บนระบบฐานข้อมูลระดับ Production นักพัฒนามักพบข้อผิดพลาดคลาสสิกที่ทำให้ระบบล่มหรือทำงานช้าลงอย่างมหาศาล ดังนี้:
+
+### 1. การละเลย Index บน Foreign Key Columns
+- **พฤติกรรม:** สร้างตารางลูก เช่น `order_items` ที่มี `FOREIGN KEY (order_id) REFERENCES orders(id)` แต่ลืมสร้าง Index บนคอลัมน์ `order_id`
+- **ผลกระทบ:** เมื่อมีการสั่ง `DELETE` ออเดอร์ในตารางแม่ PostgreSQL จะต้องทำ **Sequential Scan ทั้งตาราง `order_items`** เพื่อตรวจเช็ก Foreign Key นอกจากนี้ยังทำให้คำสั่ง `JOIN` ทำงานช้าลงมหาศาล
+- **แนวทางแก้ไข:** สร้าง Index บนทุกคอลัมน์ที่เป็น Foreign Key เสมอ:
+  ```sql filename="sql/sql.sql"
+  CREATE INDEX idx_order_items_order_id ON order_items(order_id);
+  CREATE INDEX idx_order_items_product_id ON order_items(product_id);
+  ```
+
+### 2. ปัญหา Non-SARGable Queries (การเอาฟังก์ชันไปครอบคอลัมน์ใน WHERE)
+- **พฤติกรรม:** เขียนเงื่อนไขกรองข้อมูลโดยนำฟังก์ชันไปครอบคอลัมน์ เช่น `WHERE date(created_at) = '2026-10-17'` หรือ `WHERE UPPER(email) = 'USER@EXAMPLE.COM'`
+- **ผลกระทบ:** ตัว Query Planner จะไม่สามารถนำค่าไปค้นหาใน B-Tree Index ปกติได้ ทำให้ต้องสแกนอ่านตารางแบบ Full Table Scan
+- **แนวทางแก้ไข:** เขียนเป็นเงื่อนไขช่วงเวลา หรือสร้าง Functional Index รองรับ:
+  ```sql filename="sql/sql.sql"
+  -- แบบที่ 1: เขียนเป็นช่วงเวลา (SARGable)
+  WHERE created_at >= '2026-10-17 00:00:00+07' AND created_at < '2026-10-18 00:00:00+07'
+
+  -- แบบที่ 2: สร้าง Functional Index หากจำเป็นต้องใช้ฟังก์ชันนั้นจริงๆ
+  CREATE INDEX idx_users_email_lower ON users(LOWER(email));
+  ```
+
+### 3. การเกิด Implicit Type Casting ทำลาย Index Scan
+- **พฤติกรรม:** คอลัมน์ `phone` ถูกประกาศเป็นประเภท `VARCHAR` แต่ในคำสั่ง SQL เขียนส่งค่าเป็นตัวเลข `WHERE phone = 0812345678`
+- **ผลกระทบ:** PostgreSQL จะพยายามแปลงชนิดข้อมูลของคอลัมน์ในตารางให้ตรงกับชนิดข้อมูลของ Input ส่งผลให้เกิด Implicit Casting ครอบคอลัมน์ และทำลายการใช้ B-Tree Index ทันที
+- **แนวทางแก้ไข:** ส่งข้อมูลให้ตรงกับชนิดของคอลัมน์เสมอ เช่น `WHERE phone = '0812345678'`
+
+### 4. การเปิด Long-running Transaction ค้างไว้ใน Application
+- **พฤติกรรม:** การเปิด `BEGIN TRANSACTION` ใน Node.js แล้วเรียก API ภายนอก (เช่น รอคำตอบจาก Payment Gateway หรือตัดบัตรเครดิต) ก่อนจะสั่ง `COMMIT`
+- **ผลกระทบ:** แถวข้อมูลในฐานข้อมูลจะถูกถือ Row-level Lock ค้างไว้ และขัดขวางไม่ให้กระบวนการ `VACUUM` ทำงาน ส่งผลให้เกิด Table Bloat ฐานข้อมูลบวม และเกิดปัญหา Connection Pool เต็ม
+- **แนวทางแก้ไข:** รันการติดต่อ Network ภายนอกให้เสร็จสิ้นก่อน แล้วจึงเปิด Transaction ในช่วงเวลาที่สั้นที่สุดสำหรับการเขียนฐานข้อมูลเท่านั้น
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+ก่อนนำคำสั่ง SQL หรือแบบจำลองตารางขึ้นสู่สภาพแวดล้อม Production ให้ตรวจสอบความพร้อมตามรายการนี้:
+
+- [ ] **No SELECT \***: ทุกคำสั่งในโค้ด Production ระบุชื่อคอลัมน์ที่จำเป็นอย่างเจาะจง ไม่มีการใช้ `SELECT *`
+- [ ] **Indexed Foreign Keys**: คอลัมน์ที่เป็น Foreign Key (`*_id`) มีการสร้าง B-Tree Index รองรับทุกตัว
+- [ ] **SARGable WHERE Clauses**: ไม่มีคำสั่งที่นำฟังก์ชันหรือการคำนวณไปครอบคอลัมน์ที่มี Index ในเงื่อนไข `WHERE`
+- [ ] **Safe Outer Joins**: เงื่อนไขการกรองข้อมูลของตารางฝั่งขวาใน `LEFT JOIN` ถูกวางไว้ใน `ON` clause ไม่ใช่วางใน `WHERE`
+- [ ] **Keyset Pagination for Deep Feeds**: ระบบรายการสินค้าหรือฟีดที่มีการเปิดดูหน้าลึกๆ ใช้ Keyset/Cursor Pagination แทนการใช้ `OFFSET` ขนาดใหญ่
+- [ ] **Safe NOT IN Queries**: หลีกเลี่ยงการใช้ `NOT IN` กับ Subquery ที่อาจมีค่า NULL โดยเปลี่ยนไปใช้ `NOT EXISTS` แทน
+- [ ] **Default to UNION ALL**: ใช้ `UNION ALL` เป็นค่าเริ่มต้นในการรวมชุดข้อมูล เว้นแต่มีความจำเป็นต้องตัดข้อมูลซ้ำจริงๆ
+- [ ] **Atomic UPSERT**: การตรวจสอบและเพิ่มข้อมูลที่มีโอกาสชนกัน ใช้ `INSERT ... ON CONFLICT` แทนการทำ Check-then-Insert ใน Application
+- [ ] **TIMESTAMPTZ Standard**: วันเวลาทั้งหมดจัดเก็บด้วยชนิดข้อมูล `TIMESTAMPTZ` พร้อมจัดการ Timezone อย่างถูกต้อง
+- [ ] **Proper Index Types**: มีการเลือกใช้ประเภท Index ให้ตรงกับลักษณะงาน (B-Tree สำหรับค่าปกติและ Prefix, GIN สำหรับ Full-Text Search และ JSONB)
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+การเชี่ยวชาญภาษา SQL บริสุทธิ์บน PostgreSQL 16 เป็นรากฐานที่สำคัญที่สุดของวิศวกรซอฟต์แวร์ระดับ Senior เพื่อให้สามารถออกแบบ วิเคราะห์ Execution Plan และปรับจูนระบบฐานข้อมูลได้อย่างเต็มประสิทธิภาพ
+
+<Callout type="tip" title="ขั้นตอนการศึกษาต่อยอดในระบบ Database และ Backend">
+เพื่อนำความรู้ด้าน SQL ไปประยุกต์ใช้ในระดับสถาปัตยกรรมระบบอย่างสมบูรณ์แบบ แนะนำให้ศึกษาหัวข้อที่เกี่ยวข้องตามลำดับดังนี้:
+
+1. ศึกษาการออกแบบโครงสร้างตาราง กฎ Normalization และการทำ Indexing ขั้นสูงได้ที่:  
+   👉 **[Database Design](/docs/database/database-design)** เพื่อเรียนรู้ 3NF, ความสัมพันธ์ 1-1, 1-N, N-N, Audit log, Snapshot ราคา และ State Machine
+
+2. ศึกษาการนำภาษา SQL มาผสานกับ Application ฝั่ง Backend ผ่าน ORM ได้ที่:  
+   👉 **[Prisma ORM](/docs/backend/prisma-orm)** เพื่อดูว่าคำสั่ง Prisma Client ในระดับ TypeScript ถูกแปลงเบื้องหลังมาเป็น SQL Statement เหล่านี้อย่างไร พร้อมเทคนิคการเขียน `$queryRaw` สำหรับคำสั่งขั้นสูง
+</Callout>

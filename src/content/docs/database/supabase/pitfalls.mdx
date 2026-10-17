@@ -1,0 +1,68 @@
+---
+title: Anti-patterns
+category: DATABASE
+parentTitle: Supabase
+version: Supabase & PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การใช้ URL ตัวเดียวกันทั้งใน `DATABASE_URL` และ `DIRECT_URL`**
+   - **สาเหตุ:** คัดลอก URL พอร์ต 6543 ไปวางใส่ทั้งสองตัวแปรในไฟล์ `.env`
+   - **ผลกระทบ:** เวลาสั่งรัน `npx prisma migrate deploy` คำสั่งจะค้างจนเกิด Timeout เพราะพอร์ต 6543 (Transaction Mode) ไม่รองรับ Session-level Advisory Lock ของ Prisma Migrate
+   - **วิธีแก้:** ตั้ง `DATABASE_URL` ให้ใช้พอร์ต `6543` (`?pgbouncer=true`) และตั้ง `DIRECT_URL` ให้ใช้พอร์ต `5432` (โดยไม่มี `pgbouncer=true`)
+
+2. **การสร้างตารางใน Schema `public` ด้วย Prisma โดยไม่เปิดใช้งาน RLS**
+   - **สาเหตุ:** คิดว่าใช้แค่ Prisma ใน Backend ไม่ได้ใช้ Supabase Client หน้าบ้าน เลยไม่ต้องสนใจ RLS
+   - **ผลกระทบ:** ตารางใน `public` จะถูกเปิดเผยออกทาง PostgREST Data API ของ Supabase โดยไม่มีการป้องกัน
+   - **วิธีแก้:** สั่ง `ALTER TABLE ... ENABLE ROW LEVEL SECURITY;` บนทุกตารางในไฟล์ Migration เพื่อล็อกการเข้าถึงจากภายนอกเป็น Default-Deny
+
+3. **การลืมใส่รหัสโปรเจกต์ในชื่อผู้ใช้ (`postgres.<project_ref>`) เมื่อต่อผ่าน Supavisor**
+   - **สาเหตุ:** เปลี่ยนโฮสต์จาก Direct Connection มาเป็น Pooler แต่ใช้ชื่อผู้ใช้ `postgres` เฉยๆ เหมือนเดิม
+   - **ผลกระทบ:** เชื่อมต่อไม่ได้และได้รับข้อผิดพลาด `FATAL: Tenant or user not found`
+   - **วิธีแก้:** คัดลอกรูปแบบชื่อผู้ใช้ `postgres.<project_ref>` จากหน้า Database Settings ของ Supabase มาใช้อย่างถูกต้อง
+
+4. **การเลือก Region ของฐานข้อมูลอยู่คนละทวีปกับเซิร์ฟเวอร์ Backend**
+   - **สาเหตุ:** กดข้ามตัวเลือก Region ตอนสร้างโปรเจกต์ใหม่
+   - **ผลกระทบ:** ทุกคิวรีมีค่าความหน่วงพื้นฐาน (Network Latency) สูงระดับ 150-300ms ทำให้ระบบอืดทั้งเว็บ
+   - **วิธีแก้:** เลือก Region `ap-southeast-1` (Singapore) สำหรับระบบที่ให้บริการในประเทศไทย และวางเซิร์ฟเวอร์ Backend ไว้ใน Region เดียวกัน
+
+5. **การเก็บข้อมูล Log ขนาดใหญ่หรือไฟล์รูปภาพลงในตาราง PostgreSQL โดยตรง**
+   - **สาเหตุ:** บันทึกทุก HTTP Request Log หรือเก็บรูปสินค้าลงตารางฐานข้อมูลหลัก
+   - **ผลกระทบ:** พื้นที่ฐานข้อมูลเต็มโควตาอย่างรวดเร็ว เสียค่าใช้จ่ายสูง และทำให้การทำ Backup ช้าลง
+   - **วิธีแก้:** เก็บไฟล์มีเดียไว้ใน Supabase Storage / S3 และเก็บ Application Logs ไว้ในระบบจัดการ Log โดยเฉพาะ
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+ตรวจสอบความถูกต้องของการตั้งค่า **Supabase Cloud (PostgreSQL 16)** สำหรับโปรเจกต์ **Smart Butcher Marketplace**:
+
+- [ ] **Region Co-location:** โปรเจกต์ Supabase ถูกสร้างใน Region `ap-southeast-1` (Singapore) ตรงกับตำแหน่งของเซิร์ฟเวอร์ Backend
+- [ ] **Dual URL Configured:** ตั้งค่า `DATABASE_URL` ชี้ไปยังโฮสต์ Supavisor พอร์ต `6543` พร้อม `?pgbouncer=true` และตั้งค่า `DIRECT_URL` ชี้ไปยังโฮสต์ Supavisor พอร์ต `5432` (รองรับ IPv4)
+- [ ] **RLS Enabled Everywhere:** ทุกตารางใน Schema `public` มีการสั่ง `ENABLE ROW LEVEL SECURITY` เรียบร้อยแล้ว ไม่มีคำเตือนสีแดงในหน้า Security Advisor
+- [ ] **Indexed RLS Columns:** หากมีการเขียน RLS Policy คอลัมน์ที่ใช้เปรียบเทียบกับ `(SELECT auth.uid())` มีการสร้าง B-Tree Index รองรับครบถ้วน
+- [ ] **Production Tier Active:** สำหรับสภาพแวดล้อม Production ได้อัปเกรดเป็นแพ็กเกจ Pro ขึ้นไปเพื่อป้องกันการถูก Pause อัตโนมัติและมีระบบสำรองข้อมูลรายวัน
+- [ ] **Storage Separated:** รูปภาพสินค้าเนื้อพรีเมียมและไฟล์ใบเสร็จถูกจัดเก็บแยกอยู่ใน Object Storage โดยเก็บเฉพาะพาธอ้างอิงในฐานข้อมูล
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อคุณเชี่ยวชาญการใช้งาน PostgreSQL 16 ทั้งแบบติดตั้งเองและบนคลาวด์อย่าง Supabase แล้ว ขั้นตอนสุดท้ายของหมวดฐานข้อมูลคือการมองภาพรวมทางสถาปัตยกรรมเพื่อเลือกใช้ฐานข้อมูลประเภทอื่นๆ (NoSQL, Redis, MongoDB) มาทำงานร่วมกับ PostgreSQL ได้อย่างลงตัว:
+
+<Callout type="tip" title="เส้นทางการศึกษาต่อสำหรับระบบฐานข้อมูลระดับ Production">
+1. **การเปรียบเทียบและทำงานร่วมกันระหว่าง SQL, MongoDB และ Redis:**  
+   👉 **[SQL vs NoSQL](/docs/database/sql-vs-nosql)** — เจาะลึกสถาปัตยกรรม Polyglot Persistence, การใช้ Redis ทำ Caching/Rate Limiting และเมื่อไหร่ควรใช้ MongoDB
+
+2. **การเจาะลึกระบบจัดการการเชื่อมต่อและการสำรองข้อมูลบน Supabase:**  
+   👉 **[Connection Pooling](/docs/database/connection-pooling)** และ **[Backup](/docs/database/backup)** — ทบทวนกลไกการทำงานของ Transaction Pooler และวิธีการตั้งเวลาสำรองข้อมูลจาก Supabase ด้วยตัวเอง
+
+3. **การจัดการอัปโหลดไฟล์รูปภาพสินค้าควบคู่กับฐานข้อมูล:**  
+   👉 **[File Upload](/docs/backend/file-upload)** และ **[Prisma ORM](/docs/backend/prisma-orm)** — เรียนรู้การจัดการอัปโหลดรูปภาพเนื้อสเต๊กขึ้น Cloud Storage และการเชื่อมโยงข้อมูลกับ Prisma
+</Callout>

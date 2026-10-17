@@ -1,0 +1,144 @@
+---
+title: Pool Size Formula
+category: DATABASE
+parentTitle: Connection Pooling
+version: PgBouncer & Supavisor
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เมื่อใช้ **Connection Pool** แอปพลิเคชันจะทำการเปิดการเชื่อมต่อจริงไปยัง PostgreSQL 16 ค้างไว้ล่วงหน้าจำนวนหนึ่ง (เช่น 10 สาย) เปรียบเสมือน **"การจ้างเชฟประจำ 10 คนมายืนสแตนด์บายพร้อมหั่นเนื้ออยู่ที่เขียงตลอดเวลา"**
+1. เมื่อคำสั่งซื้อของลูกค้าคนที่ 1 เข้ามา แอปพลิเคชันจะหยิบเชฟที่ว่างอยู่ (Borrow Connection) ไปรันคิวรีใช้เวลาเพียง **2 มิลลิวินาที**
+2. ทันทีที่คิวรีเสร็จ แอปพลิเคชันจะไม่ไล่เชฟกลับบ้าน แต่จะคืนเชฟคนนั้นกลับเข้าแถวสแตนด์บาย (Return to Pool) เพื่อรับออเดอร์ของลูกค้าคนที่ 2 ต่อในเสี้ยววินาทีถัดไป!
+3. หากมีลูกค้ากดสั่งเนื้อพร้อมกัน 50 คนในเสี้ยววินาทีเดียวกัน 10 คนแรกจะได้ใช้เชฟทันที ส่วนอีก 40 คนจะเข้าแถวรอคิวอยู่ในหน่วยความจำ (Pool Queue) ซึ่งเนื่องจากคิวรีใช้เวลาแค่ 2 มิลลิวินาที คนที่ 50 จึงรอคิวเพียงแค่ **10 มิลลิวินาที** ก็ได้รับบริการจนเสร็จสิ้น!
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ทำไมเราไม่ควรตั้งค่า Pool Size ให้สูงถึง 200 หรือ 500 ต่อเซิร์ฟเวอร์ที่มี CPU เพียง 4 Cores?
+- **CPU Context Switching & Disk I/O Contention:** ซีพียู 1 Core สามารถรันคำสั่งได้ทีละ 1 โปรเซสในเวลาเดียวกันเท่านั้น (หากไม่นับการรอดิสก์) หากเรามี 4 CPU Cores แต่ส่งคิวรีเข้าไปพร้อมกัน 200 โปรเซส ระบบปฏิบัติการ Linux จะต้องสั่งหยุดโปรเซสที่ 1 กลางคันเพื่อสลับให้โปรเซสที่ 2 เข้ามาใช้ซีพียู (Context Switch) สลับไปมาวินาทีละหลายหมื่นครั้ง เสียเวลาไปกับการล้าง CPU L1/L2 Cache และการแย่งชิง Spinlock/LWLock ใน Shared Buffers ของ PostgreSQL จนประสิทธิภาพรวมดิ่งลงเหว
+- **สูตรคำนวณขนาด Pool มาตรฐานโลก (PostgreSQL / HikariCP Formula):**
+  ได้รับการพิสูจน์ทางคณิตศาสตร์และผลการทดสอบจริงบน PostgreSQL ว่า จำนวนการเชื่อมต่อที่ทำงานพร้อมกันแล้วได้ Throughput สูงสุดคำนวณจาก:
+
+$$\text{Optimal Pool Size} = (\text{CPU Cores} \times 2) + \text{Effective Spindle Count}$$
+
+สำหรับเซิร์ฟเวอร์คลาวด์ยุคใหม่ที่ใช้ดิสก์ SSD / NVMe ค่าตัวบวกท้ายสุดมักกำหนดไว้ที่ `1` ถึง `2` (หรือใช้สูตรของ Prisma คือ `(CPU Cores * 2) + 1`):
+- เครื่องฐานข้อมูล **2 vCPUs:** ขนาด Pool รวมที่เหมาะสมคือ $(2 \times 2) + 1 = \mathbf{5\text{ Connections}}$
+- เครื่องฐานข้อมูล **4 vCPUs:** ขนาด Pool รวมที่เหมาะสมคือ $(4 \times 2) + 1 = \mathbf{9\text{ ถึง }10\text{ Connections}}$
+- เครื่องฐานข้อมูล **8 vCPUs:** ขนาด Pool รวมที่เหมาะสมคือ $(8 \times 2) + 1 = \mathbf{17\text{ ถึง }20\text{ Connections}}$
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: เครื่องคำนวณและจัดสรรโควตา Connection Pool สำหรับคลัสเตอร์ของ Smart Butcher
+ฟังก์ชันช่วยคำนวณขนาด Pool ที่เหมาะสมต่อ 1 Application Instance เมื่อทราบสเปกของเซิร์ฟเวอร์ฐานข้อมูลและจำนวน Container ที่รันอยู่:
+
+```typescript filename="src/config/pool-sizing.calculator.ts"
+export interface PoolSizingInput {
+  dbCpuCores: number;
+  maxDbConnectionsLimit: number; // ค่า max_connections ใน postgresql.conf (เช่น 100)
+  reservedForAdminAndMigrations: number; // กันไว้ให้แอดมินและ CI/CD (เช่น 10)
+  appInstanceCount: number; // จำนวน Pods / Containers ของ NestJS ที่รันอยู่ (เช่น 4)
+}
+
+export function calculateOptimalPrismaPoolSize(input: PoolSizingInput) {
+  // 1. คำนวณจุดที่ CPU ของฐานข้อมูลทำงานได้มีประสิทธิภาพสูงสุดตามสูตร (Cores * 2) + 1
+  const cpuOptimalTotal = input.dbCpuCores * 2 + 1;
+
+  // 2. คำนวณเพดานปลอดภัยสูงสุดที่ไม่ทำให้เกิด Too Many Connections (ใช้ไม่เกิน 80% ของที่เหลือ)
+  const safeMaxTotal = Math.floor(
+    (input.maxDbConnectionsLimit - input.reservedForAdminAndMigrations) * 0.8
+  );
+
+  // 3. แบ่งโควตาให้แต่ละ Application Instance เท่าๆ กัน
+  const recommendedPerInstance = Math.max(
+    2,
+    Math.floor(Math.min(cpuOptimalTotal * 2, safeMaxTotal) / input.appInstanceCount)
+  );
+
+  return {
+    cpuOptimalTotalConnections: cpuOptimalTotal,
+    safeMaxTotalConnections: safeMaxTotal,
+    recommendedConnectionLimitPerInstance: recommendedPerInstance,
+    recommendedPoolTimeoutSeconds: 10,
+  };
+}
+
+// ตัวอย่างการใช้งานสำหรับระบบ Smart Butcher (DB 4 vCPUs, max_connections=100, รันแอป 4 Containers)
+const sizing = calculateOptimalPrismaPoolSize({
+  dbCpuCores: 4,
+  maxDbConnectionsLimit: 100,
+  reservedForAdminAndMigrations: 15,
+  appInstanceCount: 4,
+});
+// ผลลัพธ์แนะนำ: connection_limit = 4 ถึง 5 ต่อ Container (รวม 4 Containers = 16-20 Connections)
+```
+
+### ตัวอย่างที่ 2: การควบคุมเวลาทำงานของคิวรีเพื่อหมุนเวียน Connection กลับเข้า Pool ให้เร็วที่สุด
+เพื่อให้ Pool ขนาดเล็ก (เช่น 10 Connections) สามารถรองรับผู้ใช้งานได้หลักพันคนต่อวินาที กฎสำคัญคือ **"ห้ามมีโปรเซสไหนยึด Connection ไว้กับตัวนานเกินไป"** เราจึงควรตั้งค่า `statement_timeout` และเขียนคิวรีให้กระชับ:
+
+```typescript filename="src/orders/fast-checkout.service.ts"
+import { Injectable } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+
+@Injectable()
+export class FastCheckoutService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async createMeatOrderFast(userId: string, productId: string, quantityGrams: number) {
+    // ✅ เตรียมข้อมูลและคำนวณนอก Transaction / นอกการถือครอง Connection ก่อนเสมอ!
+    const orderReference = `SB-${Date.now()}`;
+
+    // ✅ เปิด Transaction ยืม Connection จาก Pool เฉพาะจังหวะที่ยิงคำสั่ง SQL จริงเท่านั้น
+    // และกำหนด timeout ไม่ให้ถือครอง Connection เกิน 3 วินาที
+    return this.prisma.$transaction(
+      async (tx) => {
+        const product = await tx.product.update({
+          where: { id: productId, stockWeightGr: { gte: quantityGrams } },
+          data: { stockWeightGr: { decrement: quantityGrams } },
+          select: { id: true, pricePerKg: true },
+        });
+
+        const subtotal = product.pricePerKg.mul(quantityGrams).div(1000);
+
+        return tx.order.create({
+          data: {
+            userId,
+            status: 'PENDING',
+            totalAmount: subtotal,
+            items: {
+              create: {
+                productId: product.id,
+                quantityGrams,
+                unitPricePerKg: product.pricePerKg,
+                subtotal,
+              },
+            },
+          },
+        });
+      },
+      {
+        maxWait: 2000, // รอคิวจาก Pool ไม่เกิน 2 วินาที
+        timeout: 3000, // ห้ามยึด Connection ทำงานนานเกิน 3 วินาที
+      }
+    );
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การแก้ปัญหาเมื่อเว็บช้า** | พอเว็บช้าก็ปรับเพิ่ม Pool Size จาก 10 เป็น 200 ทันที ทำให้ฐานข้อมูลเกิด Context Switching จนล่มหนักกว่าเดิม | ตรวจสอบและใส่ Index ให้คิวรีทำงานจบในระดับมิลลิวินาที เพื่อคืน Connection กลับเข้า Pool ให้ไวที่สุด |
+| **การทำงานภายนอกใน Transaction** | ยืม Connection มาเปิด `$transaction` แล้วสั่ง `await sendEmail()` หรือเรียก API ธนาคารข้างใน ทำให้ยึดสายค้างไว้ | ย้ายการเรียก API ภายนอกและการส่งอีเมลออกไปทำ **นอกบล็อก `$transaction`** ทั้งหมด |
+| **การกำหนด Timeout ของ Pool** | ปล่อยให้คิวรอ Connection ไม่มีกำหนดเวลา จนเกิดปรากฏการณ์ Cascading Failure ล่มทั้งระบบ | กำหนด `pool_timeout` (เช่น 10 วินาที) เพื่อให้ Fail Fast หากฐานข้อมูลมีปัญหา |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้สูตร `(CPU Cores * 2) + 1` เมื่อ:** แอปพลิเคชันเชื่อมต่อตรงเข้าสู่ PostgreSQL 16 หรือใช้ในการกำหนดค่า `default_pool_size` ของ PgBouncer ที่ส่งต่อไปหาฐานข้อมูลจริง
+- **ไม่ควรตั้งค่า Pool Size สูงเกินกว่าจำนวนคอร์ซีพียูมากๆ:** เว้นแต่จะมี Connection Pooler ตัวกลางอย่าง PgBouncer คอยทำหน้าที่รับหน้าเสื่อจัดคิวให้ก่อนเข้าถึงตัว PostgreSQL
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ทำไมการตั้งค่า Connection Pool ขนาดเล็ก (เช่น 10-20 Connections) บนฐานข้อมูลที่มี 4 CPU Cores จึงให้ผลลัพธ์จำนวนธุรกรรมต่อวินาที (TPS) สูงกว่าการตั้งค่าไว้ที่ 200 Connections?**
+  - **แนวคำตอบ:** เพราะซีพียู 4 Cores สามารถประมวลผลคำสั่งพร้อมกันได้จริงๆ เพียง 4 เธรดในเสี้ยววินาทีเดียวกัน หากปล่อยให้โปรเซสทำงานพร้อมกันถึง 200 ตัว ระบบปฏิบัติการจะต้องเสียเวลา CPU Cycles มหาศาลไปกับการทำ Context Switching สลับโปรเซสเข้าออก ล้าง CPU Cache และเกิดการแย่งชิง Lock ภายในหน่วยความจำของ PostgreSQL การจำกัดให้มีเฉพาะโปรเซสจำนวนน้อยที่วิ่งงานจนจบอย่างรวดเร็วโดยไม่ถูกขัดจังหวะ แล้วรับคิวถัดไปเข้ามาทำต่อ จึงทำงานเสร็จเร็วกว่ามาก
+- **Q2: หากขนาดของ Connection Pool ถูกจำกัดไว้แค่ 10 Connections แล้วถ้ามีลูกค้ากดสั่งซื้อเนื้อพร้อมกัน 100 คนในวินาทีเดียวกัน อีก 90 คนที่เหลือจะเกิด Error ทันทีหรือไม่?**
+  - **แนวคำตอบ:** ไม่เกิด Error ทันที เพราะ Connection Pool มีกลไก **In-Memory Request Queue (คิวรอรับสาย)** คำขออีก 90 รายการจะเข้าแถวรออยู่ในหน่วยความจำของแอปพลิเคชัน หากคิวรีสั่งซื้อใช้เวลาทำงานเพียงรายการละ 3 มิลลิวินาที สายทั้ง 10 สายจะช่วยกันระบายคิวทั้ง 100 รายการเสร็จสิ้นภายในเวลาเพียง `10 รอบ × 3 ms = 30 มิลลิวินาที` เท่านั้น โดยจะเกิด Error (`P2024 Timed out fetching a new connection from the connection pool`) ก็ต่อเมื่อรอคิวนานเกินค่า `pool_timeout` ที่ตั้งไว้ (ค่าเริ่มต้นคือ 10 วินาที)
+
+---

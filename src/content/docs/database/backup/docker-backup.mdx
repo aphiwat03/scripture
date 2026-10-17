@@ -1,0 +1,78 @@
+---
+title: Docker Backup
+category: DATABASE
+parentTitle: Backup
+version: pg_dump & WAL PITR
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในการพัฒนาและทดสอบระบบ **Smart Butcher Marketplace** (รวมถึงการรันบนเซิร์ฟเวอร์ VPS ขนาดกลาง) เรามักรัน PostgreSQL 16 อยู่ภายใน **Docker Container** ปัญหาที่นักพัฒนามักเจอคือเครื่อง Host ภายนอกไม่ได้ติดตั้งโปรแกรม `postgresql-client` เวอร์ชัน 16 เอาไว้ หรือไม่ต้องการคัดลอกไฟล์ข้ามไปมาระหว่าง Container กับ Host ให้ซับซ้อน
+
+ทางออกที่สะอาดและปลอดภัยที่สุดคือการสั่งรัน `pg_dump` หรือ `pg_restore` **จากภายใน Container แล้วส่งกระแสข้อมูล (Standard Input/Output Stream) ทะลุออกมาเขียนเป็นไฟล์บนเครื่อง Host โดยตรง**
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **การทำงานของ Pipe และ Redirection ข้าม Docker Boundary:**
+   เมื่อเราสั่ง `docker exec <container> pg_dump ... > host_file.sql` คำสั่ง `pg_dump` จะทำงานโดยใช้ CPU และไบนารีเวอร์ชัน 16.x ที่อยู่ใน Container แล้วพ่นผลลัพธ์ออกทาง `stdout` จากนั้น Shell ของเครื่อง Host จะรับกระแสข้อมูลนั้นมาบันทึกลงดิสก์ของเครื่อง Host โดยไม่สร้างไฟล์ขยะค้างไว้ในพื้นที่ของ Container เลย
+2. **อันตรายของการใช้แฟล็ก `-it` (TTY Allocation) ตอนทำ Backup:**
+   คำสั่งที่พบบ่อยแต่ทำให้ไฟล์พังคือ `docker exec -it ... pg_dump -Fc > backup.dump` การใส่ `-t` (Allocate a pseudo-TTY) จะทำให้ Docker แปลงอักขระขึ้นบรรทัดใหม่จาก `\n` (LF) ให้กลายเป็น `\r\n` (CRLF) ซึ่งจะ **ทำลายโครงสร้างไฟล์ไบนารี `.dump` หรือไฟล์บีบอัด `.gz` จนไม่สามารถกู้คืนกลับมาได้อีกเลย!** ดังนั้นในการทำ Stream Backup/Restore ผ่าน Docker ต้องใช้แฟล็ก **`-i` (Interactive / Keep STDIN open) เท่านั้น ห้ามใส่ `-t` เด็ดขาด**
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสำรองและกู้คืนไฟล์ `.sql.gz` ผ่าน Docker Stream
+เหมาะสำหรับการบีบอัดไฟล์ SQL ข้ามมาจาก Container ลงสู่เครื่อง Host โดยตรง:
+
+```bash filename="01_docker_sql_gzip_backup.sh"
+# 1. ดึงข้อมูลจาก Container 'smart-butcher-postgres' บีบอัดด้วย gzip แล้วเซฟลงเครื่อง Host
+# สังเกตว่าเราไม่ใส่แฟล็ก -t เด็ดขาด!
+docker exec -i smart-butcher-postgres \
+  pg_dump -U butcher_admin -d smart_butcher_db --no-owner --no-privileges \
+  | gzip -9 > ./backups/smart_butcher_$(date +%Y%m%d_%H%M%S).sql.gz
+
+# 2. แตกไฟล์ .sql.gz จากเครื่อง Host แล้วส่งกระแสข้อมูล (stdin) เข้าไปกู้คืนใน Container
+gunzip -c ./backups/smart_butcher_20261017_020000.sql.gz \
+  | docker exec -i smart-butcher-postgres \
+    psql -U butcher_admin -d smart_butcher_recovery_db -v ON_ERROR_STOP=1
+```
+
+### ตัวอย่างที่ 2: การสำรองและกู้คืนด้วย Custom Format (`-Fc`) ผ่าน Docker Container
+การใช้รูปแบบ `-Fc` ร่วมกับ `pg_restore` ผ่านท่อ `stdin` ของ Docker Container:
+
+```bash filename="02_docker_custom_format_restore.sh"
+# 1. สร้างไฟล์ Custom Format (.dump) จากใน Container ออกมาวางบนเครื่อง Host
+docker exec -i smart-butcher-postgres \
+  pg_dump -U butcher_admin -d smart_butcher_db -Fc --compress=zstd:5 --no-owner \
+  > ./backups/smart_butcher_prod.dump
+
+# 2. ตรวจสอบความสมบูรณ์ของไฟล์ .dump ที่ได้บนเครื่อง Host โดยส่งกลับไปให้ pg_restore เช็คสารบัญ
+docker exec -i smart-butcher-postgres pg_restore --list < ./backups/smart_butcher_prod.dump | head -n 25
+
+# 3. สร้างฐานข้อมูลเปล่าใน Container สำหรับทดสอบการกู้คืน
+docker exec -i smart-butcher-postgres \
+  psql -U butcher_admin -d postgres -c "CREATE DATABASE smart_butcher_verify_db;"
+
+# 4. ส่งไฟล์ .dump จากเครื่อง Host เข้าไปให้ pg_restore ใน Container ทำการกู้คืน
+docker exec -i smart-butcher-postgres \
+  pg_restore -U butcher_admin -d smart_butcher_verify_db --clean --if-exists --no-owner \
+  < ./backups/smart_butcher_prod.dump
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การใช้แฟล็กของ `docker exec`** | ใช้ `docker exec -it ... pg_dump -Fc > file.dump` ทำให้ TTY แปลง Byte ไบนารีจนไฟล์เสีย | ใช้ `docker exec -i` (ไม่มี `-t`) เสมอเมื่อมีการ Redirect `stdout` หรือ `stdin` |
+| **การสำรองผ่าน Docker Volume ดิบ** | สั่ง `tar -czf backup.tar.gz /var/lib/docker/volumes/pgdata` ขณะที่ฐานข้อมูลกำลังรันอยู่ | ใช้ `pg_dump` หรือ `pg_basebackup` เพื่อรับประกันความถูกต้องของข้อมูลตามหลัก ACID |
+| **ตำแหน่งที่เก็บไฟล์ Backup** | สั่ง `pg_dump -f /tmp/backup.dump` ทิ้งไว้ข้างใน Container พอ Container ถูกลบไฟล์ก็หายไปด้วย | ส่งกระแสข้อมูลออกมาเก็บที่ดิสก์ของ Host หรืออัปโหลดขึ้น Cloud Object Storage ทันที |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `docker exec -i` Stream เมื่อ:** ฐานข้อมูลรันอยู่บน Docker หรือ Docker Compose และต้องการหลีกเลี่ยงปัญหาความไม่ตรงกันของเวอร์ชัน `pg_dump` ระหว่างเครื่อง Host กับตัว Container
+- **ไม่ควรใช้ `pg_restore` ผ่านท่อ `< file.dump` เมื่อ:** ต้องการใช้ความสามารถกู้คืนแบบขนานหลายคอร์ (`-j 4`) เพราะ `pg_restore` ต้องเข้าถึงไฟล์แบบสุ่ม (Random Seek) เพื่อแบ่งงานให้หลายโปรเซส ในกรณีที่ต้องใช้ `-j 4` ให้挂载 (Mount) โฟลเดอร์ Backup เข้าไปใน Container แบบ Read-only (`-v ./backups:/backups:ro`) แล้วอ้างอิงพาธไฟล์แทนการใช้ `<`
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ทำไมการสั่ง `docker exec -it postgres-container pg_dump -Fc ... > backup.dump` จึงทำให้ไฟล์ `.dump` เสียหายและกู้คืนไม่ได้?**
+  - **แนวคำตอบ:** เพราะแฟล็ก `-t` (`--tty`) สั่งให้ Docker จำลองหน้าจอเทอร์มินัล ซึ่งมีพฤติกรรมแปลงรหัสควบคุมการขึ้นบรรทัดใหม่จาก `0x0A` (`\n`) ให้เป็น `0x0D 0x0A` (`\r\n`) เนื่องจากไฟล์ `-Fc` เป็นไฟล์ไบนารีที่ถูกบีบอัด เมื่อไบต์ที่มีค่าตรงกับ `0x0A` ถูกแทรก `0x0D` เข้าไป โครงสร้างข้อมูลบีบอัดและ Checksum ภายในไฟล์จะพังทลายทันที
+- **Q2: หากเราทำการ Mount Docker Volume `/var/lib/postgresql/data` ไว้กับโฟลเดอร์บนเครื่อง Host แล้ว ทำไมเรายังต้องทำ `pg_dump` อีก?**
+  - **แนวคำตอบ:** Docker Volume ช่วยให้ข้อมูลไม่หายเวลา Container รีสตาร์ทเท่านั้น แต่ไม่ได้ช่วยป้องกันความผิดพลาดระดับตรรกะ (Human/Application Error) เช่น การเผลอรันสคริปต์ลบข้อมูลตาราง `orders` หรือตารางเสียหายจากการอัปเดตโค้ดผิดพลาด เพราะความเสียหายนั้นจะถูกเขียนทับลงไปใน Volume ทันที การมีไฟล์ Backup แยกตามช่วงเวลาเท่านั้นที่จะช่วยให้ย้อนข้อมูลกลับไปก่อนเกิดเหตุได้
+
+---

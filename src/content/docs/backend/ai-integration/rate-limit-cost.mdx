@@ -1,0 +1,232 @@
+---
+title: Rate Limit Cost
+category: BACKEND
+parentTitle: AI Integration
+version: Groq SDK & Llama 3.3
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในการเชื่อมต่อกับ External AI API อย่าง Groq บนระบบ Production เราต้องออกแบบระบบให้ทนทานต่อความล้มเหลว (Resilience) และควบคุมต้นทุนได้เสมอใน 4 มิติ:
+1. **Timeout Control**: กำหนดเวลาสูงสุดที่ยอมรอได้ (เช่น 8 วินาที) ไม่ปล่อยให้ Request ของผู้ใช้ค้างเติ่งหากเครือข่ายปลายทางมีปัญหา
+2. **Rate Limit (`429 Too Many Requests`)**: ทั้งการจำกัดจำนวนครั้งที่ลูกค้า 1 คนสามารถกดเรียก AI ของเราได้ และการจัดคิว/เตรียม Fallback เมื่อโควตาของ Groq เต็มชั่วคราว
+3. **Token Cost Control**: จำกัดทั้งขนาด Input Prompt และกำหนดเพดาน `max_tokens` (จำนวน Token สูงสุดของคำตอบ) ทุกครั้งเพื่อป้องกันค่าใช้จ่ายบานปลาย
+4. **Server-Sent Events (SSE) Streaming**: สำหรับคำตอบที่เป็นบทความหรือคำอธิบายยาวๆ การส่งข้อมูลกลับทีละ Chunk ทันทีที่โมเดลคิดออกช่วยให้ผู้ใช้รู้สึกว่าระบบตอบสนองเร็วขึ้นมาก
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+- **เมื่อเกิด Error จาก Groq SDK**: ไลบรารี `groq-sdk` จะโยนคลาสข้อผิดพลาดเฉพาะ เช่น `Groq.APIConnectionTimeoutError`, `Groq.RateLimitError` (HTTP 429) หรือ `Groq.APIError` เราสามารถดักจับคลาสเหล่านี้เพื่อส่งคืน **Graceful Fallback Response** (เช่น คำแนะนำมาตรฐานที่ดึงจากคอลัมน์ `Product.cookingNote` ในฐานข้อมูล) แทนการโยน `500 Internal Server Error` ใส่หน้าลูกค้า
+- **การทำ Streaming ใน NestJS 11**: ใช้ `@Sse()` Decorator ร่วมกับ `Observable<MessageEvent>` ของ RxJS โดยเมื่อเรียก `groq.chat.completions.create({ ..., stream: true })` เราจะได้ `AsyncIterable` ที่สามารถใช้ลูป `for await (const chunk of stream)` เพื่อส่งข้อความทีละส่วนออกไปยัง Client ได้ทันที
+
+<Callout type="tip" title="กลยุทธ์ Graceful Degradation เมื่อ AI ไม่พร้อมใช้งาน">
+ในระบบอีคอมเมิร์ซ ฟีเจอร์ AI เป็นส่วนเสริมที่เพิ่มคุณค่า แต่ไม่ควรทำให้การซื้อขายหลักหยุดชะงัก หาก Groq API เกิด Timeout หรือติด Rate Limit (HTTP 429) ระบบควรคืนค่าข้อมูลสำรองจากฐานข้อมูล (`Product.cookingNote`) พร้อมสถานะ `source: 'fallback_rule'` เพื่อให้หน้าเว็บของลูกค้ายังคงทำงานได้ราบรื่นโดยไม่มีหน้าจอ Error
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การดักจับ `RateLimitError` และ `APIConnectionTimeoutError` ของ `groq-sdk` พร้อมควบคุม `max_tokens` และทำ Graceful Fallback
+
+```typescript filename="src/modules/ai-butcher/resilient-groq.service.ts"
+import { Injectable, Logger } from '@nestjs/common';
+import Groq from 'groq-sdk';
+import { GroqService } from './groq.service';
+
+export interface SafeAiSummaryResult {
+  summaryText: string;
+  isFallback: boolean;
+  tokensUsed: number;
+}
+
+@Injectable()
+export class ResilientGroqService {
+  private readonly logger = new Logger(ResilientGroqService.name);
+
+  constructor(private readonly groqService: GroqService) {}
+
+  async summarizeOrderPreparationNote(params: {
+    orderId: string;
+    itemsDescription: string;
+    fallbackSummary: string;
+  }): Promise<SafeAiSummaryResult> {
+    // ตัดความยาว Input ป้องกันการกิน Prompt Tokens เกินจำเป็น
+    const safeInput = params.itemsDescription.slice(0, 1500);
+
+    try {
+      const response = await this.groqService
+        .getRawClient()
+        .chat.completions.create(
+          {
+            model: this.groqService.getDefaultModel(),
+            messages: [
+              {
+                role: 'system',
+                content:
+                  'คุณคือหัวหน้าแผนกเตรียมเนื้อของร้าน Smart Butcher สรุปรายการหั่นและแพ็กเนื้อสำหรับทีมงานหลังบ้านให้กระชับไม่เกิน 3 บรรทัด',
+              },
+              {
+                role: 'user',
+                content: `สรุปใบงานสำหรับคำสั่งซื้อ #${params.orderId}:\n${safeInput}`,
+              },
+            ],
+            temperature: 0.2,
+            max_tokens: 250, // คุมเพดาน Output Token ไม่ให้เกิน 250 tokens
+          },
+          {
+            timeout: 5000, // กำหนด Timeout เฉพาะจุดนี้ไม่เกิน 5 วินาที
+            maxRetries: 1,
+          },
+        );
+
+      const text =
+        response.choices[0]?.message?.content?.trim() || params.fallbackSummary;
+
+      return {
+        summaryText: text,
+        isFallback: false,
+        tokensUsed: response.usage?.total_tokens ?? 0,
+      };
+    } catch (error) {
+      if (error instanceof Groq.RateLimitError) {
+        this.logger.warn(
+          `[Groq Rate Limit 429] Order ${params.orderId}: โควตาเต็มชั่วคราว สลับไปใช้ Fallback Summary`,
+        );
+      } else if (error instanceof Groq.APIConnectionTimeoutError) {
+        this.logger.warn(
+          `[Groq Timeout] Order ${params.orderId}: เกินเวลา 5 วินาที สลับไปใช้ Fallback Summary`,
+        );
+      } else {
+        this.logger.error(
+          `[Groq Unexpected Error] Order ${params.orderId}:`,
+          error,
+        );
+      }
+
+      // คืนค่าสำรองเสมอเพื่อไม่ให้กระบวนการเตรียมคำสั่งซื้อ (Order) หยุดชะงัก
+      return {
+        summaryText: params.fallbackSummary,
+        isFallback: true,
+        tokensUsed: 0,
+      };
+    }
+  }
+}
+```
+
+ตัวอย่างที่ 2: การทำ Real-time Token Streaming ด้วย `@Sse()` (Server-Sent Events) ใน NestJS 11 สำหรับการให้คำแนะนำการจับคู่เนื้อวากิวกับเมนูมื้อค่ำ
+
+```typescript filename="src/modules/ai-butcher/ai-stream.controller.ts"
+import {
+  Controller,
+  Param,
+  ParseUUIDPipe,
+  Sse,
+  MessageEvent,
+  NotFoundException,
+} from '@nestjs/common';
+import { Observable } from 'rxjs';
+import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { PrismaService } from '../prisma/prisma.service';
+import { GroqService } from './groq.service';
+
+@ApiTags('AI Master Butcher (ผู้ช่วย AI แนะนำการปรุงเนื้อ)')
+@Controller('ai-butcher')
+export class AiStreamController {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly groqService: GroqService,
+  ) {}
+
+  @Sse('products/:id/stream-sommelier')
+  @ApiOperation({
+    summary: 'สตรีมคำแนะนำการจับคู่เนื้อวากิวและเครื่องดื่มแบบ Real-time (SSE)',
+  })
+  async streamSommelierAdvice(
+    @Param('id', new ParseUUIDPipe({ version: '4' })) productId: string,
+  ): Promise<Observable<MessageEvent>> {
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+      select: { id: true, name: true, marblingGrade: true, pricePerKg: true },
+    });
+
+    if (!product) {
+      throw new NotFoundException(`ไม่พบสินค้าเนื้อรหัส ${productId}`);
+    }
+
+    return new Observable<MessageEvent>((subscriber) => {
+      const abortController = new AbortController();
+
+      (async () => {
+        try {
+          const stream = await this.groqService
+            .getRawClient()
+            .chat.completions.create(
+              {
+                model: this.groqService.getDefaultModel(),
+                messages: [
+                  {
+                    role: 'system',
+                    content:
+                      'คุณคือ Sommelier และผู้เชี่ยวชาญด้านเนื้อวากิว แนะนำการจับคู่เครื่องดื่มและเครื่องเคียงสั้นๆ ไม่เกิน 4 ประโยค',
+                  },
+                  {
+                    role: 'user',
+                    content: `แนะนำการจับคู่สำหรับเนื้อ: ${product.name} (เกรด ${product.marblingGrade})`,
+                  },
+                ],
+                temperature: 0.4,
+                max_tokens: 300,
+                stream: true,
+              },
+              { signal: abortController.signal },
+            );
+
+          for await (const chunk of stream) {
+            const deltaText = chunk.choices[0]?.delta?.content;
+            if (deltaText) {
+              subscriber.next({
+                data: { token: deltaText, done: false },
+              });
+            }
+          }
+
+          subscriber.next({ data: { token: '', done: true } });
+          subscriber.complete();
+        } catch (err) {
+          subscriber.next({
+            data: {
+              token: 'ขออภัย ระบบผู้ช่วยอัจฉริยะไม่พร้อมใช้งานชั่วคราว',
+              done: true,
+              error: true,
+            },
+          });
+          subscriber.complete();
+        }
+      })();
+
+      // ยกเลิก HTTP Stream ไปยัง Groq ทันทีหากผู้ใช้ปิดหน้าเว็บกลางคัน
+      return () => {
+        abortController.abort();
+      };
+    });
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การกำหนด `max_tokens`** | ไม่กำหนดค่า `max_tokens` เลย ทำให้หากโมเดลวนลูปสร้างข้อความยาวหลายพันคำ ระบบจะต้องเสียโควตา Token จำนวนมาก | กำหนด `max_tokens` ให้เหมาะสมกับความยาวที่ต้องการใช้จริงเสมอ (เช่น `250` - `600` tokens) |
+| **เมื่อผู้ใช้ปิดหน้าเว็บระหว่าง Stream** | ปล่อยให้ Backend อ่าน Stream จาก Groq ต่อไปจนจบแม้ Client จะตัดการเชื่อมต่อแล้ว | ใช้ `AbortController` ใน Teardown Logic ของ RxJS `Observable` เพื่อสั่งยกเลิกคำขอทันทีที่ผู้ใช้ปิดหน้าเว็บ |
+| **การจัดการเมื่อ Groq ล่มหรือติด 429** | ปล่อยให้ Exception ทะลุออกไปเป็น `500 Internal Server Error` จนหน้าดูรายละเอียดสินค้าของลูกค้าพัง | ดักจับ `Groq.APIError` แล้วคืนค่า Fallback จากฐานข้อมูลเพื่อให้ระบบหลักทำงานต่อได้ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Streaming (`@Sse`) เมื่อ**: คำตอบของ AI เป็นข้อความบรรยายที่มีความยาวหลายย่อหน้า และต้องการแสดงผลทีละคำบนหน้าจอแชทเพื่อให้ผู้ใช้ไม่ต้องจ้องหน้าจอโหลดนาน
+- **ไม่ควรใช้ Streaming เมื่อ**: ต้องการผลลัพธ์เป็น `json_object` ที่ต้องนำมาทำ Validation และบันทึกลงฐานข้อมูลในฝั่ง Backend ก่อนส่งให้ผู้ใช้ ในกรณีนั้นควรใช้การเรียกแบบ Non-streaming ร่วมกับ `timeout` ที่กระชับ
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมในโค้ด `@Sse()` เราจึงต้องใส่ `abortController.abort()` ไว้ในฟังก์ชัน Return ของ `new Observable()`?
+   - **แนวคำตอบ**: ฟังก์ชันที่ Return ออกจาก `new Observable()` คือ **Teardown / Unsubscribe Logic** ซึ่งจะทำงานอัตโนมัติเมื่อฝั่ง Client ปิดแท็บเบราว์เซอร์หรือกดยกเลิกการเชื่อมต่อ การเรียก `abortController.abort()` จะไปตัดการเชื่อมต่อ HTTP Stream ระหว่าง NestJS กับ Groq ทันที ช่วยหยุดการสร้าง Token ที่ไม่มีคนอ่านต่อและประหยัดค่าใช้จ่าย Token ได้ทันที
+2. **คำถาม**: หากระบบของเรามีผู้ใช้งานกดขอคำแนะนำ AI พร้อมกันจำนวนมากจนชนขีดจำกัด `Requests Per Minute (RPM)` หรือ `Tokens Per Minute (TPM)` ของ Groq เราสามารถลดภาระนี้ที่ฝั่ง Backend ได้อย่างไร?
+   - **แนวคำตอบ**: นอกจากการใช้ `@nestjs/throttler` จำกัดจำนวนครั้งต่อผู้ใช้แล้ว เราสามารถทำ **Semantic / Exact Caching** ได้ เพราะคำถามอย่าง *"วิธีย่างเนื้อวากิว A5 Ribeye ด้วยกระทะเหล็กหล่อ ระดับ Medium Rare"* มักซ้ำกันในลูกค้าหลายคน เราสามารถนำ `(productId + equipment + doneness)` มาทำเป็น Cache Key เก็บผลลัพธ์ไว้ในตารางแคชหรือหน่วยความจำชั่วคราว ทำให้คำขอถัดไปที่เหมือนกันได้คำตอบทันทีใน 1ms โดยไม่ต้องเรียก Groq API ซ้ำเลย
+
+---

@@ -1,0 +1,230 @@
+---
+title: Mock Functions
+category: TESTING & QUALITY
+parentTitle: Jest
+version: Jest v29 & ts-jest
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+การจำลองการทำงานในร้านขายเนื้อ **Smart Butcher Marketplace**:
+- **`jest.fn()` (หุ่นยนต์จำลองสร้างใหม่)**: เปรียบเหมือน "การจ้างผู้ช่วยชั่วคราวขึ้นมาทำงานเฉพาะกิจ" ฟังก์ชันนี้ไม่มีตัวตนอยู่จริงในระบบมาก่อน เราสร้างขึ้นมาเพื่อดูว่ามีคนเรียกใช้งานเขาหรือไม่ เรียกด้วยพารามิเตอร์อะไร และสั่งให้เขาตอบคำพูดตามสคริปต์ที่เตรียมไว้ (Stubbing)
+- **`jest.spyOn()` (สายลับติดกล้องวงจรปิด)**: เปรียบเหมือน "การติดกล้องเฝ้าสังเกตการณ์พนักงานตัวจริงในร้าน" เมธอดของคลาสนั้นยังมีตัวตนอยู่จริงและทำงานได้ตามปกติ แต่เราส่งสายลับเข้าไปประกบเพื่อแอบจดบันทึกว่าพนักงานคนนั้นถูกเรียกใช้งานกี่ครั้ง และเมื่อทดสอบเสร็จ เราสามารถถอดกล้องวงจรปิดออก (`mockRestore()`) เพื่อคืนสภาพการทำงานของพนักงานให้กลับมาเป็นปกติได้ 100%
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ฟังก์ชันจำลองที่สร้างจาก Jest จะมี Property พิเศษชื่อ `.mock` คอยบันทึกสถานะทั้งหมด:
+
+```text filename="docs/testing/jest.txt"
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          JEST MOCK INSTANCE INTERNALS                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  const mockFn = jest.fn();                                                  │
+│                                                                             │
+│  mockFn('RIBEYE', 2.5);                                                     │
+│                                                                             │
+│  mockFn.mock = {                                                            │
+│    calls: [                                                                 │
+│      ['RIBEYE', 2.5]       // ➔ เก็บลำดับ Arguments ของการเรียกแต่ละครั้ง   │
+│    ],                                                                       │
+│    results: [                                                               │
+│      { type: 'return', value: 750 } // ➔ ผลลัพธ์หรือ Exception ที่ส่งกลับ   │
+│    ],                                                                       │
+│    instances: [ thisContext ],                                              │
+│    contexts: [ thisContext ],                                               │
+│    lastCall: ['RIBEYE', 2.5]                                                │
+│  };                                                                         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+1. **`jest.fn(implementation?)`**: สร้าง Standalone Mock Function มีประโยชน์มากในการส่งเป็น Callback พารามิเตอร์ หรือใช้ทำ Mock Dependency Injection
+2. **`jest.spyOn(object, methodName)`**: ทำงานโดยการสำเนา Pointer ของฟังก์ชันดั้งเดิมเก็บไว้ในตัว แล้วแทนที่ Property บน Object นั้นด้วย Mock Function ชั่วคราว เมื่อเรียก `spy.mockRestore()` ตัว Jest จะนำ Original Pointer กลับมาทับที่เดิม คืนค่าความบริสุทธิ์ของ Object
+3. **การล้างสถานะ Mock (Cleaning APIs)**:
+   - `mockFn.mockClear()` หรือ `jest.clearAllMocks()`: ล้างเฉพาะประวัติการเรียก (`calls` และ `results` กลายเป็นว่างเปล่า) แต่ยังคง Mock Implementation เดิมไว้
+   - `mockFn.mockReset()` หรือ `jest.resetAllMocks()`: ล้างประวัติการเรียก **พร้อมทั้งลบล้าง Implementation ทิ้ง** กลายเป็นฟังก์ชันว่างๆ ที่ return `undefined`
+   - `mockFn.mockRestore()` หรือ `jest.restoreAllMocks()`: ใช้ได้กับ `jest.spyOn` เท่านั้น จะยกเลิกการ Mock ทั้งหมดและกู้คืน Original Function ดั้งเดิมกลับมา
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การใช้ `jest.fn()` ตรวจสอบ Callback เมื่อเนื้อดรายเอจพร้อมจำหน่าย
+ฟังก์ชันแจ้งเตือนลูกค้า VIP เมื่อเนื้อบ่มครบ 45 วัน:
+
+```typescript filename="src/services/vault-notifier.spec.ts"
+export interface DryAgingBatch {
+  batchId: string;
+  meatCut: string;
+  targetDays: number;
+  currentDays: number;
+}
+
+export type ButcherAlertCallback = (batchId: string, message: string) => void;
+
+export class DryAgingVaultMonitor {
+  public checkBatchReadiness(batch: DryAgingBatch, onReady: ButcherAlertCallback): boolean {
+    if (batch.currentDays >= batch.targetDays) {
+      onReady(batch.batchId, `Batch ${batch.meatCut} has matured to perfection (${batch.currentDays} days)`);
+      return true;
+    }
+    return false;
+  }
+}
+
+describe('DryAgingVaultMonitor - jest.fn() Callback Inspection', () => {
+  it('should trigger readiness alert callback with correct arguments when batch is ready', () => {
+    const monitor = new DryAgingVaultMonitor();
+    
+    // สร้าง Standalone Mock Callback
+    const alertCallbackMock = jest.fn<void, [string, string]>();
+
+    const readyBatch: DryAgingBatch = {
+      batchId: 'BATCH-WAGYU-45',
+      meatCut: 'Miyazaki A5 Ribeye',
+      targetDays: 45,
+      currentDays: 45,
+    };
+
+    const isReady = monitor.checkBatchReadiness(readyBatch, alertCallbackMock);
+
+    expect(isReady).toBe(true);
+
+    // ตรวจสอบว่าถูกเรียกอย่างน้อย 1 ครั้ง
+    expect(alertCallbackMock).toHaveBeenCalled();
+
+    // ตรวจสอบว่าถูกเรียกเพียง 1 ครั้งถ้วน
+    expect(alertCallbackMock).toHaveBeenCalledTimes(1);
+
+    // ตรวจสอบพารามิเตอร์ที่ส่งเข้ามาใน Callback
+    expect(alertCallbackMock).toHaveBeenCalledWith(
+      'BATCH-WAGYU-45',
+      'Batch Miyazaki A5 Ribeye has matured to perfection (45 days)'
+    );
+
+    // ตรวจสอบระดับลึกผ่าน mock.calls
+    expect(alertCallbackMock.mock.calls[0][0]).toBe('BATCH-WAGYU-45');
+  });
+
+  it('should never trigger callback when batch is still maturing', () => {
+    const monitor = new DryAgingVaultMonitor();
+    const alertCallbackMock = jest.fn();
+
+    const maturingBatch: DryAgingBatch = {
+      batchId: 'BATCH-ANGUS-30',
+      meatCut: 'Black Angus Striploin',
+      targetDays: 30,
+      currentDays: 14, // ยังไม่ครบกำหนด
+    };
+
+    const isReady = monitor.checkBatchReadiness(maturingBatch, alertCallbackMock);
+
+    expect(isReady).toBe(false);
+    expect(alertCallbackMock).not.toHaveBeenCalled();
+  });
+});
+```
+
+### ตัวอย่างที่ 2: การใช้ `jest.spyOn()` ดักจับและควบคุม Payment Gateway Service
+การจำลองการทำงานของ Payment Service และคืนค่าเดิมหลังทดสอบ:
+
+```typescript filename="src/services/payment-spy.spec.ts"
+export class ExternalBankGateway {
+  public async authorizeHold(orderId: string, amount: number): Promise<string> {
+    // ในระบบจริงจะยิง HTTP Request ไปยังธนาคารภายนอก
+    throw new Error('Real network call not allowed in unit tests!');
+  }
+}
+
+export class OrderCheckoutService {
+  constructor(private bankGateway: ExternalBankGateway) {}
+
+  public async checkoutMeatOrder(orderId: string, totalAmount: number): Promise<{ success: boolean; holdRef: string }> {
+    if (totalAmount <= 0) {
+      throw new Error('Total amount must be greater than zero');
+    }
+
+    const holdRef = await this.bankGateway.authorizeHold(orderId, totalAmount);
+    return { success: true, holdRef };
+  }
+}
+
+describe('OrderCheckoutService - jest.spyOn()', () => {
+  let bankGateway: ExternalBankGateway;
+  let checkoutService: OrderCheckoutService;
+
+  beforeEach(() => {
+    bankGateway = new ExternalBankGateway();
+    checkoutService = new OrderCheckoutService(bankGateway);
+  });
+
+  afterEach(() => {
+    // สำคัญที่สุด: กู้คืนพฤติกรรมเดิมของ Object ทุกครั้ง
+    jest.restoreAllMocks();
+  });
+
+  it('should intercept bank call and return mocked hold reference', async () => {
+    // ดักจับเมธอด authorizeHold และจำลองค่า Return แบบ Promise
+    const gatewaySpy = jest
+      .spyOn(bankGateway, 'authorizeHold')
+      .mockResolvedValue('HOLD-REF-998877');
+
+    const result = await checkoutService.checkoutMeatOrder('ORD-BUTCHER-01', 3500.0);
+
+    expect(result).toEqual({
+      success: true,
+      holdRef: 'HOLD-REF-998877',
+    });
+
+    expect(gatewaySpy).toHaveBeenCalledTimes(1);
+    expect(gatewaySpy).toHaveBeenCalledWith('ORD-BUTCHER-01', 3500.0);
+  });
+
+  it('should simulate bank gateway failure using mockRejectedValue', async () => {
+    jest
+      .spyOn(bankGateway, 'authorizeHold')
+      .mockRejectedValue(new Error('Bank system under maintenance'));
+
+    await expect(
+      checkoutService.checkoutMeatOrder('ORD-BUTCHER-02', 1200.0)
+    ).rejects.toThrow('Bank system under maintenance');
+  });
+});
+```
+
+## 4. ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+### ❌ สิ่งที่ผิด: ใช้ `mockImplementation` กับ `jest.spyOn()` แต่ลืมสั่ง `restoreAllMocks()`
+```typescript filename="src/jest.spec.ts"
+it('test 1', () => {
+  jest.spyOn(service, 'calculatePrice').mockReturnValue(100);
+  // ... เทสต์แรกผ่าน แต่ spy ยังคงติดอยู่บน service!
+});
+
+it('test 2', () => {
+  // พังทันที: เทสต์ที่สองต้องการทดสอบ Real Implementation 
+  // แต่ค่ากลับถูก Stub เป็น 100 ตลอดเวลาจากเทสต์แรก!
+  const price = service.calculatePrice(item);
+  expect(price).toBe(250); // ได้ 100 เพราะ Mock ค้าง
+});
+```
+
+### ✅ สิ่งที่ถูก: สั่ง `jest.restoreAllMocks()` ใน `afterEach` เสมอ
+```typescript filename="src/jest.spec.ts"
+afterEach(() => {
+  jest.restoreAllMocks(); // กู้คืนฟังก์ชันดั้งเดิมทุกลำดับอย่างหมดจด
+});
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `jest.fn()`:** เมื่อสร้าง Mock Callback, Event Listener, หรือ Dependency ที่ฉีดเข้ามาผ่าน Constructor Interface
+- **ควรใช้ `jest.spyOn()`:** เมื่อต้องการสังเกตหรือแทรกแซงเมธอดของ Class Instance, Object หรือ Library ที่มีอยู่แล้ว และต้องการความมั่นใจว่าจะสามารถถอดกล้องส่องออกได้สมบูรณ์
+
+## 6. คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: อะไรคือความแตกต่างที่แท้จริงระหว่าง `mockClear()`, `mockReset()` และ `mockRestore()`?**
+  - *แนวคำตอบ:*
+    1. **`mockClear()`**: ล้างประวัติการเรียกทั้งหมด (`calls`, `instances`, `results`) แต่ยังคง Mock Logic เดิมที่ตั้งไว้ เช่น `mockReturnValue(100)` จะยังคงตอบ 100 เหมือนเดิม
+    2. **`mockReset()`**: ล้างทั้งประวัติการเรียก และ**ลบล้าง Mock Logic ทิ้ง** ฟังก์ชันจะกลายเป็น Empty Function ที่คืนค่า `undefined`
+    3. **`mockRestore()`**: ทำงานเฉพาะกับ Mock ที่สร้างจาก `jest.spyOn` เท่านั้น โดยจะถอด Mock Wrapper ออก และนำฟังก์ชันดั้งเดิม (Original Implementation) ที่มีอยู่จริงก่อนถูก Spy กลับคืนมา
+- **Q2: `mockReturnValueOnce()` มีประโยชน์อย่างไรในการจำลอง Transient Network Faults?**
+  - *แนวคำตอบ:* ใช้จำลองสถานการณ์ที่การเรียกครั้งแรกเกิดข้อผิดพลาด (Transient Error) แต่การเรียกครั้งถัดไปทำงานสำเร็จ (Retry Mechanism) เช่น `spy.mockRejectedValueOnce(new TimeoutError()).mockResolvedValueOnce(successResponse)` ช่วยให้เราสามารถทดสอบตรรกะ Circuit Breaker หรือ Exponential Backoff ได้อย่างแม่นยำในการทดสอบเพียงเคสเดียว
+
+---

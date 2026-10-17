@@ -1,0 +1,192 @@
+---
+title: Supabase Storage
+category: BACKEND
+parentTitle: File Upload
+version: Multer & Supabase Storage
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เมื่อไฟล์ผ่านการตรวจสอบจาก `ParseFilePipe` แล้ว ขั้นตอนต่อไปคือการส่ง `file.buffer` ขึ้นไปจัดเก็บบน **Supabase Storage** (ซึ่งทำงานอยู่บนสถาปัตยกรรม S3-compatible Object Storage) โดยหัวใจสำคัญของการจัดเก็บไฟล์ในระบบจริงคือ **ห้ามใช้ชื่อไฟล์ต้นฉบับจากผู้ใช้ (`file.originalname`) เป็นชื่อไฟล์บน Storage โดยตรง** เพราะอาจเกิดปัญหาชื่อไฟล์ซ้ำกันจนเขียนทับไฟล์ของลูกค้ารายอื่น (File Collision) หรือมีอักขระพิเศษ/ช่องว่าง/Path Traversal (`../../`) ที่ทำให้ URL พังหรือเกิดช่องโหว่ความปลอดภัย เราจึงต้องสร้างชื่อไฟล์ใหม่ด้วย UUID v4 (`crypto.randomUUID()`) และจัดโครงสร้างโฟลเดอร์ตามโดเมน
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+การเชื่อมต่อระหว่าง NestJS Backend กับ Supabase Storage ใช้ `@supabase/supabase-js` โดย инициализировать Client ด้วย **`SUPABASE_SERVICE_ROLE_KEY`** (ซึ่งต้องเก็บรักษาไว้ที่ฝั่ง Backend เท่านั้น ห้ามหลุดไปที่ Frontend เด็ดขาด)
+- การใช้ Service Role Key ทำให้ Backend มีสิทธิ์ Bypass Row Level Security (RLS) ของ Supabase Storage เพื่อจัดการอัปโหลดและลบไฟล์ได้ภายใต้การควบคุมของ Business Logic ใน NestJS
+- ในการตั้งค่า Client บนฝั่งเซิร์ฟเวอร์ ต้องกำหนด `auth: { persistSession: false, autoRefreshToken: false }` เสมอ เพื่อป้องกันไม่ให้ Supabase SDK พยายามจำสถานะผู้ใช้ในหน่วยความจำของ Node.js Server ที่รับโหลดจากผู้ใช้หลายคนพร้อมกัน
+
+<Callout type="tip" title="การจัดโครงสร้าง Path ใน Object Storage">
+การตั้งชื่อ Key หรือ Path ในรูปแบบ `<entity>/<entityId>/<timestamp>-<uuid>.<ext>` เช่น `products/a8098c1a-f86e-11da-bd1a-00112444be1e/1760678400000-4b2c...webp` ช่วยให้เราสามารถค้นหา ตรวจสอบ หรือไล่ลบไฟล์ทั้งหมดที่ผูกกับสินค้ารายการนั้นได้ง่ายและเป็นระเบียบ
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การสร้าง `StorageService` สำหรับเชื่อมต่อ Supabase Storage พร้อมฟังก์ชันสร้างชื่อไฟล์ปลอดภัยด้วย `crypto.randomUUID()`
+
+```typescript filename="src/modules/storage/storage.service.ts"
+import {
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { randomUUID } from 'node:crypto';
+
+export interface UploadResult {
+  bucket: string;
+  path: string;
+  publicUrl: string | null;
+}
+
+@Injectable()
+export class StorageService {
+  private readonly logger = new Logger(StorageService.name);
+  private readonly supabase: SupabaseClient;
+
+  constructor(private readonly configService: ConfigService) {
+    const supabaseUrl = this.configService.getOrThrow<string>('SUPABASE_URL');
+    const serviceRoleKey = this.configService.getOrThrow<string>(
+      'SUPABASE_SERVICE_ROLE_KEY',
+    );
+
+    this.supabase = createClient(supabaseUrl, serviceRoleKey, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+      },
+    });
+  }
+
+  private resolveExtensionFromMime(mimeType: string): string {
+    const mimeMap: Record<string, string> = {
+      'image/jpeg': 'jpg',
+      'image/png': 'png',
+      'image/webp': 'webp',
+    };
+    return mimeMap[mimeType] ?? 'bin';
+  }
+
+  public buildSafeStoragePath(
+    folderPrefix: string,
+    entityId: string,
+    mimeType: string,
+  ): string {
+    const ext = this.resolveExtensionFromMime(mimeType);
+    const uniqueFileName = `${Date.now()}-${randomUUID()}.${ext}`;
+    return `${folderPrefix}/${entityId}/${uniqueFileName}`;
+  }
+
+  async uploadPublicFile(params: {
+    bucket: string;
+    folderPrefix: string;
+    entityId: string;
+    file: Express.Multer.File;
+  }): Promise<UploadResult> {
+    const storagePath = this.buildSafeStoragePath(
+      params.folderPrefix,
+      params.entityId,
+      params.file.mimetype,
+    );
+
+    const { error } = await this.supabase.storage
+      .from(params.bucket)
+      .upload(storagePath, params.file.buffer, {
+        contentType: params.file.mimetype,
+        cacheControl: '31536000', // Cache 1 ปี เพราะชื่อไฟล์เปลี่ยนใหม่ทุกครั้งที่อัปโหลด
+        upsert: false, // ป้องกันการเขียนทับไฟล์เดิมโดยไม่ตั้งใจ
+      });
+
+    if (error) {
+      this.logger.error(
+        `Failed to upload file to ${params.bucket}/${storagePath}: ${error.message}`,
+      );
+      throw new InternalServerErrorException(
+        'ไม่สามารถอัปโหลดไฟล์ไปยังระบบจัดเก็บข้อมูลได้',
+      );
+    }
+
+    const { data: publicUrlData } = this.supabase.storage
+      .from(params.bucket)
+      .getPublicUrl(storagePath);
+
+    return {
+      bucket: params.bucket,
+      path: storagePath,
+      publicUrl: publicUrlData.publicUrl,
+    };
+  }
+}
+```
+
+ตัวอย่างที่ 2: การนำ `StorageService` ไปใช้งานใน `ProductsService` เพื่ออัปโหลดรูปภาพเนื้อวากิวและบันทึก `imageUrl` พร้อม `imagePath` ลงฐานข้อมูลผ่าน Prisma
+
+```typescript filename="src/modules/products/products.service.ts"
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
+
+@Injectable()
+export class ProductsService {
+  private readonly PRODUCT_BUCKET = 'butcher-public-assets';
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storageService: StorageService,
+  ) {}
+
+  async updateProductImage(
+    productId: string,
+    file: Express.Multer.File,
+  ): Promise<{ id: string; name: string; imageUrl: string | null }> {
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+      select: { id: true, name: true },
+    });
+
+    if (!product) {
+      throw new NotFoundException(`ไม่พบสินค้าเนื้อรหัส ${productId}`);
+    }
+
+    const uploadResult = await this.storageService.uploadPublicFile({
+      bucket: this.PRODUCT_BUCKET,
+      folderPrefix: 'products',
+      entityId: product.id,
+      file,
+    });
+
+    return this.prisma.product.update({
+      where: { id: product.id },
+      data: {
+        imageUrl: uploadResult.publicUrl,
+        imageStoragePath: uploadResult.path,
+      },
+      select: {
+        id: true,
+        name: true,
+        imageUrl: true,
+      },
+    });
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การตั้งชื่อไฟล์** | ใช้ `file.originalname` เช่น `uploads/${file.originalname}` ซึ่งเสี่ยงต่อการชนกันของชื่อไฟล์และปัญหา Encoding ภาษาไทยใน URL | สร้างชื่อไฟล์ใหม่ด้วย `crypto.randomUUID()` และกำหนดนามสกุลไฟล์จาก MIME type ที่ตรวจผ่านแล้ว |
+| **การตั้งค่า `upsert`** | เปิด `upsert: true` กับชื่อไฟล์คงที่ เช่น `products/${productId}.jpg` ทำให้ CDN แคชรูปเก่าและลูกค้าไม่เห็นรูปสินค้าที่อัปเดตใหม่ | ตั้ง `upsert: false` และใช้ชื่อไฟล์ที่ไม่ซ้ำกันทุกครั้ง (Immutable File Name) เพื่อให้ใช้ CDN Cache ระยะยาวได้เต็มประสิทธิภาพ |
+| **การดึงนามสกุลไฟล์** | ใช้ `path.extname(file.originalname)` ซึ่งผู้ใช้อาจตั้งชื่อไฟล์แปลกๆ เช่น `meat.jpg.php` | แปลงนามสกุลจาก `file.mimetype` ที่ผ่านการตรวจ Magic Number แล้วด้วย Mapping Table ที่กำหนดไว้ชัดเจน |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: ต้องการอัปโหลดไฟล์ที่ผ่านการตรวจสอบความถูกต้องและสิทธิ์ผู้ใช้งาน (Authorization) จากฝั่ง NestJS Backend เรียบร้อยแล้ว เช่น เฉพาะ Admin หรือ Butcher Shop Manager เท่านั้นที่มีสิทธิ์เปลี่ยนรูปสินค้า
+- **ไม่ควรใช้เมื่อ**: ไม่ควรนำ `SUPABASE_SERVICE_ROLE_KEY` ไปใช้ในโค้ดฝั่ง Frontend (Next.js Client Component) เด็ดขาด เพราะผู้ใช้งานสามารถแกะ Key ไปลบไฟล์ทั้งหมดในทุก Bucket ได้ทันที
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมการตั้งชื่อไฟล์ใหม่ที่ไม่ซ้ำกันเลย (เช่น ใส่ `timestamp` + `UUID`) ถึงดีกว่าการใช้ชื่อไฟล์คงที่ตามรหัสสินค้า (`products/{productId}.jpg`) แล้วเขียนทับ (`upsert: true`)?
+   - **แนวคำตอบ**: หากใช้ชื่อไฟล์คงที่แล้วเขียนทับ เมื่อแอดมินเปลี่ยนรูปเนื้อริบอายใหม่ URL ของรูปจะยังเป็นค่าเดิม ทำให้ทั้ง Browser Cache ของลูกค้าและ CDN ของ Supabase Storage แสดงรูปเก่าต่อไปจนกว่า TTL ของ Cache จะหมดอายุ ในขณะที่การสร้างชื่อไฟล์ใหม่ทุกครั้งจะทำให้ได้ URL ใหม่ทันที ลูกค้าเห็นรูปใหม่ได้ทันที และเราสามารถตั้งค่า `Cache-Control: max-age=31536000, immutable` เพื่อประหยัด Bandwidth ได้สูงสุด
+2. **คำถาม**: ทำไมตอนสร้าง `SupabaseClient` บน NestJS Backend จึงต้องตั้งค่า `persistSession: false`?
+   - **แนวคำตอบ**: เพราะ NestJS Service มี Lifecycle แบบ Singleton (อินสแตนซ์เดียวใช้ร่วมกันทุก Request) หากเปิด `persistSession: true` อาจเกิดสภาวะที่ข้อมูล Session ตกค้างหรือปะปนกันในหน่วยความจำของเซิร์ฟเวอร์และสิ้นเปลืองทรัพยากรในการทำ `autoRefreshToken` ที่ไม่จำเป็นสำหรับการทำงานด้วย Service Role Key
+
+---

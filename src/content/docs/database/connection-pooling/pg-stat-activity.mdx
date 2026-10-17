@@ -1,0 +1,111 @@
+---
+title: pg_stat_activity
+category: DATABASE
+parentTitle: Connection Pooling
+version: PgBouncer & Supavisor
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+เมื่อระบบร้าน **Smart Butcher Marketplace** เกิดอาการหน่วงหรือการเชื่อมต่อเริ่มเต็มเพดาน ผู้ดูแลระบบต้องสามารถเปิด "กล้องเอ็กซเรย์" ของ PostgreSQL 16 ที่ชื่อว่า System View **`pg_stat_activity`** เพื่อดูได้ทันทีว่า ณ วินาทีนี้มีใครเชื่อมต่อเข้ามาบ้าง แต่ละสายกำลังทำอะไรอยู่ และมีสายไหนที่กำลังสร้างปัญหาคอขวดให้กับระบบ
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ใน `pg_stat_activity` คอลัมน์ที่สำคัญที่สุดในการวินิจฉัยสุขภาพของ Connection Pool คือคอลัมน์ **`state`** ซึ่งมีสถานะหลัก 4 รูปแบบ:
+1. **`active`:** โปรเซสกำลังใช้ CPU/Disk รันคำสั่ง SQL อยู่ ณ วินาทีนี้จริงๆ
+2. **`idle`:** เปิดการเชื่อมต่อค้างไว้ใน Pool เรียบร้อยแล้ว และกำลังว่างรอรับคำสั่งถัดไปจากแอปพลิเคชัน (เป็นสถานะปกติของ Connection Pool)
+3. **`idle in transaction` (อันตรายสูงสุด!):** แอปพลิเคชันสั่งเปิด `BEGIN;` ค้างไว้แล้ว และตอนนี้ไม่ได้รันคำสั่ง SQL อะไรเลย (เช่น กำลังรอผลลัพธ์จาก API ภายนอก หรือนักพัฒนาเขียนโค้ดลืมสั่ง `COMMIT`) สถานะนี้เลวร้ายมากเพราะ **มันทั้งยึดครอง Connection ใน Pool เอาไว้ไม่ยอมคืน และยังถือครอง Row Locks รวมถึงขัดขวางไม่ให้ Autovacuum ล้างข้อมูลเก่าได้!**
+4. **`idle in transaction (aborted)`:** เหมือนข้อ 3 แต่มีคำสั่งภายใน Transaction พังไปแล้ว และแอปพลิเคชันยังไม่ยอมส่งคำสั่ง `ROLLBACK` มาปิดธุรกรรม
+
+```text filename="docs/database/connection-pooling.txt"
+                   ┌───► [ active ] ──► รันคิวรีเสร็จ (ไม่มี BEGIN) ──► [ idle ] (ปกติ ปลอดภัย)
+                   │
+[ Connection Pool ]┤
+                   │
+                   └───► [ BEGIN; ] ──► รอ API ภายนอกค้างไว้ ───────► [ idle in transaction ]
+                                                                     (อันตราย! ยึดทั้งสาย ยึดทั้ง Lock!)
+```
+
+ใน PostgreSQL 16 เราสามารถป้องกันปัญหาสายค้างเหล่านี้ได้ตั้งแต่ระดับ Engine ด้วยการตั้งค่า **`idle_in_transaction_session_timeout`** เพื่อให้ PostgreSQL ตัดสายที่เปิด Transaction ทิ้งไว้เฉยๆ เกินเวลาที่กำหนดโดยอัตโนมัติ!
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: คิวรีตรวจสอบจำนวน Connection แยกตามสถานะและค้นหาตัวการที่ค้างอยู่ใน `pg_stat_activity`
+ชุดคำสั่ง SQL สำหรับวิศวกรในการตรวจสอบสุขภาพของ Connection Pool และค้นหาคิวรีที่ค้างนานผิดปกติ:
+
+```sql filename="01_diagnose_connections.sql"
+-- 1. สรุปภาพรวมจำนวน Connections ปัจจุบันแยกตามสถานะ (state) และชื่อแอปพลิเคชันเทียบกับเพดานสูงสุด
+SELECT
+    application_name,
+    usename AS db_role,
+    state,
+    COUNT(*) AS connection_count,
+    (SELECT setting::int FROM pg_settings WHERE name = 'max_connections') AS max_limit
+FROM pg_stat_activity
+WHERE backend_type = 'client backend'
+GROUP BY application_name, usename, state
+ORDER BY connection_count DESC;
+
+-- 2. ค้นหาโปรเซสที่เป็นตัวปัญหา: ค้างอยู่ในสถานะ 'idle in transaction' หรือรันคิวรีนานเกิน 5 วินาที
+SELECT
+    pid,
+    usename,
+    client_addr,
+    state,
+    wait_event_type,
+    wait_event,
+    NOW() - xact_start AS transaction_duration,
+    NOW() - state_change AS idle_duration,
+    LEFT(query, 120) AS last_executed_query
+FROM pg_stat_activity
+WHERE state IN ('idle in transaction', 'idle in transaction (aborted)', 'active')
+  AND (NOW() - xact_start) > INTERVAL '5 seconds'
+  AND pid <> pg_backend_pid()
+ORDER BY transaction_duration DESC;
+```
+
+### ตัวอย่างที่ 2: การตั้งค่าเวลาตัดสายอัตโนมัติและการสั่งตัดโปรเซสที่ค้างด้วย `pg_terminate_backend`
+การกำหนดค่าป้องกันตัวเองใน PostgreSQL 16 และคำสั่งฉุกเฉินสำหรับเตะโปรเซสที่ค้างออกจากระบบ:
+
+```sql filename="02_auto_timeout_and_terminate.sql"
+-- 1. ตั้งค่าระดับฐานข้อมูลหรือระดับ Role:
+-- หากใครเปิด Transaction (BEGIN) ทิ้งไว้เฉยๆ โดยไม่ส่งคำสั่งต่อเกิน 15 วินาที ให้ Rollback และตัดสายทันที!
+ALTER DATABASE smart_butcher_db SET idle_in_transaction_session_timeout = '15s';
+
+-- จำกัดเวลาการรันของแต่ละคำสั่ง SQL ของแอปพลิเคชันไม่ให้เกิน 10 วินาทีเพื่อป้องกัน Pool เต็ม
+ALTER ROLE butcher_app SET statement_timeout = '10s';
+
+-- 2. คำสั่งฉุกเฉินระดับเบา: สั่งยกเลิกเฉพาะคิวรีที่กำลังรันค้างอยู่ แต่ไม่ตัดสาย Connection
+SELECT pg_cancel_backend(14829); -- แทนที่ด้วยหมายเลข pid ที่พบจาก pg_stat_activity
+
+-- 3. คำสั่งฉุกเฉินระดับเด็ดขาด: สั่งตัดสายและทำลายโปรเซสทั้งหมดที่ค้าง 'idle in transaction' เกิน 1 นาที
+SELECT
+    pid,
+    usename,
+    pg_terminate_backend(pid) AS is_terminated
+FROM pg_stat_activity
+WHERE state IN ('idle in transaction', 'idle in transaction (aborted)')
+  AND (NOW() - state_change) > INTERVAL '1 minute'
+  AND pid <> pg_backend_pid();
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การจัดการเมื่อพบคิวรีค้าง** | สั่งรีสตาร์ทเซิร์ฟเวอร์ PostgreSQL ทั้งเครื่องทันทีที่เว็บค้าง ทำให้ทุกระบบที่ใช้งานอยู่ล่มทั้งหมด | ตรวจสอบผ่าน `pg_stat_activity` แล้วใช้ `pg_cancel_backend(pid)` หรือ `pg_terminate_backend(pid)` เฉพาะตัวที่เป็นปัญหา |
+| **การตั้งค่า `idle_in_transaction_session_timeout`** | ปล่อยเป็นค่าเริ่มต้น `0` (ไม่จำกัดเวลา) ทำให้เมื่อโค้ดมีบั๊กจะยึดทั้งสายและล็อกตารางค้างไปตลอดกาล | ตั้งค่า `idle_in_transaction_session_timeout = '15s'` หรือ `'30s'` เสมอในสภาพแวดล้อม Production |
+| **การKill โปรเซสระดับ Linux** | เข้าเครื่องเซิร์ฟเวอร์แล้วรัน `kill -9 <pid>` ใส่โปรเซสของ PostgreSQL โดยตรง! | ห้ามใช้ `kill -9` เด็ดขาด (เพราะจะทำให้ Shared Memory เสียหายและบังคับให้ Postgres รีสตาร์ททั้งคลัสเตอร์) ให้ใช้ `pg_terminate_backend()` เท่านั้น |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `pg_cancel_backend(pid)` ก่อนเมื่อ:** พบคิวรี `SELECT` ที่รันช้าผิดปกติและต้องการยกเลิกเฉพาะคิวรีนั้นโดยไม่ทำให้ Connection Pool ของแอปพลิเคชันหลุด
+- **ควรใช้ `pg_terminate_backend(pid)` เมื่อ:** โปรเซสค้างอยู่ในสถานะ `idle in transaction` (ซึ่งไม่ได้กำลังรันคิวรีอยู่ ดังนั้น `pg_cancel_backend` จะไม่มีผล) จึงต้องสั่งตัดสายเพื่อปลดล็อกตารางและคืนโควตา Connection
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ในตาราง `pg_stat_activity` สถานะ `idle` กับ `idle in transaction` แตกต่างกันอย่างไร และสถานะใดที่เป็นอันตรายต่อระบบ Production?**
+  - **แนวคำตอบ:**
+    - `idle` คือสถานะปกติของ Connection ใน Pool ที่เปิดรอรับคำสั่งอยู่เฉยๆ โดยไม่ได้เปิด Transaction ค้างไว้ ไม่มีการถือ Lock ใดๆ และหากใช้ PgBouncer โหมด Transaction สายเหล่านี้สามารถนำไปหมุนเวียนให้คนอื่นใช้ได้ทันที
+    - ส่วน `idle in transaction` คือสถานะอันตรายที่โปรเซสเปิด `BEGIN` ค้างไว้แต่หยุดส่งคำสั่ง ซึ่งจะยึดสายไว้ไม่ยอมปล่อย ถือล็อกแถวที่แก้ไขไว้จนคนอื่นแก้ต่อไม่ได้ และบล็อกการทำงานของ Autovacuum ทั่วทั้งฐานข้อมูล
+- **Q2: ทำไมผู้ดูแลระบบจึงห้ามใช้คำสั่ง `kill -9 <pid>` ของ Linux เพื่อฆ่าโปรเซสของ PostgreSQL ที่ค้างอยู่โดยเด็ดขาด และควรใช้วิธีใดแทน?**
+  - **แนวคำตอบ:** เพราะโปรเซสย่อยทั้งหมดของ PostgreSQL แชร์หน่วยความจำร่วมกัน (Shared Buffers / Locks) หากโปรเซสตัวหนึ่งถูก `kill -9` (`SIGKILL`) อย่างกะทันหันในขณะที่กำลังแก้ไขข้อมูลใน Shared Memory อยู่ โปรเซสหลัก (`postmaster`) จะไม่มั่นใจว่าข้อมูลในหน่วยความจำส่วนกลางเสียหายหรือไม่ จึงต้องทำการ **สั่งหยุดโปรเซสของลูกค้าคนอื่นทั้งหมดทันทีแล้วเข้าสู่โหมด Crash Recovery** ทำให้ฐานข้อมูลล่มทั้งระบบ วิธีที่ถูกต้องคือต้องใช้ฟังก์ชัน SQL `SELECT pg_terminate_backend(pid);` (ซึ่งส่งสัญญาณ `SIGTERM` ให้โปรเซสทำความสะอาด Shared Memory และปลดล็อกอย่างปลอดภัยก่อนปิดตัวเอง)
+
+---

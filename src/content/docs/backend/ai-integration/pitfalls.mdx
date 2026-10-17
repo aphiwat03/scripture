@@ -1,0 +1,48 @@
+---
+title: Anti-patterns
+category: BACKEND
+parentTitle: AI Integration
+version: Groq SDK & Llama 3.3
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การเรียกใช้ Groq API จากฝั่ง Frontend โดยตรง (`dangerouslyAllowBrowser: true`)**:
+   ทำให้ `GROQ_API_KEY` หลุดสู่สาธารณะในทันทีที่เปิดหน้าเว็บ ต้องเรียกผ่าน NestJS Backend เสมอ
+2. **การไม่กำหนด `timeout` และ `max_tokens` ในการเรียก `chat.completions.create()`**:
+   ทำให้เซิร์ฟเวอร์เสี่ยงต่ออาการ Connection Hanging เมื่อเครือข่ายมีปัญหา และเสี่ยงต่อการสูญเสียโควตา Token เกินจำเป็น
+3. **การเปิด `response_format: { type: 'json_object' }` แต่ลืมใส่คำว่า `"JSON"` ใน Prompt**:
+   จะทำให้ Groq API ปฏิเสธคำขอด้วยสถานะ `400 Bad Request` ทันที
+4. **การปล่อยให้โมเดล AI แต่งข้อมูลสินค้าหรือราคาขึ้นมาเอง (Un-grounded Generation)**:
+   หากไม่ดึงข้อมูล `Product` จริงจากฐานข้อมูล PostgreSQL ไปใส่ใน Prompt โมเดลอาจแนะนำเนื้อหรือราคาที่ไม่มีอยู่จริงในร้าน
+5. **การส่งข้อมูลส่วนบุคคล (PII) ของลูกค้าไปใน Prompt**:
+   เช่น การส่ง `JSON.stringify(order)` ทั้งก้อนที่มีทั้งชื่อ เบอร์โทร และที่อยู่ของลูกค้าออกไปให้โมเดลภายนอกทั้งที่ต้องการแค่สรุปรายการหั่นเนื้อ
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+- [ ] ตรวจสอบชื่อโมเดลที่รองรับล่าสุด (เช่น `llama-3.1-8b-instant`) กับเอกสารทางการของ Groq (`https://console.groq.com/docs/models`) และเก็บชื่อโมเดลไว้ใน `.env`
+- [ ] เก็บรักษา `GROQ_API_KEY` ไว้ที่ฝั่ง NestJS Backend เท่านั้น และตรวจสอบด้วย `configService.getOrThrow()`
+- [ ] จำกัดความยาวของข้อความขาเข้าจากผู้ใช้ด้วย `@MaxLength()` ใน DTO เสมอ
+- [ ] แยก `system` prompt และ `user` prompt ออกจากกันอย่างชัดเจน พร้อมทำ Delimiter Isolation (`<customer_note>`)
+- [ ] ใช้ `response_format: { type: 'json_object' }` (พร้อมระบุคำว่า `JSON` ใน Prompt) และตรวจผลลัพธ์ด้วย `class-validator` ก่อนนำไปใช้งาน
+- [ ] กำหนด `timeout`, `maxRetries`, และ `max_tokens` ทุกครั้งที่เรียกใช้ Groq SDK
+- [ ] มีกลไก Graceful Fallback คืนค่าข้อมูลสำรองจากฐานข้อมูลเมื่อ Groq API เกิด Timeout หรือติด Rate Limit (`429`)
+- [ ] บันทึก Audit Log ของการใช้ Token (`promptTokens`, `completionTokens`, `latencyMs`) เพื่อติดตามต้นทุนและตรวจสอบความปลอดภัย
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อสามารถผสานความสามารถของ Groq AI (Llama 3.1 8B) เข้ากับระบบ NestJS 11 ได้อย่างปลอดภัยและพร้อมใช้งานจริงแล้ว แนะนำให้ศึกษาต่อในหัวข้อต่อไปนี้เพื่อความสมบูรณ์ของระบบ:
+
+1. **การรักษาความปลอดภัยและการตรวจสอบข้อมูลขาเข้า**: ทบทวนการตั้งค่า Rate Limiting (`@nestjs/throttler`), การป้องกันช่องโหว่ระดับ API และการตรวจข้อมูลด้วย DTO ที่ [Security](/docs/backend/security) และ [Validation](/docs/backend/validation)
+2. **การดึงข้อมูลสินค้าและคำสั่งซื้อด้วย Prisma ORM**: ดูวิธีการดึงข้อมูล `Product` และ `Order` อย่างมีประสิทธิภาพเพื่อนำมาใช้เป็น Context ให้ AI ที่ [Prisma ORM](/docs/backend/prisma-orm) และ [Query Performance](/docs/database/query-performance)
+3. **การทำเอกสาร API และการบรรจุระบบลง Container**: ศึกษากำหนด Schema ใน Swagger และการตั้งค่า Environment Variables บน Docker ที่ [Swagger](/docs/backend/swagger) และ [Docker](/docs/backend/docker)
+4. **การเขียนชุดทดสอบสำหรับระบบที่เชื่อมต่อ AI**: เรียนรู้วิธีการทำ Mock Service สำหรับ `GroqService` เพื่อรัน Unit Test และ Integration Test ได้อย่างรวดเร็วโดยไม่ต้องต่ออินเทอร์เน็ตที่ [Jest](/docs/testing/jest) และ [Backend Testing](/docs/testing/backend-testing)

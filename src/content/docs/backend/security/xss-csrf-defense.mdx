@@ -1,0 +1,167 @@
+---
+title: XSS CSRF Defense
+category: BACKEND
+parentTitle: Security
+version: OWASP Top 10 API
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในการออกแบบระบบความปลอดภัยของเว็บแอปพลิเคชัน ช่องโหว่ฝั่งไคลเอนต์ที่เชื่อมโยงกับ Backend มากที่สุดคือ **XSS** และ **CSRF**:
+1. **XSS (Cross-Site Scripting)**: ผู้โจมตีฝังโค้ด JavaScript อันตรายลงในข้อมูล (เช่น พิมพ์ `<script>...</script>` ลงในช่องหมายเหตุการหั่นเนื้อสเต็ก หรือชื่อผู้รับสินค้า) เมื่อผู้ดูแลระบบหรือลูกค้ารายอื่นเปิดดูหน้าเว็บ โค้ดนั้นจะถูกรันบนเบราว์เซอร์ของเหยื่อ
+   - **ความเชื่อมโยงกับ Cookie**: หากเราเก็บ JWT ไว้ใน `localStorage` โค้ด XSS จะขโมย Token ออกไปได้ทันที แต่ถ้าเราเก็บใน **`HttpOnly Cookie`** โค้ด JavaScript ของ XSS จะไม่สามารถอ่านค่า Cookie ออกไปได้เลย!
+2. **CSRF (Cross-Site Request Forgery)**: เมื่อเราใช้ Cookie ในการยืนยันตัวตน เบราว์เซอร์จะแนบ Cookie ไปกับทุกคำขอที่ยิงไปยังโดเมน `api.smartbutcher.co.th` โดยอัตโนมัติ ผู้โจมตีจึงสร้างเว็บหลอก (เช่น `evil-wagyu-promo.com`) ที่แอบยิงคำขอข้ามโดเมนมาสั่งซื้อเนื้อหรือเปลี่ยนที่อยู่จัดส่งในนามของเหยื่อที่ยังล็อกอินค้างไว้
+   - **ความเชื่อมโยงกับ Cookie**: เราป้องกัน CSRF ได้ด้วยการตั้งค่า Cookie `SameSite=Lax` หรือ `SameSite=Strict`, การบังคับใช้ JSON Content-Type (`application/json`) ร่วมกับ Strict CORS, และการใช้ **Double-Submit Cookie Pattern (`X-CSRF-Token`)**
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+กลไก **Stateless Double-Submit Cookie Pattern (HMAC-Signed CSRF Token)** ทำงานโดยไม่ต้องพึ่งพา Server Session:
+1. เซิร์ฟเวอร์สร้างค่าสุ่ม `csrfToken` (ผูกกับรหัสผู้ใช้ด้วย HMAC) แล้วส่งให้ไคลเอนต์ผ่าน Cookie ที่อนุญาตให้ JavaScript บนโดเมนตัวเองอ่านค่าได้ (`httpOnly: false`, `sameSite: 'strict'`) หรือส่งผ่าน Endpoint เริ่มต้น
+2. เมื่อ Frontend (Next.js) ยิงคำขอที่เปลี่ยนแปลงข้อมูล (`POST`, `PUT`, `PATCH`, `DELETE`) โค้ด Frontend จะอ่านค่าจาก Cookie นั้นมาใส่ใน HTTP Header พิเศษชื่อ **`X-CSRF-Token`**
+3. เนื่องจากกฎ **Same-Origin Policy** ของเบราว์เซอร์ เว็บไซต์แปลกปลอม (`evil.com`) จะไม่สามารถอ่านค่า Cookie ของ `smartbutcher.co.th` มาใส่ใน Header `X-CSRF-Token` ได้เลย! เมื่อ Guard บนเซิร์ฟเวอร์เปรียบเทียบค่าใน Header กับค่าใน Cookie ว่าตรงกัน จึงมั่นใจได้ 100% ว่าคำขอนั้นมาจากหน้าเว็บจริงของเราเอง
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสร้าง Stateless CSRF Protection Guard ด้วย Double-Submit Pattern (พื้นฐาน)
+```typescript filename="src/common/security/csrf.guard.ts"
+import {
+  Injectable,
+  CanActivate,
+  ExecutionContext,
+  ForbiddenException,
+} from '@nestjs/common';
+import { Request, Response } from 'express';
+import * as crypto from 'crypto';
+
+export const CSRF_COOKIE_NAME = 'sb_csrf_token';
+export const CSRF_HEADER_NAME = 'x-csrf-token';
+
+@Injectable()
+export class CsrfProtectionGuard implements CanActivate {
+  private readonly SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+  canActivate(context: ExecutionContext): boolean {
+    const http = context.switchToHttp();
+    const req = http.getRequest<Request>();
+    const res = http.getResponse<Response>();
+
+    const cookies = req.cookies as Record<string, string> | undefined;
+    let csrfCookieValue = cookies?.[CSRF_COOKIE_NAME];
+
+    // หากยังไม่มี CSRF Cookie ให้สร้างและแนบกลับไปพร้อมกับคำขอ GET
+    if (!csrfCookieValue) {
+      csrfCookieValue = crypto.randomBytes(32).toString('hex');
+      res.cookie(CSRF_COOKIE_NAME, csrfCookieValue, {
+        httpOnly: false, // ต้องเป็น false เพื่อให้ Frontend ของเราอ่านไปใส่ใน Header X-CSRF-Token ได้
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict',
+        path: '/',
+      });
+    }
+
+    // ข้ามการตรวจสอบสำหรับ Safe Methods (GET, HEAD, OPTIONS)
+    if (this.SAFE_METHODS.has(req.method)) {
+      return true;
+    }
+
+    const csrfHeaderValue = req.headers[CSRF_HEADER_NAME];
+    if (
+      !csrfHeaderValue ||
+      typeof csrfHeaderValue !== 'string' ||
+      csrfHeaderValue.length !== csrfCookieValue.length
+    ) {
+      throw new ForbiddenException({
+        code: 'CSRF_TOKEN_MISMATCH',
+        message: 'คำขอถูกปฏิเสธเนื่องจากไม่พบรหัสป้องกัน CSRF ที่ถูกต้อง (Invalid CSRF Token)',
+      });
+    }
+
+    // เปรียบเทียบแบบ Constant-time ป้องกัน Timing Attack
+    const isValid = crypto.timingSafeEqual(
+      Buffer.from(csrfCookieValue, 'utf8'),
+      Buffer.from(csrfHeaderValue, 'utf8'),
+    );
+
+    if (!isValid) {
+      throw new ForbiddenException({
+        code: 'CSRF_TOKEN_MISMATCH',
+        message: 'รหัสป้องกัน CSRF ไม่ตรงกับเซสชันปัจจุบัน',
+      });
+    }
+
+    return true;
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การทำ HTML/Script Sanitization สำหรับข้อความหมายเหตุการตัดแต่งเนื้อเพื่อป้องกัน Stored XSS (ขั้นสูง)
+```typescript filename="src/common/security/text-sanitizer.util.ts"
+import { Transform } from 'class-transformer';
+
+// ฟังก์ชันล้างแท็ก HTML อันตรายและควบคุมอักขระพิเศษก่อนบันทึกลงฐานข้อมูล (ป้องกัน Stored XSS)
+export function sanitizePlainText(input: unknown): unknown {
+  if (typeof input !== 'string') {
+    return input;
+  }
+
+  return (
+    input
+      // 1. ลบแท็ก <script>...</script> และแท็ก HTML ทั้งหมดออก
+      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+      .replace(/<\/?[^>]+(>|$)/g, '')
+      // 2. ลบโปรโตคอลอันตราย เช่น javascript: หรือ data:text/html
+      .replace(/javascript\s*:/gi, '')
+      // 3. ตัดช่องว่างหัวท้ายและจำกัดอักขระควบคุมที่มองไม่เห็น
+      .trim()
+  );
+}
+
+// Custom Decorator สำหรับแปะบนฟิลด์ข้อความใน DTO เพื่อล้างโค้ดอันตรายอัตโนมัติ
+export function SanitizeText() {
+  return Transform(({ value }) => sanitizePlainText(value));
+}
+```
+
+```typescript filename="src/modules/orders/dto/butcher-note.dto.ts"
+import { IsString, MaxLength } from 'class-validator';
+import { SanitizeText } from '../../../common/security/text-sanitizer.util';
+
+export class ButcherCuttingNoteDto {
+  @SanitizeText()
+  @IsString()
+  @MaxLength(300)
+  chefInstructionNote!: string; // เช่น "หั่นความหนา 2.5 ซม. แยกแพ็คสูญญากาศชิ้นละ 1 แพ็ค"
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/common/security/cookie-csrf-comparison.ts"
+// ❌ ผิด (Anti-pattern): ตั้งค่า Cookie เป็น sameSite: 'none' โดยไม่มี CSRF Guard และอนุญาตให้ส่งข้อมูลผ่าน Form URL-Encoded โดยไม่เช็ค Content-Type
+export const INSECURE_COOKIE_OPTIONS = {
+  httpOnly: false, // เสี่ยงต่อ XSS ขโมย Token!
+  secure: false,   // เสี่ยงต่อการถูกดักฟังกลางทางบน Wi-Fi สาธารณะ!
+  sameSite: 'none' as const, // เปิดประตูให้เว็บอื่นยิง CSRF ข้ามโดเมนได้ทันที!
+};
+
+// ✅ ถูก (Best Practice): ใช้ HttpOnly + Secure + SameSite=Lax/Strict สำหรับ Auth Token
+// ร่วมกับ Double-Submit CSRF Header (X-CSRF-Token) สำหรับทุก Mutation Request
+export const SECURE_AUTH_COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: true,
+  sameSite: 'lax' as const,
+};
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ CSRF Protection (`SameSite` Cookie + Custom Header `X-CSRF-Token`) เมื่อ**: ระบบยืนยันตัวตนใช้ Cookie (`HttpOnly Cookie`) ในการแนบสิทธิ์เข้าสู่ API
+- **ไม่จำเป็นต้องใช้ CSRF Token เมื่อ**: Endpoint นั้นรับเฉพาะ Bearer Token ผ่าน Header `Authorization: Bearer <token>` ล้วนๆ (เช่น API สำหรับ Mobile App โดยเฉพาะที่ไม่ได้อ่านค่าจาก Cookie เลย) เพราะเบราว์เซอร์ไม่สามารถแนบ Header `Authorization` ข้ามเว็บไซต์เองโดยอัตโนมัติได้
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ในกลไก Double-Submit Cookie ทำไมเราถึงต้องตั้งค่าให้ CSRF Cookie มี `httpOnly: false` ในเมื่อเราถูกสอนมาตลอดว่า Cookie ที่ปลอดภัยต้องเป็น `httpOnly: true`?
+   - **แนวคำตอบ**: เพราะเราต้องแยกหน้าที่ของ Cookie ทั้ง 2 ตัวออกจากกัน:
+     1. **Auth Cookie (`sb_access_token`)**: เก็บ JWT ที่ใช้ยืนยันตัวตน ตัวนี้ **ต้องเป็น `httpOnly: true` เสมอ** เพื่อห้าม JavaScript อ่านเด็ดขาด
+     2. **CSRF Cookie (`sb_csrf_token`)**: เก็บเพียงค่าสุ่มอ้างอิงที่ไม่ได้มีสิทธิ์เข้าถึงข้อมูลด้วยตัวเอง แต่มีไว้เพื่อให้โค้ด JavaScript บนโดเมนที่ถูกต้องของเราอ่านค่าไปแนบใส่ใน HTTP Header `X-CSRF-Token` เพื่อพิสูจน์ว่าคำขอถูกยิงมาจาก Origin เดียวกัน (เนื่องจากเว็บไซต์แปลกปลอมข้ามโดเมนไม่สามารถอ่าน Cookie ตัวนี้และไม่สามารถแนบ Custom Header ข้ามโดเมนโดยไม่ผ่าน CORS Preflight ได้)
+2. **คำถาม**: การที่ API ของเรารับข้อมูลเฉพาะ `Content-Type: application/json` (ไม่อนุญาต `application/x-www-form-urlencoded` หรือ `text/plain`) ช่วยลดความเสี่ยงของ CSRF ได้อย่างไร?
+   - **แนวคำตอบ**: เพราะ HTML `<form>` มาตรฐานที่แฮกเกอร์ใช้ทำ CSRF สามารถส่งได้เฉพาะ `application/x-www-form-urlencoded`, `multipart/form-data`, และ `text/plain` เท่านั้น (เรียกว่า Simple Requests ที่ไม่ติด CORS Preflight) หากแฮกเกอร์พยายามใช้ `fetch` ส่ง `Content-Type: application/json` ข้ามโดเมน เบราว์เซอร์จะบังคับยิงคำขอ `OPTIONS` (CORS Preflight) ไปถามเซิร์ฟเวอร์ของเราก่อนเสมอ และเมื่อเซิร์ฟเวอร์ไม่อนุญาต Origin ของแฮกเกอร์ เบราว์เซอร์ก็จะบล็อกคำขอจริงทันที
+
+---

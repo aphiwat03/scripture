@@ -1,0 +1,75 @@
+---
+title: Anti-patterns
+category: TESTING & QUALITY
+parentTitle: Jest
+version: Jest v29 & ts-jest
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+ในการตรวจสอบชุดทดสอบ Jest ระดับ Enterprise ของระบบ **Smart Butcher Marketplace** สถาปนิกซอฟต์แวร์ระดับ Senior มักพบ Anti-patterns สำคัญดังต่อไปนี้:
+
+### 1. The Liar Test (False Positive จากการลืมใส่ `await`)
+- **พฤติกรรม:** เขียน `expect(promiseFunction()).rejects.toThrow()` โดยลืมใส่คำว่า `await` ด้านหน้า
+- **ผลกระทบ:** ตัวฟังก์ชันคืนค่าเป็น Promise ที่ยังไม่ได้ Resolve ตัว Jest จะประเมินว่าการทดสอบผ่านไปแล้ว เทสต์นี้จะ "เขียวตลอดกาล" แม้ฟังก์ชันจริงในระบบจะพังยับเยิน
+- **แนวทางแก้ไข:** เติม `async/await` เสมอ และติดตั้งกฎ ESLint `jest/valid-expect` เพื่อดักจับข้อผิดพลาดนี้ตั้งแต่จังหวะพิมพ์โค้ด
+
+### 2. The Leaky Cauldron (Test Pollution จากการแชร์ Mutable State)
+- **พฤติกรรม:** การประกาศตัวแปร Array หรือ Object ขนาดใหญ่ไว้นอก `describe` แล้วให้ทุก `it` เข้าไป `push` หรือแก้ไขค่าในตัวแปรเดียวกัน
+- **ผลกระทบ:** เคสทดสอบที่ 5 จะผ่านได้ก็ต่อเมื่อเคสที่ 1, 2, 3, 4 ทำงานเรียบร้อยแล้วเท่านั้น เมื่อสั่งรันเทสต์แบบสุ่มลำดับหรือรันแยกไฟล์เดี่ยวๆ เทสต์จะล้มเหลวทันที (Flaky Test)
+- **แนวทางแก้ไข:** สร้าง Fixture ใหม่ทั้งหมดใน `beforeEach` เสมอ ห้ามแชร์ Mutable State ข้ามเคสการทดสอบเด็ดขาด
+
+### 3. The Over-Mocker (Mock ทุกอย่างจนไม่ได้ทดสอบอะไรจริง)
+- **พฤติกรรม:** การสั่ง `jest.mock()` ทุกคลาส แม้กระทั่ง Entity เล็กๆ, ฟังก์ชันคำนวณราคา, หรือ Utility ภายใน Service เดียวกัน
+- **ผลกระทบ:** ชุดทดสอบกลายเป็นการ Assert "สิ่งที่นักพัฒนาคิดว่าจะเกิดขึ้น" ไม่ใช่พฤติกรรมจริงของระบบ เมื่อมีการ Refactor โค้ดภายใน แต่ Business Output ยังเหมือนเดิม เทสต์จะพังทั้งหมด (Fragile Tests) และเมื่อระบบมีบั๊กตรรกะจริง เทสต์กลับไม่เตือน
+- **แนวทางแก้ไข:** Mock เฉพาะ External I/O Boundaries (Database, Third-party HTTP, S3, Email) และปล่อยให้ Pure Business Logic ทำงานจริง
+
+### 4. The Snapshot Hoarder (การสะสม Snapshot ไร้สาระ)
+- **พฤติกรรม:** สั่ง `expect(everything).toMatchSnapshot()` กับทุกอย่าง ทั้ง HTML ก้อนใหญ่, DOM Tree ทั้งหน้าจอ, หรือข้อมูลที่เปลี่ยนบ่อย
+- **ผลกระทบ:** เกิดอาการ **Snapshot Fatigue** เมื่อทีมงานต้องพบกับ Snapshot พังทุกสัปดาห์ จะไม่มีใครอ่าน Diff อีกต่อไป และทุกคนจะพร้อมใจกันกด `jest -u` เพื่อให้งานเสร็จ ทำให้ระบบสูญเสียเครื่องมือตรวจสอบความถูกต้องไปโดยสิ้นเชิง
+- **แนวทางแก้ไข:** ใช้ Snapshot อย่างจำกัดเฉพาะ Fixed Data Contracts และหลีกเลี่ยงการทำ Snapshot กับข้อมูล UI ที่ไม่แน่นอน
+
+### 5. The Ghost Process (ละเลย Open Handles จน Jest ปิดไม่ลง)
+- **พฤติกรรม:** เปิด Database Connection Pool หรือตั้ง `setInterval` ทิ้งไว้ใน Service แต่ไม่มีการปิดใน `afterAll`
+- **ผลกระทบ:** บน CI Process ของ Jest จะค้างเติ่งนับสิบนาทีจนระบบติด Timeout สิ้นเปลืองงบประมาณ CI Runners
+- **แนวทางแก้ไข:** สั่งรัน `jest --detectOpenHandles` เพื่อค้นหาตำแหน่งที่ลืมปิด Connection แล้วจัดการ Clean Up ให้เรียบร้อยใน Lifecycle Hooks
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+ก่อนนำชุดทดสอบ Jest ขึ้นสู่สภาพแวดล้อม CI/CD ของระบบ **Smart Butcher Marketplace** ให้ตรวจสอบความสมบูรณ์ตามรายการนี้:
+
+- [ ] **Descriptive Naming:** ทุกเคสทดสอบตั้งชื่อเป็นประโยคภาษาอังกฤษเชิงพฤติกรรม (`it('should do X when Y')`) ชัดเจน ปราศจากการตั้งชื่อแบบ `test 1`, `test 2`
+- [ ] **AAA Pattern Enforced:** โครงสร้างภายในแต่ละ Test Case ถูกจัดระเบียบตามหลัก **Arrange - Act - Assert** ชัดเจน
+- [ ] **State Cleanliness:** มีการใส่ `clearMocks: true` ใน `jest.config.ts` หรือเรียก `jest.clearAllMocks()` / `jest.restoreAllMocks()` ใน `afterEach`
+- [ ] **No Floating Point Bashing:** ทุกการ Assert ที่เกี่ยวข้องกับเงินและน้ำหนักเนื้อสัตว์ใช้ `toBeCloseTo()` ไม่ใช้ `toBe()` เพื่อป้องกันปัญหา IEEE 754
+- [ ] **Strict Typing:** ชุดทดสอบใช้ TypeScript Strict Mode ปราศจากการใช้ `any` และมีการใช้ `jest.Mocked<T>` เพื่อ Type-safe Mocks
+- [ ] **Async Awaited:** ทุกการทดสอบที่เป็น Asynchronous มีการใส่คีย์เวิร์ด `await` ครบถ้วน โดยเฉพาะหน้า `expect(...).rejects.toThrow()`
+- [ ] **No Leaky Timers:** การใช้งาน `jest.useFakeTimers()` มีการคืนค่าด้วย `jest.useRealTimers()` ใน `afterEach` เสมอ
+- [ ] **Proper Module Mocking:** การเรียกใช้ `jest.mock()` มีการปฏิบัติตามกฎ Hoisting และไม่มีการอ้างอิงตัวแปรนอก Scope โดยไม่ตั้งใจ
+- [ ] **Path Aliases Sync:** ค่าใน `moduleNameMapper` บน `jest.config.ts` ตรงกับ `paths` ใน `tsconfig.json` ครบทุกเส้นทาง
+- [ ] **CI Resource Optimization:** มีการระบุ `--maxWorkers=2` หรือ `--runInBand` ในสคริปต์ทดสอบบน CI เพื่อป้องกัน Memory Thrashing
+- [ ] **Branch Coverage Targets:** มีการกำหนด `coverageThreshold` ที่เน้น % Branch Coverage ไม่ใช่เพียงแค่ Line Coverage
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+หลังจากเข้าใจแกนหลัก กลไกการ Matcher, Mocking และ Lifecycle ของ Jest อย่างลึกซึ้งแล้ว ขอแนะนำให้ศึกษาการนำ Jest ไปประยุกต์ใช้งานในเลเยอร์เฉพาะทางตามลำดับดังนี้:
+
+<Callout type="tip" title="ศึกษาต่อในหัวข้อถัดไป">
+1. **การทดสอบฝั่ง Backend เชิงลึก (Controller, Service, Repository, E2E HTTP):**  
+   👉 **[Backend Testing (NestJS + Supertest)](/docs/testing/backend-testing)** — เรียนรู้วิธีการใช้ Jest ร่วมกับ `@nestjs/testing` Module, การทำ Dependency Injection Mocking สำหรับ Service, และการยิงจำลอง HTTP Request ทดสอบ REST APIs ด้วย Supertest
+
+2. **การทดสอบฝั่ง Frontend เชิงลึก (Component, Hooks, User Events):**  
+   👉 **[Frontend Testing (React Testing Library)](/docs/testing/frontend-testing)** — เรียนรู้วิธีการนำ Jest มาทดสอบ React Components ตามปรัชญา "ทดสอบในมุมมองของผู้ใช้งานจริง", การจำลอง User Interaction ด้วย `@testing-library/user-event`, และการดักจับ Custom Hooks
+
+3. **การทดสอบระบบแบบครบวงจรจากหน้าจอสู่ฐานข้อมูล:**  
+   👉 **[E2E Testing (Playwright)](/docs/testing/playwright)** — ก้าวข้าม Unit Test ไปสู่การควบคุม Real Browser เพื่อทดสอบเส้นทางสั่งซื้อเนื้อดรายเอจตั้งแต่เปิดเว็บจนกระทั่งพิมพ์ใบเสร็จสำเร็จ
+</Callout>

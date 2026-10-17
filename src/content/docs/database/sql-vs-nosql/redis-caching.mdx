@@ -1,0 +1,176 @@
+---
+title: Redis Caching
+category: DATABASE
+parentTitle: SQL vs NoSQL
+version: Polyglot Persistence
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ต่อให้เราปรับจูน **PostgreSQL 16** จนเร็วแค่ไหน การดึงข้อมูลจากฐานข้อมูลหลักก็ยังมีต้นทุนในการประมวลผล SQL และการอ่านดิสก์ หากหน้าร้านของ **Smart Butcher Marketplace** มีลูกค้า 50,000 คนเปิดเข้ามาดูหน้าแรกพร้อมกันเพื่อดูรายการ "เนื้อวากิวแนะนำประจำสัปดาห์" (ซึ่งข้อมูลเหมือนเดิมทุกประการสำหรับลูกค้าทุกคน) การปล่อยให้คิวรี `SELECT` แบบเดียวกันวิ่งไปกวน PostgreSQL 50,000 ครั้งต่อวินาทีถือเป็นการใช้ทรัพยากรที่สิ้นเปลืองอย่างยิ่ง
+
+เราจึงนำ **Redis (Remote Dictionary Server)** ซึ่งเป็นฐานข้อมูลแบบ **In-Memory Key-Value Data Structure Store** ที่เก็บข้อมูลทั้งหมดไว้ในหน่วยความจำหลัก (RAM) มาวางไว้ข้างหน้า เพื่อตอบสนองคำขอซ้ำๆ ด้วยความเร็วระดับ **ต่ำกว่า 1 มิลลิวินาที (Sub-millisecond Latency)** และรับภาระงานที่ต้องการความเร็วสูงและข้อมูลมีอายุสั้น (Ephemeral Data)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ทำไม Redis ถึงทำงานได้เร็วระดับแสนคำสั่งต่อวินาทีและทำหน้าที่ได้หลากหลาย?
+1. **In-Memory & Single-Threaded Event Loop Architecture:**
+   Redis เก็บข้อมูลใน RAM และใช้สถาปัตยกรรม **Single-Threaded Event Loop (ร่วมกับ I/O Multiplexing `epoll`/`kqueue`)** ในการประมวลผลคำสั่งหลัก ข้อดีที่คาดไม่ถึงของการใช้เธรดเดียวทำงานใน RAM คือ **ไม่มีการเสียเวลาทำ Context Switching และไม่ต้องมีการขอ Lock/Mutex ใดๆ เลย!** ทุกคำสั่งของ Redis จึงมีคุณสมบัติเป็น **Atomic Operation (ทำงานรวดเดียวจบไม่มีใครแทรกกลางได้)** โดยธรรมชาติ
+2. **โครงสร้างข้อมูลขั้นสูง (Rich In-Memory Data Structures):**
+   Redis ไม่ได้เก็บได้แค่ String ธรรมดา แต่มีโครงสร้างข้อมูลระดับ алгоритึมในตัว:
+   - `STRING`: เก็บ JSON Cache ของรายการสินค้า หรือใช้คำสั่ง `INCR` นับจำนวนการยิง API (Rate Limiting)
+   - `HASH`: เก็บข้อมูล Session ของผู้ใช้ หรือตะกร้าสินค้าชั่วคราว (`HSET cart:user_123 product_a5 2`)
+   - `LIST` & `STREAM`: ใช้สร้างระบบคิวงานเบื้องหลัง (Message Queue / BullMQ) เช่น คิวส่งอีเมลใบเสร็จหรือคิวแจ้งเตือนเชฟหั่นเนื้อ
+   - `SORTED SET (ZSET)`: เก็บอันดับสินค้าขายดีแบบเรียลไทม์ (Real-time Leaderboard) หรือทำ Sliding Window Rate Limiter
+3. **กลยุทธ์ Cache-Aside Pattern (Lazy Loading) & Cache Invalidation:**
+   ```text filename="docs/database/sql-vs-nosql.txt"
+   [ 1. แอปพลิเคชันเช็คข้อมูลใน Redis ก่อน: GET catalog:featured_wagyu ]
+            │
+            ├──► เจอข้อมูล (CACHE HIT - 0.3ms!) ──► ส่งคืนให้ลูกค้าทันที (ไม่ต้องกวน PostgreSQL เลย!)
+            │
+            └──► ไม่เจอ (CACHE MISS) ──► 2. คิวรีจาก PostgreSQL 16 (5ms)
+                                                  │
+                                                  ▼
+                                        3. นำผลลัพธ์มาเซฟลง Redis พร้อมตั้งเวลาหมดอายุ (SET ... EX 300)
+                                                  │
+                                                  ▼
+                                        4. ส่งข้อมูลคืนให้ลูกค้า
+   ```
+   และเมื่อแอดมินแก้ไขราคาเนื้อวากิวใน PostgreSQL 16 โค้ดจะต้องสั่ง **`DEL catalog:featured_wagyu` (Cache Invalidation)** ทันทีเพื่อให้ลูกค้าเห็นราคาใหม่ที่ถูกต้องเสมอ!
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การทำ Cache-Aside Pattern ร่วมกับ Cache Invalidation สำหรับหน้าแค็ตตาล็อกเนื้อพรีเมียม
+โค้ดบริการที่ใช้ `ioredis` คู่กับ `PrismaService` เพื่อลดภาระของ PostgreSQL 16 ลงกว่า 95% ในหน้ารายการสินค้ายอดนิยม พร้อมล้างแคชทันทีเมื่อมีการอัปเดตราคาสินค้า:
+
+```typescript filename="src/products/cached-catalog.service.ts"
+import { Injectable, Logger } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import Redis from 'ioredis';
+
+const FEATURED_WAGYU_CACHE_KEY = 'smart_butcher:catalog:featured_wagyu:v1';
+const CACHE_TTL_SECONDS = 300; // เก็บแคชไว้นาน 5 นาที (300 วินาที)
+
+@Injectable()
+export class CachedCatalogService {
+  private readonly logger = new Logger(CachedCatalogService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: Redis
+  ) {}
+
+  async getFeaturedWagyuProducts() {
+    // 1. พยายามอ่านจากหน่วยความจำ Redis ก่อน (ใช้เวลา < 0.5ms)
+    const cachedJson = await this.redis.get(FEATURED_WAGYU_CACHE_KEY);
+    if (cachedJson) {
+      return JSON.parse(cachedJson);
+    }
+
+    // 2. หากเป็น Cache Miss จึงค่อยวิ่งไปคิวรีจาก PostgreSQL 16
+    this.logger.debug('Cache miss for featured Wagyu. Querying PostgreSQL 16...');
+    const products = await this.prisma.product.findMany({
+      where: {
+        marblingScore: { gte: 9 },
+        stockWeightGr: { gt: 0 },
+      },
+      select: {
+        id: true,
+        sku: true,
+        name: true,
+        marblingScore: true,
+        pricePerKg: true,
+        stockWeightGr: true,
+        category: { select: { name: true, slug: true } },
+      },
+      orderBy: { marblingScore: 'desc' },
+      take: 20,
+    });
+
+    // 3. บันทึกผลลัพธ์ลง Redis พร้อมตั้งเวลาหมดอายุ (EX = Expire in seconds)
+    await this.redis.set(
+      FEATURED_WAGYU_CACHE_KEY,
+      JSON.stringify(products),
+      'EX',
+      CACHE_TTL_SECONDS
+    );
+
+    return products;
+  }
+
+  // 4. เมื่อแอดมินปรับราคาเนื้อหรือตัดสต็อก ต้องสั่งลบแคชทิ้งทันที (Cache Invalidation)
+  async updateProductPriceAndInvalidateCache(productId: string, newPricePerKg: number) {
+    const updated = await this.prisma.product.update({
+      where: { id: productId },
+      data: { pricePerKg: newPricePerKg },
+    });
+
+    // ล้างแคชเพื่อให้คำขอถัดไปดึงราคาใหม่ล่าสุดจาก PostgreSQL 16
+    await this.redis.del(FEATURED_WAGYU_CACHE_KEY);
+    return updated;
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การทำ Atomic Rate Limiting และ Distributed Flash-Sale Lock ด้วย Redis Lua Script
+เพื่อป้องกันบอทยิง API สั่งซื้อเนื้อวากิวลดราคารัวๆ (Rate Limiting) เราใช้คำสั่งรันภายใน **Redis Lua Script** ซึ่งรับประกันความเป็น Atomic 100% ในระดับไมโครวินาทีโดยไม่เกิด Race Condition:
+
+```typescript filename="src/security/redis-rate-limiter.service.ts"
+import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
+import Redis from 'ioredis';
+
+// สคริปต์ Lua ที่รันจบแบบ Atomic ในเธรดเดียวของ Redis:
+// เพิ่มตัวนับ +1 และถ้าเป็นครั้งแรกของรอบเวลา ให้ตั้งเวลาหมดอายุ (EXPIRE) ทันที
+const ATOMIC_RATE_LIMIT_LUA = `
+  local current = redis.call("INCR", KEYS[1])
+  if current == 1 then
+    redis.call("EXPIRE", KEYS[1], ARGV[1])
+  end
+  return current
+`;
+
+@Injectable()
+export class RedisRateLimiterService {
+  constructor(private readonly redis: Redis) {}
+
+  async enforceOrderRateLimit(userIdOrIp: string, maxRequests = 5, windowSeconds = 10) {
+    const rateLimitKey = `smart_butcher:ratelimit:checkout:${userIdOrIp}`;
+
+    const requestCount = (await this.redis.eval(
+      ATOMIC_RATE_LIMIT_LUA,
+      1,
+      rateLimitKey,
+      windowSeconds
+    )) as number;
+
+    if (requestCount > maxRequests) {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          message: `Too many checkout attempts. Allowed ${maxRequests} requests per ${windowSeconds} seconds.`,
+        },
+        HttpStatus.TOO_MANY_REQUESTS
+      );
+    }
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การตั้งเวลาหมดอายุ (TTL)** | สั่ง `redis.set(key, val)` โดยไม่ใส่เวลาหมดอายุ (`EX`) ทำให้ข้อมูลเก่าค้างเต็ม RAM จนเกิด Out of Memory | กำหนดค่า TTL (`EX <seconds>`) ให้กับทุกคีย์ที่เป็น Cache เสมอ และตั้งนโยบาย `maxmemory-policy allkeys-lru` |
+| **การใช้คำสั่งค้นหาคีย์บน Production** | รันคำสั่ง `KEYS *` บน Redis ที่มีคีย์อยู่ 5 ล้านตัว ทำให้ Single Thread ของ Redis ค้างไปหลายวินาทีจนเว็บล่ม | ห้ามใช้ `KEYS *` บน Production เด็ดขาด ให้ใช้คำสั่ง `SCAN` ที่ทยอยดึงทีละชุดโดยไม่บล็อกระบบแทน |
+| **การใช้ Redis เก็บข้อมูลการเงินหลัก** | เก็บประวัติการโอนเงิน (`payments`) ไว้ใน Redis เพียงที่เดียวโดยไม่บันทึกลง PostgreSQL | ใช้ Redis สำหรับข้อมูลชั่วคราวหรือ Cache เท่านั้น ส่วนข้อมูลหลัก (System of Record) ต้องอยู่ใน PostgreSQL เสมอ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Redis เมื่อ:** ต้องการทำ Caching ข้อมูลที่ถูกอ่านบ่อยแต่แก้ไขไม่บ่อย, จัดเก็บ User Sessions / Refresh Tokens, ทำระบบคิวงานเบื้องหลัง (BullMQ), ทำ Rate Limiting ป้องกัน API ถูกโจมตี และทำ Pub/Sub แจ้งเตือนแบบเรียลไทม์
+- **ไม่ควรใช้ Redis เมื่อ:** ข้อมูลมีขนาดใหญ่ระดับหลายร้อยกิกะไบต์ (เพราะค่าใช้จ่าย RAM แพงกว่า SSD มาก) หรือต้องการค้นหาข้อมูลด้วยเงื่อนไขซับซ้อนหลายคอลัมน์
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ในการทำ Rate Limiting ด้วย Redis ทำไมเราจึงควรใช้ Lua Script รวมคำสั่ง `INCR` และ `EXPIRE` เข้าด้วยกัน แทนที่จะเขียนแยกเป็น `await redis.incr(key)` แล้วตามด้วย `await redis.expire(key, 10)` ในโค้ด Node.js?**
+  - **แนวคำตอบ:** หากเขียนแยกเป็น 2 คำสั่งใน Node.js แล้วเกิดเหตุการณ์ที่เซิร์ฟเวอร์แอปพลิเคชันรีสตาร์ทหรือเครือข่ายหลุดหลังจากรัน `INCR` สำเร็จแต่ยังไม่ได้รัน `EXPIRE` คีย์นั้นจะกลายเป็นคีย์อมตะที่ไม่มีวันหมดอายุ (TTL = -1) ส่งผลให้ผู้ใช้งานคนนั้นถูกบล็อกออกจากระบบไปตลอดกาล! การรวมไว้ใน Lua Script บังคับให้ Redis รันทั้งสองคำสั่งแบบ Atomic ในขั้นตอนเดียว จึงไม่เกิดปัญหานี้เด็ดขาด
+- **Q2: ปัญหา Cache Stampede (หรือ Thundering Herd) คืออะไร และจะเกิดขึ้นกับระบบร้านค้าเมื่อใด?**
+  - **แนวคำตอบ:** เกิดขึ้นเมื่อคีย์แคชของหน้าที่มีคนเข้าดูพร้อมกันจำนวนมาก (เช่น หน้าสินค้า Flash Sale) หมดอายุ (TTL Expired) ลงในเสี้ยววินาทีที่มีผู้ใช้งาน 5,000 คนกดเข้ามาพอดี ทำให้ทั้ง 5,000 Requests เจอสถานะ Cache Miss พร้อมกันทั้งหมดและแห่กันยิงคิวรีทะลุเข้าไปหาฐานข้อมูล PostgreSQL พร้อมกันในเสี้ยววินาทีเดียวจนฐานข้อมูลล่ม วิธีป้องกันคือการใช้ Distributed Mutex Lock ให้มีเพียง 1 Request เท่านั้นที่เข้าไปดึงข้อมูลจาก Postgres มาเติมแคช หรือใช้เทคนิค Stale-While-Revalidate (สุ่มต่ออายุแคชก่อนหมดเวลาจริงเล็กน้อย)
+
+---

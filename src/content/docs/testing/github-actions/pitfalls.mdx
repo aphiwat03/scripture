@@ -1,0 +1,29 @@
+---
+title: Anti-patterns
+category: TESTING & QUALITY
+parentTitle: GitHub Actions
+version: GitHub Actions CI
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การใช้ `npm install` แทน `npm ci` บน GitHub Actions**: เปิดช่องให้แพ็กเกจถูกอัปเดตเวอร์ชันย่อยโดยไม่ตั้งใจและทำให้การติดตั้งบน CI ช้าลง
+2. **การไม่กำหนด `timeout-minutes` ใน GitHub Actions**: เมื่อเกิดอาการค้างในเทสต์หรือฐานข้อมูล ระบบจะปล่อยให้รันต่อเนื่องสูงสุดถึง 6 ชั่วโมงจนโควตา CI หมดเกลี้ยง
+
+---
+
+## 2. Checklist สรุป
+
+- [ ] ในไฟล์ GitHub Actions ใช้ `npm ci` คู่กับ `cache: 'npm'`, ตั้งค่า `concurrency` (`cancel-in-progress: true`) และกำหนด `timeout-minutes` ทุก Job
+- [ ] ตั้งค่า **PostgreSQL 16 Service Container** พร้อมระบุ `--health-cmd="pg_isready ..."` ก่อนรัน Migration และ E2E Tests
+- [ ] ตั้งค่า `actions/upload-artifact@v4` เพื่อเก็บรายงาน Playwright Report เมื่อเทสต์บน CI ล้มเหลว
+- [ ] เปิดใช้งาน **Branch Protection Rules** บนสาขา `main` โดยบังคับให้ CI ผ่านครบทุกด่านก่อนอนุญาตให้กด Merge
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+1. **[Git Hooks](/docs/testing/git-hooks)**: ดักจับข้อผิดพลาดก่อน Push ขึ้น GitHub
+2. **[Playwright](/docs/testing/playwright)**: การรัน E2E Tests บน GitHub Actions CI
+3. **[Docker](/docs/backend/docker)**: ต่อยอดสู่การ Build Production Container บน CI/CD Pipeline

@@ -1,0 +1,144 @@
+---
+title: Snapshots
+category: TESTING & QUALITY
+parentTitle: Jest
+version: Jest v29 & ts-jest
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+หากเปรียบเทียบการตรวจสอบในร้าน **Smart Butcher Marketplace**:
+- **Assertion ปกติ (`toBe`, `toEqual`)**: เปรียบเหมือน "ช่างตรวจสอบสเปก" เดินตรวจทีละจุด น้ำหนักตรงไหม ชนิดเนื้อตรงไหม
+- **Snapshot Testing (`toMatchSnapshot`)**: เปรียบเหมือน "การถ่ายภาพสแกน 3 มิติของก้อนเนื้อทั้งชิ้นเก็บไว้ในอัลบั้ม" ในการทดสอบครั้งถัดไป ระบบจะหยิบภาพถ่ายเดิมมาทาบกับชิ้นเนื้อใหม่ หากรูปทรง รอยบาก หรือตำแหน่งไขมันผิดเพี้ยนไปแม้แต่มิลลิเมตรเดียว ตัวระบบจะส่งเสียงเตือนว่าชิ้นเนื้อมีการเปลี่ยนแปลง
+
+Snapshot Testing ถูกออกแบบมาเพื่อตรวจสอบว่าข้อมูลโครงสร้างขนาดใหญ่ (เช่น เอกสารใบกำกับภาษีเต็มรูปแบบ, Response จาก GraphQL หรือ Complex DTOs) ไม่ถูกเปลี่ยนแปลงโดยไม่ตั้งใจ (Regression Guard)
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **ไฟล์จัดเก็บ Snapshot:** เมื่อรันเทสต์ครั้งแรก Jest จะแปลงข้อมูล (Serialization) เป็นข้อความ Text แล้วบันทึกลงในโฟลเดอร์ `__snapshots__/*.spec.ts.snap` ข้างๆ ไฟล์ทดสอบ
+2. **การเปรียบเทียบในรอบถัดไป:** ทุกครั้งที่รันเทสต์ Jest จะ Serialize ค่า Output ใหม่ แล้วนำไปเปรียบเทียบ Diff บรรทัดต่อบรรทัดกับ Snapshot ในไฟล์ `.snap`
+3. **Inline Snapshots (`toMatchInlineSnapshot`):** แทนที่จะแยกไฟล์ `.snap` Jest จะใช้ไลบรารีวิเคราะห์โค้ด (Prettier AST) เพื่อเขียนข้อความ Snapshot แทรกกลับเข้ามาในไฟล์ Source Code ของตัวเทสต์เองแบบอัตโนมัติ
+4. **Asymmetric Property Matchers in Snapshot:** หากข้อมูลมีฟิลด์จำพวก Dynamic UUID หรือ Date Timestamp เราสามารถระบุรูปร่างข้อมูลเฉพาะฟิลด์นั้นใน Snapshot ได้ เพื่อไม่ให้เทสต์พังทุกรอบ
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การใช้ Snapshot ตรวจสอบใบสั่งตัดเนื้อดรายเอจระดับพรีเมียม (Master Cutting Slip)
+การตรวจสอบโครงสร้าง DTO ใบสั่งงานของช่างแล่เนื้อ:
+
+```typescript filename="src/services/cutting-slip-generator.spec.ts"
+export interface MasterCuttingSlip {
+  slipNo: string;
+  orderId: string;
+  generatedDate: Date;
+  customerVipTier: 'SILVER' | 'GOLD' | 'BLACK_DIAMOND';
+  items: Array<{
+    lineNo: number;
+    cutName: string;
+    thicknessCm: number;
+    recommendedKnife: string;
+    agingDays: number;
+    packaging: string;
+  }>;
+  certification: {
+    inspectorCode: string;
+    halalCertified: boolean;
+    storageTempCelsius: number;
+  };
+}
+
+export function generateMasterCuttingSlip(orderId: string): MasterCuttingSlip {
+  return {
+    slipNo: `SLIP-${orderId.toUpperCase()}`,
+    orderId,
+    generatedDate: new Date(),
+    customerVipTier: 'BLACK_DIAMOND',
+    items: [
+      {
+        lineNo: 1,
+        cutName: 'Australian Wagyu MBS 9+ Ribeye',
+        thicknessCm: 4.0,
+        recommendedKnife: 'YAGI_240MM_CARBON_STEEL',
+        agingDays: 45,
+        packaging: 'VACUUM_SEALED_WITH_OXYGEN_ABSORBER',
+      },
+      {
+        lineNo: 2,
+        cutName: 'Kurobuta Pork Tomahawk',
+        thicknessCm: 3.5,
+        recommendedKnife: 'DEBA_HEAVY_BONE',
+        agingDays: 0,
+        packaging: 'BUTCHER_PAPER_WRAPPED',
+      },
+    ],
+    certification: {
+      inspectorCode: 'INSP-TH-7709',
+      halalCertified: true,
+      storageTempCelsius: 1.5,
+    },
+  };
+}
+
+describe('CuttingSlipGenerator - Snapshot Testing', () => {
+  it('should match master cutting slip structure with dynamic date property matcher', () => {
+    const slip = generateMasterCuttingSlip('ord-vip-007');
+
+    // ใช้ Snapshot ร่วมกับ Property Matcher ป้องกัน Timestamp ทำเทสต์พัง
+    expect(slip).toMatchSnapshot({
+      generatedDate: expect.any(Date), // ยกเว้นฟิลด์นี้ให้ตรวจเฉพาะชนิดข้อมูล
+    });
+  });
+
+  it('should verify packaging standard using inline snapshot', () => {
+    const packagingSpec = {
+      standard: 'ISO-22000-MEAT',
+      vacuumBarPressure: -0.98,
+      dryIcePreservation: true,
+    };
+
+    // Jest จะเติมข้อความในวงเล็บนี้ให้อัตโนมัติในครั้งแรกที่รันเทสต์
+    expect(packagingSpec).toMatchInlineSnapshot(`
+{
+  "dryIcePreservation": true,
+  "standard": "ISO-22000-MEAT",
+  "vacuumBarPressure": -0.98,
+}
+`);
+  });
+});
+```
+
+## 4. ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+### ❌ สิ่งที่ผิด: อัปเดต Snapshot แบบไม่คิด (`jest -u`) เมื่อเทสต์ล้มเหลว
+```bash filename="terminal.sh"
+# เมื่อมีคนแก้โค้ดคำนวณภาษีผิดพลาด ทำให้ Snapshot ไม่ตรง
+# นักพัฒนากดอัปเดตทันทีโดยไม่อ่าน Diff เพื่อให้เทสต์ผ่านไปเร็วๆ
+npm test -- -u
+# ผลลัพธ์: บั๊กการเงินถูกเซฟเป็น Snapshot มาตรฐานใหม่ นำไปสู่ความเสียหายบน Production!
+```
+
+### ✅ สิ่งที่ถูก: ตรวจสอบ Diff บรรทัดต่อบรรทัดก่อนกดยืนยันอัปเดต Snapshot
+```markdown filename="docs/testing/jest.txt"
+- "totalVat": 210.00,
++ "totalVat": 0.00,  <-- ตรวจพบว่าโค้ดทำบั๊ก ลืมคิด VAT! ต้องแก้ที่โค้ดจริง ไม่ใช่กด -u
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Snapshot Testing เมื่อ:**
+  - ตรวจสอบโครงสร้าง **API Response Contracts / DTOs** ขนาดใหญ่ที่มีความเสถียรแล้ว
+  - ตรวจสอบข้อความแจ้งเตือน Error Message ที่ยาวและมีฟอร์แมตหลายบรรทัด
+  - ตรวจสอบการแปลง AST หรือ SQL Query Generator
+- **ไม่ควรใช้ Snapshot Testing เมื่อ:**
+  - ข้อมูลมีขนาดเล็ก (เช่น ตัวเลขราคา 1 บรรทัด ควรใช้ `toBe(250)` ชัดเจนกว่า)
+  - ข้อมูลมีการเปลี่ยนแปลงตลอดเวลาและไม่มีรูปแบบตายตัว
+  - สภาพแวดล้อมที่ทีมงานมักกดยืนยัน `jest -u` โดยไม่อ่าน ทำให้เกิดปัญหา **Snapshot Fatigue** (สูญเสียความเชื่อมั่นในเทสต์)
+
+## 6. คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: อะไรคือความเสี่ยงหลักของการนำ Snapshot Testing มาใช้ในทีมขนาดใหญ่ และมีนโยบายป้องกันอย่างไร?**
+  - *แนวคำตอบ:* ความเสี่ยงสูงสุดคือ **Snapshot Fatigue** เมื่อชุดทดสอบมี Snapshot มากเกินไป เมื่อมีการแก้ไขโค้ดเล็กน้อยจะทำให้ Snapshot นับสิบไฟล์พังพร้อมกัน วิศวกรจะเริ่มไม่อ่าน Diff และกด `jest -u` ผ่านๆ ทำให้บั๊กหลุดรอดเข้าไปในระบบ นโยบายป้องกันระดับ Senior ได้แก่:
+    1. ห้ามใช้ Snapshot กับ UI Component Tree ขนาดยักษ์
+    2. ใช้ Snapshot เฉพาะ Contract หรือ Serialized Payload สำคัญ
+    3. บังคับทำ Code Review ไฟล์นามสกุล `*.snap` ใน Pull Request อย่างเข้มงวดเสมือนเป็นโค้ดโปรดักชัน
+- **Q2: Inline Snapshot แตกต่างจาก External Snapshot อย่างไร และมีข้อได้เปรียบอย่างไรในการพัฒนาซอฟต์แวร์?**
+  - *แนวคำตอบ:* External Snapshot จะบันทึกไฟล์แยกในโฟลเดอร์ `__snapshots__` ทำให้อ่านยากเพราะต้องเปิดสลับไฟล์ไปมา ส่วน Inline Snapshot จะใช้ AST Parser ทำการเขียนผลลัพธ์ Snapshot ฝังไว้ในไฟล์โค้ดทดสอบโดยตรง ข้อได้เปรียบคือผู้อ่านสามารถเห็น Input และ Expected Output อยู่ในหน้าจอเดียวกันทันทีตามหลัก Co-location ช่วยเพิ่ม Developer Experience (DX) และทำให้การทำ Code Review ทำได้ง่ายขึ้น
+
+---

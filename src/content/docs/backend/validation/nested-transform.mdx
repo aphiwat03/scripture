@@ -1,0 +1,225 @@
+---
+title: Nested Transform
+category: BACKEND
+parentTitle: Validation
+version: class-validator & Zod
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในระบบสั่งซื้อเนื้อพรีเมียม คำขอสร้างใบสั่งซื้อ (`POST /api/v1/orders`) ไม่ได้เป็นเพียง JSON ชั้นเดียวแบนๆ แต่มีโครงสร้างซ้อนกันหลายระดับ (Nested Structure) เช่น ภายใน `CreateOrderDto` จะมีอ็อบเจกต์ที่อยู่จัดส่ง `shippingAddress: ShippingAddressDto` และมีรายการเนื้อที่สั่งซื้อ `items: CreateOrderItemDto[]`
+
+การตรวจสอบข้อมูลซ้อนกันใน NestJS ต้องอาศัยการทำงานร่วมกันของ **2 Decorators จาก 2 ไลบรารีเสมอ** คือ:
+1. **`@ValidateNested()` (จาก `class-validator`)**: บอกให้ Validator มุดลงไปตรวจสอบกฎภายในอ็อบเจกต์ลูกด้วย (และถ้าเป็น Array ของอ็อบเจกต์ ต้องใส่ **`@ValidateNested({ each: true })`**)
+2. **`@Type(() => ChildDto)` (จาก `class-transformer`)**: บอกให้ Transformer รู้ว่าจะต้องแปลง Plain JSON ของอ็อบเจกต์ลูกนั้นให้เป็น Instance ของคลาสอะไร
+
+<Callout type="important" title="หลุมพรางอันดับ 1: ใส่ @ValidateNested แต่ลืมใส่ @Type">
+หากคุณแปะเฉพาะ @ValidateNested({ each: true }) บน items: CreateOrderItemDto[] โดยลืมแปะ @Type(() => CreateOrderItemDto) จาก class-transformer ตัว ValidationPipe จะไม่รู้ว่าสมาชิกใน Array คือคลาสอะไร (เพราะ TypeScript ลบ Type ของ Array ทิ้งตอน Compile) ส่งผลให้การตรวจสอบใน CreateOrderItemDto ไม่ทำงานเลยแม้แต่ข้อเดียว!
+</Callout>
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ทำไม TypeScript ถึงไม่บอกชนิดของ `items: CreateOrderItemDto[]` ให้ `class-transformer` รู้อัตโนมัติ?
+- เมื่อเปิด `emitDecoratorMetadata: true` ใน `tsconfig.json` ตัว TypeScript Compiler จะบันทึกชนิดของฟิลด์ลงใน `design:type`
+- สำหรับฟิลด์เดี่ยวอย่าง `shippingAddress: ShippingAddressDto` ค่า `design:type` คือ `ShippingAddressDto`
+- แต่สำหรับฟิลด์ที่เป็น Array อย่าง `items: CreateOrderItemDto[]` ค่า `design:type` ที่ TypeScript สร้างออกมาได้มีแค่คำว่า **`Array`** เท่านั้น! (ไม่ได้บอกว่าข้างใน `Array` คือ `CreateOrderItemDto`)
+- ดังนั้นเราจึงต้องระบุ `@Type(() => CreateOrderItemDto)` ด้วยตัวเองเสมอ เพื่อให้ `plainToInstance()` สร้างอินสแตนซ์ของ `CreateOrderItemDto` ให้กับสมาชิกทุกตัวใน Array ก่อนส่งเข้า `validate()`
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การทำ Nested Validation สำหรับ CreateOrderDto, ShippingAddressDto และ CreateOrderItemDto[] (พื้นฐาน)
+```typescript filename="src/modules/orders/dto/create-order.dto.ts"
+import {
+  IsString,
+  IsNotEmpty,
+  IsUUID,
+  IsInt,
+  IsEnum,
+  IsBoolean,
+  Min,
+  Max,
+  Matches,
+  ValidateNested,
+  IsArray,
+  ArrayMinSize,
+  ArrayMaxSize,
+  IsDefined,
+} from 'class-validator';
+import { Type, Transform } from 'class-transformer';
+import { PaymentMethod } from '@prisma/client';
+
+export enum MeatCutStyle {
+  STEAK_THICK_25MM = 'STEAK_THICK_25MM',
+  STEAK_MEDIUM_20MM = 'STEAK_MEDIUM_20MM',
+  YAKINIKU_5MM = 'YAKINIKU_5MM',
+  SHABU_THIN_2MM = 'SHABU_THIN_2MM',
+  WHOLE_SUBPRIMAL_BLOCK = 'WHOLE_SUBPRIMAL_BLOCK',
+}
+
+// 1. DTO ย่อยสำหรับที่อยู่จัดส่งรถห้องเย็น
+export class ColdChainShippingAddressDto {
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString({ message: 'ชื่อผู้รับสินค้าต้องเป็นข้อความ' })
+  @IsNotEmpty({ message: 'กรุณาระบุชื่อผู้รับสินค้า' })
+  recipientName!: string;
+
+  @IsString()
+  @Matches(/^0[689]\d{8}$/, {
+    message: 'เบอร์โทรศัพท์ผู้รับต้องเป็นเบอร์มือถือไทย 10 หลัก',
+  })
+  phoneNumber!: string;
+
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @IsNotEmpty({ message: 'กรุณาระบุบ้านเลขที่และรายละเอียดที่อยู่จัดส่ง' })
+  addressLine!: string;
+
+  @IsString()
+  @Matches(/^[1-9]\d{4}$/, {
+    message: 'รหัสไปรษณีย์ต้องเป็นตัวเลข 5 หลักที่ถูกต้อง',
+  })
+  postalCode!: string;
+}
+
+// 2. DTO ย่อยสำหรับรายการชิ้นเนื้อแต่ละชิ้นในตะกร้า (OrderItem)
+export class CreateOrderItemDto {
+  @IsUUID('4', { message: 'รหัสสินค้า (productId) ต้องเป็น UUID v4' })
+  productId!: string;
+
+  @IsEnum(MeatCutStyle, {
+    message: 'รูปแบบการหั่นเนื้อ (cutStyle) ไม่ถูกต้อง',
+  })
+  cutStyle!: MeatCutStyle;
+
+  @IsInt({ message: 'น้ำหนักเนื้อที่สั่ง (weightGrams) ต้องเป็นจำนวนเต็มหน่วยกรัม' })
+  @Min(200, { message: 'สั่งซื้อเนื้อพรีเมียมขั้นต่ำรายการละ $constraint1 กรัมขึ้นไป' })
+  @Max(10000, { message: 'สั่งซื้อเนื้อต่อรายการได้ไม่เกิน $constraint1 กรัม (10 กก.)' })
+  weightGrams!: number;
+
+  @IsBoolean({ message: 'กรุณาระบุว่าต้องการแพ็คสูญญากาศแยกชิ้นหรือไม่ (true/false)' })
+  isCustomDryAgeCut!: boolean;
+}
+
+// 3. DTO หลักของใบสั่งซื้อ (Order) ที่ประกอบร่าง Nested DTOs เข้าด้วยกัน
+export class CreateOrderDto {
+  @IsUUID('4')
+  userId!: string;
+
+  @IsEnum(PaymentMethod, {
+    message: 'ช่องทางการชำระเงินไม่ถูกต้อง',
+  })
+  paymentMethod!: PaymentMethod;
+
+  // ตรวจสอบอ็อบเจกต์ซ้อน 1:1 (ต้องมีทั้ง @IsDefined, @ValidateNested และ @Type)
+  @IsDefined({ message: 'กรุณาระบุข้อมูลที่อยู่สำหรับจัดส่งรถห้องเย็น (shippingAddress)' })
+  @ValidateNested()
+  @Type(() => ColdChainShippingAddressDto)
+  shippingAddress!: ColdChainShippingAddressDto;
+
+  // ตรวจสอบ Array ของอ็อบเจกต์ซ้อน 1:N (ต้องมี @IsArray, @ValidateNested({ each: true }) และ @Type)
+  @IsArray({ message: 'รายการสินค้าที่สั่งซื้อ (items) ต้องเป็น Array' })
+  @ArrayMinSize(1, { message: 'ใบสั่งซื้อต้องมีรายการเนื้ออย่างน้อย 1 รายการ' })
+  @ArrayMaxSize(30, { message: 'สั่งซื้อได้สูงสุดไม่เกิน 30 รายการต่อ 1 ใบสั่งซื้อ' })
+  @ValidateNested({ each: true })
+  @Type(() => CreateOrderItemDto)
+  items!: CreateOrderItemDto[];
+}
+```
+
+### ตัวอย่างที่ 2: การใช้ `@Transform` และ `@Type` จัดการ Query String ที่ซับซ้อน (Boolean, Comma-separated Array, Date) (ขั้นสูง)
+```typescript filename="src/modules/orders/dto/filter-orders-query.dto.ts"
+import {
+  IsOptional,
+  IsEnum,
+  IsBoolean,
+  IsDate,
+  IsInt,
+  Min,
+  Max,
+  IsArray,
+} from 'class-validator';
+import { Type, Transform } from 'class-transformer';
+import { OrderStatus } from '@prisma/client';
+
+export class FilterOrdersQueryDto {
+  // แปลง Query String ?page=2&limit=20 จาก string เป็น number อย่างปลอดภัยด้วย @Type(() => Number)
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page: number = 1;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  limit: number = 20;
+
+  // รองรับทั้ง ?statuses=PAID,SHIPPED และ ?statuses=PAID&statuses=SHIPPED
+  @IsOptional()
+  @Transform(({ value }): unknown => {
+    if (typeof value === 'string') {
+      return value
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+    return value;
+  })
+  @IsArray()
+  @IsEnum(OrderStatus, { each: true, message: 'สถานะคำสั่งซื้อในตัวกรองไม่ถูกต้อง' })
+  statuses?: OrderStatus[];
+
+  // แปลงสตริง "true" / "false" ใน Query String ให้เป็น boolean ที่ถูกต้อง 100%
+  @IsOptional()
+  @Transform(({ value }): unknown => {
+    if (value === 'true' || value === '1' || value === true) return true;
+    if (value === 'false' || value === '0' || value === false) return false;
+    return value;
+  })
+  @IsBoolean({ message: 'พารามิเตอร์ isColdChainExpress ต้องเป็น true หรือ false' })
+  isColdChainExpress?: boolean;
+
+  // แปลงสตริงวันที่ ISO 8601 เป็น Date Object พร้อมตรวจว่าเป็นวันที่ที่ถูกต้อง
+  @IsOptional()
+  @Type(() => Date)
+  @IsDate({ message: 'รูปแบบวันที่เริ่มต้น (fromDate) ไม่ถูกต้อง ต้องเป็น ISO 8601' })
+  fromDate?: Date;
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/orders/nested-validation-comparison.ts"
+import { ValidateNested, IsDefined } from 'class-validator';
+import { Type } from 'class-transformer';
+import { ColdChainShippingAddressDto } from './dto/create-order.dto';
+
+// ❌ ผิด (Anti-pattern): แปะแค่ @ValidateNested() แต่ไม่ใส่ @IsDefined() และไม่ใส่ @Type()
+export class BadOrderDto {
+  // 1. ถ้าลูกค้าส่ง {} เปล่าๆ มา (ไม่ส่ง shippingAddress มาเลย) @ValidateNested() จะข้ามไปเฉยๆ เหมือนเป็น Optional!
+  // 2. ถ้าส่งมาแต่ไม่มี @Type() กฎข้างใน ColdChainShippingAddressDto จะไม่ถูกรันเลย!
+  @ValidateNested()
+  shippingAddress!: ColdChainShippingAddressDto;
+}
+
+// ✅ ถูก (Best Practice): สำหรับ Required Nested Object ต้องใส่ครบทั้ง @IsDefined(), @ValidateNested() และ @Type() เสมอ!
+export class GoodOrderDto {
+  @IsDefined({ message: 'กรุณาระบุข้อมูลที่อยู่จัดส่ง' })
+  @ValidateNested()
+  @Type(() => ColdChainShippingAddressDto)
+  shippingAddress!: ColdChainShippingAddressDto;
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `@IsDefined()` คู่กับ `@ValidateNested()` และ `@Type()` เสมอเมื่อ**: อ็อบเจกต์ย่อยนั้นเป็นฟิลด์บังคับ (Required) เพราะโดยธรรมชาติ `@ValidateNested()` จะข้ามการทำงานหากค่าของฟิลด์นั้นเป็น `undefined` หรือ `null`
+- **ไม่ควรใช้ `@Type(() => Boolean)` กับค่าใน Query String (`?inStock=false`)**: เพราะใน JavaScript `new Boolean("false")` จะได้ค่าความจริงเป็น `true` เสมอ! ต้องใช้ `@Transform(({ value }) => value === 'true')` ตามตัวอย่างที่ 2 เท่านั้น
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมการส่ง Query String `?inStock=false` เข้ามายัง DTO ที่แปะ `@Type(() => Boolean)` จึงได้ค่าใน Controller ออกมาเป็น `true` และต้องแก้ไขอย่างไร?
+   - **แนวคำตอบ**: เพราะ `@Type(() => Boolean)` ของ `class-transformer` จะเรียกฟังก์ชัน `Boolean(value)` ของ JavaScript มาครอบสตริง `"false"` ซึ่งในภาษา JavaScript สตริงใดๆ ที่ไม่ใช่สตริงว่าง `""` จะเป็นค่า Truthy ทั้งหมด ทำให้ `Boolean("false") === true`! วิธีแก้ไขคือห้ามใช้ `@Type(() => Boolean)` กับ Query String แต่ให้เขียน `@Transform(({ value }) => value === 'true' ? true : value === 'false' ? false : value)` ร่วมกับ `@IsBoolean()` แทน
+2. **คำถาม**: ถ้าลูกค้าส่ง `items: "not-an-array"` เข้ามาใน `CreateOrderDto` ที่มีแต่ `@ValidateNested({ each: true })` โดยไม่ได้แปะ `@IsArray()` จะเกิดปัญหาอะไร?
+   - **แนวคำตอบ**: อาจเกิดพฤติกรรมที่ไม่คาดคิดหรือข้อความแจ้งเตือนที่ไม่ตรงจุด เพราะ `@ValidateNested({ each: true })` คาดหวังว่าตัวแปรนั้นเป็น Iterable/Array อยู่แล้ว ดังนั้นสำหรับฟิลด์ที่เป็น Array ของ Nested Objects จึงต้องแปะเรียงกันให้ครบทั้ง 4 ตัวคือ `@IsArray()`, `@ArrayMinSize(1)`, `@ValidateNested({ each: true })`, และ `@Type(() => ItemDto)`
+
+---

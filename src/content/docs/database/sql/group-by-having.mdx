@@ -1,0 +1,155 @@
+---
+title: GROUP BY Having
+category: DATABASE
+parentTitle: SQL
+version: SQL:2023 & PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+การคำนวณและสรุปข้อมูลยอดขายเนื้อเปรียบเหมือนการปิดกะสิ้นวันของร้าน **Smart Butcher Marketplace**:
+- หากต้องการทราบว่าเนื้อแต่ละประเภทขายได้เงินรวมเท่าไร เราจะใช้ **`GROUP BY`** หมวดหมู่เนื้อ
+- ฟังก์ชันคำนวณอย่าง **`COUNT`**, **`SUM`**, **`AVG`**, **`MIN`**, **`MAX`** จะทำหน้าที่คำนวณตัวเลขสรุปในแต่ละกลุ่ม
+- หากเราต้องการดูเฉพาะกลุ่มที่มียอดขายถล่มทลายเกิน 50,000 บาทขึ้นไป เราจะใช้ **`HAVING`** เพื่อคัดกรองกลุ่มผลลัพธ์เหล่านั้น
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+PostgreSQL มี 2 กลยุทธ์ในการประมวลผลคำสั่ง `GROUP BY`:
+1. **HashAggregate**: สแกนข้อมูลแล้วนำค่าของคอลัมน์ใน `GROUP BY` มาเข้า Hash Table ในหน่วยความจำ `work_mem` เพื่อสะสมผลลัพธ์ของ Aggregate ฟังก์ชัน เหมาะสำหรับข้อมูลที่มีจำนวนกลุ่มไม่มากนักและตารางยังไม่ได้เรียงลำดับ
+2. **GroupAggregate**: หากข้อมูลถูกจัดเรียงลำดับตาม Group By Key อยู่แล้ว (ผ่าน Index Scan หรือ Sort Node) Engine จะอ่านข้อมูลเรียงลำดับทีละแถว เมื่อค่าเปลี่ยนกลุ่มจะสรุปผลทันที ซึ่งใช้หน่วยความจำน้อยมาก
+
+```text filename="docs/database/sql.txt"
++--------------------------------------------------------------+
+| ความแตกต่างระหว่าง WHERE vs HAVING ในกระบวนการ Query Engine     |
++--------------------------------------------------------------+
+| 1. WHERE ทำงานก่อน (Pre-aggregation):                        |
+|    - กรองข้อมูลระดับรายแถว (Tuple) ก่อนเข้าสู่ขั้นตอนจัดกลุ่ม        |
+|    - ไม่สามารถใส่ Aggregate Functions เช่น SUM(), COUNT() ได้ |
+|    - ช่วยลดปริมาณข้อมูลที่ต้องนำไปคำนวณ ทำให้ Query ทำงานเร็วขึ้น    |
++--------------------------------------------------------------+
+| 2. HAVING ทำงานหลัง (Post-aggregation):                      |
+|    - กรองข้อมูลระดับกลุ่ม (Grouped Results) หลังคำนวณเสร็จแล้ว  |
+|    - สามารถตรวจสอบเงื่อนไขของ Aggregate Functions ได้           |
++--------------------------------------------------------------+
+```
+
+> [!NOTE] Functional Dependency ใน PostgreSQL
+> มาตรฐาน SQL ดั้งเดิมบังคับว่า คอลัมน์ทุกตัวใน `SELECT` ต้องปรากฏใน `GROUP BY` หรือต้องถูกครอบด้วย Aggregate Function แต่ใน PostgreSQL (ตั้งแต่เวอร์ชัน 9.1+) หากเราระบุ **Primary Key** ของตารางใน `GROUP BY` แล้ว เราสามารถหยิบคอลัมน์อื่นๆ ของตารางนั้นมาใส่ใน `SELECT` ได้ทันทีโดยไม่ต้องใส่ใน `GROUP BY` ซ้ำซ้อน เนื่องจากฐานข้อมูลเข้าใจคุณสมบัติ Functional Dependency ว่า PK ย่อมระบุข้อมูลคอลัมน์อื่นได้แน่นอน 100%
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: รายงานยอดขายและราคาเนื้อเฉลี่ยแยกตามหมวดหมู่สินค้า
+สรุปข้อมูลว่าเนื้อแต่ละหมวดหมู่มียอดขายกี่ชิ้น ยอดเงินรวมเท่าใด และราคาเฉลี่ยต่อชิ้นอยู่ที่เท่าใด:
+
+```sql filename="sql/sql.sql"
+-- สรุปยอดขายสินค้าเนื้อแยกตามหมวดหมู่สินค้า
+SELECT 
+    c.id AS category_id,
+    c.name AS category_name,
+    COUNT(oi.id) AS total_items_sold,
+    COALESCE(SUM(oi.quantity), 0) AS total_units_sold,
+    COALESCE(SUM(oi.subtotal), 0.00) AS total_revenue,
+    COALESCE(ROUND(AVG(oi.unit_price), 2), 0.00) AS avg_unit_price
+FROM categories c
+LEFT JOIN products p ON c.id = p.category_id
+LEFT JOIN order_items oi ON p.id = oi.product_id
+GROUP BY c.id, c.name
+ORDER BY total_revenue DESC;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| category_id | category_name | total_items_sold | total_units_sold | total_revenue | avg_unit_price |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 1 | เนื้อวากิวญี่ปุ่น | 1 | 2 | 9000.00 | 4500.00 |
+| 3 | เนื้อดรายเอจพิเศษ | 1 | 1 | 4500.00 | 2800.00 |
+| 2 | เนื้อออสเตรเลียแองกัส | 0 | 0 | 0.00 | 0.00 |
+| 4 | สเต๊กพรีเมียมคัต | 0 | 0 | 0.00 | 0.00 |
+
+### ตัวอย่างที่ 2: การค้นหาลูกค้า VIP ด้วย `HAVING` ร่วมกับหลายเงื่อนไข
+ค้นหาเฉพาะลูกค้าที่มียอดสั่งซื้อที่สำเร็จแล้วรวมเกิน 10,000 บาท และมีจำนวนคำสั่งซื้อตั้งแต่ 2 ครั้งขึ้นไป:
+
+```sql filename="sql/sql.sql"
+-- ค้นหาลูกค้าระดับ VIP ด้วย HAVING กรองผลรวม
+SELECT 
+    u.id AS user_id,
+    u.full_name,
+    u.email,
+    COUNT(o.id) AS completed_order_count,
+    SUM(o.total_amount) AS total_spent
+FROM users u
+INNER JOIN orders o ON u.id = o.user_id
+WHERE o.status = 'COMPLETED' -- WHERE กรองเฉพาะออเดอร์ที่สำเร็จก่อนทำการรวมกลุ่ม
+GROUP BY u.id, u.full_name, u.email
+HAVING SUM(o.total_amount) >= 10000.00 AND COUNT(o.id) >= 2 -- HAVING กรองเฉพาะกลุ่มที่เข้าเกณฑ์ VIP
+ORDER BY total_spent DESC;
+```
+
+**ผลลัพธ์ที่ได้ (Expected Output):**
+
+| user_id | full_name | email | completed_order_count | total_spent |
+| :--- | :--- | :--- | :--- | :--- |
+| 1 | Somchai Steaklover | somchai@butcher.io | 2 | 19100.00 |
+
+**โค้ดเทียบเคียงใน Prisma Client:**
+```typescript filename="src/sql.ts"
+// Prisma Client รองรับ groupBy ร่วมกับ having
+const vipUsers = await prisma.order.groupBy({
+  by: ['userId'],
+  where: {
+    status: 'COMPLETED',
+  },
+  _count: {
+    id: true,
+  },
+  _sum: {
+    totalAmount: true,
+  },
+  having: {
+    totalAmount: {
+      _sum: {
+        gte: 10000.00,
+      },
+    },
+    id: {
+      _count: {
+        gte: 2,
+      },
+    },
+  },
+});
+```
+
+## 4. ผิด vs ถูก (Anti-patterns & Best Practices)
+
+### ❌ โค้ดที่ผิด: นำ Aggregate Function ไปใส่ใน WHERE หรือเอาเงื่อนไขรายแถวไปใส่ใน HAVING
+```sql filename="sql/sql.sql"
+-- ผิดไวยากรณ์: WHERE SUM(total_amount) จะฟ้อง Error ทันที
+-- และเอา o.status = 'COMPLETED' มาใส่ใน HAVING ทำให้ประสิทธิภาพช้าลงเพราะต้อง Group ทุกแถวก่อน
+SELECT user_id, SUM(total_amount)
+FROM orders
+WHERE SUM(total_amount) > 10000.00
+GROUP BY user_id
+HAVING status = 'COMPLETED';
+```
+
+### ✅ โค้ดที่ถูก: ใช้ WHERE กรองแถวก่อน และใช้ HAVING กรองผลรวม
+```sql filename="sql/sql.sql"
+-- ถูกต้อง: WHERE กรองแถวก่อนเข้า HashAggregate และ HAVING กรองค่าผลรวม
+SELECT user_id, SUM(total_amount) AS total_spent
+FROM orders
+WHERE status = 'COMPLETED'
+GROUP BY user_id
+HAVING SUM(total_amount) > 10000.00;
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `GROUP BY`:** เมื่อต้องการยุบแถวข้อมูล (Row Aggregation) เพื่อทำสรุปผลสถิติ รายงาน Dashboard หรือตัวเลข KPI
+- **ไม่ควรใช้ `GROUP BY`:** หากต้องการคำนวณยอดสะสม (Running Total) หรือการจัดอันดับ (Ranking) แต่ยังต้องการให้คงแถวข้อมูลเดิมไว้ครบทุกแถว (กรณีนี้ต้องใช้ Window Functions)
+
+## 6. คำถามสัมภาษณ์ (Interview Questions)
+- **Q1: ความแตกต่างระหว่าง `COUNT(*)`, `COUNT(1)`, และ `COUNT(column_name)` ใน PostgreSQL คืออะไร?**
+  - *คำตอบ:* ใน PostgreSQL ทั้ง `COUNT(*)` และ `COUNT(1)` มีประสิทธิภาพและผลลัพธ์เหมือนกันทุกประการ (Optimizer แปลงเป็นนับจำนวนแถวทั้งหมดในระดับ Plan) โดยจะนับทุกแถวแม้แถวนั้นจะมีค่าคอลัมน์เป็น NULL ทั้งหมดก็ตาม แต่สำหรับ `COUNT(column_name)` จะนับเฉพาะแถวที่ `column_name` **มีค่าไม่เป็น NULL** เท่านั้น หากคอลัมน์นั้นมีค่าเป็น NULL แถวดังกล่าวจะไม่ถูกนับ
+- **Q2: ทำไมการใส่เงื่อนไขใน `WHERE` ถึงช่วยให้การทำ `GROUP BY` มีประสิทธิภาพสูงกว่าการไปใส่ใน `HAVING`?**
+  - *คำตอบ:* เพราะ `WHERE` ทำงานตั้งแต่ขั้นตอนการอ่านแถวข้อมูล (Scan Phase) ทำให้แถวที่ไม่ตรงเงื่อนไขถูกคัดทิ้งทันที ช่วยลดขนาดของข้อมูลที่จะต้องส่งเข้าไปสร้าง Hash Table ในหน่วยความจำ `work_mem` ของขั้นตอน `GROUP BY` ส่วน `HAVING` จะประมวลผลหลังจากจัดกลุ่มและคำนวณ Aggregate เสร็จสิ้นแล้วทุกแถว หากเอาเงื่อนไขที่ไม่ใช่ Aggregate ไปไว้ใน `HAVING` ระบบจะต้องเสียเวลาคำนวณกลุ่มของข้อมูลที่ไม่ได้ใช้งานแล้วค่อยคัดทิ้งในภายหลัง
+
+---

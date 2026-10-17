@@ -1,0 +1,55 @@
+---
+title: Anti-patterns
+category: DATABASE
+parentTitle: Transactions
+version: PostgreSQL 16 & Prisma $tx
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **Holding Transactions Open Across Network Calls:** การเปิด Transaction แล้วสั่งตัดสต็อกหรือสร้างออเดอร์ จากนั้นรอเรียก HTTP API ของธนาคารหรือระบบส่งอีเมลภายในบล็อก Transaction เดิม ส่งผลให้เกิดสถานะ `idle in transaction` ล็อกแถวข้อมูลค้างไว้และทำลาย Throughput ของทั้งระบบ
+2. **Using Global Prisma Client Inside Interactive Transaction:** การเผลอเขียน `this.prisma.table.update(...)` แทนที่จะเขียน `tx.table.update(...)` ภายใน `prisma.$transaction(async (tx) => ...)` ทำให้คำสั่งนั้นหลุดออกจากขอบเขต Transaction และไม่ถูก Rollback เมื่อเกิดข้อผิดพลาด
+3. **Catching and Swallowing SQL Errors Inside a Transaction Block:** การดัก `try...catch` รอบคำสั่ง SQL ที่เกิด Error ภายใน Transaction แล้วพยายามรันคำสั่ง SQL อื่นต่อใน Transaction เดิมโดยไม่ได้ใช้ `SAVEPOINT` ซึ่งใน PostgreSQL จะล้มเหลวทั้งหมดด้วย Error `25P02 (in_failed_sql_transaction)`
+4. **Read-Modify-Write without Atomic Update or Locking:** การดึงยอดเงินหรือจำนวนสต็อกมาเก็บในตัวแปร JavaScript บวกลบเลขในโค้ด แล้วสั่ง `SET stock_qty = ค่าใหม่` กลับเข้าไปในโหมด `READ COMMITTED` ปกติ ซึ่งก่อให้เกิดปัญหา Lost Update ทันทีเมื่อมีผู้ใช้ทำรายการพร้อมกัน
+5. **Locking Hot Rows at the Beginning of a Long Transaction:** การสั่ง `UPDATE` แถวที่มีการแย่งชิงสูง (เช่น สินค้าโปรโมชัน) ไว้ตั้งแต่บรรทัดแรกของ Transaction ที่มีหลายขั้นตอน ทำให้แถวนั้นถูกล็อกนานเกินความจำเป็น แทนที่จะย้ายไปไว้บรรทัดสุดท้ายก่อน `COMMIT`
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+- [ ] **Atomic Multi-Table Writes:** ทุกกระบวนการทางธุรกิจที่มีการเขียนข้อมูลมากกว่า 1 ตาราง (เช่น สร้าง `orders` + `order_items` + ตัดสต็อก `products`) ถูกหุ้มด้วย Transaction เสมอ
+- [ ] **Zero External I/O Inside Transaction:** ไม่มีคำสั่งเรียก API ภายนอก (`fetch`, `axios`, Payment Gateway, Email, S3 Upload) อยู่ภายในบล็อก `BEGIN ... COMMIT` หรือ `prisma.$transaction` เด็ดขาด
+- [ ] **Hot Row Updates Placed Last:** คำสั่ง `UPDATE` บนตารางที่มีการแย่งชิงสูง (เช่น การตัดสต็อกสินค้าใน `products`) ถูกจัดวางไว้เป็นขั้นตอนท้ายสุดก่อนจบ Transaction เพื่อลดเวลาถือครอง Lock
+- [ ] **Consistent `tx` Client Usage:** ภายใน Interactive Transaction ของ Prisma มีการส่งและเรียกใช้ตัวแปร `tx` ทุกจุด รวมถึงส่ง `tx` ต่อไปยัง Helper Methods ที่ถูกเรียกข้างในด้วย
+- [ ] **Appropriate Isolation Level:** ใช้ `READ COMMITTED` คู่กับ Atomic Update / Row Locking สำหรับงานทั่วไป และใช้ `REPEATABLE READ` หรือ `SERIALIZABLE` (พร้อมกลไก Retry `40001`) สำหรับรายงานการเงินหรือกฎธุรกิจที่ซับซ้อน
+- [ ] **Safety Timeouts Configured:** ตั้งค่า `idle_in_transaction_session_timeout`, `lock_timeout`, และ `statement_timeout` ในฐานข้อมูลควบคู่กับ `maxWait` และ `timeout` ใน Prisma
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อคุณเข้าใจการมัดรวมคำสั่งด้วย Transactions และระดับการแยกตัวของข้อมูลแล้ว ขั้นตอนสุดท้ายที่สำคัญที่สุดในการสร้างระบบ E-Commerce ระดับ Enterprise คือการจัดการภาวะที่ผู้ใช้หลายพันคนแย่งกันซื้อสินค้าชิ้นสุดท้ายในเสี้ยววินาทีเดียวกันโดยไม่ให้เกิด Race Condition หรือ Deadlock:
+
+<Callout type="tip" title="ก้าวต่อไปสู่การควบคุม Concurrency และ Locking เชิงลึก">
+ลำพังแค่การเปิด Transaction แบบ READ COMMITTED ยังไม่เพียงพอที่จะป้องกันปัญหา Race Condition ทุกกรณี ศึกษาต่อในบท Concurrency เพื่อเรียนรู้การใช้ SELECT ... FOR UPDATE, Optimistic Locking, การป้องกัน Deadlock และการทำ Idempotency
+</Callout>
+
+- **พื้นฐานการออกแบบและประสิทธิภาพ:**
+  - [Database Design](/docs/database/database-design)
+  - [Indexing](/docs/database/indexing)
+  - [Query Performance](/docs/database/query-performance)
+  - [PostgreSQL 16](/docs/database/postgresql)
+  - [SQL](/docs/database/sql)
+- **การจัดการภาวะทำงานพร้อมกันและการเชื่อมต่อ (ลำดับถัดไปที่แนะนำ):**
+  - [Concurrency](/docs/database/concurrency)
+  - [Connection Pooling](/docs/database/connection-pooling)
+  - [Backup & Recovery](/docs/database/backup)
+- **การใช้งานร่วมกับฝั่ง Backend:**
+  - [Prisma ORM](/docs/backend/prisma-orm)
+  - [NestJS](/docs/backend/nestjs)
+  - [Backend Security](/docs/backend/security)

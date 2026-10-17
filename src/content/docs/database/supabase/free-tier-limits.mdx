@@ -1,0 +1,133 @@
+---
+title: Free Tier Limits
+category: DATABASE
+parentTitle: Supabase
+version: Supabase & PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ก่อนนำระบบ **Smart Butcher Marketplace** ขึ้นให้บริการจริงบน Supabase วิศวกรต้องทราบข้อจำกัดทางกายภาพและนโยบายของแพลตฟอร์ม เพื่อไม่ให้เกิดเหตุการณ์ "เช้าวันจันทร์ลูกค้าเข้าเว็บสั่งซื้อเนื้อไม่ได้เพราะฐานข้อมูลหลับไปเอง" หรือ "ลูกค้ากดคลิกดูสินค้าแต่ละหน้าต้องรอโหลดนานถึง 2 วินาทีเพราะเลือกตั้งเซิร์ฟเวอร์ไว้คนละซีกโลก"
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **กลไก Free Tier Project Pausing (การหยุดโปรเจกต์อัตโนมัติหลัง 7 วัน):**
+   บนแพ็กเกจ **Free Tier** ของ Supabase หากโปรเจกต์ไม่มีคำขอ API หรือไม่มีกิจกรรมในฐานข้อมูลต่อเนื่องกันเป็นเวลา **7 วัน** ระบบจะสั่งปิดเครื่องคอมพิวต์ (Pause Project) เพื่อประหยัดทรัพยากรคลาวด์ เมื่อโปรเจกต์อยู่ในสถานะ Paused การเชื่อมต่อจาก Prisma ทั้งหมดจะล้มเหลวทันที และต้องกดปุ่ม Restore ในหน้า Dashboard ซึ่งใช้เวลาปลุกเครื่องราว 2-5 นาที (แพ็กเกจ **Pro Tier ขึ้นไปจะไม่มีการสั่ง Pause โปรเจกต์เด็ดขาด**)
+2. **ผลกระทบของการเลือก Region ต่อ Network Latency (RTT):**
+   ทุกคิวรีที่ Prisma ส่งไปยังฐานข้อมูลต้องเดินทางไปและกลับผ่านสายเคเบิลใต้น้ำตามความเร็วแสงในใยแก้วนำแสง:
+   - หากกลุ่มลูกค้าและเซิร์ฟเวอร์แอปพลิเคชันอยู่ในประเทศไทย แต่เราเผลอสร้างโปรเจกต์ Supabase ไว้ที่ค่าเริ่มต้นคือ **`us-east-1` (North Virginia, สหรัฐอเมริกา)** ระยะทางไป-กลับเกือบ 28,000 กิโลเมตร จะทำให้เกิดค่าความหน่วงพื้นฐาน (**Network RTT**) สูงถึง **220 - 280 มิลลิวินาทีต่อ 1 คิวรี!** หากหน้าเว็บ 1 หน้าต้องยิงคิวรี 4 รอบ ลูกค้าจะต้องรอนานเกิน 1 วินาทีเต็มๆ ทั้งที่ SQL ใช้เวลาทำงานจริงแค่ 1 มิลลิวินาที!
+   - แต่หากเราเลือก Region เป็น **`ap-southeast-1` (Singapore)** ซึ่งเป็นศูนย์ข้อมูลที่ใกล้ประเทศไทยที่สุด ค่า Network RTT จะลดลงเหลือเพียง **12 - 25 มิลลิวินาทีเท่านั้น (เร็วขึ้นกว่า 10 เท่า!)**
+   - *ข้อสำคัญ:* Region ของฐานข้อมูลถูกผูกติดกับ Physical Data Center ตั้งแต่ตอนกดสร้างโปรเจกต์ หากเลือกผิดจะต้องสร้างโปรเจกต์ใหม่แล้วย้ายข้อมูลด้วย `pg_dump` / `pg_restore`
+3. **ขีดจำกัดด้านพื้นที่จัดเก็บและขนาดการเชื่อมต่อ (Compute Sizing & Limits):**
+   - **Free Tier:** พื้นที่ฐานข้อมูลจำกัดที่ **500 MB** (เมื่อเต็มฐานข้อมูลจะถูกเปลี่ยนเป็นโหมด Read-Only ทันที!), ใช้ซีพียูแบบ Shared CPU และมี RAM จำกัด ไม่มีการทำ Daily Backup อัตโนมัติ
+   - **Pro Tier:** เริ่มต้นด้วยพื้นที่ฐานข้อมูล **8 GB** (ขยายเพิ่มได้อัตโนมัติ), มี Daily Backup 7 วัน และสามารถเลือกอัปเกรดขนาด Compute Instance (Micro, Small, Medium, Large...) ซึ่งจะเพิ่มทั้งจำนวน CPU Cores, ขนาด RAM (`shared_buffers`) และโควตา `max_connections` ของ PostgreSQL 16 ตามขนาดเครื่อง
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: คิวรีตรวจสอบขนาดพื้นที่ฐานข้อมูลและขนาดตารางปัจจุบันเพื่อป้องกันดิสก์เต็ม (500MB Free / 8GB Pro Limit)
+เราสามารถรันคิวรีใน PostgreSQL 16 เพื่อตรวจสอบว่าฐานข้อมูลของร้าน **Smart Butcher Marketplace** ใช้พื้นที่ดิสก์ไปแล้วกี่เมกะไบต์ และตารางใดหรือ Index ตัวใดกินพื้นที่มากที่สุด:
+
+```sql filename="01_monitor_supabase_storage_quota.sql"
+-- 1. ตรวจสอบขนาดรวมของฐานข้อมูลปัจจุบันเทียบกับโควตาของแพ็กเกจ (เช่น 500 MB สำหรับ Free Tier)
+SELECT
+    current_database() AS db_name,
+    pg_size_pretty(pg_database_size(current_database())) AS current_size_pretty,
+    ROUND(pg_database_size(current_database()) / (1024.0 * 1024.0), 2) AS current_size_mb,
+    ROUND((pg_database_size(current_database()) / (500.0 * 1024.0 * 1024.0)) * 100, 2) AS free_tier_usage_percent;
+
+-- 2. แสดงอันดับตารางใน Schema public ที่ใช้พื้นที่ดิสก์มากที่สุด (แยกขนาดตารางจริง กับขนาด Index)
+SELECT
+    relname AS table_name,
+    pg_size_pretty(pg_total_relation_size(relid)) AS total_size,
+    pg_size_pretty(pg_relation_size(relid)) AS table_data_size,
+    pg_size_pretty(pg_indexes_size(relid)) AS indexes_size,
+    n_live_tup AS estimated_row_count
+FROM pg_stat_user_tables
+WHERE schemaname = 'public'
+ORDER BY pg_total_relation_size(relid) DESC;
+```
+
+### ตัวอย่างที่ 2: การรวมคิวรีด้วย Relation Inclusion ใน Prisma เพื่อลดจำนวนรอบการเดินทางข้ามเครือข่าย (Minimizing Network RTTs)
+แม้เราจะเลือกโซน `ap-southeast-1` (Singapore) ที่มีค่า RTT ราว 15-20ms แล้ว การยิงคิวรีแยกกันหลายรอบตามลำดับ (Sequential Waterfalls) ก็ยังสะสมความหน่วงได้ เราจึงควรใช้ `include` หรือ `Promise.all` เพื่อดึงข้อมูลใบสั่งซื้อพร้อมรายการเนื้อและสถานะการชำระเงินให้จบในการเดินทางรอบเดียว:
+
+```typescript filename="src/orders/order-detail-optimized.service.ts"
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+
+@Injectable()
+export class OrderDetailOptimizedService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  // ❌ ช้าเพราะเสียเวลาเดินทางข้ามเครือข่ายไปสิงคโปร์ถึง 3 รอบตามลำดับ (3 x 20ms = 60ms+)
+  async getOrderWaterfallSlow(orderId: string, userId: string) {
+    const order = await this.prisma.order.findFirst({ where: { id: orderId, userId } });
+    if (!order) throw new NotFoundException();
+    const items = await this.prisma.orderItem.findMany({ where: { orderId } });
+    const payment = await this.prisma.payment.findUnique({ where: { orderId } });
+    return { order, items, payment };
+  }
+
+  // ✅ เร็วที่สุด: รวบการดึงข้อมูลทั้งหมดให้จบในการเดินทางไปที่ Supabase เพียงรอบเดียว!
+  async getOrderSingleTripFast(orderId: string, userId: string) {
+    const orderDetail = await this.prisma.order.findFirst({
+      where: {
+        id: orderId,
+        userId: userId,
+      },
+      select: {
+        id: true,
+        status: true,
+        totalAmount: true,
+        createdAt: true,
+        items: {
+          select: {
+            id: true,
+            quantityGrams: true,
+            unitPricePerKg: true,
+            subtotal: true,
+            product: {
+              select: {
+                sku: true,
+                name: true,
+                marblingScore: true,
+              },
+            },
+          },
+        },
+        payment: {
+          select: {
+            id: true,
+            paymentMethod: true,
+            paidAt: true,
+          },
+        },
+      },
+    });
+
+    if (!orderDetail) {
+      throw new NotFoundException(`Order ${orderId} not found`);
+    }
+
+    return orderDetail;
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การเลือก Region ของฐานข้อมูล** | กดสร้างโปรเจกต์โดยไม่ดู Region ได้ค่าเริ่มต้นที่อเมริกา (`us-east-1`) ในขณะที่เซิร์ฟเวอร์แอปอยู่ที่สิงคโปร์ | เลือก Region ของ Supabase ให้ **อยู่ในโซนเดียวกับเซิร์ฟเวอร์ Backend** เสมอ (เช่น `ap-southeast-1` สิงคโปร์ สำหรับไทย) |
+| **การใช้ Free Tier บนระบบจริง** | ใช้ Free Tier รันระบบลูกค้าจริง พอหยุดยาวสงกรานต์ไม่มีคนเข้า 7 วัน ฐานข้อมูลถูก Pause จนระบบล่ม | ใช้ Free Tier สำหรับ Dev/Testing เท่านั้น และใช้ Pro Tier สำหรับระบบ Production จริงเสมอ |
+| **การเก็บไฟล์ไบนารีในตาราง** | เก็บรูปภาพเนื้อสเต๊กเป็น Base64 หรือ `BYTEA` ลงในตาราง PostgreSQL โดยตรงจนโควตา 500MB/8GB เต็มในพริบตา | เก็บไฟล์รูปภาพไว้ใน **Supabase Storage (หรือ S3/R2)** แล้วเก็บเฉพาะ URL/Path สั้นๆ ไว้ในตาราง `products` |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Supabase Free Tier เมื่อ:** กำลังเรียนรู้ พัฒนาโปรเจกต์ต้นแบบ (Prototype/MVP) หรือใช้เป็นฐานข้อมูลสำหรับสภาพแวดล้อมทดสอบชั่วคราว
+- **ควรอัปเกรดเป็น Supabase Pro Tier เมื่อ:** เปิดตัวระบบ Production ให้ลูกค้าใช้งานจริง เพราะต้องการการรับประกันว่าฐานข้อมูลจะไม่ถูก Pause มีระบบสำรองข้อมูลรายวัน และมีทรัพยากร Compute ที่เสถียร
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: หากเซิร์ฟเวอร์แอปพลิเคชัน Next.js ของคุณตั้งอยู่ที่สิงคโปร์ (`ap-southeast-1`) แต่ฐานข้อมูล Supabase ตั้งอยู่ที่สหรัฐอเมริกา (`us-east-1`) การเพิ่ม Index ในตารางจะช่วยแก้ปัญหาความหน่วง 250ms ต่อคิวรีได้หรือไม่ เพราะเหตุใด?**
+  - **แนวคำตอบ:** การเพิ่ม Index จะไม่ช่วยแก้ปัญหาความหน่วง 250ms นั้นได้เลย เพราะเวลาที่ใช้ในการค้นหาข้อมูลผ่าน Index ใน PostgreSQL อาจลดลงจาก 2ms เหลือ 0.2ms แล้ว แต่เวลาอีก 249.8ms คือ **เวลาที่สัญญาณแสงเดินทางไปและกลับผ่านสายเคเบิลใต้น้ำข้ามมหาสมุทรแปซิฟิก (Network Propagation Latency / RTT)** วิธีแก้ไขมีเพียงสองทางคือ ย้ายฐานข้อมูลมาไว้ที่โซนสิงคโปร์ (`ap-southeast-1`) ให้อยู่ใกล้กับเซิร์ฟเวอร์แอปพลิเคชันมากที่สุด และลดจำนวนรอบการยิงคิวรีต่อ 1 หน้าเว็บลง
+- **Q2: จะเกิดอะไรขึ้นกับฐานข้อมูล Supabase บนแพ็กเกจ Free Tier หากขนาดข้อมูลรวมใน PostgreSQL พุ่งเกินขีดจำกัด 500 MB?**
+  - **แนวคำตอบ:** แพลตฟอร์มจะทำการสลับโหมดของฐานข้อมูลเข้าสู่สถานะ **Read-Only Mode (อ่านได้อย่างเดียว)** เพื่อป้องกันดิสก์ของระบบล้น ส่งผลให้แอปพลิเคชันหน้าร้านยังสามารถดึงรายการสินค้า (`SELECT`) มาแสดงผลได้ แต่คำสั่งสร้างใบสั่งซื้อใหม่หรือบันทึกการจ่ายเงิน (`INSERT` / `UPDATE`) จะถูกปฏิเสธทั้งหมดจนกว่าผู้ดูแลระบบจะเข้าไปลบข้อมูลที่ไม่จำเป็นออกแล้วรัน `VACUUM FULL` คืนพื้นที่ดิสก์ หรืออัปเกรดขึ้นสู่แพ็กเกจ Pro
+
+---

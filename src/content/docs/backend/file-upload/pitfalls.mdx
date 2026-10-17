@@ -1,0 +1,48 @@
+---
+title: Anti-patterns
+category: BACKEND
+parentTitle: File Upload
+version: Multer & Supabase Storage
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การอ่านไฟล์ขนาดใหญ่เข้า `memoryStorage` โดยไม่จำกัดขนาด (`limits.fileSize`)**:
+   หากปล่อยให้ผู้ใช้ส่งไฟล์ขนาดหลายร้อย MB เข้ามาพร้อมกันเพียงไม่กี่คน หน่วยความจำ Heap และ Buffer ของ Node.js จะเต็มอย่างรวดเร็วจน Container ถูก Kubernetes หรือ Docker สั่ง Kill ด้วยสถานะ `OOMKilled (Exit Code 137)`
+2. **การเก็บไฟล์อัปโหลดไว้ในโฟลเดอร์ `./uploads` ภายใน Docker Container**:
+   เมื่อทำการ Deploy เวอร์ชันใหม่หรือ Restart Container ข้อมูลที่ไม่อยู่ใน Persistent Volume จะถูกล้างทิ้งทั้งหมด และเมื่อขยายระบบเป็นหลาย Container (Load Balanced) เครื่องที่ 2 จะไม่สามารถเปิดไฟล์ที่ถูกอัปโหลดไว้ในเครื่องที่ 1 ได้
+3. **การเชื่อค่า `file.mimetype` โดยไม่ตรวจ Magic Number**:
+   ค่า `file.mimetype` มาจาก Header ของ Request ที่ฝั่ง Client กำหนดเองได้ การไม่ตรวจไบต์จริงของไฟล์เปิดช่องให้ผู้ไม่หวังดีอัปโหลดไฟล์ HTML/SVG/Script เข้ามาในระบบได้
+4. **การเปิดสลิปโอนเงิน (`Payment`) เป็น Public Bucket**:
+   ถือเป็นความเสี่ยงด้านข้อมูลส่วนบุคคล (PDPA/PII) อย่างร้ายแรง เพราะสลิปธนาคารมีข้อมูลชื่อจริงและเลขบัญชี ต้องใช้ Private Bucket ร่วมกับ Signed URL ที่ตรวจสอบสิทธิ์ความเป็นเจ้าของออเดอร์แล้วเท่านั้น
+5. **การเก็บเฉพาะ Public URL ลงฐานข้อมูลโดยไม่เก็บ `storagePath`**:
+   ทำให้เวลาต้องการลบไฟล์ (`storage.from(bucket).remove([path])`) หรือสร้าง Signed URL ต้องมาเขียนโค้ดตัด String จาก URL เอง ซึ่งเปราะบางและพังง่ายเมื่อโครงสร้าง URL เปลี่ยน
+
+---
+
+---
+
+## 2. Checklist สรุป
+
+- [ ] ตั้งค่า `limits.fileSize` และ `limits.files` ใน `FileInterceptor` ทุกจุดเพื่อปกป้องหน่วยความจำของเซิร์ฟเวอร์
+- [ ] ใช้ `ParseFilePipe` ร่วมกับ Validator ที่ตรวจสอบ **Magic Number** (`FF D8 FF` สำหรับ JPEG, `89 50 4E 47` สำหรับ PNG, `RIFF...WEBP` สำหรับ WebP) เสมอ
+- [ ] ห้ามใช้ `file.originalname` เป็นชื่อไฟล์บน Storage ให้สร้างชื่อไฟล์ใหม่ด้วย `crypto.randomUUID()` และกำหนดนามสกุลจาก MIME type ที่ตรวจสอบแล้ว
+- [ ] แยก Bucket ชัดเจนระหว่าง **Public Bucket** (รูป `Product`, `Category`) และ **Private Bucket** (สลิปโอนเงิน `Payment`)
+- [ ] บันทึกค่า `storagePath` ลงในตารางฐานข้อมูลเสมอ เพื่อใช้สร้าง Signed URL และใช้ลบไฟล์เมื่อมีการอัปเดตหรือลบข้อมูล
+- [ ] ตรวจสอบสิทธิ์ Ownership (`order.userId === currentUser.id`) หรือ Role `ADMIN` ก่อนเรียก `createSignedUrl()` สำหรับดูสลิปโอนเงินทุกครั้ง
+- [ ] จัดการลบไฟล์ขยะ (Orphaned Files) ด้วย `try / catch` Compensating Delete เมื่อบันทึก DB ล้มเหลว และลบไฟล์เก่าหลังจากอัปเดต DB สำเร็จแล้ว
+
+---
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อเข้าใจการจัดการไฟล์อัปโหลดอย่างปลอดภัยด้วย Multer และ Supabase Storage แล้ว แนะนำให้ศึกษาต่อในหัวข้อต่อไปนี้เพื่อให้ระบบ Backend ของ Smart Butcher Marketplace สมบูรณ์แบบ:
+
+1. **พื้นฐานและการตั้งค่า Supabase เชิงลึก**: ศึกษาการจัดการฐานข้อมูลและโครงสร้างของ Supabase เพิ่มเติมที่ [Supabase](/docs/database/supabase)
+2. **การตรวจสอบข้อมูลขาเข้าและการรักษาความปลอดภัย**: ทบทวนการทำ Input Validation และแนวทางป้องกันช่องโหว่ระดับแอปพลิเคชันที่ [Validation](/docs/backend/validation), [Authentication](/docs/backend/authentication) และ [Security](/docs/backend/security)
+3. **การจัดการฐานข้อมูลด้วย Prisma ORM และ Transactions**: ดูวิธีผูกข้อมูลไฟล์เข้ากับโมเดลฐานข้อมูลอย่างปลอดภัยที่ [Prisma ORM](/docs/backend/prisma-orm) และ [Transactions](/docs/database/transactions)
+4. **การนำระบบขึ้น Production และการทำเอกสาร API**: ศึกษาการบรรจุแอปพลิเคชันลง Container และการทำเอกสารสำหรับ `multipart/form-data` ต่อได้ที่ [Docker](/docs/backend/docker) และ [Swagger](/docs/backend/swagger)
+5. **การเขียนชุดทดสอบสำหรับระบบอัปโหลดไฟล์**: ศึกษาการจำลอง (Mock) `StorageService` และทดสอบ Endpoint อัปโหลดไฟล์ด้วย Supertest ที่ [Backend Testing](/docs/testing/backend-testing)

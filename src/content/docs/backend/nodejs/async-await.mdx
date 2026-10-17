@@ -1,0 +1,234 @@
+---
+title: Async Await
+category: BACKEND
+parentTitle: Node.js
+version: Node.js 22 LTS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในการสั่งซื้อเนื้อออนไลน์ ขั้นตอนการทำงานต้องเกิดขึ้นตามลำดับ: ตรวจสอบข้อมูลลูกค้า (User) -> เช็กสต็อกเนื้อสเต็ก (Product) -> หักเงินผ่านบัตร (Payment) -> สร้างบิลคำสั่งซื้อ (Order)
+- **Callback Hell (ยุคเก่า):** ซ้อนฟังก์ชันลึกจนเป็นพีระมิด จัดการ Error ยาก และเกิดปัญหากลืน Error
+- **Promise (มาตรฐาน ES6):** เป็นวัตถุตัวแทนของ "ผลลัพธ์ที่จะมาถึงในอนาคต" ทำให้ต่อสายคำสั่งด้วย `.then()` และ `.catch()`
+- **Async/Await (ES2017+):** ไวยากรณ์ครอบที่ทำให้โค้ดที่ทำงานแบบ Asynchronous อ่านเรียบง่าย ตรงไปตรงมา เหมือนกับโค้ด Synchronous แต่ยังคงประสิทธิภาพแบบ Non-blocking ทั้งหมด
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **Promise States:** วัตถุ Promise มีได้ 3 สถานะเท่านั้น:
+   - `pending`: สถานะเริ่มต้น กำลังรอผลลัพธ์
+   - `fulfilled`: ประมวลผลสำเร็จ มีค่า Value ออกมา
+   - `rejected`: ประมวลผลล้มเหลว มีข้อผิดพลาด Reason/Error ออกมา
+   *หมายเหตุ: เมื่อ Promise เปลี่ยนจาก `pending` เป็น `fulfilled` หรือ `rejected` (เรียกว่า **Settled**) แล้ว สถานะจะไม่สามารถเปลี่ยนแปลงได้อีกตลอดไป*
+2. **Async/Await under the hood (Generators + Microtasks):**
+   เบื้องหลังของคำสั่ง `async` และ `await` คือการผสมผสานระหว่าง **Generator Functions (`function*`, `yield`)** และ **Promise Runners**:
+   - เมื่อเอนจิน V8 เจอคำสั่ง `await promise`:
+     - ฟังก์ชันจะถูกบันทึก Execution Context และระงับ (Suspend) ชั่วคราว
+     - Call Stack ถูกปล่อยว่างเพื่อให้ Event Loop จัดการงานอื่นต่อ
+     - เมื่อ Promise เบื้องหลัง resolve เสร็จ สัญญาณ Callback จะถูกดันเข้า **Promise Microtask Queue**
+     - V8 จะดึงฟังก์ชันกลับเข้ามาใน Call Stack และ Resume ต่อจากจุดเดิมพร้อมส่งค่าผลลัพธ์ให้ตัวแปร
+3. **Promise Concurrency Methods:**
+
+| Method | พฤติกรรมเมื่อสำเร็จ | พฤติกรรมเมื่อล้มเหลว (Reject) | Use Case เหมาะสม |
+| :--- | :--- | :--- | :--- |
+| `Promise.all([p1, p2])` | รอจนสำเร็จ **ครบทุกตัว** ถึงจะ resolve ค่าเป็น array | **Fail-fast:** ตัวใดตัวหนึ่ง reject จะ reject ทันที | งานที่ผูกพันกัน ขาดตัวใดตัวหนึ่งไม่ได้ เช่น รวม User + Product + Stock |
+| `Promise.allSettled([p1, p2])` | รอจน **ทุกตัวจบงาน** (ทั้ง fulfilled และ rejected) | ไม่มีการ reject คืน array ของ object `{ status, value/reason }` | ส่งอีเมลแจ้งเตือนลูกค้า 100 รายการ ต้องการรู้ว่าใครสำเร็จ ใครล้มเหลว |
+| `Promise.race([p1, p2])` | คืนผลลัพธ์ของตัวแรกที่ **Settle** (สำเร็จหรือพังก่อน) | ถ้าตัวแรกสุดล้มเหลว ก็ reject ตามตัวแรก | การทำ Timeout Guard (เช่น แข่ง Request DB กับ Timer 3 วินาที) |
+| `Promise.any([p1, p2])` | คืนผลลัพธ์ของตัวแรกที่ **Fulfilled สำเร็จ** | จะ reject ก็ต่อเมื่อ **ล้มเหลวทั้งหมด** (โยน `AggregateError`) | ระบบสำรอง Fallback Payment Gateway (Omise, Stripe, 2C2P) |
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: ขั้นตอนสั่งซื้อเนื้อ (Checkout Order Flow) พร้อม Error Handling
+```typescript filename="src/checkout-flow.ts"
+interface ButcherProduct {
+  id: string;
+  name: string;
+  pricePerKg: number;
+  stockKg: number;
+}
+
+interface CreateOrderPayload {
+  userId: string;
+  productId: string;
+  quantityKg: number;
+  paymentMethod: 'PROMPTPAY' | 'CREDIT_CARD';
+}
+
+class InsufficientStockError extends Error {
+  constructor(productName: string, requested: number, available: number) {
+    super(`สต็อกเนื้อ ${productName} ไม่เพียงพอ: ขอซื้อ ${requested}kg แต่เหลือเพียง ${available}kg`);
+    this.name = 'InsufficientStockError';
+  }
+}
+
+async function fetchProductDetails(productId: string): Promise<ButcherProduct> {
+  // จำลองการดึงข้อมูลจาก Database
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      if (productId === 'wagyu-a5') {
+        resolve({
+          id: 'wagyu-a5',
+          name: 'เนื้อสันนอกวากิวญี่ปุ่น A5 (Miyazaki)',
+          pricePerKg: 4500,
+          stockKg: 10,
+        });
+      } else {
+        reject(new Error(`ไม่พบสินค้ารหัส: ${productId}`));
+      }
+    }, 100);
+  });
+}
+
+async function processCardPayment(userId: string, amountThb: number): Promise<{ transactionId: string }> {
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      resolve({ transactionId: `txn_butcher_${Date.now()}` });
+    }, 150);
+  });
+}
+
+export async function checkoutButcherOrder(payload: CreateOrderPayload) {
+  console.log(`[Order Service] เริ่มต้นประมวลผลคำสั่งซื้อสำหรับลูกค้า: ${payload.userId}`);
+
+  try {
+    // 1. ดึงข้อมูลสินค้าและเช็กสต็อก
+    const product = await fetchProductDetails(payload.productId);
+
+    if (product.stockKg < payload.quantityKg) {
+      throw new InsufficientStockError(product.name, payload.quantityKg, product.stockKg);
+    }
+
+    const totalAmount = product.pricePerKg * payload.quantityKg;
+    console.log(`[Order Service] ยอดรวมคำสั่งซื้อ: ${totalAmount.toLocaleString()} บาท`);
+
+    // 2. ชำระเงิน
+    const paymentResult = await processCardPayment(payload.userId, totalAmount);
+    console.log(`[Payment Service] ตัดเงินสำเร็จ Transaction ID: ${paymentResult.transactionId}`);
+
+    // 3. สร้างคำสั่งซื้อ
+    const finalizedOrder = {
+      orderId: `ord_${Date.now()}`,
+      userId: payload.userId,
+      items: [{ productId: product.id, name: product.name, quantityKg: payload.quantityKg }],
+      totalAmount,
+      transactionId: paymentResult.transactionId,
+      status: 'CONFIRMED',
+      createdAt: new Date().toISOString(),
+    };
+
+    return finalizedOrder;
+  } catch (error) {
+    if (error instanceof InsufficientStockError) {
+      console.warn(`[Stock Alert] ${error.message}`);
+    } else {
+      console.error('[Critical Error] การสั่งซื้อล้มเหลว:', error);
+    }
+    // ส่งต่อ Error ให้ Controller ชั้นบนแปลงเป็น HTTP 400 หรือ 500
+    throw error;
+  } finally {
+    console.log(`[Audit] เสร็จสิ้นกระบวนการสำหรับลูกค้า ${payload.userId}`);
+  }
+}
+```
+
+### ตัวอย่างที่ 2: การใช้ Concurrency (`Promise.allSettled` และ `Promise.any`) ในระบบตลาดเนื้อ
+```typescript filename="src/concurrency-payment-demo.ts"
+// การเลือก Payment Gateway แบบ High Availability ด้วย Promise.any
+async function chargeViaOmise(amount: number): Promise<string> {
+  return new Promise((_, reject) => setTimeout(() => reject(new Error('Omise Gateway Timeout 504')), 300));
+}
+
+async function chargeViaStripe(amount: number): Promise<string> {
+  return new Promise((resolve) => setTimeout(() => resolve('Stripe Charge Success: ch_883921'), 200));
+}
+
+async function chargeVia2C2P(amount: number): Promise<string> {
+  return new Promise((resolve) => setTimeout(() => resolve('2C2P Charge Success: 2c_11029'), 400));
+}
+
+export async function reliableCharge(amount: number) {
+  try {
+    // Promise.any จะเลือกตัวแรกที่ชำระสำเร็จ ไม่สนใจว่าตัวอื่นจะพัง
+    const fastestSuccessGateway = await Promise.any([
+      chargeViaOmise(amount),
+      chargeViaStripe(amount),
+      chargeVia2C2P(amount),
+    ]);
+    console.log('[Payment HA] ชำระเงินสำเร็จผ่านช่องทางด่วนที่สุด:', fastestSuccessGateway);
+  } catch (aggregateError: any) {
+    console.error('[Payment HA] ทุก Payment Gateway ล้มเหลวทั้งหมด:', aggregateError.errors);
+  }
+}
+
+// การส่งแจ้งเตือนลูกค้าหลายรายด้วย Promise.allSettled
+export async function notifyButcherVIPCustomers(customerIds: string[]) {
+  const notificationPromises = customerIds.map((id) => {
+    return new Promise<{ customerId: string; status: string }>((resolve, reject) => {
+      if (id === 'vip_error_customer') {
+        reject(new Error(`SMS Provider ส่งไม่สำเร็จสำหรับเบอร์ของ ${id}`));
+      } else {
+        resolve({ customerId: id, status: 'SMS_SENT' });
+      }
+    });
+  });
+
+  const results = await Promise.allSettled(notificationPromises);
+
+  results.forEach((res, index) => {
+    if (res.status === 'fulfilled') {
+      console.log(`[Notify Success] ลูกค้า ${res.value.customerId} ได้รับ SMS ข่าวโปรโมชันเนื้อ A5`);
+    } else {
+      console.error(`[Notify Failed] ลูกค้าลำดับที่ ${index} ส่งไม่ผ่าน: ${res.reason.message}`);
+    }
+  });
+}
+```
+
+## 4. ผิด vs ถูก (Anti-patterns & Best Practices)
+
+### ❌ โค้ดที่ผิด: ใช้ `forEach` กับ `async/await` ทำให้โค้ดไม่รอ และควบคุม Error ไม่ได้
+```typescript filename="bad-async-loop.ts"
+const meatProductIds = ['beef_01', 'beef_02', 'pork_01'];
+
+// ผิด: forEach ไม่สนใจ Promise ที่ return ออกมาจาก callback!
+// บรรทัด "ตัดสต็อกเสร็จสิ้น" จะถูกพิมพ์ออกมาก่อนที่ฟังก์ชันข้างในจะทำงานเสร็จ
+// และหากเกิด Error ระบบจะไม่สามารถดักจับด้วย try/catch ภายนอกได้
+async function updateAllStock() {
+  meatProductIds.forEach(async (id) => {
+    await db.updateStock(id, -1);
+  });
+  console.log('ตัดสต็อกเสร็จสิ้นทุกรายการ (แต่จริงๆ ยังทำงานไม่เสร็จ!)');
+}
+```
+
+### ✅ โค้ดที่ถูก: ใช้ `Promise.all` เมื่อต้องการขนาน หรือ `for...of` เมื่อต้องการทำทีละขั้นตอน
+```typescript filename="good-async-loop.ts"
+const meatProductIds = ['beef_01', 'beef_02', 'pork_01'];
+
+// แบบที่ 1: ต้องการรันขนานกันเพื่อความรวดเร็ว (Parallel)
+async function updateAllStockParallel() {
+  await Promise.all(
+    meatProductIds.map((id) => db.updateStock(id, -1))
+  );
+  console.log('ตัดสต็อกพร้อมกันเสร็จสิ้นเรียบร้อยทุกรายการ');
+}
+
+// แบบที่ 2: ต้องการทำตามลำดับทีละชิ้น (Sequential) เพื่อป้องกัน Deadlock หรือ Race condition
+async function updateAllStockSequential() {
+  for (const id of meatProductIds) {
+    await db.updateStock(id, -1);
+    console.log(`ตัดสต็อกชิ้นที่ ${id} สำเร็จ`);
+  }
+  console.log('ตัดสต็อกทีละชิ้นเรียบร้อย');
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้:** การดึงข้อมูล I/O ทุกชนิด เช่น ดึงข้อมูล User, Product, Category, การส่งคำสั่งซื้อไปยัง Payment Provider, การเขียนไฟล์ใบเสร็จ
+- **ไม่ควรใช้:** หลีกเลี่ยงการเขียน `return await promise;` เมื่อไม่ได้อยู่ในบล็อก `try/catch` เพราะเป็นการสร้าง Microtask ซ้อนโดยเปล่าประโยชน์ (ยกเว้นในกรณีที่ต้องการให้ Stack Trace สมบูรณ์ขึ้นตอนดีบัก)
+
+## 6. คำถามสัมภาษณ์ (Interview Questions)
+- **Q1: อะไรคือความแตกต่างระหว่าง `Promise.all()` และ `Promise.allSettled()` และในระบบการชำระเงินของร้านค้าควรเลือกใช้อย่างไร?**
+  - *คำตอบ:* `Promise.all()` จะ Fail-fast ทันทีหากมี Promise ตัวใดตัวหนึ่ง reject เหมาะสำหรับขั้นตอนที่มีความต่อเนื่องสัมพันธ์กัน เช่น ถ้าคำนวณภาษีเนื้อไม่ผ่าน ก็ไม่ต้องหักเงิน ส่วน `Promise.allSettled()` จะรอให้ทุก Promise ทำงานจนเสร็จทั้งหมด ไม่ว่าจะสำเร็จหรือล้มเหลว เหมาะสำหรับงานอิสระที่ต้องการสรุปรายงานผล เช่น การส่งใบเสร็จคำสั่งซื้อให้ 5 หน่วยงานปลายทาง
+- **Q2: หากโค้ดมี Unhandled Promise Rejection ใน Node.js จะเกิดอะไรขึ้นกับระบบ?**
+  - *คำตอบ:* ใน Node.js เวอร์ชัน 15 เป็นต้นมา ค่าเริ่มต้นจะทำให้ Node.js Process **Crash และหยุดทำงานทันที (Terminate with non-zero exit code)** เพื่อป้องกันไม่ให้แอปพลิเคชันทำงานต่อในสภาวะสถานะข้อมูลผิดเพี้ยน (Corrupted state)
+
+---

@@ -1,0 +1,139 @@
+---
+title: Volumes Health
+category: BACKEND
+parentTitle: Docker
+version: Docker v27 & Compose v2
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+การนำระบบร้านค้าเนื้อพรีเมียมขึ้นใช้งานจริงต้องมีกลไกรับประกันความมั่นคง 4 ด้านในระดับ Container:
+1. **Persistent Volumes**: ปกป้องข้อมูลในตาราง `Order`, `Payment`, และสต็อก `Product` ให้คงอยู่ถาวรแม้จะมีการอัปเกรดอิมเมจของ PostgreSQL
+2. **Environment Variables & Validation**: แยกค่าคงที่และการตั้งค่าออกจากโค้ด พร้อมตรวจสอบความถูกต้องตั้งแต่วินาทีแรกที่ NestJS เริ่มทำงาน
+3. **Docker Secrets**: จัดการข้อมูลความลับระดับสูงโดยไม่ให้รั่วไหลผ่านคำสั่ง `docker inspect`
+4. **Container Healthcheck**: ให้ Docker Engine ตรวจสอบสุขภาพของทั้ง PostgreSQL และ NestJS API อย่างต่อเนื่องเพื่อรู้ทันทีเมื่อบริการค้างหรือเชื่อมต่อฐานข้อมูลไม่ได้
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+- **Named Volume (`postgres_data`)**: Docker จัดการพื้นที่นี้ไว้ที่ `/var/lib/docker/volumes/` บนเครื่องโฮสต์ ซึ่งมีประสิทธิภาพ I/O สูงกว่า Bind Mount และปลอดภัยจากการเผลอลบไฟล์ในโฟลเดอร์โปรเจกต์ โดยจะไม่ถูกลบเมื่อสั่ง `docker compose down` (ยกเว้นจะระบุแฟล็ก `-v` อย่างจงใจ)
+- **Healthcheck Lifecycle**: Docker จะรันคำสั่ง `test` ตามรอบเวลา `interval` เมื่อเริ่มต้น Container จะอยู่ในสถานะ `health: starting` ในช่วงเวลา `start_period` หากคำสั่งคืนค่า Exit Code `0` จะเปลี่ยนเป็น `healthy` แต่หากคืนค่าอื่นติดต่อกันครบจำนวน `retries` สถานะจะกลายเป็น `unhealthy`
+
+<Callout type="warning" title="ระวังคำสั่ง docker compose down -v">
+การรันคำสั่ง `docker compose down` ปกติจะลบเฉพาะ Container และ Network แต่ยังคงเก็บ Named Volume (`postgres_data`) เอาไว้ อย่างไรก็ตาม หากเติมแฟล็ก `-v` (`docker compose down -v`) Docker จะลบ Volume ทิ้งทันที ส่งผลให้ข้อมูลลูกค้า สินค้า และคำสั่งซื้อทั้งหมดในฐานข้อมูลหายไปอย่างถาวร ห้ามใช้แฟล็ก `-v` บนเครื่องที่มีข้อมูลสำคัญเด็ดขาด
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การตรวจสอบความถูกต้องของ Environment Variables ตอนบูตระบบ NestJS 11 เพื่อให้ระบบ Fail-fast ทันทีหากตั้งค่าใน Docker Compose ไม่ครบถ้วน
+
+```typescript filename="src/config/env.validation.ts"
+import { plainToInstance } from 'class-transformer';
+import {
+  IsEnum,
+  IsInt,
+  IsNotEmpty,
+  IsString,
+  IsUrl,
+  Max,
+  Min,
+  validateSync,
+} from 'class-validator';
+
+export enum Environment {
+  Development = 'development',
+  Production = 'production',
+  Test = 'test',
+}
+
+class EnvironmentVariables {
+  @IsEnum(Environment)
+  NODE_ENV: Environment = Environment.Development;
+
+  @IsInt()
+  @Min(1024)
+  @Max(65535)
+  PORT: number = 3000;
+
+  @IsString()
+  @IsNotEmpty()
+  DATABASE_URL!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  JWT_SECRET!: string;
+
+  @IsUrl({ require_tld: false })
+  @IsNotEmpty()
+  SUPABASE_URL!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  SUPABASE_SERVICE_ROLE_KEY!: string;
+}
+
+export function validateEnv(config: Record<string, unknown>): EnvironmentVariables {
+  const validatedConfig = plainToInstance(EnvironmentVariables, config, {
+    enableImplicitConversion: true,
+  });
+
+  const errors = validateSync(validatedConfig, {
+    skipMissingProperties: false,
+  });
+
+  if (errors.length > 0) {
+    const messages = errors
+      .map((err) => Object.values(err.constraints ?? {}).join(', '))
+      .join('; ');
+    throw new Error(`[ConfigValidation] การตั้งค่า Environment Variables ไม่ครบถ้วน: ${messages}`);
+  }
+
+  return validatedConfig;
+}
+```
+
+ตัวอย่างที่ 2: การกำหนด `healthcheck` ให้กับ `butcher_api` และการตั้งค่า `secrets` ใน `compose.yaml` เพื่อตรวจสอบ Endpoint `/health` โดยไม่ต้องติดตั้ง `curl` เพิ่มใน Alpine Image
+
+```yaml filename="compose.yaml"
+services:
+  butcher_api:
+    image: smart-butcher-api:1.0.0
+    # ... การตั้งค่าอื่นจากหัวข้อก่อนหน้า ...
+    secrets:
+      - jwt_private_secret
+    healthcheck:
+      # ใช้ node ในการยิง HTTP GET ไปที่ /health ของตัวเอง จึงไม่ต้องติดตั้ง curl หรือ wget เพิ่มใน Image
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+secrets:
+  jwt_private_secret:
+    file: ./secrets/jwt_secret.txt
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การตรวจจับค่า `.env` ที่ตกหล่น** | ปล่อยให้แอปสตาร์ทผ่านไปก่อน แล้วค่อยไปพังด้วย `TypeError: Cannot read properties of undefined` ตอนที่ลูกค้ากดสั่งซื้อเนื้อ | ใช้ `validateEnv` ใน `ConfigModule.forRoot({ validate: validateEnv })` เพื่อหยุดการบูตทันทีหากขาดตัวแปรสำคัญ |
+| **การทำ Healthcheck บน Node Image** | ติดตั้งแพ็กเกจ `curl` และไลบรารีพ่วงอีกหลายสิบตัวใน Production Image เพียงเพื่อใช้รัน Healthcheck | ใช้คำสั่ง `node -e "fetch('http://127.0.0.1:3000/health')..."` ที่มีอยู่ใน Node.js 22 ทันที |
+| **การเก็บไฟล์ `.env`** | Commit ไฟล์ `.env` ที่มีรหัสผ่านจริงเข้าสู่ Git Repository | Commit เฉพาะไฟล์ `.env.example` ที่มีเฉพาะชื่อตัวแปรตัวอย่าง และฉีดค่าจริงที่เครื่องเซิร์ฟเวอร์ |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Named Volume เมื่อ**: เก็บข้อมูลฐานข้อมูล PostgreSQL 16 ที่ต้องการความเร็ว I/O สูงและความปลอดภัยของไฟล์ข้อมูล
+- **ควรใช้ Bind Mount (`./src:/app/src`) เมื่อ**: อยู่ในโหมด Local Development เท่านั้นเพื่อซิงค์ซอร์สโค้ดจากเครื่องโฮสต์เข้าสู่ Container แบบทันที ไม่ควรใช้ Bind Mount สำหรับโค้ดใน Production
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: Named Volume (`postgres_data:/var/lib/postgresql/data/pgdata`) ต่างจาก Bind Mount (`./db-data:/var/lib/postgresql/data/pgdata`) อย่างไร และทำไมจึงแนะนำ Named Volume สำหรับ PostgreSQL?
+   - **แนวคำตอบ**: Named Volume ถูกจัดการโดย Docker Engine โดยตรง มีการตั้งค่าสิทธิ์ไฟล์ (File Permissions/Ownership ของผู้ใช้ `postgres`) ให้ถูกต้องอัตโนมัติ และทำงานได้เร็วกว่ามากบน Windows (WSL2) และ macOS ในขณะที่ Bind Mount จะผูกกับโฟลเดอร์บนระบบไฟล์ของโฮสต์โดยตรง ซึ่งมักเกิดปัญหา Permission Denied กับ UID ของ PostgreSQL และเสี่ยงต่อการที่ผู้ใช้หรือโปรแกรมบนโฮสต์เผลอไปแก้ไขหรือลบไฟล์ฐานข้อมูลโดยตรง
+2. **คำถาม**: พารามิเตอร์ `start_period: 20s` ใน `healthcheck` ของ Docker Compose มีความสำคัญอย่างไรต่อแอปพลิเคชัน NestJS?
+   - **แนวคำตอบ**: แอปพลิเคชัน NestJS ที่ต้องรัน `prisma migrate deploy` และโหลด Dependency Injection Graph ตอนเริ่มต้นอาจใช้เวลาบูตประมาณ 5–15 วินาที `start_period` คือช่วงเวลาผ่อนผัน (Grace Period) ตอนเพิ่งสตาร์ท Container หาก Healthcheck ล้มเหลวในช่วงเวลานี้ Docker จะยังไม่นับรวมเป็นจำนวนครั้งที่ล้มเหลว (`retries`) ป้องกันไม่ให้ Container ถูกตีตราว่า `unhealthy` ก่อนที่จะบูตเสร็จสมบูรณ์
+
+---

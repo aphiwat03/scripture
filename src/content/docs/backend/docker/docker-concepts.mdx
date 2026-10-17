@@ -1,0 +1,114 @@
+---
+title: Docker Concepts
+category: BACKEND
+parentTitle: Docker
+version: Docker v27 & Compose v2
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+Docker คือแพลตฟอร์ม Containerization ที่ห่อหุ้มโค้ดของแอปพลิเคชัน รันไทม์ (Node.js) ไลบรารีระบบ และไฟล์ตั้งค่าทั้งหมดให้อยู่ในหน่วยเดียวกัน โดยประกอบด้วยองค์ประกอบหลัก 4 ส่วนที่ทำงานสอดประสานกัน:
+1. **Image**: แม่พิมพ์แบบอ่านอย่างเดียว (Read-only Template) ที่เกิดจากการซ้อนทับกันเป็นชั้นๆ (Layers) เช่น ชั้นของ Alpine Linux + ชั้นของ Node.js 22 + ชั้นของโค้ด NestJS ที่คอมไพล์แล้ว
+2. **Container**: อินสแตนซ์ที่กำลังทำงานอยู่ (Runnable Instance) ของ Image มีพื้นที่เขียนไฟล์ชั่วคราว (Writable Layer) ของตัวเองแยกขาดจากโฮสต์
+3. **Volume**: พื้นที่จัดเก็บข้อมูลถาวรที่อยู่นอกวงจรชีวิตของ Container ใช้สำหรับเก็บข้อมูลฐานข้อมูล PostgreSQL 16 (เช่น ตาราง `User`, `Product`, `Order`, `Payment`) ไม่ให้หายไปเมื่อลบหรือสร้าง Container ใหม่
+4. **Network**: เครือข่ายเสมือนที่ช่วยให้ Container ของ NestJS และ PostgreSQL สื่อสารกันภายในได้ด้วยชื่อ Service โดยไม่ต้องเปิดพอร์ตฐานข้อมูลออกสู่สาธารณะ
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ต่างจาก Virtual Machine (VM) ที่ต้องจำลองฮาร์ดแวร์และบูตระบบปฏิบัติการ Guest OS เต็มรูปแบบสำหรับทุกเครื่อง Docker Container ใช้คุณสมบัติระดับ Linux Kernel ร่วมกับเครื่องโฮสต์โดยตรงผ่านกลไกสำคัญ 3 ประการ:
+- **Namespaces (`pid`, `net`, `mnt`, `ipc`, `uts`, `user`)**: แยกมุมมองของโพรเซส เครือข่าย และระบบไฟล์ ทำให้ Container ของ NestJS เห็นตัวเองเป็น PID 1 และไม่เห็นโพรเซสอื่นบนเครื่องโฮสต์
+- **Control Groups (`cgroups`)**: จำกัดและจัดสรรทรัพยากรฮาร์ดแวร์ เช่น กำหนดไม่ให้ Container ใช้ RAM เกิน 512MB หรือ CPU เกิน 1 Core
+- **Union File System (`OverlayFS`)**: นำ Layer ของ Image ที่เป็น Read-only มาซ้อนทับกัน หากสอง Image ใช้ Base Image `node:22-alpine` ตัวเดียวกัน Docker จะแชร์ Layer พื้นฐานร่วมกันบนดิสก์ ช่วยประหยัดพื้นที่และโหลดเร็วขึ้นอย่างมาก
+
+<Callout type="note" title="Stateless Container vs Stateful Data">
+หัวใจสำคัญของการออกแบบระบบด้วย Docker คือต้องถือว่าตัว Container ของ NestJS API เป็น Stateless เสมอ (สามารถถูกลบและสร้างใหม่ได้ทุกเมื่อโดยที่ระบบไม่เสียข้อมูล) ข้อมูลที่มีสถานะทั้งหมดของระบบร้านค้าเนื้อพรีเมียมต้องถูกเก็บไว้ใน PostgreSQL Volume หรือ Cloud Storage (Supabase Storage) เท่านั้น
+</Callout>
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การสร้างไฟล์ `.dockerignore` เพื่อป้องกันไม่ให้โฟลเดอร์ขนาดใหญ่ (`node_modules`) หรือไฟล์ความลับ (`.env`) หลุดเข้าไปใน Docker Build Context
+
+```dockerignore filename=".dockerignore"
+# Dependencies และ Build artifacts บนเครื่องโฮสต์
+node_modules
+dist
+coverage
+.pnpm-store
+
+# ไฟล์ความลับและ Environment Variables (ต้องฉีดเข้าตอนรันเท่านั้น)
+.env
+.env.*
+!.env.example
+
+# ไฟล์ Git และเอกสารที่ไม่จำเป็นต่อการรัน Production
+.git
+.gitignore
+.github
+README.md
+docs
+src/content
+*.log
+```
+
+ตัวอย่างที่ 2: สคริปต์ตรวจสอบความพร้อมของการเชื่อมต่อฐานข้อมูลและสถานะ Container (`HealthController`) ใน NestJS 11 เพื่อรองรับการทำงานในสภาพแวดล้อม Container
+
+```typescript filename="src/modules/health/health.controller.ts"
+import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+
+export interface SystemHealthResponse {
+  status: 'ok' | 'degraded';
+  service: string;
+  timestamp: string;
+  uptimeSeconds: number;
+  database: 'connected' | 'disconnected';
+}
+
+@Controller('health')
+export class HealthController {
+  constructor(private readonly prisma: PrismaService) {}
+
+  @Get()
+  async checkHealth(): Promise<SystemHealthResponse> {
+    try {
+      // ตรวจสอบการเชื่อมต่อกับ PostgreSQL 16 Container
+      await this.prisma.$queryRaw`SELECT 1`;
+
+      return {
+        status: 'ok',
+        service: 'smart-butcher-api',
+        timestamp: new Date().toISOString(),
+        uptimeSeconds: Math.floor(process.uptime()),
+        database: 'connected',
+      };
+    } catch {
+      throw new ServiceUnavailableException({
+        status: 'degraded',
+        service: 'smart-butcher-api',
+        timestamp: new Date().toISOString(),
+        uptimeSeconds: Math.floor(process.uptime()),
+        database: 'disconnected',
+      });
+    }
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **ไฟล์ `.dockerignore`** | ไม่มีไฟล์ `.dockerignore` ทำให้คำสั่ง `COPY . .` ก๊อปปี้โฟลเดอร์ `node_modules` (ขนาดหลายร้อย MB) และไฟล์ `.env` เข้าไปใน Image | สร้าง `.dockerignore` เพื่อคัดกรองเฉพาะซอร์สโค้ดและไฟล์ที่จำเป็นต่อการ Build เท่านั้น |
+| **การเก็บข้อมูลใน Container** | เขียนไฟล์ใบเสร็จหรือฐานข้อมูล SQLite ไว้ใน Writable Layer ของ Container ซึ่งจะหายทันทีเมื่อสั่ง `docker compose down` | เก็บข้อมูลฐานข้อมูลใน Named Volume และเก็บไฟล์มีเดียบน Cloud Object Storage |
+| **การรวมหลายบริการใน Container เดียว** | ติดตั้งทั้ง Node.js, PostgreSQL และ Nginx ไว้ใน Container ตัวเดียวกัน ทำให้ขยายระบบแยกส่วนไม่ได้ | แยก 1 โพรเซสหลักต่อ 1 Container (NestJS 1 Container, PostgreSQL 1 Container) แล้วเชื่อมกันด้วย Docker Network |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: ต้องการให้ทีมพัฒนาทุกคนรัน PostgreSQL 16 และ NestJS 11 ในสภาพแวดล้อมที่ตรงกัน 100% หรือเมื่อต้องการสร้าง Artifact มาตรฐานสำหรับนำไปรันบน Cloud (AWS ECS, Google Cloud Run, DigitalOcean, Kubernetes)
+- **ไม่ควรใช้เมื่อ**: ไม่ควรนำ Docker Image ที่ไม่ได้แยก Stage การ Build (มีทั้ง TypeScript Compiler และ `devDependencies`) ไปรันบน Production Server โดยตรงเพราะมีขนาดใหญ่และมีพื้นผิวการโจมตี (Attack Surface) สูง
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ถ้าเราสั่ง `COPY package.json pnpm-lock.yaml ./` แล้วรัน `pnpm install` ก่อนคำสั่ง `COPY . .` ใน Dockerfile มีข้อดีอย่างไรในแง่ของ Docker Layer Caching?
+   - **แนวคำตอบ**: Docker สร้างและแคช Image เป็นรายบรรทัดคำสั่ง (Layer) หากคัดลอกไฟล์ซอร์สโค้ดทั้งหมด (`COPY . .`) ก่อนติดตั้งแพ็กเกจ ทุกครั้งที่แก้โค้ดแม้แต่ตัวอักษรเดียวใน `ProductsService` แคชของ Layer นั้นจะถูกทำลาย ทำให้ Docker ต้องรัน `pnpm install` ใหม่ทั้งหมด แต่ถ้าแยกคัดลอกเฉพาะ `package.json` และ Lockfile มาก่อน Docker จะใช้แคชของ Layer `node_modules` เดิมได้ทันทีตราบใดที่ไม่มีการเพิ่ม/ลดไลบรารี ช่วยลดเวลา Build จากหลายนาทีเหลือเพียงไม่กี่วินาที
+2. **คำถาม**: ทำไมการไม่มีไฟล์ `.dockerignore` จึงเป็นอันตรายด้านความปลอดภัย?
+   - **แนวคำตอบ**: เพราะคำสั่ง `COPY . .` ใน Dockerfile จะคัดลอกทุกไฟล์ในโฟลเดอร์โปรเจกต์เข้าไปฝังอยู่ใน Layer ของ Image รวมถึงไฟล์ `.env` ที่มีรหัสผ่านฐานข้อมูล (`DATABASE_URL`), `JWT_SECRET`, และ `SUPABASE_SERVICE_ROLE_KEY` หากมีการ Push Image นั้นขึ้น Registry ใครที่ดึง Image ไปสามารถแกะดูความลับทั้งหมดได้ทันที
+
+---

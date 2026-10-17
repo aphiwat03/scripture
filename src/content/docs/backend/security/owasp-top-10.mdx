@@ -1,0 +1,146 @@
+---
+title: OWASP Top 10
+category: BACKEND
+parentTitle: Security
+version: OWASP Top 10 API
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในสถาปัตยกรรมเว็บยุคใหม่ที่แยกส่วน Frontend (Next.js / Mobile App) ออกจาก Backend (NestJS REST API) อย่างชัดเจน รูปแบบการโจมตีได้เปลี่ยนจากการเจาะหน้าเว็บแบบดั้งเดิมมาเป็นการยิงโจมตีที่ **API Endpoints** โดยตรง ทางมูลนิธิ **OWASP (Open Web Application Security Project)** จึงได้จัดทำมาตรฐาน **OWASP API Security Top 10** ซึ่งสรุปช่องโหว่ที่พบบ่อยและสร้างความเสียหายรุนแรงที่สุดต่อระบบธุรกิจ:
+
+| รหัส OWASP API | ชื่อช่องโหว่ | ตัวอย่างเหตุการณ์จริงใน Smart Butcher Marketplace | แนวทางป้องกันใน NestJS 11 |
+| :--- | :--- | :--- | :--- |
+| **API1** | **Broken Object Level Authorization (BOLA / IDOR)** | ลูกค้า A เปลี่ยนรหัสใบสั่งซื้อใน URL `GET /orders/:id` เป็นรหัสของลูกค้า B แล้วดูที่อยู่และเบอร์โทรของลูกค้า B ได้ | บังคับใส่เงื่อนไข `where: { id: orderId, userId: currentUser.id }` ใน Prisma เสมอ |
+| **API2** | **Broken Authentication** | แฮกเกอร์รันสคริปต์สุ่มรหัสผ่านบัญชีลูกค้า VIP นับหมื่นครั้งโดยไม่ถูกบล็อก | ใช้ Bcrypt (Cost 12), Rate Limiting (`@nestjs/throttler`), และ Refresh Token Rotation |
+| **API3** | **Broken Object Property Level Authorization (BOPLA)** | ลูกค้าแอบส่งฟิลด์ `"role": "ADMIN"` หรือ `"isPaid": true` แถมมาใน JSON Body ตอนแก้ไขโปรไฟล์หรือสร้างออเดอร์ (Mass Assignment) | เปิดใช้งาน `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true })` และแยก DTO ขาเข้า/ขาออก |
+| **API4** | **Unrestricted Resource Consumption** | แฮกเกอร์ส่ง `?limit=10000000` หรือส่ง JSON Body ขนาด 500MB เข้ามาจนเซิร์ฟเวอร์หน่วยความจำเต็ม (DoS) | จำกัดขนาด Body (`json({ limit: '100kb' })`), บังคับ `@Max(100)` ใน Pagination และตั้ง Timeout |
+| **API8** | **Security Misconfiguration** | เปิด CORS `origin: '*'`, ลืมใส่ Security Headers หรือปล่อยให้ Prisma Stack Trace โชว์ออกหน้าเว็บ | ติดตั้ง `helmet`, ตั้งค่า Strict CORS Whitelist และใช้ Global Exception Filter ซ่อนรายละเอียดภายใน |
+
+<Callout type="warning" title="หลักการ Defense in Depth (การป้องกันหลายชั้น)">
+ระบบที่ปลอดภัยระดับ Enterprise จะไม่ฝากความหวังไว้ที่ด่านตรวจเพียงชั้นเดียว หาก Guard ชั้นแรกพลาด ชั้น ValidationPipe, ชั้น Service Business Logic และชั้น Database Constraint ของ Prisma จะต้องช่วยกันสกัดกั้นไม่ให้เกิดความเสียหายต่อข้อมูลได้
+</Callout>
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+ช่องโหว่ **API3: Broken Object Property Level Authorization (BOPLA)** เป็นการรวมกันของ 2 ปัญหาใหญ่คือ:
+1. **Mass Assignment (ขาเข้า)**: เกิดเมื่อนักพัฒนาส่ง `req.body` เข้าสู่ `prisma.user.update({ data: req.body })` โดยตรง ทำให้ผู้โจมตีสามารถเดาชื่อคอลัมน์ในฐานข้อมูล (เช่น `role`, `isActive`) แล้วส่งค่าเข้ามาแก้ไขสิทธิ์ตัวเองได้
+2. **Excessive Data Exposure (ขาออก)**: เกิดเมื่อนักพัฒนาส่งอ็อบเจกต์จาก `prisma.user.findUnique()` ออกไปทาง Controller โดยตรงโดยไม่คัดกรองฟิลด์ ทำให้ `passwordHash` หรือข้อมูลส่วนบุคคลรั่วไหลออกไปใน JSON Response
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การป้องกัน Mass Assignment และ Resource Exhaustion ในระดับ Bootstrap (พื้นฐาน)
+```typescript filename="src/common/security/bootstrap-security.config.ts"
+import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { json, urlencoded } from 'express';
+
+export function configureCoreApiSecurity(app: INestApplication): void {
+  // 1. ป้องกัน OWASP API4 (Unrestricted Resource Consumption):
+  // จำกัดขนาด JSON Payload สูงสุดไม่เกิน 100KB ป้องกันการยิง JSON ขนาดยักษ์ถล่ม Memory
+  app.use(json({ limit: '100kb' }));
+  app.use(urlencoded({ extended: true, limit: '100kb' }));
+
+  // 2. ป้องกัน OWASP API3 (Mass Assignment / BOPLA):
+  // whitelist: true จะตัดทุกฟิลด์ที่ไม่ได้ประกาศ Decorator ใน DTO ทิ้งทันที
+  // forbidNonWhitelisted: true จะโยน 400 Bad Request ทันทีหากตรวจพบฟิลด์แปลกปลอม
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+      stopAtFirstError: false,
+    }),
+  );
+}
+```
+
+### ตัวอย่างที่ 2: การป้องกัน SSRF (Server-Side Request Forgery - OWASP API7) เมื่อรับ URL รูปหลักฐานจากภายนอก (ขั้นสูง)
+```typescript filename="src/common/security/ssrf-url-validator.service.ts"
+import { Injectable, BadRequestException } from '@nestjs/common';
+import { URL } from 'url';
+
+@Injectable()
+export class SsrfUrlValidatorService {
+  // อนุญาตให้ดึงไฟล์เฉพาะจากโดเมน CDN ของบริษัทที่ผ่านการรับรองแล้วเท่านั้น
+  private readonly ALLOWED_IMAGE_HOSTS = new Set([
+    'cdn.smartbutcher.co.th',
+    'storage.smartbutcher.co.th',
+  ]);
+
+  validateExternalImageUrl(rawUrl: string): string {
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      throw new BadRequestException({
+        code: 'INVALID_URL_FORMAT',
+        message: 'รูปแบบ URL ของรูปภาพไม่ถูกต้อง',
+      });
+    }
+
+    // 1. บังคับใช้โปรโตคอล HTTPS เท่านั้น (ป้องกัน file://, gopher://, http://)
+    if (parsed.protocol !== 'https:') {
+      throw new BadRequestException({
+        code: 'INSECURE_URL_PROTOCOL',
+        message: 'อนุญาตเฉพาะ URL ที่ใช้โปรโตคอล HTTPS เท่านั้น',
+      });
+    }
+
+    // 2. ป้องกันการชี้ไปยัง Internal Network / Cloud Metadata IP (เช่น 169.254.169.254 หรือ localhost)
+    if (!this.ALLOWED_IMAGE_HOSTS.has(parsed.hostname)) {
+      throw new BadRequestException({
+        code: 'UNTRUSTED_IMAGE_HOST',
+        message: `ไม่อนุญาตให้ใช้รูปภาพจากโดเมนภายนอก (${parsed.hostname})`,
+      });
+    }
+
+    return parsed.toString();
+  }
+}
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```typescript filename="src/modules/users/owasp-bopla-comparison.ts"
+// ❌ ผิด (Anti-pattern): ส่ง Body เข้า Prisma ตรงๆ (เปิดช่องโหว่ Mass Assignment เปลี่ยนตัวเองเป็น ADMIN!)
+export async function updateProfileAntiPattern(prisma: any, userId: string, rawBody: any) {
+  // ถ้าแฮกเกอร์ส่ง { "fullName": "Hacker", "role": "ADMIN" } เข้ามา จะกลายเป็น ADMIN ทันที!
+  return prisma.user.update({
+    where: { id: userId },
+    data: rawBody,
+  });
+}
+
+// ✅ ถูก (Best Practice): ระบุฟิลด์ที่อนุญาตให้อัปเดตอย่างชัดเจนจาก DTO ที่ผ่าน ValidationPipe แล้วเท่านั้น
+export async function updateProfileBestPractice(
+  prisma: any,
+  userId: string,
+  safeDto: { fullName: string; phoneNumber?: string },
+) {
+  return prisma.user.update({
+    where: { id: userId },
+    data: {
+      fullName: safeDto.fullName,
+      phoneNumber: safeDto.phoneNumber,
+    },
+    select: {
+      id: true,
+      email: true,
+      fullName: true,
+      phoneNumber: true,
+      role: true, // เลือกเฉพาะฟิลด์ที่ปลอดภัยส่งกลับ ไม่ส่ง passwordHash
+    },
+  });
+}
+```
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรตั้งค่า `json({ limit: '100kb' })` เป็นค่าเริ่มต้นสำหรับ REST API ทั่วไปเสมอ**: เพื่อป้องกันการโจมตีแบบ JSON Bomb หรือ Payload Flood
+- **ไม่ควรอนุญาตให้เซิร์ฟเวอร์ Backend ดึงข้อมูลจาก URL ที่ผู้ใช้กรอกเข้ามาโดยตรง (`fetch(userProvidedUrl)`)**: โดยไม่ตรวจสอบ Hostname Whitelist เพราะแฮกเกอร์สามารถส่ง `http://169.254.169.254/latest/meta-data/` เพื่อขโมย IAM Credentials ของ Cloud Server ได้ (ช่องโหว่ SSRF)
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ช่องโหว่ Mass Assignment (อยู่ในหมวด OWASP API3: BOPLA) เกิดขึ้นได้อย่างไร และใน NestJS 11 เราป้องกันได้อย่างไร?
+   - **แนวคำตอบ**: เกิดจากการที่ Backend รับ JSON Object จากผู้ใช้งานแล้วส่งต่อไปอัปเดตลง ORM (เช่น Prisma หรือ TypeORM) โดยตรง ทำให้ผู้โจมตีสามารถเพิ่มฟิลด์ที่มีชื่อตรงกับคอลัมน์สำคัญในฐานข้อมูล เช่น `role: 'ADMIN'`, `balance: 999999` หรือ `isVerified: true` เข้ามาใน Request Body ได้ วิธีป้องกันใน NestJS 11 คือการสร้าง DTO ที่ระบุเฉพาะฟิลด์ที่อนุญาตให้แก้ไข เปิดใช้งาน `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true })` ระดับ Global และในชั้น Service ให้ Map ฟิลด์ลงคำสั่ง `prisma.update` แบบ Explicit เท่านั้น
+2. **คำถาม**: ทำไมการปล่อยให้ขนาดของ Request Body เป็นค่าเริ่มต้นหรือตั้งไว้สูงมาก (เช่น `50mb`) สำหรับทุก Endpoint จึงอันตรายต่อระบบ Node.js?
+   - **แนวคำตอบ**: เพราะการ Parse JSON (`JSON.parse`) ใน Node.js เป็นการทำงานแบบ Synchronous ที่ใช้ทั้ง CPU และ V8 Heap Memory สูงมาก หากผู้โจมตีส่ง JSON ขนาด 50MB เข้ามาพร้อมกันเพียง 10-20 คำขอ Event Loop ของเซิร์ฟเวอร์จะหยุดชะงัก (Event Loop Block) และหน่วยความจำจะเต็มจนโปรเซสแครช (OOM Kill) ทั้งระบบ ดังนั้นจึงควรจำกัด JSON Body ทั่วไปไว้ที่ `100kb` และเปิดรับไฟล์ขนาดใหญ่เฉพาะที่ Endpoint อัปโหลดไฟล์ (`multipart/form-data`) ที่มีระบบ Streaming เท่านั้น
+
+---

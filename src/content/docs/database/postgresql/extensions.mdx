@@ -1,0 +1,150 @@
+---
+title: Extensions
+category: DATABASE
+parentTitle: PostgreSQL 16
+version: PostgreSQL 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+หากเปรียบเทียบ PostgreSQL กับรถกระบะห้องเย็นขนส่งเนื้อของ **Smart Butcher Marketplace**:
+- ตัว PostgreSQL Engine ดั้งเดิม เปรียบเหมือนโครงสร้างรถ เครื่องยนต์ดีเซล และห้องแช่แข็งมาตรฐาน
+- แต่หากร้านต้องการฟังก์ชันพิเศษ เช่น:
+  - ติดตั้งตู้เซฟป้องกันการโจรกรรมรหัสผ่าน (ต้องการระบบ Hash ชั้นสูง) -> ติดตั้งส่วนขยาย **`pgcrypto`**
+  - ติดตั้งระบบ GPS อัจฉริยะที่เดาชื่อเนื้อที่ลูกค้าพิมพ์ผิดบนหน้าจอสั่งซื้อ เช่น ลูกค้าพิมพ์ "วากิว ดรายเอช" หรือ "wagy ribye" แต่ระบบยังเดาใจได้ถูกต้อง -> ติดตั้งส่วนขยาย **`pg_trgm` (Trigram Matching)**
+- **PostgreSQL Extension Architecture:** ช่วยให้เราสามารถติดตั้งฟังก์ชันระดับ C Library ที่มีความเร็วสูงสุดลงในตัว Database Engine ได้โดยตรงผ่านคำสั่ง `CREATE EXTENSION` เพียงบรรทัดเดียว โดยไม่ต้อง Compile ตัวฐานข้อมูลใหม่และไม่ต้องรีสตาร์ตเซิร์ฟเวอร์
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. กลไกการโหลด Extension
+เมื่อรันคำสั่ง `CREATE EXTENSION extension_name;`:
+1. PostgreSQL จะมองหาไฟล์ Control File (`extension_name.control`) ในไดเรกทอรีแชร์ของระบบ
+2. โหลด Shared Object Library (`.so` บน Linux หรือ `.dll` บน Windows) เข้าสู่หน่วยความจำของ Process
+3. รันสคริปต์ SQL ของ Extension เพื่อลงทะเบียน Functions, Operators, Data Types, และ Index Access Methods ลงใน System Catalogs (`pg_proc`, `pg_type`, `pg_am`)
+
+### 2. `pgcrypto`
+- นำเสนออัลกอริทึมการเข้ารหัสมาตรฐานสากล: Blowfish/Bcrypt (`crypt()`, `gen_salt('bf')`), SHA-2 (`digest()`), AES-Symmetric (`pgp_sym_encrypt()`), และฟังก์ชันสร้างตัวเลขสุ่มความปลอดภัยสูง
+- ใน PostgreSQL 13+ ฟังก์ชัน `gen_random_uuid()` ถูกยกเข้าไปเป็น Core Function โดยไม่ต้องเปิด Extension อีกต่อไป แต่ `pgcrypto` ยังคงจำเป็นสำหรับงาน Hashing และ Encryption
+
+### 3. `pg_trgm` (Trigram Matching)
+- **Trigram คืออะไร:** คือการตัดข้อความออกเป็นชิ้นย่อยๆ ขนาด 3 ตัวอักษรเรียงต่อกัน โดยเติมช่องว่างข้างหน้า 2 ช่องและข้างหลัง 1 ช่อง
+  - ตัวอย่างคำว่า `"WAGYU"` จะถูกแตกเป็น trigrams: `["  w", " wa", "wag", "agy", "gyu", "yu "]`
+- **Similarity Score:** คำนวณความเหมือนกันของสองข้อความโดยการเทียบสัดส่วนของ Trigram ที่ซ้ำกัน (0.0 ถึง 1.0)
+- **Index Support:** สามารถสร้างดัชนีแบบ **GIN (Generalized Inverted Index)** หรือ **GiST** บน Trigrams ทำให้สามารถค้นหาคำค้นแบบมี Wildcard ข้างหน้า เช่น `WHERE name LIKE '%wagyu%'` ได้อย่างรวดเร็ว โดยเปลี่ยนจาก Sequential Scan เป็น Index Scan ทันที!
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การเปิดใช้งาน Extensions และการเข้ารหัสรหัสผ่านด้วย `pgcrypto`
+จัดการระบบสมาชิกพนักงาน Butcher ด้วยการเข้ารหัสระดับ Database:
+
+```sql filename="11_pgcrypto_demo.sql"
+-- 1. ติดตั้ง Extensions ที่จำเป็น
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+
+-- 2. สร้างตารางพนักงานขายเนื้อพร้อมการแฮชรหัสผ่านด้วย Blowfish (Bcrypt)
+CREATE TABLE butcher_staff (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username TEXT NOT NULL UNIQUE,
+    -- เก็บสตริง hash ที่ได้จาก bcrypt
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'STAFF'
+);
+
+-- 3. บันทึกข้อมูลพนักงาน โดยสั่งแฮชรหัสผ่านตั้งแต่ใน SQL ด้วย Blowfish Cost Factor 10
+INSERT INTO butcher_staff (username, password_hash)
+VALUES (
+    'chef_somchai',
+    crypt('SuperSecretPass#2026', gen_salt('bf', 10))
+);
+
+-- 4. ตรวจสอบรหัสผ่านตอนล็อกอิน (Password Verification)
+-- ฟังก์ชัน crypt() จะนำ salt จาก hash เดิมมาเข้ารหัสใหม่แล้วเปรียบเทียบ
+SELECT id, username, role
+FROM butcher_staff
+WHERE username = 'chef_somchai'
+  AND password_hash = crypt('SuperSecretPass#2026', password_hash);
+
+/* ผลลัพธ์เมื่อรหัสผ่านถูกต้อง:
+                  id                  |   username   | role  
+--------------------------------------+--------------+-------
+ 4a9f9d2b-4261-4c6e-8d5e-7a912bb0e922 | chef_somchai | STAFF
+(1 row)
+*/
+```
+
+### ตัวอย่างที่ 2: ระบบ Fuzzy Search ค้นหาเนื้อพรีเมียมด้วย `pg_trgm` และ GIN Index
+จำลองระบบค้นหาสินค้าของหน้าร้าน Smart Butcher ที่รองรับคำสะกดผิดและการค้นหาแบบข้อความย่อย:
+
+```sql filename="12_trigram_search.sql"
+-- 1. เพิ่ม GIN Index บนคอลัมน์ชื่อสินค้าโดยใช้ trigram operator class (gin_trgm_ops)
+CREATE INDEX idx_products_name_trgm ON products USING GIN (name gin_trgm_ops);
+
+-- 2. ป้อนข้อมูลสินค้าหลากหลายประเภท
+INSERT INTO products (category_id, name, sku, price_per_kg, stock_qty)
+VALUES 
+('c1111111-1111-1111-1111-111111111111', 'Japanese Miyazaki Wagyu A5 Ribeye', 'WGY-MIYA-RIB', 5500.00, 10),
+('c1111111-1111-1111-1111-111111111111', 'Australian Black Angus Tomahawk', 'ANG-AUS-TOMA', 2800.00, 8),
+('c1111111-1111-1111-1111-111111111111', 'Dry-Aged 45 Days Striploin Beef', 'DRY-45D-STRIP', 3200.00, 5);
+
+-- 3. ทดสอบการค้นหาแบบ Wildcard ที่มีเครื่องหมาย % ด้านหน้า
+-- หากไม่มี pg_trgm คำสั่งนี้จะบังคับทำ Sequential Scan แต่เมื่อมี GIN Trigram Index ระบบจะวิ่งผ่าน Index ทันที!
+EXPLAIN ANALYZE
+SELECT id, name, price_per_kg
+FROM products
+WHERE name ILIKE '%wagyu%ribeye%';
+
+-- 4. ทดสอบ Fuzzy Search ในกรณีที่ลูกค้าสะกดคำผิด เช่น พิมพ์ "wagy ribye"
+-- ใช้ตัวดำเนินการ % (Similarity Operator) หรือฟังก์ชัน similarity()
+SELECT 
+    name, 
+    sku,
+    ROUND(similarity(name, 'wagy ribye')::numeric, 3) AS similarity_score
+FROM products
+WHERE similarity(name, 'wagy ribye') > 0.25
+ORDER BY similarity_score DESC;
+
+/* ผลลัพธ์ตัวอย่าง (Expected Output):
+               name                |     sku      | similarity_score 
+-----------------------------------+--------------+------------------
+ Japanese Miyazaki Wagyu A5 Ribeye | WGY-MIYA-RIB |            0.412
+(1 row)
+ระบบสามารถ match เจอ 'Japanese Miyazaki Wagyu A5 Ribeye' ได้อย่างแม่นยำแม้ลูกค้าพิมพ์ผิด!
+*/
+```
+
+## 4. ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+### ❌ สิ่งที่ผิด: ใช้ `B-Tree` Index กับการค้นหาแบบ `LIKE '%keyword%'`
+```sql filename="sql/postgresql.sql"
+-- สร้าง B-Tree Index ปกติ
+CREATE INDEX idx_products_name ON products(name);
+
+-- คิวรีที่มี wildcard ด้านหน้า:
+SELECT * FROM products WHERE name LIKE '%wagyu%';
+-- B-Tree Index ไร้ประโยชน์โดยสิ้นเชิง! 
+-- เพราะ B-Tree ค้นหาได้เฉพาะคำขึ้นต้น (Prefix) เท่านั้น เช่น LIKE 'wagyu%' 
+-- ส่งผลให้ PostgreSQL ต้องกวาดอ่านทุกหน้าตาราง (Full Table Scan)
+```
+
+### ✅ สิ่งที่ถูก: ติดตั้ง `pg_trgm` และใช้ `GIN` Index แบบ `gin_trgm_ops`
+```sql filename="sql/postgresql.sql"
+-- สร้าง GIN Trigram Index
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX idx_products_name_gin ON products USING GIN (name gin_trgm_ops);
+
+-- คิวรีเดิมจะทำงานผ่าน Bitmap Index Scan ทันที ไม่ว่า % จะอยู่หน้าหรือหลัง:
+SELECT * FROM products WHERE name ILIKE '%wagyu%';
+```
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `pg_trgm`:** ในงาน Search Box ของ E-Commerce ทั่วไป ที่ต้องการค้นหาชื่อสินค้า, แท็ก, หรือชื่อลูกค้า ที่มีขนาดข้อมูลไม่เกินหลักล้านแถว ประหยัดทรัพยากรกว่าการติดตั้ง Elasticsearch แยกเซิร์ฟเวอร์
+- **ไม่ควรใช้ `pg_trgm`:** กับตารางที่มีการ `INSERT` / `UPDATE` ปริมาณมหาศาลทุกวินาที (High-velocity Write) เพราะ GIN Index มีภาระในการแตก Trigram และจัดระเบียบ Index Tree ค่อนข้างหนักหน่วงตอนเขียนข้อมูล
+
+## 6. คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: เหตุใด GIN Index ร่วมกับ `pg_trgm` จึงสามารถเร่งความเร็ว Query ที่มี Wildcard ด้านหน้าอย่าง `LIKE '%wagyu%'` ได้ ต่างจาก B-Tree ดั้งเดิม?**
+  - *แนวคำตอบ:* B-Tree เป็นโครงสร้างต้นไม้ที่เรียงลำดับสตริงแบบ Lexicographical Order ตามตัวอักษรแรกเริ่ม หากเราค้นหาแบบ `LIKE '%wagyu%'` ตัว Engine ไม่ทราบว่าตัวอักษรตัวแรกคืออะไร จึงไม่สามารถใช้คุณสมบัติการนำทางของ B-Tree ได้ ต้องยอมกวาดอ่านข้อมูลทั้งหมด ในทางตรงกันข้าม GIN (Generalized Inverted Index) จะทำหน้าที่เหมือนดัชนีท้ายเล่มหนังสือ มันจะแยกสตริงออกเป็นชิ้นย่อย Trigrams 3 ตัวอักษร แล้วสร้างดัชนีย้อนกลับชี้ว่า Trigram `"wag"` ปรากฏอยู่ในแถวที่เท่าไรบ้าง เมื่อเราค้นหาคำว่า `"wagyu"` GIN Index จะค้นหาเฉพาะแถวที่มี Trigram ของคำนี้ตรงกัน แล้วดึงเฉพาะแถวเหล่านั้นมาตรวจสอบ ทำให้ลดจำนวนแถวที่ต้องอ่านลงได้อย่างมหาศาล
+- **Q2: หากต้องการทำ Vector Search สำหรับค้นหาความคล้ายคลึงของเนื้อสัตว์ด้วย AI Embeddings บน PostgreSQL 16 จะต้องใช้ Extension ใด และมี Index Access Method อะไรบ้าง?**
+  - *แนวคำตอบ:* ใช้ Extension **`pgvector`** โดยจะเพิ่มชนิดข้อมูล `vector(n)` ลงใน PostgreSQL พร้อมตัวดำเนินการวัดระยะห่าง (Distance Operators) เช่น L2 Distance (`<->`), Cosine Distance (`<=>`), และ Inner Product (`<#>`) และมี Index Methods 2 ชนิดหลักคือ **IVFFlat** (Inverted File Flat - สร้างง่าย ใช้หน่วยความจำน้อย) และ **HNSW** (Hierarchical Navigable Small World - แม่นยำสูงและค้นหาได้เร็วกว่ามาก แต่กินพื้นที่และใช้เวลาสร้างนานกว่า)
+
+---

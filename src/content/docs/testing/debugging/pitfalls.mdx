@@ -1,0 +1,31 @@
+---
+title: Anti-patterns
+category: TESTING & QUALITY
+parentTitle: Debugging
+version: Node Inspector & DevTools
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การแก้บั๊กด้วยการเดาสุ่มโดยไม่เขียน Failing Test นำ**: ทำให้ไม่มั่นใจว่าแก้ไขถูกจุดจริงหรือไม่ และไม่มีเกราะป้องกันหากมีการแก้ไขโค้ดกลับมาเป็นแบบเดิมในอนาคต
+2. **การกลืน Error ต้นทางในบล็อก catch**: ดักจับ Error แล้วโยน `new Error("Something went wrong")` โดยไม่ใส่ `{ cause: err }` ทำให้สูญเสีย Stack Trace บรรทัดต้นตอทั้งหมด
+3. **การใช้ `console.log` พิมพ์ออบเจกต์ User หรือ Payment ทั้งก้อนบน Production**: นอกจากจะค้นหาข้อมูลยากแล้ว ยังทำให้ข้อมูลส่วนบุคคลและความลับทางการเงินรั่วไหลลงไปในระบบจัดเก็บ Log
+
+---
+
+## 2. Checklist สรุป
+
+- [ ] สร้างไฟล์ `.vscode/launch.json` ที่มีทั้งโหมด Debug Jest (`--runInBand`) และ Compound Debug สำหรับ Next.js 16 + NestJS 11
+- [ ] เมื่อเกิดบั๊กในระบบ ให้เขียน **Failing Unit/Integration Test** เพื่อจำลองบั๊กให้เห็นก่อนลงมือแก้โค้ดเสมอ
+- [ ] ใช้ `{ cause: originalError }` ทุกครั้งที่มีการห่อหุ้มและโยน Error ตัวใหม่ในบล็อก `catch`
+- [ ] ใช้ **Structured JSON Logging** ที่มี `correlationId` และระบบ `redact` ข้อมูลส่วนบุคคลแทนการใช้ `console.log`
+- [ ] เพิ่มขั้นตอน `npm audit --omit=dev --audit-level=high` ในระบบตรวจสอบความปลอดภัยของโปรเจกต์
+
+---
+
+## 3. ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+1. **[Type Checking](/docs/testing/type-checking)**: ดักจับบั๊กตั้งแต่ระดับ Compile-time ก่อนต้องรัน Debugger
+2. **[Jest](/docs/testing/jest)**: ทบทวนคำสั่ง CLI, Watch Mode และการจำลอง Mock Functions
+3. **[Backend Testing](/docs/testing/backend-testing)**: การใช้ Supertest ในการทดสอบ Integration

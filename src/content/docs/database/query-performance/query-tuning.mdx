@@ -1,0 +1,114 @@
+---
+title: Query Tuning
+category: DATABASE
+parentTitle: Query Performance
+version: EXPLAIN & pg_stat_statements
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+ในหัวข้อนี้ เราจะจำลองสถานการณ์จริงในฐานะ Senior Fullstack Developer ที่ได้รับแจ้งปัญหาว่า **"API ดึงรายงานสินค้าเนื้อพรีเมียมขายดีและค้นหารายการคำสั่งซื้อของผู้ใช้ ใช้เวลาถึง 1,850 มิลลิวินาที (1.85 วินาที)"** โดยเราจะใช้กระบวนการปรับจูนอย่างเป็นระบบ 4 ขั้นตอน:
+1. **Examine:** รันคิวรีเดิมที่มีปัญหาร่วมกับ `EXPLAIN (ANALYZE, BUFFERS)` เพื่อระบุจุดคอขวด
+2. **Rewrite SQL (Sargable Query):** แก้ไขโครงสร้าง SQL ที่ขัดขวางการใช้ Index (เช่น เอาฟังก์ชันออกจากคอลัมน์ใน `WHERE`, เปลี่ยน Correlated Subquery เป็น Join/Aggregate, เลิกใช้ `SELECT *`)
+3. **Create Optimal Index:** สร้าง Composite หรือ Covering Index ที่สอดคล้องกับเงื่อนไขการกรองและการเรียงลำดับ
+4. **Verify:** รัน `EXPLAIN (ANALYZE, BUFFERS)` ซ้ำอีกครั้งเพื่อพิสูจน์ผลลัพธ์ก่อนและหลังการปรับจูน
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+แนวคิดสำคัญในการเขียน SQL ให้ใช้ Index ได้เต็มประสิทธิภาพเรียกว่าการเขียน **Sargable Query (Search Argument Able)**:
+- **Non-Sargable (ใช้ Index ปกติไม่ได้):** `WHERE DATE_TRUNC('month', o.created_at) = '2026-10-01'` หรือ `WHERE o.total_amount / 100 > 50` เพราะ Engine ต้องดึงค่าทุกแถวมาคำนวณฟังก์ชันหรือสมการก่อนจึงจะเปรียบเทียบได้
+- **Sargable (วิ่งเข้า B-Tree Index ทันที):** `WHERE o.created_at >= '2026-10-01' AND o.created_at < '2026-11-01'` และ `WHERE o.total_amount > 5000` เพราะคอลัมน์อยู่เดี่ยวๆ ด้านหนึ่งของตัวดำเนินการเปรียบเทียบ ทำให้กระโดดเข้าสู่ช่วงของ B-Tree Index ได้ทันที
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: คิวรีก่อนการปรับจูน (Before Optimization - ช้า 1,850 ms)
+คิวรีเจ้าปัญหาที่ต้องการดึงรายการออเดอร์ที่ชำระเงินแล้วในเดือนตุลาคม 2026 ของสินค้าในหมวดหมู่เนื้อวากิว พร้อมนับจำนวนชิ้นรวมในแต่ละออเดอร์:
+
+```sql filename="sql/11_slow_query_before_tuning.sql"
+-- ❌ คิวรีก่อนปรับจูน: มีปัญหา 4 จุดใหญ่
+-- 1. ใช้ SELECT * ดึงคอลัมน์ JSONB ขนาดใหญ่มาโดยไม่ได้ใช้
+-- 2. ใช้ฟังก์ชัน TO_CHAR(o.created_at, 'YYYY-MM') ทำให้ใช้ Index บน created_at ไม่ได้ (Non-Sargable)
+-- 3. ใช้ Correlated Subquery นับจำนวนชิ้นทีละแถว
+-- 4. ใช้ OFFSET ลึกในการแบ่งหน้า
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT 
+    o.*,
+    u.full_name,
+    (SELECT SUM(oi.quantity) FROM order_items oi WHERE oi.order_id = o.id) AS total_meat_packs
+FROM orders o
+JOIN users u ON u.id = o.user_id
+WHERE LOWER(o.status) = 'paid'
+  AND TO_CHAR(o.created_at, 'YYYY-MM') = '2026-10'
+ORDER BY o.created_at DESC
+LIMIT 20 OFFSET 5000;
+
+/* ผลลัพธ์ก่อนปรับจูน:
+   - เกิด Parallel Seq Scan บนตาราง orders กวาดอ่านทุกแถวเพราะติดฟังก์ชัน LOWER() และ TO_CHAR()
+   - รัน Subquery ซ้ำหลายพันรอบ
+   - Buffers: shared hit=12450 read=38200
+   - Execution Time: 1852.430 ms
+*/
+```
+
+### ตัวอย่างที่ 2: คิวรีหลังการปรับจูน (After Optimization - เร็วขึ้นเหลือ 1.15 ms!)
+ปรับปรุงทั้งการสร้าง Index และเขียนคิวรีใหม่ให้เป็น Sargable Query พร้อมใช้ Keyset Pagination และดึงเฉพาะคอลัมน์ที่ใช้จริง:
+
+```sql filename="sql/12_fast_query_after_tuning.sql"
+-- ขั้นที่ 1: สร้าง Composite Covering Index ที่ตรงกับรูปแบบการค้นหาและเรียงลำดับ
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_orders_status_created_id_desc
+ON orders (status, created_at DESC, id DESC)
+INCLUDE (user_id, order_number, total_amount);
+
+-- ขั้นที่ 2: เขียนคิวรีใหม่ให้สะอาดและเป็น Sargable 100%
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT 
+    o.id,
+    o.order_number,
+    o.status,
+    o.total_amount,
+    o.created_at,
+    u.full_name,
+    COALESCE(SUM(oi.quantity), 0) AS total_meat_packs
+FROM orders o
+JOIN users u ON u.id = o.user_id
+LEFT JOIN order_items oi ON oi.order_id = o.id
+WHERE o.status = 'PAID'
+  -- เปลี่ยนจาก TO_CHAR เป็น Range Condition ที่ใช้ B-Tree Index ได้ทันที
+  AND o.created_at >= '2026-10-01 00:00:00+07'::timestamptz
+  AND o.created_at <  '2026-11-01 00:00:00+07'::timestamptz
+  -- เปลี่ยนจาก OFFSET 5000 เป็น Keyset Pagination
+  AND (o.created_at, o.id) < ('2026-10-15 14:20:00+07'::timestamptz, '7c333333-3333-3333-3333-333333333333'::uuid)
+GROUP BY o.id, o.order_number, o.status, o.total_amount, o.created_at, u.full_name
+ORDER BY o.created_at DESC, o.id DESC
+LIMIT 20;
+
+/* ผลลัพธ์หลังปรับจูน:
+   - ใช้ Index Only Scan บน idx_orders_status_created_id_desc อ่านเพียง 20 แถว
+   - Buffers: shared hit=68 read=0 (ลดการอ่านบล็อกจาก 50,650 บล็อก เหลือเพียง 68 บล็อกใน RAM!)
+   - Execution Time: 1.150 ms (เร็วขึ้นกว่า 1,600 เท่า!)
+*/
+```
+
+## 4. ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+### ตารางสรุปเปรียบเทียบผลลัพธ์ก่อนและหลังการปรับจูน
+
+| ตัวชี้วัดประสิทธิภาพ | ❌ ก่อนปรับจูน (Before) | ✅ หลังปรับจูน (After) | การเปลี่ยนแปลง |
+| :--- | :--- | :--- | :--- |
+| **แผนการสแกนตาราง `orders`** | `Parallel Seq Scan` (กวาดทั้งตาราง) | `Index Only Scan` (กระโดดเข้าเป้า) | ไม่ต้องแตะตาราง Heap เลย |
+| **จำนวนบล็อก 8KB ที่ต้องอ่าน** | 50,650 บล็อก (~405 MB) | 68 บล็อก (~544 KB) | ลด I/O ลง **99.86%** |
+| **วิธีการแบ่งหน้าข้อมูล** | `OFFSET 5000` (อ่านแล้วทิ้ง 5,000 แถว) | Keyset `(created_at, id) < (...)` | อ่านเฉพาะ 20 แถวที่ต้องการจริง |
+| **เวลาประมวลผลรวม (Execution Time)** | **1,852.43 ms** | **1.15 ms** | เร็วขึ้น **1,610 เท่า** |
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรทำ Query Rewriting และสร้าง Covering Index เมื่อ:** คิวรีนั้นอยู่ในเส้นทางหลักที่ผู้ใช้งานเรียกบ่อย หรือเป็นคิวรีที่ติดอันดับต้นๆ ใน `pg_stat_statements`
+- **ไม่ควรพยายามจูนคิวรีวิเคราะห์ข้อมูลขนาดยักษ์ (OLAP) ให้รันสดๆ บนฐานข้อมูลหลักเมื่อ:** คิวรีนั้นต้องกวาดคำนวณข้อมูลย้อนหลังหลายปีจำนวนหลายสิบล้านแถวเสมอ ซึ่งควรย้ายไปใช้ **Materialized View**, **Read Replica**, หรือระบบ Data Warehouse แยกต่างหาก
+
+## 6. คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: คำว่า "Sargable Query" คืออะไร และจงยกตัวอย่างการแปลงคิวรีที่ไม่เป็น Sargable ให้เป็น Sargable มา 2 ตัวอย่าง?**
+  - **แนวคำตอบ:** คำว่า Sargable ย่อมาจาก **S**earch **ARG**ument **ABLE** หมายถึงการเขียนเงื่อนไขใน `WHERE` ให้ Database Engine สามารถนำค่าไปค้นหาในโครงสร้าง B-Tree Index ได้โดยตรง ตัวอย่างการแปลงเช่น:
+    1. เปลี่ยนจาก `WHERE EXTRACT(YEAR FROM created_at) = 2026` เป็น `WHERE created_at >= '2026-01-01' AND created_at < '2027-01-01'`
+    2. เปลี่ยนจาก `WHERE SUBSTRING(sku, 1, 3) = 'WGY'` เป็น `WHERE sku LIKE 'WGY%'`
+- **Q2: ทำไมการใช้ `SELECT *` จึงส่งผลเสียต่อประสิทธิภาพอย่างมากใน PostgreSQL แม้ว่าเราจะดึงข้อมูลมาเพียง 50 แถวก็ตาม?**
+  - **แนวคำตอบ:** ประการแรก หากตารางมีคอลัมน์ขนาดใหญ่ เช่น `TEXT` หรือ `JSONB` ที่ถูกจัดเก็บไว้ในตารางแยก **TOAST** การสั่ง `SELECT *` จะบังคับให้ PostgreSQL ต้องตามไปเปิดอ่านและคลายการบีบอัดข้อมูลจาก TOAST ทุกแถวทั้งที่ไม่ได้ใช้งาน ประการที่สอง การดึงทุกคอลัมน์ทำให้หมดสิทธิ์ใช้ **Index-Only Scan** เพราะ Index ไม่ได้เก็บทุกคอลัมน์ของตารางไว้ และประการที่สาม เป็นการเพิ่มขนาดข้อมูลที่ต้องแปลงและส่งผ่านสาย Network ไปยัง Backend โดยไม่จำเป็น
+
+---
