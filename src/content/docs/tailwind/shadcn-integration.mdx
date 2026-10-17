@@ -1,0 +1,292 @@
+---
+title: Tailwind CSS v4 & shadcn/ui Integration
+category: Frontend
+parentTitle: Tailwind CSS v4
+version: Tailwind v4.0 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**shadcn/ui** ได้ปฏิวัติวิธีที่นักพัฒนาสร้างหน้าเว็บใน Next.js โดยไม่ได้เป็น Component Library แบบสำเร็จรูปที่ติดตั้งผ่าน NPM Package ทึบๆ (Black-box Dependency) แต่ใช้ปรัชญา **"Copy/Paste & Complete Ownership"**:
+- โค้ดคอมโพเนนต์จะถูกก๊อปปี้มาไว้ในโฟลเดอร์ของโปรเจกต์เราเอง (`src/components/ui/`) ทำให้ทีมเรามีสิทธิ์ปรับแต่ง แก้ไข หรือลบโค้ดได้ 100%
+- ขับเคลื่อนด้วย **Radix UI Primitives** (Unstyled, Accessible, Keyboard-friendly)
+- ตกแต่งสไตล์ภายนอกทั้งหมดด้วย **Tailwind CSS Utility Classes**
+- จัดการระบบสีและธีมผ่าน **CSS Custom Properties** เช่น `--primary`, `--background`, `--card`, `--radius`
+
+ใน **Tailwind CSS v4** การผสานกับ shadcn/ui ยิ่งทรงพลังขึ้นผ่าน `@theme inline` ซึ่งเชื่อมโยง CSS Variables ของระบบเข้าสู่ Atomic Utilities ได้โดยตรงโดยไม่ต้องมีไฟล์คอนฟิก JS
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### กลไก Theming และ Headless Slot Pattern
+1. **Semantic CSS Variable Architecture**:
+   shadcn นิยามโทเคนสีเชิงความหมายใน `:root` และ `.dark`:
+   ```css
+   :root {
+     --background: oklch(1 0 0);
+     --foreground: oklch(0.14 0.005 285);
+     --primary: oklch(0.48 0.24 275);
+     --primary-foreground: oklch(0.98 0.01 275);
+     --radius: 0.75rem;
+   }
+   ```
+2. **Binding เข้ากับ Tailwind v4 ผ่าน `@theme inline`**:
+   ```css
+   @theme inline {
+     --color-background: var(--background);
+     --color-foreground: var(--foreground);
+     --color-primary: var(--primary);
+     --color-primary-foreground: var(--primary-foreground);
+     --radius-lg: var(--radius);
+   }
+   ```
+   ทำให้เกิดคลาสอย่าง `bg-background`, `text-foreground`, `bg-primary`, `rounded-lg` ทันที
+3. **Data State Attributes**:
+   Radix Primitives จะแปะ Attribute ลงใน DOM ตามสถานะ เช่น `data-state="open"` หรือ `data-side="bottom"` ซึ่ง Tailwind ดักจับได้ทันทีผ่าน `data-[state=open]:animate-in` หรือ `data-[side=bottom]:slide-in-from-top-2`
+
+---
+
+## 3. ตัวอย่างโค้ด (Tailwind v4 & TSX)
+
+### ตัวอย่างที่ 1: การตั้งค่า Token ของ shadcn ใน `globals.css` (Tailwind v4)
+
+```css filename="src/app/globals.css"
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --background: oklch(0.99 0 0);
+  --foreground: oklch(0.15 0.02 260);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.15 0.02 260);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.15 0.02 260);
+  --primary: oklch(0.55 0.22 260);
+  --primary-foreground: oklch(0.98 0 0);
+  --secondary: oklch(0.96 0.01 260);
+  --secondary-foreground: oklch(0.2 0.02 260);
+  --muted: oklch(0.96 0.01 260);
+  --muted-foreground: oklch(0.55 0.02 260);
+  --accent: oklch(0.96 0.01 260);
+  --accent-foreground: oklch(0.2 0.02 260);
+  --destructive: oklch(0.57 0.24 27);
+  --destructive-foreground: oklch(0.98 0 0);
+  --border: oklch(0.92 0.01 260);
+  --input: oklch(0.92 0.01 260);
+  --ring: oklch(0.55 0.22 260);
+  --radius: 0.75rem;
+}
+
+html.dark {
+  --background: oklch(0.12 0.02 260);
+  --foreground: oklch(0.98 0 0);
+  --card: oklch(0.15 0.02 260);
+  --card-foreground: oklch(0.98 0 0);
+  --popover: oklch(0.15 0.02 260);
+  --popover-foreground: oklch(0.98 0 0);
+  --primary: oklch(0.65 0.2 260);
+  --primary-foreground: oklch(0.12 0.02 260);
+  --secondary: oklch(0.2 0.02 260);
+  --secondary-foreground: oklch(0.98 0 0);
+  --muted: oklch(0.2 0.02 260);
+  --muted-foreground: oklch(0.65 0.02 260);
+  --border: oklch(0.25 0.02 260);
+  --ring: oklch(0.65 0.2 260);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+}
+```
+
+### ตัวอย่างที่ 2: คอมโพเนนต์การ์ดข้อมูลแบบ shadcn ใน Production (UserProfileDialog)
+
+```tsx filename="src/components/UserProfileDialog.tsx"
+import * as React from "react";
+import { cn } from "@/lib/utils";
+import { X, Check, Mail, Bell } from "lucide-react";
+
+interface DialogProps {
+  isOpen: boolean;
+  onClose: () => void;
+  className?: string;
+}
+
+export function UserProfileDialog({
+  isOpen,
+  onClose,
+  className,
+}: DialogProps) {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      {/* Backdrop Overlay */}
+      <div
+        onClick={onClose}
+        className="fixed inset-0 bg-black/60 backdrop-blur-xs transition-opacity animate-in fade-in duration-200"
+      />
+
+      {/* shadcn-style Dialog Content Box */}
+      <div
+        role="dialog"
+        className={cn(
+          "relative z-50 w-full max-w-lg rounded-lg border border-border bg-card p-6 text-card-foreground shadow-2xl transition-all animate-in zoom-in-95 duration-200",
+          className
+        )}
+      >
+        <div className="flex items-start justify-between">
+          <div>
+            <h3 className="text-lg font-semibold tracking-tight text-foreground">
+              ตั้งค่าการแจ้งเตือนบัญชี
+            </h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              กำหนดช่องทางการรับข่าวสารและข้อความอัปเดตระบบ
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground transition"
+            aria-label="ปิดหน้าต่าง"
+          >
+            <X className="size-4" />
+          </button>
+        </div>
+
+        <div className="mt-6 space-y-4">
+          <div className="flex items-center justify-between rounded-md border border-border p-3.5">
+            <div className="flex items-center gap-3">
+              <Mail className="size-4.5 text-muted-foreground" />
+              <div>
+                <p className="text-xs font-medium text-foreground">อีเมลแจ้งเตือนยอดบิล</p>
+                <p className="text-[11px] text-muted-foreground">รับใบเสร็จทุกสิ้นเดือนทางอีเมล</p>
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              defaultChecked
+              className="size-4 rounded border-border text-primary focus:ring-ring"
+            />
+          </div>
+
+          <div className="flex items-center justify-between rounded-md border border-border p-3.5">
+            <div className="flex items-center gap-3">
+              <Bell className="size-4.5 text-muted-foreground" />
+              <div>
+                <p className="text-xs font-medium text-foreground">การแจ้งเตือนความปลอดภัย</p>
+                <p className="text-[11px] text-muted-foreground">แจ้งเตือนเมื่อมีการล็อกอินจากอุปกรณ์ใหม่</p>
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              defaultChecked
+              className="size-4 rounded border-border text-primary focus:ring-ring"
+            />
+          </div>
+        </div>
+
+        <div className="mt-6 flex items-center justify-end gap-3 border-t border-border pt-4">
+          <button
+            type="button"
+            onClick={onClose}
+            className="h-9 rounded-md border border-input bg-background px-4 text-xs font-medium text-foreground transition hover:bg-accent hover:text-accent-foreground"
+          >
+            ยกเลิก
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex h-9 items-center gap-1.5 rounded-md bg-primary px-4 text-xs font-medium text-primary-foreground shadow-xs transition hover:bg-primary/90"
+          >
+            <Check className="size-3.5" /> บันทึกข้อมูล
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับ CSS ปกติ
+
+| มิติ | shadcn/ui + Tailwind v4 | UI Component Libraries ทั่วไป (เช่น MUI / AntD) |
+| :--- | :--- | :--- |
+| **สิทธิ์ความเป็นเจ้าของโค้ด** | **100%** อยู่ในโปรเจกต์ของเรา ปรับแก้ได้ทุกบรรทัด | โค้ดถูกฝังใน `node_modules` ปรับแต่งยากมาก |
+| **การ Theming** | แก้ที่ Native CSS Variables ใน `globals.css` | ต้องเซ็ตผ่าน JS ThemeProvider Object ขนาดใหญ่ |
+| **ผลกระทบต่อ Bundle Size** | มีผลเฉพาะคอมโพเนนต์ที่นำเข้าจริงผ่าน Tree-shaking | ขนาด Bundle เริ่มต้นมักจะสูงกว่า 100KB+ |
+| **การเข้าถึง (A11y)** | สมบูรณ์แบบด้วย Radix UI Primitives WAI-ARIA | ขึ้นอยู่กับการพัฒนาของทีมงานภายนอก |
+
+---
+
+## 5. ผิด vs ถูก
+
+### จุดที่ 1: พยายามติดตั้ง shadcn เป็น NPM Dependency เดี่ยวๆ
+```bash
+# ❌ ผิด: shadcn ไม่ใช่แพ็กเกจไลบรารีที่ติดตั้งแบบนี้
+npm install shadcn-ui
+
+# ✅ ถูก: ใช้ shadcn CLI เพื่อคัดลอกไฟล์คอมโพเนนต์ลงในโปรเจกต์
+npx shadcn@latest add button dialog
+```
+*เหตุผล*: shadcn ถูกออกแบบมาเพื่อแก้ปัญหา Dependency Hell และการถูกจำกัดสไตล์ โดยส่งมอบโค้ด TSX ให้เราเป็นเจ้าของ
+
+### จุดที่ 2: Hardcode ค่าสีลงในคอมโพเนนต์แทนที่จะใช้ Semantic Token ของ shadcn
+```tsx
+// ❌ ผิด: ใช้สีตายตัว ทำให้คอมโพเนนต์ไม่เปลี่ยนสีตาม Dark Mode หรือ Custom Theme
+<div className="bg-white text-black border border-gray-200">
+
+// ✅ ถูก: ใช้ Semantic Tokens ของ shadcn ที่แมปกับ CSS Variables
+<div className="bg-card text-card-foreground border border-border">
+```
+*เหตุผล*: การใช้ `bg-card` และ `text-card-foreground` ทำให้คอมโพเนนต์สลับธีม สว่าง/มืด ได้อย่างถูกต้องอัตโนมัติ
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้
+- โปรเจกต์ Next.js 16 ระดับองค์กรที่ต้องการความยืดหยุ่นสูงสุดในการออกแบบระบบ Design System เฉพาะของตัวเอง
+- เมื่อต้องการสร้างเว็บที่รองรับ Accessibility (Keyboard navigation, Screen readers) ตามมาตรฐานระดับโลก
+- เว็บไซต์ที่ต้องการสลับธีม Dark/Light Mode ได้ง่ายผ่าน CSS Variables
+
+### ไม่ควรใช้
+- งานเร่งด่วนแบบ Prototype 1 วัน ที่ไม่ได้ต้องการการปรับแต่งสไตล์เฉพาะตัวใดๆ (อาจเลือกไลบรารีสำเร็จรูปไปก่อนได้)
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: อะไรคือความแตกต่างเชิงปรัชญาที่สำคัญที่สุดระหว่าง `shadcn/ui` กับ Component Libraries ยุคเก่าอย่าง Material UI (MUI)?
+**แนวทางคำตอบ**: 
+ความแตกต่างที่สำคัญที่สุดคือ **การถือครองความเป็นเจ้าของโค้ด (Code Ownership)** ในขณะที่ MUI ถูกติดตั้งเป็น Black-box Dependency ใน `node_modules` ซึ่งมักก่อให้เกิดปัญหาขนาด Bundle ที่ใหญ่เทอะทะ และมีความยากลำบากอย่างยิ่งเมื่อดีไซเนอร์ต้องการสไตล์ที่ไม่ตรงกับกรอบของ MUI แต่ shadcn/ui เป็นเพียงชุดโค้ดตั้งต้นที่สร้างบน Radix UI และ Tailwind CSS ที่ถูกคัดลอกลงในโปรเจกต์ของเราโดยตรง ทำให้นักพัฒนาสามารถดัดแปลง ลบ หรือเพิ่มพฤติกรรมใดๆ ก็ตามได้อย่างอิสระ 100% โดยไม่มีข้อจำกัดของ Library มาขวางกั้น
+
+### Q2: ใน Tailwind v4 เราเชื่อมโยงโครงสร้าง Theming ของ shadcn เข้ากับ Core Engine ได้อย่างไร?
+**แนวทางคำตอบ**: 
+เราประกาศชุดตัวแปรสี Semantic CSS Variables เช่น `--primary`, `--background`, `--card` ภายใน `:root` และ `.dark` ในไฟล์ `globals.css` จากนั้นใช้ Directive ใหม่ของ Tailwind v4 คือ `@theme inline` เพื่อทำการ Bind ตัวแปรเหล่านั้นเข้ากับระบบ Atomic Class (เช่น `--color-primary: var(--primary);`) ทำให้เราสามารถเรียกใช้งานคลาสเช่น `bg-primary`, `text-primary-foreground` ได้ทันที โดยที่ยังรักษาความสามารถในการสลับค่าสีใน Runtime ของ CSS ไว้อย่างสมบูรณ์

@@ -1,0 +1,139 @@
+---
+title: SSR (Server-Side Rendering)
+category: Frontend
+parentTitle: Next.js 16
+version: v16.4
+updatedAt: 2026-10-17
+---
+
+## 1. คืออะไร และแก้ปัญหาอะไร
+
+**SSR (Server-Side Rendering)** หรือการเรนเดอร์เนื้อหาจากฝั่งเซิร์ฟเวอร์ คือกระบวนการที่ Next.js ประมวลผลคอมโพเนนต์ ดึงข้อมูลจากฐานข้อมูลหรือ API และสร้างเป็นโค้ด HTML ที่สมบูรณ์ส่งกลับไปให้เบราว์เซอร์ในทุกๆ ครั้งที่มีคำขอ (Request) เข้ามา
+
+เทคนิคนี้เข้ามาแก้ปัญหาของ **Client-Side Rendering (CSR)** แบบดั้งเดิมใน React ที่เบราว์เซอร์จะได้รับไฟล์ HTML เปล่าๆ แล้วต้องรอโหลด JavaScript ขนาดใหญ่มาดาวน์โหลดและรันก่อนจึงจะแสดงผล ส่งผลให้เกิดอาการหน้าขาว (Blank Screen) ในช่วงแรก เครื่องมือค้นหา (Search Engines) จัดทำดัชนีเนื้อหาได้ยาก และส่งผลกระทบต่อคะแนน Core Web Vitals (โดยเฉพาะค่า FCP และ LCP) ด้วย SSR ผู้ใช้งานจะมองเห็นเนื้อหาหน้าเว็บได้ทันทีตั้งแต่ Response ก้อนแรกถูกส่งมาถึง
+
+## 2. Module และ Feature หลัก
+
+ใน Next.js 16 สถาปัตยกรรม App Router กำหนดให้ Server Components ทำหน้าที่เป็นหน่วยประมวลผลหลักของ SSR โดยมีฟังก์ชันและคอนฟิกสำคัญดังนี้:
+
+| เครื่องมือ / คำสั่ง | ใช้ทำอะไร |
+| --- | --- |
+| `export const dynamic = 'force-dynamic'` | สั่งบังคับให้หน้านั้นประมวลผลแบบ Dynamic SSR ในทุก Request โดยไม่ทำ Static Caching |
+| `cookies()` / `headers()` | ฟังก์ชันอ่านค่า HTTP Cookie หรือ Header ของ Request ขาเข้า (ใน Next.js 16 เป็น Async API ต้องใช้ `await`) |
+| `connection()` | ฟังก์ชันจาก `next/server` เพื่อระบุจุดที่ต้องการรอสัญญาณเครือข่ายก่อนประมวลผลแบบ Dynamic |
+| `Suspense` + Streaming | แบ่งย่อย HTML เป็นท่อนๆ ส่งไปให้เบราว์เซอร์ทันทีที่แต่ละส่วนดึงข้อมูลเสร็จ โดยไม่ต้องรอให้ทั้งหน้าเสร็จพร้อมกัน |
+| `fetch(..., { cache: 'no-store' })` | ปิดการบันทึก Cache ของคำขอ เพื่อให้ยิงดึงข้อมูลสดใหม่จาก Backend ทุกครั้ง |
+
+## 3. ตัวอย่างโค้ดการใช้งาน
+
+### ตัวอย่างหน้า Dynamic Dashboard ด้วย SSR และ Streaming
+
+ตัวอย่างการสร้างหน้ารายการสั่งซื้อที่อ่าน User Session จาก Cookie และดึงข้อมูลสดจาก Backend ทุกครั้งที่มีผู้ใช้งานเปิดหน้าเว็บ พร้อมใช้ `<Suspense>` สตรีมส่วนชาร์ตสถิติ:
+
+```tsx filename="src/app/dashboard/page.tsx"
+import { Suspense } from 'react';
+import { cookies } from 'next/headers';
+import { redirect } from 'next/navigation';
+
+// บังคับให้หน้านี้เรนเดอร์ใหม่ทุก Request (SSR)
+export const dynamic = 'force-dynamic';
+
+interface UserProfile {
+  id: string;
+  name: string;
+  role: string;
+}
+
+async function getUserSession(): Promise<UserProfile | null> {
+  const cookieStore = await cookies();
+  const token = cookieStore.get('auth_token')?.value;
+
+  if (!token) return null;
+
+  const res = await fetch(`${process.env.BACKEND_API_URL}/auth/me`, {
+    headers: { Authorization: `Bearer ${token}` },
+    cache: 'no-store', // ดึงข้อมูลสดใหม่เสมอ
+  });
+
+  if (!res.ok) return null;
+  return res.json();
+}
+
+async function OrderStatsList() {
+  // จำลองการดึงข้อมูลสถิติที่ใช้เวลาประมวลผล
+  const res = await fetch(`${process.env.BACKEND_API_URL}/orders/summary`, {
+    cache: 'no-store',
+  });
+  const data = await res.json();
+
+  return (
+    <div className="grid grid-cols-2 gap-4 mt-6">
+      <div className="p-4 rounded-xl border border-hairline bg-subtle">
+        <span className="text-xs text-muted">ยอดขายวันนี้</span>
+        <p className="text-xl font-bold mt-1">฿{data.todayRevenue.toLocaleString()}</p>
+      </div>
+      <div className="p-4 rounded-xl border border-hairline bg-subtle">
+        <span className="text-xs text-muted">คำสั่งซื้อรอดำเนินการ</span>
+        <p className="text-xl font-bold mt-1">{data.pendingCount} รายการ</p>
+      </div>
+    </div>
+  );
+}
+
+export default async function DashboardPage() {
+  const user = await getUserSession();
+
+  if (!user) {
+    redirect('/login');
+  }
+
+  return (
+    <div className="max-w-4xl mx-auto p-6">
+      <header className="border-b border-hairline pb-4">
+        <h1 className="text-2xl font-bold">แดชบอร์ดจัดการระบบ</h1>
+        <p className="text-sm text-muted mt-1">
+          ยินดีต้อนรับคุณ {user.name} ({user.role})
+        </p>
+      </header>
+
+      {/* Streaming SSR: แสดง Skeleton ทันทีขณะที่ OrderStatsList กำลังดึงข้อมูล */}
+      <Suspense
+        fallback={
+          <div className="p-8 text-center text-sm text-muted animate-pulse">
+            กำลังประมวลผลข้อมูลสถิติล่าสุด...
+          </div>
+        }
+      >
+        <OrderStatsList />
+      </Suspense>
+    </div>
+  );
+}
+```
+
+## 4. Callout สำคัญที่ควรรู้
+
+<Callout type="tip" title="ใช้ Suspense เพื่อทำ Streaming SSR">
+การใช้ Server-Side Rendering ไม่จำเป็นต้องรอให้ข้อมูลทั้งหน้าพร้อมก่อนส่ง HTML การห่อหุ้มคอมโพเนนต์ที่ทำงานช้าด้วย `<Suspense fallback={<Skeleton />}>` จะทำให้ Next.js ส่งโครงสร้างหลักของหน้าไปให้ผู้ใช้เห็นทันที และสตรีมชิ้นส่วนที่เหลือตามมาเมื่อโหลดเสร็จ
+</Callout>
+
+<Callout type="note" title="Next.js 16 ตรวจจับ Dynamic Rendering อัตโนมัติ">
+หากคอมโพเนนต์มีการเรียกใช้ฟังก์ชัน Dynamic APIs เช่น `await cookies()`, `await headers()` หรืออ่านพารามิเตอร์ `searchParams` Next.js จะเปลี่ยนเส้นทางนั้นเป็น Dynamic SSR โดยอัตโนมัติ โดยไม่จำเป็นต้องเขียน `export const dynamic = 'force-dynamic'` เสมอไป
+</Callout>
+
+<Callout type="warning" title="คำนึงถึงภาระของเซิร์ฟเวอร์ (Server Load)">
+SSR ประมวลผลโค้ดใหม่ทุกครั้งที่ผู้ใช้เรียกหน้าเว็บ หากหน้าเว็บมีผู้เข้าชมหลักหมื่นคนพร้อมกัน อาจทำให้ CPU เซิร์ฟเวอร์หรือฐานข้อมูลรับภาระหนัก ควรพิจารณาทำ Caching ร่วมด้วย หรือใช้ Static Rendering สำหรับหน้าที่เนื้อหาไม่ได้เปลี่ยนตามรายบุคคล
+</Callout>
+
+## 5. ข้อควรระวังและ Best Practices
+
+- **หลีกเลี่ยง Request Waterfall ในเซิร์ฟเวอร์**: หากมีข้อมูลหลายชุดที่ต้องดึงในหน้าเดียวกันและไม่ได้ขึ้นต่อกัน ควรใช้ `Promise.all([fetchA(), fetchB()])` พร้อมกัน แทนการเขียน `await` เรียงต่อกันเป็นทอดๆ เพื่อลดระยะเวลารอรวม (TTFB)
+- **เก็บความลับไว้ที่ Server Component เสมอ**: การเชื่อมต่อ Database หรือการส่ง API Token ลับระหว่าง SSR ทำงานอยู่บนเซิร์ฟเวอร์เท่านั้น โค้ดส่วนนี้จะไม่รั่วไหลไปยังเบราว์เซอร์ แต่ต้องระวังไม่ส่ง Object ที่มีข้อมูลอ่อนไหวผ่าน Props ไปยัง Client Component
+- **จัดการ Error State ด้วย error.tsx**: เนื่องจาก SSR เกิดขึ้นบนเซิร์ฟเวอร์ หาก API ภายนอกล่มหรือ Database ขัดข้อง ตัวหน้าเว็บอาจพังได้ทันที ควรเตรียมไฟล์ `error.tsx` เพื่อแสดงข้อความแจ้งเตือนอย่างเป็นมิตรแทนที่จะปล่อยให้หน้าเว็บแสดงข้อผิดพลาด Internal Server Error 500
+- **แยกแยะระหว่าง SSR กับ SSG**: หน้าเว็บที่เนื้อหาเหมือนกันสำหรับทุกคน (เช่น หน้าบทความ, ข้อกำหนดการใช้งาน) ควรสร้างเป็น Static Site Generation (SSG) ล่วงหน้า ส่วน SSR ควรสงวนไว้สำหรับหน้าที่ข้อมูลเฉพาะเจาะจงตามสิทธิ์ของผู้ใช้แต่ละคนเท่านั้น
+
+## 6. แหล่งอ้างอิง (Official Documentation)
+
+- [Next.js Server Components & SSR Rendering](https://nextjs.org/docs/app/building-your-application/rendering/server-components) — เอกสารทางการเรื่องสถาปัตยกรรมการเรนเดอร์ฝั่งเซิร์ฟเวอร์
+- [Dynamic vs Static Rendering in Next.js](https://nextjs.org/docs/app/building-your-application/rendering/server-components#dynamic-rendering) — การเปรียบเทียบและการควบคุมพฤติกรรม Dynamic Rendering
+- [Streaming with Suspense in Next.js](https://nextjs.org/docs/app/building-your-application/routing/loading-ui-and-streaming) — วิธีใช้งาน Suspense เพื่อส่งมอบเนื้อหาแบบสตรีมมิ่ง

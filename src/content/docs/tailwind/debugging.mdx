@@ -1,0 +1,179 @@
+---
+title: DevTools Debugging & Specificity
+category: Frontend
+parentTitle: Tailwind CSS v4
+version: Tailwind v4.0 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+หนึ่งในสถานการณ์ที่สร้างความสับสนให้นักพัฒนา Front-end มากที่สุดคือ: **"ใส่คลาส Tailwind ลงใน JSX แล้ว แต่ทำไมหน้าจอถึงไม่เปลี่ยนสไตล์?"**
+
+สาเหตุของปัญหานี้มักแบ่งออกเป็น 2 กรณีหลัก:
+1. **คลาสไม่ถูกคอมไพล์ (Uncompiled Class)**: Oxide Engine ไม่ได้สร้างกฎ CSS นั้นขึ้นมาใน Stylesheet (เกิดจากการสะกดผิด, การใช้ Dynamic Interpolation, หรือไฟล์อยู่นอกขอบเขตการสแกน)
+2. **คลาสถูกขีดฆ่า (Overridden by Specificity)**: กฎ CSS ถูกสร้างขึ้นแล้ว แต่ถูกกฎอื่นที่มีความสำคัญสูงกว่าขีดฆ่าทับในเบราว์เซอร์
+
+ใน **Tailwind CSS v4** การ Debug ได้รับการปรับปรุงให้ตรวจสอบได้ง่ายขึ้นผ่าน **CSS Cascade Layers (`@layer`)** และเครื่องมือ Chrome / Edge / Safari DevTools
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ลำดับความสำคัญของ Cascade Layers และ Specificity
+1. **The Modern Cascade Layers Hierarchy**:
+   Tailwind v4 จัดระเบียบกฎสไตล์ทั้งหมดลงใน Cascade Layers มาตรฐาน:
+   ```css
+   @layer theme, base, components, utilities;
+   ```
+   - เลเยอร์ที่อยู่ด้านล่างสุด (`utilities`) จะชนะเลเยอร์ด้านบน (`base`, `components`) เสมอ ต่อให้ตัวด้านบนจะมี Specificity สูงกว่าก็ตาม!
+2. **Specificity Calculation (คะแนนความสำคัญ)**:
+   - **Inline Styles**: (1, 0, 0, 0)
+   - **ID Selectors**: (0, 1, 0, 0)
+   - **Classes, Pseudo-classes, Attributes**: (0, 0, 1, 0) -> *คลาส Tailwind ปกติอยู่ในกลุ่มนี้*
+   - **Element Tags**: (0, 0, 0, 1)
+3. **The Importance Modifier (`!`)**:
+   การเติมเครื่องหมายตกใจนำหน้า เช่น `!bg-indigo-600` จะแปลงเป็น `background-color: ... !important;` ซึ่งจะกระโดดข้าม Cascade Layer ทั้งหมด
+
+---
+
+## 3. ตัวอย่างโค้ด (Tailwind v4 & TSX)
+
+### ตัวอย่างที่ 1: การแก้ปัญหาคลาสถูก CSS เก่าขีดฆ่าในหน้าจอ Modal (DebugModalCard)
+
+```tsx filename="src/components/DebugModalCard.tsx"
+import { AlertOctagon, CheckCircle2 } from "lucide-react";
+
+interface DebugModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+export function DebugModalCard({ isOpen, onClose }: DebugModalProps) {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+      {/* 
+        ⚠️ เคสศึกษา: หากในโปรเจกต์มี Legacy CSS เขียนไว้ว่า:
+        body .card { padding: 40px; background: #eee; } (Specificity 0-0-1-1)
+        คลาส Tailwind ปกติ p-6 (0-0-1-0) จะแพ้และถูกขีดฆ่า!
+        
+        วิธีแก้แบบถูกวิธี: จัด Legacy CSS เข้า @layer base หรือใช้ arbitrary selector [&.card]
+      */}
+      <div className="relative w-full max-w-md rounded-3xl border border-neutral-200 bg-white p-6 shadow-2xl dark:border-neutral-800 dark:bg-neutral-900">
+        <div className="flex items-center gap-3 text-amber-600 dark:text-amber-400">
+          <AlertOctagon className="size-6 shrink-0" />
+          <h3 className="text-base font-bold text-neutral-900 dark:text-white">
+            ตรวจสอบความขัดแย้งของ Specificity
+          </h3>
+        </div>
+
+        <p className="mt-3 text-xs leading-relaxed text-neutral-600 dark:text-neutral-400">
+          เมื่อเปิด Chrome DevTools แล้วพบเส้นขีดฆ่าบนคลาส แสดงว่ามี Selector จากภายนอกที่มีคะแนน Specificity สูงกว่ากำลังทับสไตล์อยู่
+        </p>
+
+        <div className="mt-6 flex justify-end gap-3 border-t border-neutral-100 pt-4 dark:border-neutral-800">
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex h-9 items-center gap-1.5 rounded-xl bg-indigo-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
+          >
+            <CheckCircle2 className="size-3.5" /> ทราบแล้ว
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: การควบคุมสไตล์ของ Third-party Form ด้วย Arbitrary Child Selectors
+
+```tsx filename="src/components/ThirdPartyFormWrapper.tsx"
+export function ThirdPartyFormWrapper() {
+  return (
+    // จัดการลูกหลานที่ถูกสร้างขึ้นโดยไลบรารีภายนอกด้วย [&_input] และ [&_label]
+    <div className="w-full max-w-lg rounded-2xl border border-neutral-200 bg-white p-6 dark:border-neutral-800 dark:bg-neutral-900 [&_input]:h-10 [&_input]:w-full [&_input]:rounded-xl [&_input]:border [&_input]:border-neutral-300 [&_input]:px-3 [&_input]:text-xs [&_label]:mb-1 [&_label]:block [&_label]:text-xs [&_label]:font-semibold">
+      <h4 className="text-sm font-bold text-neutral-900 dark:text-white mb-4">
+        แบบฟอร์มลงทะเบียน (Third-Party Widget)
+      </h4>
+
+      {/* จำลอง HTML ดิบที่ถูก Inject จากภายนอก */}
+      <div className="space-y-4">
+        <div>
+          <label>ชื่อผู้ใช้งาน</label>
+          <input type="text" placeholder="ระบุ username" />
+        </div>
+        <div>
+          <label>รหัสผ่าน</label>
+          <input type="password" placeholder="••••••••" />
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับ CSS ปกติ
+
+| ปัญหาใน DevTools | การตรวจสอบใน Tailwind v4 | การแก้ไขที่ถูกต้อง |
+| :--- | :--- | :--- |
+| **ไม่มีชื่อคลาสขึ้นใน Styles pane เลย** | คลาสไม่ถูก Oxide คอมไพล์ | เช็คการสะกดคำ หรือเพิ่มพาธใน `@source` |
+| **มีชื่อคลาส แต่มีเส้นขีดฆ่าทับ** | มีกฎอื่นทับด้วย Specificity ที่สูงกว่า | ย้ายกฎอื่นเข้า `@layer` หรือใช้ `twMerge` |
+| **คลาสแสดงผล แต่ค่าสีเพี้ยน** | CSS Variable ถูกกำหนดค่าผิดใน runtime | Inspect ดูแท็บ Computed Style หาค่า Hex แท้จริง |
+
+---
+
+## 5. ผิด vs ถูก
+
+### จุดที่ 1: สแปมเครื่องหมาย `!` (Important) ไปทั่วทั้งโปรเจกต์
+```tsx
+// ❌ ผิด: ใช้ !bg-blue-600 !p-4 !text-white เพื่อหนีปัญหา Specificity ชั่วคราว (สร้างหนี้ทางเทคนิค)
+<div className="!bg-blue-600 !p-4 !text-white">
+
+// ✅ ถูก: ค้นหาต้นตอใน Styles Pane ของ DevTools และจัดการ Hierarchy ของ Cascade Layers
+<div className="bg-blue-600 p-4 text-white">
+```
+*เหตุผล*: การสแปม `!important` จะทำลายความสามารถในการ Override สไตล์ของคอมโพเนนต์ลูก และทำให้การบำรุงรักษาระบบดีไซน์ในอนาคตกลายเป็นฝันร้าย
+
+### จุดที่ 2: สะกดไวยากรณ์ Arbitrary ผิดประเภท
+```tsx
+// ❌ ผิด: ใส่ค่าพิกเซลลงใน Utility สี หรือลืมวงเล็บ
+<div className="bg-[12px] text-[red]">
+
+// ✅ ถูก: ใช้หน่วยที่ตรงกับ Property หรือใช้ Palette มาตรฐาน
+<div className="p-[12px] text-red-600">
+```
+*เหตุผล*: Oxide Engine มีการตรวจสอบชนิดของข้อมูล (Data Type Validation) หากคุณใส่ตัวเลขพิกเซลลงใน Utility ที่รับสี ตัวสแกนจะเพิกเฉยและไม่สร้าง CSS ออกมา
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้
+- เปิด **Chrome DevTools -> Elements Tab** ทุกครั้งที่สไตล์ไม่แสดงผลตามที่คาดหวัง
+- ตรวจสอบแท็บ **Computed** เพื่อดูว่าค่าไฟนอลที่เบราว์เซอร์นำไปวาดจริงคืออะไร
+- ใช้ `@source` เพิ่มพาธในไฟล์ CSS เมื่อทำงานร่วมกับ Monorepo หรือแพ็กเกจภายนอก
+
+### ไม่ควรใช้
+- ไม่ควรใช้ `!important` (`!*`) เป็นทางเลือกแรกในการแก้ปัญหาสไตล์ไม่ติด ควรสำรวจและเคลียร์คะแนน Specificity ก่อนเสมอ
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: หากพบปัญหาว่าในโปรเจกต์ Next.js สไตล์ของ Tailwind v4 บางคลาสไม่แสดงผลในหน้าจอจริง มีขั้นตอนการ Debug (Troubleshooting Workflow) อย่างไร?
+**แนวทางคำตอบ**: 
+ผมจะใช้กระบวนการ 3 ขั้นตอน:
+1. **Inspect Elements**: เปิด DevTools คลิกที่ชิ้นส่วนนั้นเพื่อดูแท็บ Styles:
+   - หาก **ไม่มีคลาสปรากฏเลย**: แสดงว่า Oxide Engine สแกนไม่พบ ให้ตรวจสอบว่ามีการตัดต่อสตริง (Dynamic string interpolation) หรือไม่ หรือไฟล์นั้นอยู่นอกโฟลเดอร์ที่ถูกตรวจจับ (ต้องเพิ่ม `@source`)
+   - หาก **มีคลาสแต่ถูกขีดฆ่า**: ตรวจสอบว่ากฎใดที่ขีดฆ่ามัน มักเกิดจาก Legacy CSS หรือ Global CSS ที่มี Specificity สูงกว่า
+2. **Check Computed Styles**: ดูว่า Property ใดที่กำลังชนะการคำนวณขั้นสุดท้าย
+3. **ตรวจสอบ Build Logs / Terminal**: ตรวจสอบว่า PostCSS หรือ Turbopack มี Error ในการ Parse ไฟล์ CSS หรือไม่
+
+### Q2: ใน CSS ยุคใหม่ ฟีเจอร์ `@layer` (Cascade Layers) ช่วยลดปัญหา Specificity War ได้อย่างไร?
+**แนวทางคำตอบ**: 
+เดิมทีใน CSS ความสำคัญของกฎขึ้นอยู่กับคะแนน Specificity (ID > Class > Element) แต่ **CSS Cascade Layers** เพิ่มเลเยอร์ชั้นความสำคัญที่อยู่เหนือ Specificity โดยกฎในเลเยอร์ที่ถูกประกาศทีหลัง (เช่น `@layer utilities`) จะมีความสำคัญชนะกฎในเลเยอร์ก่อนหน้า (เช่น `@layer base` หรือ `@layer components`) เสมอ ไม่ว่ากฎในเลเยอร์ก่อนหน้าจะมีจำนวน ID หรือ Class ซ้อนกันกี่ชั้นก็ตาม ทำให้สถาปัตยกรรม Atomic CSS ของ Tailwind ปลอดภัยจากการถูกสไตล์ระดับล่างทับซ้อน

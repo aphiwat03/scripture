@@ -1,0 +1,646 @@
+---
+title: Docker
+category: BACKEND
+version: Docker Engine + Compose v2
+updatedAt: 2026-10-17
+---
+
+# Docker
+
+ในการพัฒนาระบบ **Smart Butcher Marketplace** ปัญหาคลาสสิกที่ทีมพัฒนาพบบ่อยคือ *"รันบนเครื่องตัวเองผ่าน แต่พอขึ้นเซิร์ฟเวอร์จริงกลับพัง"* (Works on my machine) เนื่องจากความแตกต่างของเวอร์ชัน Node.js, ไลบรารีระดับ OS สำหรับ Prisma Client หรือการตั้งค่า PostgreSQL 16 การนำ **Docker Engine** และ **Docker Compose v2** มาใช้ช่วยมาตรฐานสภาพแวดล้อมตั้งแต่เครื่องนักพัฒนา (Local Development), ระบบ CI/CD ไปจนถึง Production Server ให้เหมือนกันทุกประการ พร้อมทั้งจำกัดทรัพยากรและยกระดับความปลอดภัยของระบบ
+
+| หัวข้อในหน้านี้ | รายละเอียดหลัก |
+| :--- | :--- |
+| [1. แนวคิดหลักของ Docker (Image, Container, Volume, Network)](#1-แนวคิดหลักของ-docker-image-container-volume-network) | สถาปัตยกรรม Containerization, UnionFS Layers และความแตกต่างจาก Virtual Machine |
+| [2. การเขียน Multi-stage Dockerfile สำหรับ NestJS 11 ระดับ Production](#2-การเขียน-multi-stage-dockerfile-สำหรับ-nestjs-11-ระดับ-production) | การลดขนาด Image, การสร้าง Prisma Client, การรันด้วย Non-root User และ `.dockerignore` |
+| [3. การประกอบระบบด้วย Docker Compose (NestJS + PostgreSQL 16)](#3-การประกอบระบบด้วย-docker-compose-nestjs-postgresql-16) | การผสานระบบ Backend API และฐานข้อมูลให้ทำงานร่วมกันด้วยไฟล์ `compose.yaml` |
+| [4. การจัดการ Persistent Volumes, Environment Variables, Secrets และ Healthcheck](#4-การจัดการ-persistent-volumes-environment-variables-secrets-และ-healthcheck) | การรักษาข้อมูลสต็อกเนื้อและคำสั่งซื้อไม่ให้สูญหาย และการควบคุมลำดับการบูตด้วย `healthcheck` |
+| [5. การเชื่อมต่อเครือข่ายระหว่าง Container และคำสั่ง CLI สำหรับ Debug](#5-การเชื่อมต่อเครือข่ายระหว่าง-container-และคำสั่ง-cli-สำหรับ-debug) | ระบบ Internal DNS ของ Docker Network และชุดคำสั่งตรวจสอบระบบเมื่อเกิดปัญหา |
+| [ข้อผิดพลาดที่พบบ่อย (Anti-patterns)](#ข้อผิดพลาดที่พบบ่อย-anti-patterns) | ข้อควรระวังในการเขียน Dockerfile และ Compose สำหรับ Node.js / NestJS |
+| [Checklist สรุป](#checklist-สรุป) | รายการตรวจสอบความพร้อมของระบบ Container ก่อนขึ้น Production |
+| [ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่](#ลำดับการเรียนที่แนะนำ-และ-ดูเพิ่มเติมที่) | เส้นทางการศึกษาต่อยอดด้าน Database, CI/CD และ Testing |
+
+---
+
+## 1. แนวคิดหลักของ Docker (Image, Container, Volume, Network)
+
+### แนวคิด (Concept)
+Docker คือแพลตฟอร์ม Containerization ที่ห่อหุ้มโค้ดของแอปพลิเคชัน รันไทม์ (Node.js) ไลบรารีระบบ และไฟล์ตั้งค่าทั้งหมดให้อยู่ในหน่วยเดียวกัน โดยประกอบด้วยองค์ประกอบหลัก 4 ส่วนที่ทำงานสอดประสานกัน:
+1. **Image**: แม่พิมพ์แบบอ่านอย่างเดียว (Read-only Template) ที่เกิดจากการซ้อนทับกันเป็นชั้นๆ (Layers) เช่น ชั้นของ Alpine Linux + ชั้นของ Node.js 22 + ชั้นของโค้ด NestJS ที่คอมไพล์แล้ว
+2. **Container**: อินสแตนซ์ที่กำลังทำงานอยู่ (Runnable Instance) ของ Image มีพื้นที่เขียนไฟล์ชั่วคราว (Writable Layer) ของตัวเองแยกขาดจากโฮสต์
+3. **Volume**: พื้นที่จัดเก็บข้อมูลถาวรที่อยู่นอกวงจรชีวิตของ Container ใช้สำหรับเก็บข้อมูลฐานข้อมูล PostgreSQL 16 (เช่น ตาราง `User`, `Product`, `Order`, `Payment`) ไม่ให้หายไปเมื่อลบหรือสร้าง Container ใหม่
+4. **Network**: เครือข่ายเสมือนที่ช่วยให้ Container ของ NestJS และ PostgreSQL สื่อสารกันภายในได้ด้วยชื่อ Service โดยไม่ต้องเปิดพอร์ตฐานข้อมูลออกสู่สาธารณะ
+
+### หลักการเบื้องหลัง (Under the Hood)
+ต่างจาก Virtual Machine (VM) ที่ต้องจำลองฮาร์ดแวร์และบูตระบบปฏิบัติการ Guest OS เต็มรูปแบบสำหรับทุกเครื่อง Docker Container ใช้คุณสมบัติระดับ Linux Kernel ร่วมกับเครื่องโฮสต์โดยตรงผ่านกลไกสำคัญ 3 ประการ:
+- **Namespaces (`pid`, `net`, `mnt`, `ipc`, `uts`, `user`)**: แยกมุมมองของโพรเซส เครือข่าย และระบบไฟล์ ทำให้ Container ของ NestJS เห็นตัวเองเป็น PID 1 และไม่เห็นโพรเซสอื่นบนเครื่องโฮสต์
+- **Control Groups (`cgroups`)**: จำกัดและจัดสรรทรัพยากรฮาร์ดแวร์ เช่น กำหนดไม่ให้ Container ใช้ RAM เกิน 512MB หรือ CPU เกิน 1 Core
+- **Union File System (`OverlayFS`)**: นำ Layer ของ Image ที่เป็น Read-only มาซ้อนทับกัน หากสอง Image ใช้ Base Image `node:22-alpine` ตัวเดียวกัน Docker จะแชร์ Layer พื้นฐานร่วมกันบนดิสก์ ช่วยประหยัดพื้นที่และโหลดเร็วขึ้นอย่างมาก
+
+<Callout type="note" title="Stateless Container vs Stateful Data">
+หัวใจสำคัญของการออกแบบระบบด้วย Docker คือต้องถือว่าตัว Container ของ NestJS API เป็น Stateless เสมอ (สามารถถูกลบและสร้างใหม่ได้ทุกเมื่อโดยที่ระบบไม่เสียข้อมูล) ข้อมูลที่มีสถานะทั้งหมดของระบบร้านค้าเนื้อพรีเมียมต้องถูกเก็บไว้ใน PostgreSQL Volume หรือ Cloud Storage (Supabase Storage) เท่านั้น
+</Callout>
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การสร้างไฟล์ `.dockerignore` เพื่อป้องกันไม่ให้โฟลเดอร์ขนาดใหญ่ (`node_modules`) หรือไฟล์ความลับ (`.env`) หลุดเข้าไปใน Docker Build Context
+
+```dockerignore filename=".dockerignore"
+# Dependencies และ Build artifacts บนเครื่องโฮสต์
+node_modules
+dist
+coverage
+.pnpm-store
+
+# ไฟล์ความลับและ Environment Variables (ต้องฉีดเข้าตอนรันเท่านั้น)
+.env
+.env.*
+!.env.example
+
+# ไฟล์ Git และเอกสารที่ไม่จำเป็นต่อการรัน Production
+.git
+.gitignore
+.github
+README.md
+docs
+src/content
+*.log
+```
+
+ตัวอย่างที่ 2: สคริปต์ตรวจสอบความพร้อมของการเชื่อมต่อฐานข้อมูลและสถานะ Container (`HealthController`) ใน NestJS 11 เพื่อรองรับการทำงานในสภาพแวดล้อม Container
+
+```typescript filename="src/modules/health/health.controller.ts"
+import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+
+export interface SystemHealthResponse {
+  status: 'ok' | 'degraded';
+  service: string;
+  timestamp: string;
+  uptimeSeconds: number;
+  database: 'connected' | 'disconnected';
+}
+
+@Controller('health')
+export class HealthController {
+  constructor(private readonly prisma: PrismaService) {}
+
+  @Get()
+  async checkHealth(): Promise<SystemHealthResponse> {
+    try {
+      // ตรวจสอบการเชื่อมต่อกับ PostgreSQL 16 Container
+      await this.prisma.$queryRaw`SELECT 1`;
+
+      return {
+        status: 'ok',
+        service: 'smart-butcher-api',
+        timestamp: new Date().toISOString(),
+        uptimeSeconds: Math.floor(process.uptime()),
+        database: 'connected',
+      };
+    } catch {
+      throw new ServiceUnavailableException({
+        status: 'degraded',
+        service: 'smart-butcher-api',
+        timestamp: new Date().toISOString(),
+        uptimeSeconds: Math.floor(process.uptime()),
+        database: 'disconnected',
+      });
+    }
+  }
+}
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **ไฟล์ `.dockerignore`** | ไม่มีไฟล์ `.dockerignore` ทำให้คำสั่ง `COPY . .` ก๊อปปี้โฟลเดอร์ `node_modules` (ขนาดหลายร้อย MB) และไฟล์ `.env` เข้าไปใน Image | สร้าง `.dockerignore` เพื่อคัดกรองเฉพาะซอร์สโค้ดและไฟล์ที่จำเป็นต่อการ Build เท่านั้น |
+| **การเก็บข้อมูลใน Container** | เขียนไฟล์ใบเสร็จหรือฐานข้อมูล SQLite ไว้ใน Writable Layer ของ Container ซึ่งจะหายทันทีเมื่อสั่ง `docker compose down` | เก็บข้อมูลฐานข้อมูลใน Named Volume และเก็บไฟล์มีเดียบน Cloud Object Storage |
+| **การรวมหลายบริการใน Container เดียว** | ติดตั้งทั้ง Node.js, PostgreSQL และ Nginx ไว้ใน Container ตัวเดียวกัน ทำให้ขยายระบบแยกส่วนไม่ได้ | แยก 1 โพรเซสหลักต่อ 1 Container (NestJS 1 Container, PostgreSQL 1 Container) แล้วเชื่อมกันด้วย Docker Network |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: ต้องการให้ทีมพัฒนาทุกคนรัน PostgreSQL 16 และ NestJS 11 ในสภาพแวดล้อมที่ตรงกัน 100% หรือเมื่อต้องการสร้าง Artifact มาตรฐานสำหรับนำไปรันบน Cloud (AWS ECS, Google Cloud Run, DigitalOcean, Kubernetes)
+- **ไม่ควรใช้เมื่อ**: ไม่ควรนำ Docker Image ที่ไม่ได้แยก Stage การ Build (มีทั้ง TypeScript Compiler และ `devDependencies`) ไปรันบน Production Server โดยตรงเพราะมีขนาดใหญ่และมีพื้นผิวการโจมตี (Attack Surface) สูง
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ถ้าเราสั่ง `COPY package.json pnpm-lock.yaml ./` แล้วรัน `pnpm install` ก่อนคำสั่ง `COPY . .` ใน Dockerfile มีข้อดีอย่างไรในแง่ของ Docker Layer Caching?
+   - **แนวคำตอบ**: Docker สร้างและแคช Image เป็นรายบรรทัดคำสั่ง (Layer) หากคัดลอกไฟล์ซอร์สโค้ดทั้งหมด (`COPY . .`) ก่อนติดตั้งแพ็กเกจ ทุกครั้งที่แก้โค้ดแม้แต่ตัวอักษรเดียวใน `ProductsService` แคชของ Layer นั้นจะถูกทำลาย ทำให้ Docker ต้องรัน `pnpm install` ใหม่ทั้งหมด แต่ถ้าแยกคัดลอกเฉพาะ `package.json` และ Lockfile มาก่อน Docker จะใช้แคชของ Layer `node_modules` เดิมได้ทันทีตราบใดที่ไม่มีการเพิ่ม/ลดไลบรารี ช่วยลดเวลา Build จากหลายนาทีเหลือเพียงไม่กี่วินาที
+2. **คำถาม**: ทำไมการไม่มีไฟล์ `.dockerignore` จึงเป็นอันตรายด้านความปลอดภัย?
+   - **แนวคำตอบ**: เพราะคำสั่ง `COPY . .` ใน Dockerfile จะคัดลอกทุกไฟล์ในโฟลเดอร์โปรเจกต์เข้าไปฝังอยู่ใน Layer ของ Image รวมถึงไฟล์ `.env` ที่มีรหัสผ่านฐานข้อมูล (`DATABASE_URL`), `JWT_SECRET`, และ `SUPABASE_SERVICE_ROLE_KEY` หากมีการ Push Image นั้นขึ้น Registry ใครที่ดึง Image ไปสามารถแกะดูความลับทั้งหมดได้ทันที
+
+---
+
+## 2. การเขียน Multi-stage Dockerfile สำหรับ NestJS 11 ระดับ Production
+
+### แนวคิด (Concept)
+ในการสร้างโปรเจกต์ NestJS 11 ด้วย TypeScript และ Prisma ORM เราจำเป็นต้องใช้เครื่องมือจำนวนมากในขั้นตอนการ Build เช่น `@nestjs/cli`, `typescript`, `@types/*` และ Prisma CLI เพื่อคอมไพล์โค้ดเป็น JavaScript (`dist/`) และสร้าง Prisma Client แต่เมื่อนำไปรันจริงบน Production เราต้องการเพียงแค่ไฟล์ใน `dist/`, `node_modules` เฉพาะส่วน `dependencies` (ไม่รวม `devDependencies`) และ Prisma Query Engine เท่านั้น เทคนิค **Multi-stage Dockerfile** ช่วยให้เราแยกขั้นตอนการติดตั้งและคอมไพล์ไว้ใน Stage แรกๆ แล้วคัดลอกเฉพาะผลลัพธ์ที่จำเป็นไปยัง Stage สุดท้ายที่มีขนาดเล็กและปลอดภัย
+
+### หลักการเบื้องหลัง (Under the Hood)
+การทำงานของ Multi-stage Build ใน Dockerfile แบ่งออกเป็นลำดับขั้น:
+1. **`deps` Stage**: ติดตั้ง Dependencies ทั้งหมดด้วย `pnpm install --frozen-lockfile` เพื่อให้มั่นใจว่าได้เวอร์ชันตรงกับ Lockfile ทุกประการ
+2. **`builder` Stage**: รับ `node_modules` จาก `deps` มารัน `pnpm prisma generate` (เพื่อสร้าง Type-safe Client และ Query Engine สำหรับสถาปัตยกรรม Linux Alpine) ตามด้วย `pnpm run build` เพื่อสร้างโฟลเดอร์ `dist/` จากนั้นรัน `pnpm prune --prod` เพื่อตัด `devDependencies` ทิ้ง
+3. **`runner` (Production) Stage**: เริ่มต้นจาก Image เปล่าที่สะอาด (`node:22-alpine`) ติดตั้ง `dumb-init` เพื่อจัดการ Signal (`SIGTERM`, `SIGINT`) อย่างถูกต้อง เปลี่ยนไปใช้บัญชีผู้ใช้ `USER node` (Non-root) เพื่อความปลอดภัย และคัดลอกเฉพาะ `dist/`, `node_modules` ที่ Prune แล้ว และ `prisma/` มาใช้งาน
+
+<Callout type="warning" title="ทำไมไม่ควรรัน Node.js เป็น PID 1 หรือด้วยสิทธิ์ root">
+โดยค่าเริ่มต้น Container จะรันด้วยสิทธิ์ `root` ซึ่งหากแอปพลิเคชันมีช่องโหว่ Remote Code Execution ผู้โจมตีจะได้สิทธิ์สูงสุดใน Container ทันที จึงต้องสลับเป็น `USER node` เสมอ นอกจากนี้ การใช้ `dumb-init` ช่วยส่งต่อสัญญาณ `SIGTERM` ไปยังโพรเซส Node.js เพื่อให้ NestJS ทำ Graceful Shutdown (`app.enableShutdownHooks()`) ปิดการเชื่อมต่อ Prisma และรอให้การตัดสต็อกเนื้อที่ค้างอยู่ทำงานจนเสร็จก่อนปิดตัวลง
+</Callout>
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การเปิดใช้งาน `enableShutdownHooks()` ใน `src/main.ts` ของ NestJS 11 เพื่อให้ทำงานสอดคล้องกับสัญญาณหยุดการทำงานของ Docker Container
+
+```typescript filename="src/main.ts"
+import { NestFactory } from '@nestjs/core';
+import { ValidationPipe, Logger } from '@nestjs/common';
+import { AppModule } from './app.module';
+
+async function bootstrap(): Promise<void> {
+  const logger = new Logger('Bootstrap');
+  const app = await NestFactory.create(AppModule);
+
+  // เปิดรับสัญญาณ SIGTERM / SIGINT จาก Docker เพื่อให้ Prisma ปิด Connection อย่างปลอดภัย
+  app.enableShutdownHooks();
+
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    }),
+  );
+
+  const port = Number(process.env.PORT ?? 3000);
+  // ต้องผูกกับ 0.0.0.0 เสมอเมื่อรันใน Docker Container เพื่อรับทราฟฟิกจากภายนอก Container
+  await app.listen(port, '0.0.0.0');
+  logger.log(`Smart Butcher Marketplace API is running on port ${port}`);
+}
+
+void bootstrap();
+```
+
+ตัวอย่างที่ 2: ไฟล์ `Dockerfile` แบบ Multi-stage ระดับ Production สำหรับ NestJS 11 + Prisma ORM + `pnpm` บน `node:22-alpine`
+
+```dockerfile filename="Dockerfile"
+# ==========================================
+# Stage 1: Base image พร้อมเปิดใช้งาน pnpm ผ่าน corepack
+# ==========================================
+FROM node:22-alpine AS base
+RUN apk add --no-cache libc6-compat openssl dumb-init
+RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
+WORKDIR /app
+
+# ==========================================
+# Stage 2: ติดตั้ง Dependencies ทั้งหมด (รวม devDependencies สำหรับ Build)
+# ==========================================
+FROM base AS deps
+COPY package.json pnpm-lock.yaml ./
+COPY prisma ./prisma/
+RUN pnpm install --frozen-lockfile
+
+# ==========================================
+# Stage 3: Generate Prisma Client, Build NestJS และตัด devDependencies ออก
+# ==========================================
+FROM base AS builder
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# สร้าง Prisma Client สำหรับ Linux musl (Alpine) และคอมไพล์ TypeScript เป็น dist/
+RUN pnpm prisma generate
+RUN pnpm run build
+
+# ลบ devDependencies ออกจาก node_modules เพื่อลดขนาด Image
+RUN pnpm prune --prod
+
+# ==========================================
+# Stage 4: Production Runner (ขนาดเล็กและรันด้วย Non-root user)
+# ==========================================
+FROM node:22-alpine AS runner
+RUN apk add --no-cache openssl dumb-init
+
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=3000
+
+# ใช้ผู้ใช้ 'node' (UID 1000) ที่มีมาให้ใน Official Node Image แทน root
+USER node
+
+# คัดลอกเฉพาะไฟล์ที่จำเป็นต่อการรันจริงพร้อมกำหนดสิทธิ์เจ้าของไฟล์ให้เป็น node:node
+COPY --chown=node:node --from=builder /app/package.json ./package.json
+COPY --chown=node:node --from=builder /app/node_modules ./node_modules
+COPY --chown=node:node --from=builder /app/dist ./dist
+COPY --chown=node:node --from=builder /app/prisma ./prisma
+
+EXPOSE 3000
+
+# ใช้ dumb-init เป็น Entrypoint เพื่อส่งต่อสัญญาณ SIGTERM ให้ Node.js ทำ Graceful Shutdown
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "dist/main.js"]
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **จำนวน Stage ใน Dockerfile** | เขียน Stage เดียวแล้วสั่ง `pnpm run start:dev` หรือทิ้งซอร์สโค้ด `.ts` และ `devDependencies` ไว้ใน Production Image (ขนาด 800MB+) | ใช้ Multi-stage Build คัดลอกเฉพาะ `dist/` และ Production `node_modules` ไปยัง Stage สุดท้าย (ขนาดเหลือ ~180MB) |
+| **คำสั่ง CMD รันแอปพลิเคชัน** | ใช้ `CMD ["npm", "run", "start:prod"]` ซึ่ง npm จะกลืนสัญญาณ `SIGTERM` ทำให้ Graceful Shutdown ไม่ทำงาน | ใช้ `ENTRYPOINT ["dumb-init", "--"]` ร่วมกับ `CMD ["node", "dist/main.js"]` โดยตรง |
+| **การผูก Network Interface** | สั่ง `app.listen(3000, '127.0.0.1')` ทำให้เข้าถึง API จากนอก Container ไม่ได้เลย | สั่ง `app.listen(port, '0.0.0.0')` เพื่อรับการเชื่อมต่อผ่าน Docker Network Interface |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: สร้าง Image สำหรับนำขึ้นระบบ Staging และ Production ทุกครั้ง เพื่อให้ได้ Image ที่ขนาดเล็ก บูตไว และปลอดภัยสูงสุด
+- **ไม่ควรใช้เมื่อ**: ขณะกำลังเขียนโค้ดแบบ Hot-reload บนเครื่องตัวเองที่ต้องการแก้ไฟล์ปุ๊บเห็นผลปั๊บ ในขั้นพัฒนาอาจรันเฉพาะ PostgreSQL 16 ใน Docker แล้วรัน `pnpm run start:dev` บนเครื่องโฮสต์ หรือแยก Target เฉพาะสำหรับ Development
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมเราต้องติดตั้งแพ็กเกจ `openssl` ใน `node:22-alpine` เมื่อใช้งานร่วมกับ Prisma ORM?
+   - **แนวคำตอบ**: เพราะ Alpine Linux ใช้ไลบรารีมาตรฐาน `musl libc` และตัดแพ็กเกจหลายอย่างออกเพื่อให้ขนาดเล็กที่สุด ในขณะที่ Prisma Query Engine ต้องการไลบรารี `openssl` ของระบบในการสร้างการเชื่อมต่อที่เข้ารหัส (SSL/TLS) ไปยังฐานข้อมูล PostgreSQL หากไม่ติดตั้ง `openssl` ไว้ Prisma อาจโยนข้อผิดพลาดตอนเริ่มต้นทำงาน
+2. **คำถาม**: การใช้ `CMD ["node", "dist/main.js"]` แทน `CMD ["pnpm", "run", "start:prod"]` มีผลต่อการจัดการคำสั่งซื้อ (`Order`) ขณะกำลัง Deploy เวอร์ชันใหม่อย่างไร?
+   - **แนวคำตอบ**: เมื่อระบบทำการ Rolling Update เพื่อเปลี่ยนเป็นเวอร์ชันใหม่ Docker/Orchestrator จะส่งสัญญาณ `SIGTERM` ไปยังโพรเซสหลัก หากใช้ `pnpm` หรือ `npm` หุ้มอยู่อีกชั้น ตัว Package Manager อาจไม่ส่งต่อ `SIGTERM` ไปยังโพรเซส `node` ทำให้หลังจากผ่านไป 10 วินาที Container จะถูกบังคับตัดไฟด้วย `SIGKILL` ส่งผลให้ Transaction การสั่งซื้อเนื้อหรือการอัปเดตสถานะ `Payment` ที่กำลังทำค้างอยู่ถูกตัดกลางคัน แต่การรัน `node dist/main.js` ภายใต้ `dumb-init` จะทำให้ NestJS ได้รับ `SIGTERM` และรอให้ Request ที่ค้างอยู่ทำงานเสร็จอย่างปลอดภัยก่อนปิดตัว
+
+---
+
+## 3. การประกอบระบบด้วย Docker Compose (NestJS + PostgreSQL 16)
+
+### แนวคิด (Concept)
+ในระบบจริง แอปพลิเคชัน NestJS ไม่ได้ทำงานลำพัง แต่ต้องเชื่อมต่อกับฐานข้อมูล **PostgreSQL 16** การมานั่งพิมพ์คำสั่ง `docker run` ยาวๆ พร้อมพารามิเตอร์ Network และ Volume ทีละตัวเป็นเรื่องที่เสี่ยงต่อความผิดพลาดสูง **Docker Compose v2** (`compose.yaml`) ช่วยให้เรากำหนดสถาปัตยกรรมของทั้งระบบ (Multi-container Application) ไว้ในไฟล์ YAML เพียงไฟล์เดียว และสั่งรันหรือหยุดทั้งระบบได้ด้วยคำสั่งเดียว (`docker compose up -d`)
+
+### หลักการเบื้องหลัง (Under the Hood)
+เมื่อรันคำสั่ง `docker compose up -d`:
+1. Docker Compose จะอ่านไฟล์ `compose.yaml` แล้วสร้าง Bridge Network เฉพาะของโปรเจกต์ขึ้นมาโดยอัตโนมัติ
+2. สร้าง Named Volume สำหรับจัดเก็บข้อมูลของ PostgreSQL 16
+3. ดึงหรือ Build Image ของแต่ละ Service (`postgres_db` และ `butcher_api`)
+4. ตรวจสอบลำดับการพึ่งพากันผ่าน `depends_on` โดยรอให้ `postgres_db` ผ่านเงื่อนไข `condition: service_healthy` (ฐานข้อมูลพร้อมรับการเชื่อมต่อจริง ไม่ใช่แค่ Container เริ่มทำงาน) แล้วจึงค่อยสั่งรัน Migration และเปิดทำงาน `butcher_api`
+
+<Callout type="tip" title="มาตรฐานชื่อไฟล์ของ Docker Compose v2">
+ใน Docker Compose v2 ชื่อไฟล์มาตรฐานที่แนะนำอย่างเป็นทางการคือ `compose.yaml` (หรือยังสามารถใช้ `docker-compose.yml` เดิมได้เพื่อความเข้ากันได้ย้อนหลัง) และไม่ต้องระบุฟิลด์ `version: '3.8'` ที่บรรทัดบนสุดอีกต่อไปเนื่องจากถูกยกเลิก (Deprecated) แล้วใน Compose Specification ยุคใหม่
+</Callout>
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: ไฟล์ `compose.yaml` สำหรับประกอบร่างระบบ Smart Butcher Marketplace (NestJS 11 API + PostgreSQL 16 Alpine)
+
+```yaml filename="compose.yaml"
+name: smart-butcher-marketplace
+
+services:
+  postgres_db:
+    image: postgres:16-alpine
+    container_name: butcher_postgres_16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-butcher_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?กรุณากำหนดค่า POSTGRES_PASSWORD ในไฟล์ .env}
+      POSTGRES_DB: ${POSTGRES_DB:-smart_butcher_db}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      # ผูกเฉพาะ 127.0.0.1 บนเครื่องโฮสต์เพื่อไม่ให้พอร์ต 5432 เปิดออกสู่เครือข่ายภายนอกโดยตรง
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/pgdata
+    networks:
+      - butcher_internal_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-butcher_admin} -d $${POSTGRES_DB:-smart_butcher_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  butcher_api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    image: smart-butcher-api:1.0.0
+    container_name: butcher_nestjs_api
+    restart: unless-stopped
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # เชื่อมต่อผ่านชื่อ Service 'postgres_db' ในเครือข่ายภายในของ Docker
+      DATABASE_URL: postgresql://${POSTGRES_USER:-butcher_admin}:${POSTGRES_PASSWORD}@postgres_db:5432/${POSTGRES_DB:-smart_butcher_db}?schema=public&connection_limit=20
+    ports:
+      - "${API_PORT:-3000}:3000"
+    networks:
+      - butcher_internal_net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+volumes:
+  postgres_data:
+    name: smart_butcher_pgdata
+
+networks:
+  butcher_internal_net:
+    name: smart_butcher_network
+    driver: bridge
+```
+
+ตัวอย่างที่ 2: สคริปต์ Entrypoint สำหรับรัน `prisma migrate deploy` อัตโนมัติเพื่ออัปเดตตาราง (`User`, `Product`, `Category`, `Order`, `OrderItem`, `Payment`) ก่อนเปิดรับทราฟฟิกใน `butcher_api`
+
+```sh filename="scripts/docker-entrypoint.sh"
+#!/bin/sh
+set -e
+
+echo "[Entrypoint] กำลังตรวจสอบและรัน Prisma Database Migrations สำหรับ Smart Butcher Marketplace..."
+./node_modules/.bin/prisma migrate deploy
+
+echo "[Entrypoint] Migrations สำเร็จ! กำลังเริ่มต้นระบบ NestJS 11 API..."
+exec "$@"
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การตั้งค่า `DATABASE_URL` ใน Compose** | ใช้ `localhost:5432` ใน `DATABASE_URL` ของ `butcher_api` ทำให้ NestJS พยายามต่อหาฐานข้อมูลใน Container ของตัวเองแล้วพังด้วย `ECONNREFUSED` | ใช้ชื่อ Service ใน Compose เป็น Hostname คือ `postgres_db:5432` |
+| **การใช้ `depends_on` แบบธรรมดา** | เขียนแค่ `depends_on: [postgres_db]` ซึ่ง Docker จะรัน NestJS ทันทีที่ Container ของ Postgres เพิ่งเริ่มสตาร์ทแต่ยังบูต Engine ไม่เสร็จ | ใช้ `depends_on` ร่วมกับ `condition: service_healthy` และตั้งค่า `pg_isready` ใน `healthcheck` |
+| **คำสั่ง Migration บน Production** | รัน `prisma migrate dev` หรือ `prisma db push` ใน Production Container ซึ่งอาจลบข้อมูลตารางทิ้งหากเกิด Schema Drift | ใช้คำสั่ง `prisma migrate deploy` เท่านั้นในสภาพแวดล้อม Production |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: ต้องการจำลองสภาพแวดล้อมแบบครบวงจรบนเครื่องพัฒนา ทดสอบ Integration/E2E Test หรือ Deploy ระบบขนาดเล็กถึงกลางบน Single Node / VPS
+- **ไม่ควรใช้เมื่อ**: หากระบบขยายใหญ่ระดับต้องทำ Auto-scaling หลายสิบเครื่องข้าม Data Center ในกรณีนั้นควรนำ Docker Image ที่สร้างจาก `Dockerfile` เดียวกันนี้ไปรันบน Container Orchestrator หรือใช้ Managed PostgreSQL ควบคู่กัน
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมใน `compose.yaml` การแมปพอร์ตของ PostgreSQL จึงควรเขียนเป็น `"127.0.0.1:5432:5432"` แทนที่จะเป็น `"5432:5432"`?
+   - **แนวคำตอบ**: การเขียน `"5432:5432"` จะผูกพอร์ตเข้ากับ `0.0.0.0` บนเครื่องโฮสต์ และที่สำคัญคือ Docker จะแก้ไขกฎ `iptables` โดยตรงซึ่งมักจะข้าม (Bypass) กฎของ `ufw` (Uncomplicated Firewall) บน Linux Server ทำให้พอร์ต 5432 ของฐานข้อมูลเปิดออกสู่โลกอินเทอร์เน็ตโดยไม่ตั้งใจ การระบุ `127.0.0.1:5432:5432` จะจำกัดให้เชื่อมต่อพอร์ตนี้ได้เฉพาะจากภายในเครื่องโฮสต์เองเท่านั้น ส่วน `butcher_api` ยังคงคุยผ่านพอร์ต `5432` ภายใน `butcher_internal_net` ได้ตามปกติ
+2. **คำถาม**: ไวยากรณ์ `${POSTGRES_PASSWORD:?กรุณากำหนดค่า...}` ในไฟล์ `compose.yaml` มีประโยชน์อย่างไร?
+   - **แนวคำตอบ**: เป็นฟีเจอร์ Required Variable Substitution ของ Docker Compose หากผู้ดูแลระบบลืมตั้งค่า `POSTGRES_PASSWORD` ในไฟล์ `.env` หรือตั้งเป็นค่าว่าง Docker Compose จะหยุดทำงานทันทีพร้อมแสดงข้อความแจ้งเตือนที่กำหนดไว้ แทนที่จะเผลอรันฐานข้อมูลด้วยรหัสผ่านว่างเปล่าหรือค่า Default ที่ไม่ปลอดภัย
+
+---
+
+## 4. การจัดการ Persistent Volumes, Environment Variables, Secrets และ Healthcheck
+
+### แนวคิด (Concept)
+การนำระบบร้านค้าเนื้อพรีเมียมขึ้นใช้งานจริงต้องมีกลไกรับประกันความมั่นคง 4 ด้านในระดับ Container:
+1. **Persistent Volumes**: ปกป้องข้อมูลในตาราง `Order`, `Payment`, และสต็อก `Product` ให้คงอยู่ถาวรแม้จะมีการอัปเกรดอิมเมจของ PostgreSQL
+2. **Environment Variables & Validation**: แยกค่าคงที่และการตั้งค่าออกจากโค้ด พร้อมตรวจสอบความถูกต้องตั้งแต่วินาทีแรกที่ NestJS เริ่มทำงาน
+3. **Docker Secrets**: จัดการข้อมูลความลับระดับสูงโดยไม่ให้รั่วไหลผ่านคำสั่ง `docker inspect`
+4. **Container Healthcheck**: ให้ Docker Engine ตรวจสอบสุขภาพของทั้ง PostgreSQL และ NestJS API อย่างต่อเนื่องเพื่อรู้ทันทีเมื่อบริการค้างหรือเชื่อมต่อฐานข้อมูลไม่ได้
+
+### หลักการเบื้องหลัง (Under the Hood)
+- **Named Volume (`postgres_data`)**: Docker จัดการพื้นที่นี้ไว้ที่ `/var/lib/docker/volumes/` บนเครื่องโฮสต์ ซึ่งมีประสิทธิภาพ I/O สูงกว่า Bind Mount และปลอดภัยจากการเผลอลบไฟล์ในโฟลเดอร์โปรเจกต์ โดยจะไม่ถูกลบเมื่อสั่ง `docker compose down` (ยกเว้นจะระบุแฟล็ก `-v` อย่างจงใจ)
+- **Healthcheck Lifecycle**: Docker จะรันคำสั่ง `test` ตามรอบเวลา `interval` เมื่อเริ่มต้น Container จะอยู่ในสถานะ `health: starting` ในช่วงเวลา `start_period` หากคำสั่งคืนค่า Exit Code `0` จะเปลี่ยนเป็น `healthy` แต่หากคืนค่าอื่นติดต่อกันครบจำนวน `retries` สถานะจะกลายเป็น `unhealthy`
+
+<Callout type="warning" title="ระวังคำสั่ง docker compose down -v">
+การรันคำสั่ง `docker compose down` ปกติจะลบเฉพาะ Container และ Network แต่ยังคงเก็บ Named Volume (`postgres_data`) เอาไว้ อย่างไรก็ตาม หากเติมแฟล็ก `-v` (`docker compose down -v`) Docker จะลบ Volume ทิ้งทันที ส่งผลให้ข้อมูลลูกค้า สินค้า และคำสั่งซื้อทั้งหมดในฐานข้อมูลหายไปอย่างถาวร ห้ามใช้แฟล็ก `-v` บนเครื่องที่มีข้อมูลสำคัญเด็ดขาด
+</Callout>
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การตรวจสอบความถูกต้องของ Environment Variables ตอนบูตระบบ NestJS 11 เพื่อให้ระบบ Fail-fast ทันทีหากตั้งค่าใน Docker Compose ไม่ครบถ้วน
+
+```typescript filename="src/config/env.validation.ts"
+import { plainToInstance } from 'class-transformer';
+import {
+  IsEnum,
+  IsInt,
+  IsNotEmpty,
+  IsString,
+  IsUrl,
+  Max,
+  Min,
+  validateSync,
+} from 'class-validator';
+
+export enum Environment {
+  Development = 'development',
+  Production = 'production',
+  Test = 'test',
+}
+
+class EnvironmentVariables {
+  @IsEnum(Environment)
+  NODE_ENV: Environment = Environment.Development;
+
+  @IsInt()
+  @Min(1024)
+  @Max(65535)
+  PORT: number = 3000;
+
+  @IsString()
+  @IsNotEmpty()
+  DATABASE_URL!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  JWT_SECRET!: string;
+
+  @IsUrl({ require_tld: false })
+  @IsNotEmpty()
+  SUPABASE_URL!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  SUPABASE_SERVICE_ROLE_KEY!: string;
+}
+
+export function validateEnv(config: Record<string, unknown>): EnvironmentVariables {
+  const validatedConfig = plainToInstance(EnvironmentVariables, config, {
+    enableImplicitConversion: true,
+  });
+
+  const errors = validateSync(validatedConfig, {
+    skipMissingProperties: false,
+  });
+
+  if (errors.length > 0) {
+    const messages = errors
+      .map((err) => Object.values(err.constraints ?? {}).join(', '))
+      .join('; ');
+    throw new Error(`[ConfigValidation] การตั้งค่า Environment Variables ไม่ครบถ้วน: ${messages}`);
+  }
+
+  return validatedConfig;
+}
+```
+
+ตัวอย่างที่ 2: การกำหนด `healthcheck` ให้กับ `butcher_api` และการตั้งค่า `secrets` ใน `compose.yaml` เพื่อตรวจสอบ Endpoint `/health` โดยไม่ต้องติดตั้ง `curl` เพิ่มใน Alpine Image
+
+```yaml filename="compose.yaml"
+services:
+  butcher_api:
+    image: smart-butcher-api:1.0.0
+    # ... การตั้งค่าอื่นจากหัวข้อก่อนหน้า ...
+    secrets:
+      - jwt_private_secret
+    healthcheck:
+      # ใช้ node ในการยิง HTTP GET ไปที่ /health ของตัวเอง จึงไม่ต้องติดตั้ง curl หรือ wget เพิ่มใน Image
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+secrets:
+  jwt_private_secret:
+    file: ./secrets/jwt_secret.txt
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การตรวจจับค่า `.env` ที่ตกหล่น** | ปล่อยให้แอปสตาร์ทผ่านไปก่อน แล้วค่อยไปพังด้วย `TypeError: Cannot read properties of undefined` ตอนที่ลูกค้ากดสั่งซื้อเนื้อ | ใช้ `validateEnv` ใน `ConfigModule.forRoot({ validate: validateEnv })` เพื่อหยุดการบูตทันทีหากขาดตัวแปรสำคัญ |
+| **การทำ Healthcheck บน Node Image** | ติดตั้งแพ็กเกจ `curl` และไลบรารีพ่วงอีกหลายสิบตัวใน Production Image เพียงเพื่อใช้รัน Healthcheck | ใช้คำสั่ง `node -e "fetch('http://127.0.0.1:3000/health')..."` ที่มีอยู่ใน Node.js 22 ทันที |
+| **การเก็บไฟล์ `.env`** | Commit ไฟล์ `.env` ที่มีรหัสผ่านจริงเข้าสู่ Git Repository | Commit เฉพาะไฟล์ `.env.example` ที่มีเฉพาะชื่อตัวแปรตัวอย่าง และฉีดค่าจริงที่เครื่องเซิร์ฟเวอร์ |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Named Volume เมื่อ**: เก็บข้อมูลฐานข้อมูล PostgreSQL 16 ที่ต้องการความเร็ว I/O สูงและความปลอดภัยของไฟล์ข้อมูล
+- **ควรใช้ Bind Mount (`./src:/app/src`) เมื่อ**: อยู่ในโหมด Local Development เท่านั้นเพื่อซิงค์ซอร์สโค้ดจากเครื่องโฮสต์เข้าสู่ Container แบบทันที ไม่ควรใช้ Bind Mount สำหรับโค้ดใน Production
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: Named Volume (`postgres_data:/var/lib/postgresql/data/pgdata`) ต่างจาก Bind Mount (`./db-data:/var/lib/postgresql/data/pgdata`) อย่างไร และทำไมจึงแนะนำ Named Volume สำหรับ PostgreSQL?
+   - **แนวคำตอบ**: Named Volume ถูกจัดการโดย Docker Engine โดยตรง มีการตั้งค่าสิทธิ์ไฟล์ (File Permissions/Ownership ของผู้ใช้ `postgres`) ให้ถูกต้องอัตโนมัติ และทำงานได้เร็วกว่ามากบน Windows (WSL2) และ macOS ในขณะที่ Bind Mount จะผูกกับโฟลเดอร์บนระบบไฟล์ของโฮสต์โดยตรง ซึ่งมักเกิดปัญหา Permission Denied กับ UID ของ PostgreSQL และเสี่ยงต่อการที่ผู้ใช้หรือโปรแกรมบนโฮสต์เผลอไปแก้ไขหรือลบไฟล์ฐานข้อมูลโดยตรง
+2. **คำถาม**: พารามิเตอร์ `start_period: 20s` ใน `healthcheck` ของ Docker Compose มีความสำคัญอย่างไรต่อแอปพลิเคชัน NestJS?
+   - **แนวคำตอบ**: แอปพลิเคชัน NestJS ที่ต้องรัน `prisma migrate deploy` และโหลด Dependency Injection Graph ตอนเริ่มต้นอาจใช้เวลาบูตประมาณ 5–15 วินาที `start_period` คือช่วงเวลาผ่อนผัน (Grace Period) ตอนเพิ่งสตาร์ท Container หาก Healthcheck ล้มเหลวในช่วงเวลานี้ Docker จะยังไม่นับรวมเป็นจำนวนครั้งที่ล้มเหลว (`retries`) ป้องกันไม่ให้ Container ถูกตีตราว่า `unhealthy` ก่อนที่จะบูตเสร็จสมบูรณ์
+
+---
+
+## 5. การเชื่อมต่อเครือข่ายระหว่าง Container และคำสั่ง CLI สำหรับ Debug
+
+### แนวคิด (Concept)
+เมื่อ Container ทั้งหมดรันอยู่ภายใต้ Custom Bridge Network เดียวกัน (`butcher_internal_net`) Docker จะเปิดใช้งาน **Embedded DNS Server** ที่ไอพี `127.0.0.11` ภายในเครือข่ายนั้น ทำให้แต่ละ Container สามารถเรียกหากันด้วย **Service Name** ได้เสมือนเป็นชื่อโดเมนจริง เช่น `butcher_api` สามารถเชื่อมต่อฐานข้อมูลได้ที่โฮสต์ `postgres_db` พอร์ต `5432` เสมอ แม้ว่า IP Address ภายในของ Container จะเปลี่ยนไปทุกครั้งที่รีสตาร์ทก็ตาม และเมื่อเกิดปัญหาในการทำงาน นักพัฒนาจำเป็นต้องเชี่ยวชาญชุดคำสั่ง Docker CLI เพื่อตรวจสอบ Log, ทรัพยากร และสถานะเครือข่ายอย่างรวดเร็ว
+
+### หลักการเบื้องหลัง (Under the Hood)
+การแปลงชื่อและเส้นทางทราฟฟิกใน Docker Network มี 2 ทิศทางที่ต้องแยกให้ชัดเจน:
+1. **Container-to-Container (East-West Traffic)**: วิ่งผ่านเครือข่ายเสมือน `butcher_internal_net` โดยใช้พอร์ตภายในของโปรเซส (`CONTAINER_PORT`) เสมอ เช่น แม้เราจะแมปพอร์ต PostgreSQL ออกโฮสต์เป็น `127.0.0.1:5433:5432` แต่เมื่อ `butcher_api` คุยกับ `postgres_db` จะต้องคุยผ่านพอร์ต `5432` เสมอ
+2. **Host/Client-to-Container (North-South Traffic)**: วิ่งจากเบราว์เซอร์หรือ Postman บนเครื่องโฮสต์เข้ามาทางพอร์ตที่ถูก Publish (`HOST_PORT`) เช่น `http://localhost:3000`
+
+<Callout type="note" title="การเชื่อมต่อจากภายใน Container ออกมายัง Service ที่รันอยู่บนเครื่อง Host">
+ในกรณีที่คุณรันเฉพาะ NestJS ใน Docker แต่รันบริการอื่น (เช่น Mock Server หรือ Local Tool) ไว้บนเครื่อง Host โดยตรง คุณไม่สามารถใช้ `localhost` จากใน Container เพื่อชี้มายังเครื่อง Host ได้ ให้ใช้ชื่อโดเมนพิเศษ `host.docker.internal` แทน
+</Callout>
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การตั้งค่า `PrismaService` ใน NestJS 11 พร้อมบันทึก Log การเชื่อมต่อและจัดการ Lifecycle เมื่อทำงานผ่าน Docker Internal DNS
+
+```typescript filename="src/modules/prisma/prisma.service.ts"
+import {
+  Injectable,
+  OnModuleInit,
+  OnModuleDestroy,
+  Logger,
+} from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
+
+@Injectable()
+export class PrismaService
+  extends PrismaClient
+  implements OnModuleInit, OnModuleDestroy
+{
+  private readonly logger = new Logger(PrismaService.name);
+
+  constructor() {
+    super({
+      log: [
+        { emit: 'Order' as never, level: 'error' },
+        { emit: 'stdout', level: 'warn' },
+      ],
+    });
+  }
+
+  async onModuleInit(): Promise<void> {
+    this.logger.log('กำลังเชื่อมต่อฐานข้อมูล PostgreSQL 16 ผ่าน Docker Network...');
+    await this.$connect();
+    this.logger.log('เชื่อมต่อฐานข้อมูล PostgreSQL 16 สำเร็จพร้อมให้บริการ');
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    this.logger.log('ได้รับสัญญาณปิดระบบ กำลังตัดการเชื่อมต่อฐานข้อมูลอย่างปลอดภัย...');
+    await this.$disconnect();
+  }
+}
+```
+
+ตัวอย่างที่ 2: ชุดคำสั่ง Docker Compose CLI มาตรฐานสำหรับการตรวจสอบสถานะ การดู Log การตรวจปริมาณการใช้ RAM/CPU และการเข้าถึงฐานข้อมูลเพื่อ Debug ในระบบจริง
+
+```bash filename="scripts/debug-containers.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 1. ตรวจสอบสถานะการทำงานและสถานะ Healthcheck ของทุก Container
+docker compose ps
+
+# 2. ดู Log ล่าสุด 100 บรรทัดของ NestJS API พร้อมติดตามแบบ Real-time และแสดงเวลา
+docker compose logs -f --tail=100 --timestamps butcher_api
+
+# 3. ตรวจสอบปริมาณการใช้ CPU, RAM (Memory Limit) และ Network I/O แบบสดๆ
+docker stats butcher_nestjs_api butcher_postgres_16 --no-stream
+
+# 4. ทดสอบรันคำสั่งตรวจสอบตารางสินค้าเนื้อวากิวใน PostgreSQL 16 โดยตรงผ่าน Container
+docker compose exec postgres_db psql -U butcher_admin -d smart_butcher_db -c \
+  "SELECT id, sku, name, \"pricePerKg\" FROM \"Product\" ORDER BY \"createdAt\" DESC LIMIT 5;"
+
+# 5. เปิด Shell เข้าไปตรวจสอบไฟล์ใน Container ของ NestJS (ในฐานะผู้ใช้ node)
+docker compose exec butcher_api sh
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การอ้างอิงที่อยู่ข้าม Container** | ฮาร์ดโค้ด IP Address ภายใน เช่น `172.18.0.2` ลงใน `DATABASE_URL` ซึ่งจะเปลี่ยนและพังทันทีเมื่อ Container ถูกรีครีเอต | อ้างอิงด้วยชื่อ Service (`postgres_db`) ผ่านระบบ Embedded DNS ของ Custom Bridge Network เสมอ |
+| **การดู Log เพื่อแก้ปัญหา** | ใช้ `docker compose logs` โดยไม่ใส่ `--tail` บนระบบที่รันมานานหลายสัปดาห์ ทำให้เทอร์มินัลค้างเพราะดึง Log หลายล้านบรรทัด | ใช้ `docker compose logs --tail=100 -f <service>` เพื่อดูเฉพาะเหตุการณ์ล่าสุด |
+| **การติดตั้งแก้ไขไฟล์สดใน Container** | เข้าไปแก้โค้ดใน `dist/` ผ่าน `docker compose exec` เพราะการแก้ไขทั้งหมดจะหายไปทันทีเมื่อรีสตาร์ท Container | แก้ไขที่ซอร์สโค้ดแล้วสั่ง `docker compose up -d --build` เพื่อสร้าง Image ใหม่ที่เป็นมาตรฐาน |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `docker compose exec` เมื่อ**: ต้องการตรวจสอบค่า Environment, ทดสอบการเชื่อมต่อเครือข่าย หรือรันคำสั่ง `psql` / `prisma migrate status` เพื่อวินิจฉัยปัญหาเฉพาะหน้า
+- **ไม่ควรใช้ `docker compose exec` เมื่อ**: ต้องการเปลี่ยนแปลงโครงสร้างระบบหรือแก้ไขโค้ดถาวร ทุกการเปลี่ยนแปลงต้องทำผ่านโค้ด, `Dockerfile`, หรือ `compose.yaml` (Infrastructure as Code) เสมอ
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: หากใน `compose.yaml` เราตั้งค่าพอร์ตของ `postgres_db` เป็น `ports: ["5435:5432"]` ตัวแปร `DATABASE_URL` ของ `butcher_api` ที่อยู่ใน Docker Network เดียวกันต้องใช้พอร์ต `5435` หรือ `5432` เพราะอะไร?
+   - **แนวคำตอบ**: ต้องใช้พอร์ต `5432` (`postgresql://...@postgres_db:5432/...`) เพราะการสื่อสารระหว่าง Container ภายใน Docker Network เดียวกันจะคุยกันที่พอร์ตของโพรเซสภายใน Container โดยตรง (`5432`) ส่วนพอร์ต `5435` เป็นพอร์ตที่เปิดไว้สำหรับโปรแกรมที่รันอยู่บนเครื่อง Host (เช่น DBeaver หรือ Prisma Studio บนเครื่องเรา) เพื่อเชื่อมต่อเข้ามาเท่านั้น
+2. **คำถาม**: คำสั่ง `docker compose restart butcher_api` ต่างจาก `docker compose up -d --force-recreate butcher_api` อย่างไรเมื่อเราเพิ่งแก้ไขค่าในไฟล์ `.env`?
+   - **แนวคำตอบ**: `docker compose restart` จะสั่งหยุดและสตาร์ทตัว Container เดิมซ้ำโดยไม่อ่านค่า Environment Variables ใหม่จากไฟล์ `.env` ในขณะที่ `docker compose up -d` (หรือ `--force-recreate`) จะอ่านการตั้งค่าล่าสุดและสร้าง Container ใหม่พร้อมฉีดค่า `.env` ที่อัปเดตแล้วเข้าไป
+
+---
+
+## ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การใช้แท็ก `:latest` สำหรับ Base Image (`FROM node:latest` หรือ `postgres:latest`)**:
+   ทำให้การ Build ขาดความแน่นอน (Non-deterministic) วันหนึ่งเมื่อ Node.js หรือ PostgreSQL ออก Major Version ใหม่ ระบบอาจพังทันทีโดยที่ไม่ได้แก้โค้ดเลย ต้องระบุเวอร์ชันให้ชัดเจน เช่น `node:22-alpine` และ `postgres:16-alpine`
+2. **การคัดลอกโค้ดทั้งหมดก่อนรัน `pnpm install` ใน Dockerfile**:
+   ทำให้เสียประโยชน์จาก Docker Layer Cache อย่างสิ้นเชิง ส่งผลให้ทุกครั้งที่แก้โค้ดต้องดาวน์โหลดแพ็กเกจใหม่ทั้งหมด
+3. **การลืมรัน `prisma generate` ในขั้นตอน Build สำหรับ Alpine Linux**:
+   ทำให้ Prisma Client ไม่มี Binary Engine ที่ตรงกับสถาปัตยกรรมของ Container (`linux-musl-openssl-3.0.x`) และเกิดข้อผิดพลาดทันทีที่เริ่มรันแอปพลิเคชัน
+4. **การรัน Container ด้วยสิทธิ์ `root` โดยไม่เปลี่ยนเป็น `USER node`**:
+   เพิ่มความเสี่ยงด้านความปลอดภัยอย่างมากหากแอปพลิเคชันถูกโจมตี
+5. **การไม่กำหนด Resource Limits (`cpus`, `memory`)**:
+   หากโพรเซสหนึ่งเกิด Memory Leak หรือใช้ CPU เต็ม 100% จะดึงทรัพยากรของเครื่องโฮสต์จนทำให้ฐานข้อมูล PostgreSQL ที่อยู่บนเครื่องเดียวกันล่มตามไปด้วย
+
+---
+
+## Checklist สรุป
+
+- [ ] มีไฟล์ `.dockerignore` ที่คัดกรอง `node_modules`, `dist`, `.git` และไฟล์ `.env` ออกจากการ Build เสมอ
+- [ ] ใช้ Multi-stage `Dockerfile` ที่แยกขั้นตอน `deps`, `builder` และ `runner` เพื่อลดขนาด Image และตัด `devDependencies` ออก
+- [ ] รัน `prisma generate` ในขั้นตอน Build และใช้ `prisma migrate deploy` สำหรับการอัปเดตฐานข้อมูลใน Production
+- [ ] ตั้งค่า `USER node` ใน Stage สุดท้ายของ `Dockerfile` และใช้ `dumb-init` ร่วมกับ `app.enableShutdownHooks()`
+- [ ] ผูกพอร์ตของ NestJS เข้ากับ `0.0.0.0` (`await app.listen(port, '0.0.0.0')`)
+- [ ] กำหนด Named Volume สำหรับเก็บข้อมูลของ PostgreSQL 16 และผูกพอร์ตฐานข้อมูลบนโฮสต์ไว้ที่ `127.0.0.1` เท่านั้น
+- [ ] ตั้งค่า `healthcheck` ให้กับทั้งฐานข้อมูลและ API พร้อมใช้ `depends_on: { condition: service_healthy }`
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+หลังจากจัดเตรียมสภาพแวดล้อมด้วย Docker และ Docker Compose เรียบร้อยแล้ว แนะนำให้ศึกษาต่อในหัวข้อต่อไปนี้เพื่อดูแลระบบระดับ Production อย่างครบวงจร:
+
+1. **การบริหารจัดการฐานข้อมูล PostgreSQL 16 เชิงลึก**: ศึกษาการตั้งค่าฐานข้อมูล การทำ Migration และการสำรองข้อมูลใน Volume เพิ่มเติมที่ [PostgreSQL](/docs/database/postgresql), [Migrations](/docs/database/migrations) และ [Backup](/docs/database/backup)
+2. **การจัดการ Connection Pool ในระบบ Container**: เรียนรู้การตั้งค่าจำนวนการเชื่อมต่อฐานข้อมูลที่เหมาะสมเมื่อขยายจำนวน Container ของ NestJS ที่ [Connection Pooling](/docs/database/connection-pooling)
+3. **การทำเอกสาร API มาตรฐานและการเชื่อมต่อ AI**: ดูวิธีการเปิดหน้าเอกสาร OpenAPI และการเชื่อมต่อบริการภายนอกได้ที่ [Swagger](/docs/backend/swagger) และ [AI Integration](/docs/backend/ai-integration)
+4. **การผสาน Docker เข้ากับระบบ CI/CD และการทดสอบ**: ศึกษาการรัน Automated Test และ Pipeline อัตโนมัติได้ที่ [Git Hooks & CI](/docs/testing/git-hooks-ci) และ [Backend Testing](/docs/testing/backend-testing)

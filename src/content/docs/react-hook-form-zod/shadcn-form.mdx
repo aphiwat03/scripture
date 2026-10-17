@@ -1,0 +1,505 @@
+---
+title: shadcn/ui Form Architecture
+category: Frontend
+parentTitle: React Hook Form + Zod
+version: RHF v7 & Zod v4 (Next.js 16)
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+คอมโพเนนต์ **Form** ใน **shadcn/ui** ไม่ใช่ Form สำเร็จรูปที่ถูกห่อหุ้มเป็นก้อนทึบ (Black Box) แต่เป็นการนำพลังของ **React Hook Form**, **Zod**, และ **Radix UI Primitives** มาผสมผสานกันผ่านปรัชญา **Component Composition (การประกอบชิ้นส่วนย่อย)**
+
+เป้าหมายหลักของการออกแบบสถาปัตยกรรมนี้คือการแก้ปัญหาคลาสสิกของระบบฟอร์มในระดับองค์กร:
+1. **Design System Consistency**: การแยก Layout, Label, Input, คำอธิบาย (Description), และข้อความแจ้งเตือน (Error Message) ออกเป็นชิ้นส่วนที่จัดเรียงและปรับแต่ง Tailwind CSS ได้อย่างอิสระ
+2. **Accessibility (A11y) โดยอัตโนมัติ**: การเชื่อมโยง Label เข้ากับ Input ผ่าน `htmlFor` และ `id`, การเชื่อมโยงข้อความ Error ผ่าน `aria-describedby` และ `aria-invalid` ซึ่งนักพัฒนามักจะลืมเขียนเมื่อสร้างฟอร์มด้วยมือ
+3. **End-to-End Type Safety**: เชื่อมต่อ Type Definition จาก Zod Schema เข้ากับ Form Field ทันที มี Auto-completion และ Compile-time Type Checking
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 ผ่าสถาปัตยกรรม 6 องค์ประกอบหลักใน `components/ui/form.tsx`
+
+โครงสร้าง Form ของ shadcn/ui ขับเคลื่อนด้วย React Context ซ้อนกัน 2 ระดับ:
+
+```
+[ Form (FormProvider) ]
+  └── [ FormField (Controller Wrapper + FormFieldContext) ]
+        └── [ FormItem (FormItemContext + React.useId) ]
+              ├── <FormLabel>
+              ├── <FormControl> (React.cloneElement: inject id, ref, aria-*)
+              │     └── <Input /> หรือ <Select />
+              ├── <FormDescription>
+              └── <FormMessage>
+```
+
+#### 1. `Form` (หรือ `FormProvider`)
+ส่งต่อเมธอดและ State ทั้งหมดของ RHF (เช่น `handleSubmit`, `control`, `errors`) ลงไปยังต้นไม้คอมโพเนนต์ลูกผ่าน React Context
+
+#### 2. `FormField`
+เป็น Wrapper รอบ `<Controller />` ของ React Hook Form โดยทำหน้าที่สร้าง `FormFieldContext` เพื่อส่งค่า `name` ของฟิลด์นั้นลงไปยังคอมโพเนนต์ลูก
+
+#### 3. `FormItem`
+ทำหน้าที่เป็น Layout Container (มักเป็น `div space-y-2`) และเป็นจุดสร้าง **Unique Accessible ID** ด้วย React 19 / React 18 `React.useId()` แล้วแชร์ผ่าน `FormItemContext`:
+- `id`: Unique ID ประจำฟิลด์ เช่น `:r1:`
+- ตัวแปรลูก:
+  - `formItemId = ${id}-form-item`
+  - `formDescriptionId = ${id}-form-item-description`
+  - `formMessageId = ${id}-form-item-message`
+
+#### 4. `FormLabel`
+รับ `id` จาก `useFormField()` มากำหนดเป็น `htmlFor={formItemId}` ทำให้เมื่อผู้ใช้คลิกที่ Label เซอร์เซอร์จะกระโดดไปโฟกัสที่ช่อง Input ทันที พร้อมทั้งใส่สไตล์สีแดง (`text-destructive`) อัตโนมัติเมื่อเกิด `error`
+
+#### 5. `FormControl` (หัวใจของการ Inject Attributes)
+ใช้ `React.cloneElement` เพื่อแทรก Props สำคัญเข้าไปยังคอมโพเนนต์อินพุตลูกโดยตรง:
+- `id={formItemId}`: เชื่อมกับ Label
+- `aria-describedby`: เชื่อมต่อกับ Description และ Error Message เพื่อให้ Screen Reader อ่านออกเสียงช่วยเหลือผู้พิการทางสายตา
+- `aria-invalid={!!error}`: แจ้งระบบ Assistant ว่าอินพุตนี้ไม่ถูกต้อง
+- `ref={field.ref}`: สำหรับจัดการ Focus เมื่อเกิด Error
+
+#### 6. `FormDescription` & `FormMessage`
+- `FormDescription`: แสดงข้อความช่วยเหลือโดยมี `id={formDescriptionId}`
+- `FormMessage`: ดึงข้อความ Error จาก RHF `fieldState.error?.message` มาแสดงผลโดยอัตโนมัติ พร้อมกำหนด `id={formMessageId}`
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่างที่ 1: Enterprise Login Form พร้อม Show/Hide Password และ Remember Me
+
+ฟอร์มล็อกอินระดับองค์กรที่มีการสลับดูรหัสผ่าน, ตัวเลือก Remember Me, และการดักจับสถานะ Submitting:
+
+```tsx filename="src/features/auth/components/EnterpriseLoginForm.tsx"
+'use client';
+
+import React, { useState } from 'react';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
+import { Eye, EyeOff, Loader2, Lock, Mail } from 'lucide-react';
+
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from '@/components/ui/form';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
+
+// 1. Zod v4 Schema
+const loginSchema = z.object({
+  email: z
+    .string()
+    .min(1, 'กรุณากรอกอีเมล')
+    .email('รูปแบบอีเมลไม่ถูกต้อง กรุณาใช้อีเมลบริษัท เช่น user@company.com'),
+  password: z
+    .string()
+    .min(1, 'กรุณากรอกรหัสผ่าน')
+    .min(8, 'รหัสผ่านต้องมีความยาวอย่างน้อย 8 ตัวอักษร'),
+  rememberMe: z.boolean().default(false),
+});
+
+type LoginFormValues = z.infer<typeof loginSchema>;
+
+export function EnterpriseLoginForm() {
+  const [showPassword, setShowPassword] = useState(false);
+
+  const form = useForm<LoginFormValues>({
+    resolver: zodResolver(loginSchema),
+    defaultValues: {
+      email: '',
+      password: '',
+      rememberMe: false,
+    },
+  });
+
+  const onSubmit = async (values: LoginFormValues) => {
+    try {
+      // จำลองการเรียก Next.js Server Action หรือ Authentication API
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      console.log('Login Payload:', values);
+      alert('เข้าสู่ระบบสำเร็จ');
+    } catch (err) {
+      form.setError('root', {
+        message: 'อีเมลหรือรหัสผ่านไม่ถูกต้อง กรุณาลองใหม่อีกครั้ง',
+      });
+    }
+  };
+
+  const isSubmitting = form.formState.isSubmitting;
+
+  return (
+    <div className="w-full max-w-md p-8 mx-auto bg-card border border-border rounded-2xl shadow-xl space-y-6">
+      <div className="space-y-2 text-center">
+        <h1 className="text-2xl font-bold tracking-tight text-foreground">เข้าสู่ระบบองค์กร</h1>
+        <p className="text-sm text-muted-foreground">ป้อนข้อมูลประจำตัวของคุณเพื่อเข้าถึงคอนโซลการจัดการ</p>
+      </div>
+
+      <Form {...form}>
+        <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-5">
+          {/* Email Field */}
+          <FormField
+            control={form.control}
+            name="email"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>อีเมลพนักงาน (Corporate Email)</FormLabel>
+                <FormControl>
+                  <div className="relative">
+                    <Mail className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                    <Input
+                      {...field}
+                      type="email"
+                      placeholder="alex.smith@enterprise.com"
+                      className="pl-9"
+                      autoComplete="username"
+                      disabled={isSubmitting}
+                    />
+                  </div>
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          {/* Password Field with Show/Hide Toggle */}
+          <FormField
+            control={form.control}
+            name="password"
+            render={({ field }) => (
+              <FormItem>
+                <div className="flex items-center justify-between">
+                  <FormLabel>รหัสผ่าน</FormLabel>
+                  <a href="#forgot" className="text-xs text-primary hover:underline">
+                    ลืมรหัสผ่าน?
+                  </a>
+                </div>
+                <FormControl>
+                  <div className="relative">
+                    <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                    <Input
+                      {...field}
+                      type={showPassword ? 'text' : 'password'}
+                      placeholder="••••••••••••"
+                      className="pl-9 pr-10"
+                      autoComplete="current-password"
+                      disabled={isSubmitting}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      className="absolute right-3 top-2.5 text-muted-foreground hover:text-foreground"
+                      aria-label={showPassword ? 'ซ่อนรหัสผ่าน' : 'แสดงรหัสผ่าน'}
+                    >
+                      {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </button>
+                  </div>
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          {/* Remember Me Checkbox */}
+          <FormField
+            control={form.control}
+            name="rememberMe"
+            render={({ field }) => (
+              <FormItem className="flex flex-row items-center space-x-2 space-y-0">
+                <FormControl>
+                  <Checkbox
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                    disabled={isSubmitting}
+                  />
+                </FormControl>
+                <FormLabel className="text-sm font-normal cursor-pointer">
+                  จดจำการเข้าสู่ระบบบนอุปกรณ์นี้เป็นเวลา 30 วัน
+                </FormLabel>
+              </FormItem>
+            )}
+          />
+
+          {form.formState.errors.root && (
+            <div className="p-3 text-sm text-destructive bg-destructive/10 rounded-md">
+              {form.formState.errors.root.message}
+            </div>
+          )}
+
+          <Button type="submit" className="w-full" disabled={isSubmitting}>
+            {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            {isSubmitting ? 'กำลังตรวจสอบสิทธิ์...' : 'เข้าสู่ระบบ'}
+          </Button>
+        </form>
+      </Form>
+    </div>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: Comprehensive Registration Form พร้อม Select บทบาท และ Checkbox เงื่อนไข
+
+ฟอร์มสมัครสมาชิกพนักงานที่มี Select, Description ช่วยกรอก และการตรวจเงื่อนไขข้อตกลง:
+
+```tsx filename="src/features/auth/components/ComprehensiveRegistrationForm.tsx"
+'use client';
+
+import React from 'react';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
+import { Loader2 } from 'lucide-react';
+
+import {
+  Form,
+  FormControl,
+  FormDescription,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from '@/components/ui/form';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+
+const registrationSchema = z.object({
+  fullName: z.string().min(2, 'ชื่อ-นามสกุลต้องมีความยาวอย่างน้อย 2 ตัวอักษร'),
+  workEmail: z.string().email('กรุณาระบุอีเมลองค์กรที่ถูกต้อง'),
+  departmentRole: z.enum(['ENGINEERING', 'PRODUCT', 'DATA_SECURITY', 'FINANCE'], {
+    message: 'กรุณาเลือกฝ่ายและบทบาทงานของคุณ',
+  }),
+  acceptTerms: z.literal(true, {
+    errorMap: () => ({ message: 'คุณต้องยอมรับข้อตกลงและนโยบายความเป็นส่วนตัวขององค์กรก่อนดำเนินการต่อ' }),
+  }),
+});
+
+type RegistrationFormValues = z.infer<typeof registrationSchema>;
+
+export function ComprehensiveRegistrationForm() {
+  const form = useForm<RegistrationFormValues>({
+    resolver: zodResolver(registrationSchema),
+    defaultValues: {
+      fullName: '',
+      workEmail: '',
+      departmentRole: undefined,
+      acceptTerms: false as unknown as true,
+    },
+  });
+
+  const onSubmit = async (data: RegistrationFormValues) => {
+    await new Promise((r) => setTimeout(r, 1000));
+    console.log('Registration Submitted:', data);
+    alert('ส่งใบสมัครบัญชีสำเร็จ เจ้าหน้าที่จะดำเนินการตรวจสอบ');
+  };
+
+  return (
+    <div className="max-w-xl mx-auto p-6 bg-background border rounded-xl shadow space-y-6">
+      <div>
+        <h2 className="text-xl font-bold text-foreground">ลงทะเบียนบัญชีบุคลากรใหม่</h2>
+        <p className="text-sm text-muted-foreground">กรอกข้อมูลให้ครบถ้วนเพื่อสร้างสิทธิ์การเข้าถึงระบบ Cloud</p>
+      </div>
+
+      <Form {...form}>
+        <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+          {/* Full Name */}
+          <FormField
+            control={form.control}
+            name="fullName"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>ชื่อ-นามสกุล (ภาษาอังกฤษทางการ)</FormLabel>
+                <FormControl>
+                  <Input placeholder="Supachai Jaidee" {...field} />
+                </FormControl>
+                <FormDescription>ระบุชื่อตรงกับหนังสือเดินทางหรือเอกสารฝ่ายบุคคล</FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          {/* Work Email */}
+          <FormField
+            control={form.control}
+            name="workEmail"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>อีเมลสำหรับการทำงาน</FormLabel>
+                <FormControl>
+                  <Input type="email" placeholder="s.jaidee@org.example.com" {...field} />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          {/* Role Select */}
+          <FormField
+            control={form.control}
+            name="departmentRole"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>แผนก / ฝ่ายงาน</FormLabel>
+                <Select onValueChange={field.onChange} defaultValue={field.value}>
+                  <FormControl>
+                    <SelectTrigger>
+                      <SelectValue placeholder="เลือกแผนกงานของคุณ..." />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    <SelectItem value="ENGINEERING">วิศวกรรมซอฟต์แวร์ (Engineering)</SelectItem>
+                    <SelectItem value="PRODUCT">การจัดการผลิตภัณฑ์ (Product Management)</SelectItem>
+                    <SelectItem value="DATA_SECURITY">ความปลอดภัยข้อมูล (Data & Security)</SelectItem>
+                    <SelectItem value="FINANCE">การเงินและการบัญชี (Finance & Accounting)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <FormDescription>สิทธิ์การเข้าถึงฐานข้อมูลจะถูกกำหนดตามแผนกที่เลือก</FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          {/* Accept Terms Checkbox */}
+          <FormField
+            control={form.control}
+            name="acceptTerms"
+            render={({ field }) => (
+              <FormItem className="flex flex-row items-start space-x-3 space-y-0 rounded-md border p-4 bg-muted/30">
+                <FormControl>
+                  <Checkbox
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                  />
+                </FormControl>
+                <div className="space-y-1 leading-none">
+                  <FormLabel className="cursor-pointer">
+                    ฉันยอมรับข้อตกลงการใช้งานและนโยบายความลับข้อมูล (NDA)
+                  </FormLabel>
+                  <FormDescription>
+                    ข้อมูลกิจกรรมทั้งหมดจะถูกบันทึกผ่าน Centralized SIEM
+                  </FormDescription>
+                  <FormMessage />
+                </div>
+              </FormItem>
+            )}
+          />
+
+          <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
+            {form.formState.isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            ส่งข้อมูลลงทะเบียน
+          </Button>
+        </form>
+      </Form>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม
+
+| มิติการเปรียบเทียบ | วิธีเดิม: สร้าง Form Component ก้อนใหญ่รวมหมด (Monolithic) | สถาปัตยกรรม shadcn/ui (Composable Composition) |
+| :--- | :--- | :--- |
+| **การเชื่อมต่อ Accessibility** | ต้องตั้งชื่อ `id="email-input"` และ `htmlFor="email-input"` เองด้วยมือ มักลืมหรือ ID ซ้ำ | สร้าง Accessible ID สุ่มเฉพาะตัว (`:r1:-form-item`) และ inject `aria-*` อัตโนมัติ |
+| **ความยืดหยุ่นในการจัดวาง UI** | เพิ่ม Icon หรือปุ่มลูกเล่นยาก เพราะ Input ถูกห่อในกล่องสำเร็จรูป | ยืดหยุ่นสูงสุด วาง Icon, Button, หรือ Popover แทรกใน `FormControl` ได้ตามใจ |
+| **การจัดการข้อผิดพลาด (Errors)** | ต้องส่ง Props `error={errors.email?.message}` เข้าไปลึกๆ ทุกชั้น | `FormMessage` ดึง Error จาก Context ของฟิลด์นั้นมาแสดงผลได้เองทันที |
+| **การทำงานกับ Custom Controls** | ต้องเขียน Adapter หุ้ม Select, DatePicker, Checkbox แยกหลายชุด | ใช้ `FormField` เป็นตัวครอบ แล้วยัด Native Input หรือ Radix Primitives เข้า `FormControl` ได้ทันที |
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practices)
+
+### 5.1 ผิด ❌: ใส่คอมโพเนนต์หลายตัวใน `FormControl` ช่องเดียว
+
+`FormControl` อาศัย `React.cloneElement` เพื่อส่ง Props (`id`, `aria-describedby`, `ref`) ไปยัง Direct Child เพียงตัวเดียว:
+
+```tsx
+// ❌ ผิด: ใส่มากกว่า 1 Element ลงใน FormControl ทำให้ React.cloneElement พัง
+<FormControl>
+  <Input {...field} />
+  <button type="button">ตรวจสอบ</button>
+</FormControl>
+```
+
+```tsx
+// ✅ ถูกต้อง: ห่อหุ้มใน wrapper <div> ตัวเดียว หรือวางปุ่มไว้นอก FormControl
+<FormControl>
+  <div className="relative">
+    <Input {...field} className="pr-12" />
+    <button type="button" className="absolute right-2 top-2">
+      ตรวจสอบ
+    </button>
+  </div>
+</FormControl>
+```
+
+### 5.2 ผิด ❌: ใส่ `id` ซ้ำซ้อนลงใน Input หรือ FormLabel
+
+```tsx
+// ❌ ผิด: กำหนด id เองด้วยมือ ทำให้ระบบ Auto-accessible ID ของ shadcn เสียหาย
+<FormItem>
+  <FormLabel htmlFor="my-custom-id">อีเมล</FormLabel>
+  <FormControl>
+    <Input id="my-custom-id" {...field} />
+  </FormControl>
+</FormItem>
+```
+
+```tsx
+// ✅ ถูกต้อง: ปล่อยให้ FormItem และ FormControl จัดการ ID ร่วมกันโดยอัตโนมัติ
+<FormItem>
+  <FormLabel>อีเมล</FormLabel>
+  <FormControl>
+    <Input {...field} />
+  </FormControl>
+</FormItem>
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ shadcn/ui Form เมื่อ:
+- พัฒนาเว็บแอปพลิเคชัน Next.js 16 หรือ React 19 ที่ต้องการ UI สวยงามตามมาตรฐาน Design System ระดับมืออาชีพ
+- แอปพลิเคชันที่ต้องผ่านมาตรฐานการเข้าถึงระดับสากล **WCAG 2.1 AA** (Web Content Accessibility Guidelines)
+- ต้องการจัดการ Form Validation ที่ซับซ้อนด้วย Zod Schema พร้อมข้อความ Error แจ้งเตือนแบบ Real-time
+
+### ไม่ควรใช้ shadcn/ui Form เมื่อ:
+- หน้าเว็บที่มีฟอร์มช่องเดียวแบบ Standalone เช่น ช่อง Search Bar เล็กๆ ใน Navbar ที่ไม่ต้องการ Validation ข้อผิดพลาดซับซ้อน (ใช้ `<input type="search" />` ธรรมดาจะประหยัดโค้ดกว่า)
+- แอปที่ต้องเรนเดอร์ Data Grid ตารางขนาดใหญ่ที่มีช่องให้กรอกข้อมูลเป็นพันเซลล์พร้อมกัน (ควรใช้ Data Grid Library เฉพาะทางที่ทำ Virtualization)
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: `FormControl` ในคอมโพเนนต์ Form ของ shadcn/ui ทำงานอย่างไรเบื้องหลัง และทำไมมันถึงเชื่อมต่อ Screen Reader เข้ากับ Error Message ได้อย่างถูกต้อง?
+**แนวทางตอบแบบ Senior**:
+"เบื้องหลังของ `FormControl` ใช้เทคนิค **`React.cloneElement`** ร่วมกับ React Context ครับ:
+1. ที่ระดับ `FormItem` มีการสร้าง Unique ID ขึ้นมาด้วย `React.useId()` (เช่น `:r1:`) แล้วนำมาแตกเป็น Sub-IDs เช่น `formItemId`, `formDescriptionId`, และ `formMessageId`
+2. เมื่อ `FormControl` ได้รับ Child Component เข้ามา (เช่น `<Input />`) ตัวมันจะทำการ Clone Element นั้นแล้ว Inject Props พิเศษเข้าไป ได้แก่:
+   - `id={formItemId}` เพื่อจับคู่กับ `htmlFor` ของ `<FormLabel>`
+   - `aria-invalid={!!error}` เพื่อแจ้งสถานะความถูกต้องแก่เบราว์เซอร์
+   - `aria-describedby` ซึ่งจะนำ `formDescriptionId` และ `formMessageId` มารวมกัน
+3. ผลลัพธ์คือ เมื่อ Screen Reader นำทางมาถึงช่อง Input นี้ มันจะอ่านออกเสียง Label ก่อน และหากมี Validation Error เกิดขึ้น เทคโนโลยีช่วยเหลือคนตาบอดจะอ่านข้อความ Error ใน `FormMessage` ให้อัตโนมัติโดยที่นักพัฒนาไม่ต้องเขียน Attribute ผูกด้วยมือเลยครับ"
+
+### Q2: ข้อดีของการออกแบบ Form แบบ Composable (แยกชิ้นส่วน `FormField`, `FormItem`, `FormLabel`, `FormControl`) แทนการสร้าง `<CustomInput label="..." error="..." />` ก้อนเดียวคืออะไร?
+**แนวทางตอบแบบ Senior**:
+"การออกแบบสถาปัตยกรรมแบบ **Composable Slots** ตามแบบฉบับของ shadcn/ui มีข้อได้เปรียบกว่าแบบ Monolithic ชัดเจน 3 ประการ:
+1. **Inversion of Control & Layout Flexibility**: ฟอร์มในชีวิตจริงมักมีการจัดวาง Layout ที่หลากหลาย เช่น ช่อง Checkbox ที่ Label อยู่ข้างขวา, ช่อง Input ที่มี Icon หรือปุ่มลูกเล่นอยู่ข้างใน, หรือช่องที่มี Tooltip อธิบายเพิ่มเติม การแยกชิ้นส่วนทำให้เราสามารถจัดลำดับ DOM และแทรกสไตล์ Tailwind ได้อย่างไร้ขีดจำกัดโดยไม่ต้องสร้าง Props ประหลาดๆ นับสิบตัวมารองรับ
+2. **Polymorphic Controls**: `FormControl` ไม่ได้ผูกติดกับ Input แบบ Text แต่สามารถห่อหุ้ม Slider, Switch, RadioGroup, Combobox หรือ DatePicker ใดๆ ก็ได้ที่มี Interface เข้ากันได้
+3. **Single Responsibility Principle**: แต่ละคอมโพเนนต์รับผิดชอบหน้าที่ของตัวเองอย่างเคร่งครัด `FormLabel` ดูแล A11y Label, `FormMessage` ดูแลการแสดงผล Error, และ `FormField` ดูแลการซิงค์ State กับ React Hook Form ทำให้โค้ด Clean, Test ง่าย และ Maintain ระยะยาวได้ดีกว่ามากครับ"

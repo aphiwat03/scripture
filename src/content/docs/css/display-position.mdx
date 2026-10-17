@@ -1,0 +1,149 @@
+---
+title: Display & Position
+category: Frontend
+parentTitle: CSS
+version: CSS3 / Modern CSS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การควบคุมพิกัดและพฤติกรรมการปรากฏตัวของ Element บนหน้าจอถูกขับเคลื่อนด้วย 2 พร็อพเพอร์ตี้หลัก:
+- **`display`**: กำหนดประเภทของกล่อง (`block`, `inline`, `inline-block`, `none`)
+- **`position`**: กำหนดพิกัดอ้างอิงและการดึงออกจาก Normal Document Flow:
+  - `static`: ค่าเริ่มต้น ไหลไปตามกระแสเอกสารปกติ (ไม่ตอบสนองต่อ `top/left/z-index`)
+  - `relative`: คงตำแหน่งเดิมใน Flow ไว้ แต่สามารถเลื่อนตำแหน่งจากจุดเดิมได้ และ **ทำหน้าที่เป็นจุดอ้างอิงพิกัด (Reference Anchor) ให้แก่ลูกที่เป็น `absolute`**
+  - `absolute`: หลุดออกจาก Flow ลอยอิสระ โดยอิงพิกัดจาก **Ancestor ที่มี `position` ที่ไม่ใช่ static ที่ใกล้ที่สุด**
+  - `fixed`: ลอยตรึงติดกับ Viewport (หน้าต่างเบราว์เซอร์) เสมอ ไม่เลื่อนตามการ Scroll
+  - `sticky`: ไฮบริดอัจฉริยะ! ไหลไปตามหน้าปกติ แต่เมื่อเลื่อนหน้าจอมาชนพิกัดที่กำหนด (เช่น `top: 0`) มันจะเกาะติดค้างไว้จนกว่าจะสิ้นสุดขอบเขตของกล่องแม่
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ทำไม `z-index: 99999` ถึงยังจมอยู่ใต้ Element อื่น? (Stacking Context)
+นี่คือบั๊กยอดฮิตอันดับ 1 ของนักพัฒนา CSS! 
+
+`z-index` ไม่ได้เปรียบเทียบกันแบบ Global ทั่วทั้งหน้าจอ แต่จะเปรียบเทียบกัน **"ภายใน Stacking Context (ระนาบมิติ) เดียวกันเท่านั้น"**
+- หากกล่องแม่ถูกกำหนดให้อยู่ในระนาบที่ต่ำ (เช่น มี `z-index: 1`) ต่อให้กล่องลูกข้างในจะใส่ `z-index: 999999` ขนาดไหน มันก็ไม่มีวันลอยขึ้นมาเหนือกล่องข้างเคียงที่มี `z-index: 2` ได้เลย!
+- สิ่งที่สร้าง Stacking Context ใหม่: การใส่ `position` คู่กับ `z-index`, การใส่ `opacity < 1`, การใส่ `transform`, `filter`, หรือการประกาศ **`isolation: isolate;`** อย่างตั้งใจ
+
+---
+
+## 3. ตัวอย่างโค้ด (Modern CSS)
+
+### ตัวอย่างที่ 1: การใช้ `position: relative` เป็นจุดอ้างอิงให้ Badge แจ้งเตือน
+
+```css filename="notification-badge.css"
+/* กล่องแม่: ต้องเป็น relative เพื่อเป็นจุดอ้างอิงพิกัดให้ลูก */
+.icon-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  background-color: #f1f5f9;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+/* จุดแจ้งเตือนสีแดง: absolute ลอยไปเกาะมุมขวาบนของปุ่ม */
+.badge-count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  background-color: #ef4444; /* แดง */
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 9999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* เส้นขอบสีขาวช่วยตัดกับปุ่มด้านหลัง */
+  border: 2px solid #ffffff;
+}
+```
+
+### ตัวอย่างที่ 2: Sticky Header และการตัดปัญหา z-index ด้วย `isolation: isolate`
+
+```css filename="layout.css"
+/* Sticky Header เกาะติดขอบบนเมื่อเลื่อนจอ */
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  height: 56px;
+  background-color: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid #e2e8f0;
+}
+
+/* ป้องกันปัญหา z-index รั่วไหลของ Modal ด้วย isolation */
+.modal-overlay {
+  position: fixed;
+  inset: 0; /* top: 0; right: 0; bottom: 0; left: 0; */
+  z-index: 50;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* สร้าง Stacking Context อิสระ ไม่ตีกับสไตล์อื่น */
+  isolation: isolate; 
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ลืมใส่ `position: relative` ที่กล่องแม่
+
+```html
+<!-- ผิด: กล่องแม่ไม่ได้ประกาศ position ทำให้ .close-btn หลุดไปอิงขอบหน้าจอ <body> นอกสุดแทน! -->
+<div class="card">
+  <button class="close-btn" style="position: absolute; top: 8px; right: 8px;">✕</button>
+  <h3>รายละเอียดสินค้า</h3>
+</div>
+```
+
+### ✅ โค้ดที่ถูกต้อง: ประกาศ `position: relative` ที่ตัวแม่เสมอ
+
+```html
+<!-- ถูกต้อง: .card มี position: relative กล่องลูกจะเกาะมุมของการ์ดพอดี -->
+<div class="card" style="position: relative;">
+  <button class="close-btn" style="position: absolute; top: 8px; right: 8px;">✕</button>
+  <h3>รายละเอียดสินค้า</h3>
+</div>
+```
+
+---
+
+## 5. เทียบกับ Tailwind CSS v4
+
+| Modern CSS Property | Tailwind CSS v4 Utility |
+| :--- | :--- |
+| `position: relative;` | `relative` |
+| `position: absolute;` | `absolute` |
+| `position: sticky; top: 0;` | `sticky top-0` |
+| `top: 0; right: 0; bottom: 0; left: 0;` | `inset-0` |
+| `isolation: isolate;` | `isolate` |
+| `z-index: 50;` | `z-50` |
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: Stacking Context คืออะไร และทำไมบางครั้งการใส่ `z-index: 9999` จึงไม่สามารถทำให้ Element ลอยขึ้นมาอยู่ชั้นบนสุดได้?
+**แนวทางคำตอบ**: Stacking Context คือแนวคิดเรื่องมิติตามแนวแกน Z สมมติในหน่วยความจำของเบราว์เซอร์ ซึ่งจัดลำดับเป็นชั้นๆ (Hierarchy) หาก Element แม่ถูกจัดให้อยู่ใน Stacking Context ที่มีระดับความสำคัญต่ำกว่า Element อื่น ต่อให้ Element ลูกข้างในจะกำหนด `z-index` เป็นค่ามหาศาลขนาดไหน ขอบเขตอำนาจของ `z-index` นั้นก็จะมีผลแค่การเปรียบเทียบกับพี่น้องใน Stacking Context เดียวกันเท่านั้น ไม่สามารถทะลุขึ้นไปชนะ Element ข้างนอกที่อยู่ใน Stacking Context ที่สูงกว่าได้
+
+### Q2: `position: sticky` ทำงานอย่างไร และอะไรคือสาเหตุที่ทำให้มันไม่ยอมเกาะติด (Sticky Fails)?
+**แนวทางคำตอบ**: `position: sticky` จะทำตัวเป็น `relative` ปกติในขณะที่เลื่อนหน้าจอ แต่เมื่อตำแหน่งของมันเคลื่อนมาถึงจุด Offset ที่ระบุไว้ (เช่น `top: 0`) มันจะล็อกตัวเองไว้เสมือนเป็น `fixed` จนกว่าหน้าจอจะเลื่อนพ้นขอบล่างของกล่องแม่ (Parent Container) 
+สาเหตุที่พบบ่อยที่สุดที่ทำให้ sticky ไม่ทำงาน:
+1. **ลืมใส่พิกัดทิศทาง**: เช่น ใส่แค่ `position: sticky` แต่ไม่ได้ระบุ `top: 0`
+2. **กล่องแม่หรือบรรพบุรุษมี `overflow: hidden`, `auto`, หรือ `scroll`**: ซึ่งจะตัดขอบเขตการคำนวณ Scroll Container ทันที
+3. **กล่องแม่มีความสูงเท่ากับตัวมันพอดี**: ทำให้ไม่มีพื้นที่เหลือให้เคลื่อนที่ตาม

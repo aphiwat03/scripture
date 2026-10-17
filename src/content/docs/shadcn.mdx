@@ -1,0 +1,42 @@
+---
+title: shadcn/ui
+category: Frontend
+version: Latest (Next.js 16 + Tailwind v4)
+updatedAt: 2026-10-17
+---
+
+## ภาพรวม shadcn/ui & Radix UI Ecosystem
+
+**shadcn/ui** ได้ปฏิวัติวิธีที่นักพัฒนาสร้างหน้าตาของเว็บแอปพลิเคชันยุคใหม่ โดยแหวกแนวจากกรอบเดิมของ Component Libraries ทั่วไป (เช่น Material UI, Ant Design, Chakra UI) ที่มักติดตั้งเป็น NPM Package ขนาดใหญ่ที่ปรับแต่งยาก
+
+ปรัชญาของ shadcn/ui:
+> **"Not a component library. It's a collection of re-usable components that you can copy and paste into your apps."**
+
+สถาปัตยกรรม 3 ชั้นอันทรงพลัง:
+1. **Radix UI (Headless Layer)**: ควบคุมพฤติกรรม Accessibility (WAI-ARIA compliance, focus trap, keyboard navigation) 100% โดยไม่มีการใส่ Style มาให้เกะกะ
+2. **Tailwind CSS v4 (Style Layer)**: ตกแต่งความสวยงามผ่าน Utility Classes และ CSS Variables (`@theme`)
+3. **shadcn/ui (Assembly Layer)**: นำทั้งสองชั้นมาประกอบเข้าด้วยกันเป็นไฟล์ TypeScript (`components/ui/*`) วางไว้ในโปรเจกต์ของคุณโดยตรง ทำให้คุณเป็น **"เจ้าของโค้ดอย่างแท้จริง"** มีอิสระในการปรับแต่งได้ทุกบรรทัด
+
+---
+
+## แผนผังเนื้อหา shadcn/ui (Directory)
+
+| หัวข้อ | ลิงก์อ่านเนื้อหา | คำอธิบายสังเขป |
+| :--- | :--- | :--- |
+| **1. ปรัชญาและแนวคิด** | [Philosophy & Copy-Paste](/docs/shadcn/philosophy) | ทำไมไม่ทำเป็น package, ข้อดี-ข้อเสีย เทียบกับ MUI/Chakra/AntD |
+| **2. สถาปัตยกรรม 3 ชั้น** | [3-Layer Architecture](/docs/shadcn/three-layer-architecture) | Radix UI (headless a11y) → Tailwind (style) → shadcn |
+| **3. การติดตั้งใน Next.js 16** | [Next.js 16 + v4 Setup](/docs/shadcn/installation) | `init`, `components.json`, โครงสร้าง `components/ui`, path alias |
+| **4. ฟังก์ชัน `cn()`** | [cn() & tailwind-merge](/docs/shadcn/cn-utility) | `clsx` + `tailwind-merge`, การรับ `className` ข้าม component |
+| **5. CSS Variables & Theme** | [Theming & Variables](/docs/shadcn/theming-variables) | ตัวแปรสี, `@theme` ใน globals.css, next-themes (Dark mode) |
+| **6. Variants ด้วย `cva`** | [cva & asChild Slot](/docs/shadcn/cva-variants) | Class Variance Authority, Button variants/sizes, Radix Slot pattern |
+| **7. Component พื้นฐาน** | [Core Components](/docs/shadcn/core-components) | Button, Input, Label, Select, Checkbox, Card, Badge, Skeleton |
+| **8. Overlays & Dialogs** | [Overlays & Dialogs](/docs/shadcn/overlays-dialogs) | Dialog, AlertDialog (แทน SweetAlert2), Sheet, Popover, DropdownMenu |
+| **9. Forms (RHF + Zod)** | [Forms (RHF + Zod)](/docs/shadcn/forms-zod) | `<Form>`, `<FormField>`, React Hook Form + Zod, Server Actions |
+| **10. Toast ด้วย Sonner** | [Toast with Sonner](/docs/shadcn/toast-sonner) | Toaster, `toast.success/error/promise`, Toast vs Dialog |
+| **11. Navigation & Layout** | [Navigation & Layout](/docs/shadcn/navigation-layout) | Tabs, Accordion, Sidebar, Breadcrumb, Dashboard layout |
+| **12. Data Display & Table** | [Tables & Charts](/docs/shadcn/data-display) | Table พื้นฐาน, TanStack Table (sorting/paging), Recharts |
+| **13. Lucide React Icons** | [Lucide React Icons](/docs/shadcn/lucide-icons) | Tree-shaking import, ปรับขนาด/สีผ่าน Tailwind, a11y icon buttons |
+| **14. การปรับแต่ง Component** | [Component Customization](/docs/shadcn/customization) | แก้ไขโค้ดใน `components/ui`, การห่อหุ้ม, ข้อควรระวังในการอัปเดต |
+| **15. Next.js App Router** | [App Router & Client](/docs/shadcn/nextjs-app-router) | `"use client"` ขอบเขตการใช้งาน, ผสม Server/Client components |
+| **16. Accessibility & Perf** | [Accessibility & Perf](/docs/shadcn/accessibility-perf) | ประโยชน์จาก Radix, Bundle size, การทำ Contrast และ Alt |
+| **17. Pitfalls & Q&A** | [Pitfalls & Q&A](/docs/shadcn/pitfalls) | รวม Anti-patterns ยอดฮิต, คำถามสัมภาษณ์งาน, Checklist สรุป และ Roadmap |

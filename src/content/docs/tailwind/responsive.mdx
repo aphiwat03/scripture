@@ -1,0 +1,245 @@
+---
+title: Responsive Design & Container Queries
+category: Frontend
+parentTitle: Tailwind CSS v4
+version: Tailwind v4.0 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การสร้างเว็บที่รองรับทุกขนาดหน้าจอใน Tailwind CSS ยึดปรัชญา **Mobile-First Breakpoint System**:
+- คลาสที่ไม่มี Prefix (เช่น `p-4 text-base`) มีผลกับ **หน้าจอขนาดเล็กที่สุด (มือถือ)** เป็นค่าเริ่มต้น
+- Breakpoint Prefixes (`sm:`, `md:`, `lg:`, `xl:`, `2xl:`) ทำงานผ่านเงื่อนไข `min-width` หมายถึง "ตั้งแต่ขนาดนี้ขึ้นไป"
+
+และใน Tailwind CSS v4 ฟีเจอร์ที่ปฏิวัติวงการ Front-end คือ **Native Container Queries (`@container`)**:
+- สื่อสารกับขนาดของ **ตัวคอนเทนเนอร์แม่ (Parent Box)** โดยตรง แทนที่จะพึ่งพาขนาดหน้าต่างบราวเซอร์ (Viewport)
+- ช่วยให้คอมโพเนนต์ชิ้นเดียวกัน เช่น `<ProductCard />` สามารถแสดงผลแบบแนวนอนเมื่ออยู่ในหน้าหลัก (กว้าง) และสลับเป็นแนวตั้งเมื่อถูกนำไปวางใน Sidebar (แคบ) ได้อัตโนมัติ
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### กลไก Mobile-First Media Queries และ CSS Container Queries
+1. **Breakpoint Scale (`min-width`)**:
+   - `sm:` -> `@media (min-width: 640px)`
+   - `md:` -> `@media (min-width: 768px)`
+   - `lg:` -> `@media (min-width: 1024px)`
+   - `xl:` -> `@media (min-width: 1280px)`
+   - `2xl:` -> `@media (min-width: 1536px)`
+2. **Container Queries ใน v4 Engine**:
+   - เมื่อใส่ `@container` บนกล่องแม่ Oxide Engine จะกำหนด:
+     ```css
+     container-type: inline-size;
+     ```
+   - เมื่อใส่ `@md:flex-row` บนตัวลูก จะถูกแปลงเป็น:
+     ```css
+     @container (min-width: 28rem /* 448px */) {
+       .adaptive-card { flex-direction: row; }
+     }
+     ```
+   ทำให้คอมโพเนนต์เป็นอิสระจาก Viewport อย่างสมบูรณ์ (Truly Modular Component)
+
+---
+
+## 3. ตัวอย่างโค้ด (Tailwind v4 & TSX)
+
+### ตัวอย่างที่ 1: ส่วนฮีโร่แบบ Mobile-First (ResponsiveHeroSection)
+
+```tsx filename="src/components/ResponsiveHeroSection.tsx"
+import { ArrowRight, Sparkles, CheckCircle } from "lucide-react";
+
+export function ResponsiveHeroSection() {
+  return (
+    <section className="relative overflow-hidden px-6 py-12 sm:py-20 lg:py-28">
+      {/* Container กลางจำกัดความกว้างและจัด Flex สลับตามขนาดหน้าจอ */}
+      <div className="mx-auto flex max-w-7xl flex-col items-center gap-10 lg:flex-row lg:justify-between lg:gap-16">
+        {/* ข้อความฝั่งซ้าย: ไล่ขนาดฟอนต์จากมือถือสู่เดสก์ท็อป */}
+        <div className="max-w-2xl text-center lg:text-left">
+          <div className="inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50/50 px-3 py-1 text-xs font-semibold text-indigo-700 dark:border-indigo-900 dark:bg-indigo-950/50 dark:text-indigo-300">
+            <Sparkles className="size-3.5" /> Next.js 16 + Tailwind v4
+          </div>
+
+          <h1 className="mt-6 text-3xl font-extrabold tracking-tight text-neutral-900 sm:text-5xl lg:text-6xl dark:text-white">
+            สร้างเว็บแอประดับองค์กรด้วยความเร็วสูงสุด
+          </h1>
+
+          <p className="mt-4 text-sm leading-relaxed text-neutral-600 sm:text-base lg:text-lg dark:text-neutral-300">
+            สัมผัสประสบการณ์คอมไพล์ CSS ที่เร็วขึ้น 10 เท่า ด้วย Rust Oxide Engine และระบบ Container Queries เต็มรูปแบบ
+          </p>
+
+          <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:justify-center lg:justify-start">
+            <button
+              type="button"
+              className="flex h-12 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-6 text-sm font-semibold text-white shadow-lg shadow-indigo-600/25 transition hover:bg-indigo-500"
+            >
+              เริ่มต้นใช้งานทันที
+              <ArrowRight className="size-4" />
+            </button>
+            <button
+              type="button"
+              className="flex h-12 items-center justify-center rounded-xl border border-neutral-300 bg-white px-6 text-sm font-semibold text-neutral-800 transition hover:bg-neutral-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+            >
+              ดูเอกสารฉบับเต็ม
+            </button>
+          </div>
+
+          <div className="mt-8 flex flex-wrap items-center justify-center gap-6 text-xs text-neutral-500 lg:justify-start">
+            <span className="flex items-center gap-1.5">
+              <CheckCircle className="size-4 text-emerald-500" /> ฟรีตลอดชีพ
+            </span>
+            <span className="flex items-center gap-1.5">
+              <CheckCircle className="size-4 text-emerald-500" /> ไม่ต้องใช้บัตรเครดิต
+            </span>
+          </div>
+        </div>
+
+        {/* กล่องกราฟิกฝั่งขวา: ปรับขนาดตามหน้าจอ */}
+        <div className="w-full max-w-md lg:max-w-xl">
+          <div className="relative aspect-4/3 w-full rounded-3xl border border-neutral-200 bg-linear-to-br from-indigo-500/10 via-purple-500/10 to-pink-500/10 p-6 shadow-2xl dark:border-neutral-800">
+            <div className="flex h-full flex-col justify-center rounded-2xl bg-white p-6 shadow-sm dark:bg-neutral-900">
+              <div className="size-10 rounded-xl bg-indigo-600/10 text-indigo-600 flex items-center justify-center font-bold">
+                ⚡
+              </div>
+              <h3 className="mt-4 text-lg font-bold text-neutral-900 dark:text-white">
+                Ultra-fast Compile
+              </h3>
+              <p className="mt-2 text-xs text-neutral-500 dark:text-neutral-400">
+                ประมวลผลสไตล์ชีตโดยใช้ทรัพยากรน้อยลงและส่งมอบ Bundle ขนาดเล็กกว่า 15KB บน Production
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: การ์ดสินค้าอัจฉริยะที่ปรับตัวตามพื้นที่บรรจุ (AdaptiveProductCard ด้วย Container Queries)
+
+```tsx filename="src/components/AdaptiveProductCard.tsx"
+import Image from "next/image";
+import { Star, ShoppingCart } from "lucide-react";
+
+interface AdaptiveProductProps {
+  title: string;
+  price: string;
+  rating: number;
+  reviewsCount: number;
+  imageUrl: string;
+}
+
+export function AdaptiveProductCard({
+  title,
+  price,
+  rating,
+  reviewsCount,
+  imageUrl,
+}: AdaptiveProductProps) {
+  return (
+    // 1. ประกาศตัวแม่เป็น @container
+    <div className="@container w-full">
+      {/* 2. ตัวลูกใช้ @sm: หรือ @md: เพื่อปรับเปลี่ยนตามความกว้างของ Container ไม่ใช่ทั้งหน้าจอ */}
+      <div className="flex flex-col @sm:flex-row items-center gap-4 rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm transition hover:shadow-md dark:border-neutral-800 dark:bg-neutral-900">
+        <div className="relative aspect-square w-full @sm:w-36 shrink-0 overflow-hidden rounded-xl bg-neutral-100 dark:bg-neutral-800">
+          <Image
+            src={imageUrl}
+            alt={title}
+            fill
+            className="object-cover"
+            sizes="(max-width: 448px) 100vw, 144px"
+          />
+        </div>
+
+        <div className="flex flex-1 flex-col justify-between self-stretch">
+          <div>
+            <div className="flex items-center gap-1 text-amber-500 text-xs">
+              <Star className="size-3.5 fill-current" />
+              <span className="font-semibold">{rating}</span>
+              <span className="text-neutral-400">({reviewsCount})</span>
+            </div>
+            <h4 className="mt-1.5 text-sm @md:text-base font-bold text-neutral-900 dark:text-white">
+              {title}
+            </h4>
+          </div>
+
+          <div className="mt-4 flex items-center justify-between border-t border-neutral-100 pt-3 dark:border-neutral-800">
+            <span className="text-base @md:text-lg font-black text-indigo-600 dark:text-indigo-400">
+              {price}
+            </span>
+            <button
+              type="button"
+              className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-500"
+            >
+              <ShoppingCart className="size-3.5" />
+              <span className="hidden @xs:inline">หยิบใส่ตะกร้า</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับ CSS ปกติ
+
+| งาน | Tailwind v4 Utility | Pure CSS เทียบเท่า |
+| :--- | :--- | :--- |
+| **ซ่อนในมือถือ แสดงใน Tablet** | `hidden md:block` | `@media (min-width: 768px) { display: block; }` |
+| **Grid ขยายตามเบรกพอยต์** | `grid-cols-1 md:grid-cols-3` | `@media (min-width: 768px) { grid-template-columns: repeat(3, 1fr); }` |
+| **สร้างขอบเขต Container** | `@container` | `container-type: inline-size;` |
+| **เปลี่ยนทิศทางตามขนาดกล่องแม่** | `@md:flex-row` | `@container (min-width: 28rem) { flex-direction: row; }` |
+
+---
+
+## 5. ผิด vs ถูก
+
+### จุดที่ 1: การคิดแบบ Desktop-First (เขียนสไตล์จอใหญ่แล้วพยายามลบล้างในมือถือ)
+```tsx
+// ❌ ผิด: พยายามคิดจากจอใหญ่ แล้วใช้ sm: เป็นจอมือถือ (ซึ่งเข้าใจผิด)
+<div className="flex-row sm:flex-col">
+
+// ✅ ถูก: คิดแบบ Mobile-First โดยให้ค่าตั้งต้นเป็นจอมือถือ แล้วขยายด้วย sm: หรือ md:
+<div className="flex-col sm:flex-row">
+```
+*เหตุผล*: Breakpoints ของ Tailwind ทั้งหมดเป็น `min-width` เสมอ คลาสที่ไม่มี prefix คือขนาดเล็กสุด เมื่อหน้าจอกว้างขึ้นเรื่อยๆ ถึงจะ activate คลาสที่มี prefix
+
+### จุดที่ 2: ใช้ Container Query Variant โดยลืมประกาศ `@container` บน Container แม่
+```tsx
+// ❌ ผิด: ใส่ @md:flex-row บนคอมโพเนนต์ลูก แต่ลืมใส่ @container ที่ตัวแม่
+<div>
+  <div className="@md:flex-row">...</div>
+</div>
+
+// ✅ ถูก: ต้องมี @container บนองค์ประกอบแม่ เพื่อสร้าง Container Context
+<div className="@container">
+  <div className="@md:flex-row">...</div>
+</div>
+```
+*เหตุผล*: CSS Container Queries ต้องการให้มี Element บรรพบุรุษที่ถูกระบุ `container-type: inline-size` หากไม่มี เบราว์เซอร์จะไม่สามารถประเมินขนาดกล่องเพื่อ trigger variant `@md:` ได้
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Media Query Breakpoints (`sm:`, `md:`, `lg:`)
+- การควบคุม Page Layout ระดับโครงสร้างหลัก เช่น Navigation Bar, Sidebar สลับเป็น Drawer, Hero Banner
+
+### ควรใช้ Container Queries (`@container`, `@sm:`, `@md:`)
+- การสร้าง **Reusable Design System Components** เช่น Product Card, Comment Box, Video Player Card ที่ต้องสามารถนำไปวางในช่อง Sidebar แคบ หรือช่อง Content กว้าง ได้โดยหน้าตาปรับเปลี่ยนอัตโนมัติ
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ปรัชญา "Mobile-First" ใน Tailwind CSS มีผลต่อการเขียน CSS อย่างไร และข้อดีคืออะไร?
+**แนวทางคำตอบ**: 
+Mobile-first หมายถึงการเขียนสไตล์พื้นฐาน (คลาสที่ไม่มี prefix) เพื่อตอบโจทย์หน้าจอสมาร์ตโฟนที่มีพื้นที่จำกัดที่สุดก่อน จากนั้นจึงใช้ Utility Prefixes เช่น `sm:`, `md:`, `lg:` ซึ่งคอมไพล์เป็น `@media (min-width: ...)` เพื่อขยายหรือเพิ่มเติมเลย์เอาต์เมื่อหน้าจอกว้างขึ้น ข้อดีคือลดความซับซ้อนของการเขียนโค้ด CSS ลบล้าง (Overriding) ช่วยให้หน้าเว็บบนมือถือโหลดได้เบาและรวดเร็วที่สุด และป้องกันอาการเลย์เอาต์เพี้ยนเมื่อเปิดบนอุปกรณ์หน้าจอแปลกใหม่
+
+### Q2: ความแตกต่างที่สำคัญระหว่าง Media Queries ปกติ (`md:`) กับ Container Queries (`@md:`) ใน Tailwind v4 คืออะไร?
+**แนวทางคำตอบ**: 
+`md:` ประเมินจาก **Viewport (ขนาดหน้าต่างบราวเซอร์ทั้งหมด)** ในขณะที่ `@md:` ประเมินจาก **ขนาดความกว้างของ Parent Element ที่ระบุ `@container`** ข้อได้เปรียบของ Container Queries คือช่วยให้คอมโพเนนต์มีสถาปัตยกรรมแบบแยกตัวอิสระ (Encapsulated) อย่างแท้จริง โดยคอมโพเนนต์จะปรับสไตล์ตามพื้นที่ที่มันได้รับจริง ไม่ว่าหน้าต่างบราวเซอร์จะใหญ่ระดับเดสก์ท็อป แต่ถ้าคอมโพเนนต์ถูกวางในช่องแคบ 300px มันจะแสดงผลในโหมดกะทัดรัดอย่างถูกต้อง

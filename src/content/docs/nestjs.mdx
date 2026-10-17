@@ -1,0 +1,125 @@
+---
+title: NestJS 11
+category: Backend
+version: v11.0
+updatedAt: 2026-10-17
+---
+
+## 1. คืออะไร และแก้ปัญหาอะไร
+
+**NestJS 11** คือ Progressive Node.js Framework สำหรับพัฒนาซอฟต์แวร์ฝั่งเซิร์ฟเวอร์ (Backend) ระดับองค์กรที่มีประสิทธิภาพสูงและรองรับการขยายตัว (Scalability) ได้อย่างมั่นคง โดยพัฒนาขึ้นบนภาษา **TypeScript** และทำงานเป็นเลเยอร์ครอบเว็บเซิร์ฟเวอร์อย่าง Express หรือ Fastify
+
+ในระบบ Node.js แบบดั้งเดิม นักพัฒนามักประสบปัญหาการขาดโครงสร้างมาตรฐาน โค้ดแต่ละโปรเจกต์จัดวางไม่เหมือนกัน ส่งผลให้เมื่อระบบมีขนาดใหญ่ขึ้น การดูแลรักษา การทดสอบ (Unit Testing) และการทำงานร่วมกันเป็นทีมทำได้ยาก NestJS จึงเข้ามาแก้ปัญหานี้โดยการนำสถาปัตยกรรม **Modular Architecture** ร่วมกับ **Dependency Injection (DI)** และแนวคิดการออกแบบซอฟต์แวร์แบบ Object-Oriented Programming (OOP) ที่ได้รับแรงบันดาลใจจาก Angular ทำให้โค้ดแบ่งชั้นความรับผิดชอบอย่างชัดเจน เป็นระเบียบ และสามารถเขียน Test ได้ง่าย
+
+<InteractiveFlowDiagram variant="request" title="โครงสร้างการทำงานภายใน NestJS (Controller ➔ Service ➔ Database)" subtitle="แสดงลำดับการกระจายงานจาก Controller ที่รับคำขอ ส่งต่อไปยัง Service ที่เก็บ Business Logic และส่งข้อมูลต่อไปยังฐานข้อมูล" />
+
+## 2. Module และ Feature หลัก
+
+สถาปัตยกรรมของ NestJS แบ่งหน้าที่การทำงานออกเป็นชั้นๆ อย่างรัดกุมผ่านระบบ Decorator และ Dependency Injection ดังนี้:
+
+| ส่วนประกอบหลัก | ใช้ทำอะไร |
+| --- | --- |
+| `@Module()` | ตัวจัดกลุ่มการทำงาน (Module Container) ที่รวม Controller, Provider และ Module อื่นๆ เข้าด้วยกันเป็นหนึ่งหน่วย |
+| `@Controller()` | ด่านหน้ารับ HTTP Request (GET, POST, PUT, DELETE) จากผู้ใช้ แล้วส่งต่อไปยัง Service |
+| `@Injectable()` (Service) | ผู้ให้บริการทางตรรกะธุรกิจ (Business Logic) ที่ถูกส่งผ่านระบบ Dependency Injection ไปให้ Controller ใช้งาน |
+| `Pipes` | ชั้นกรองและแปลงชนิดข้อมูล (Transformation) รวมถึงตรวจสอบความถูกต้อง (Validation) เช่น `ValidationPipe` |
+| `Guards` | ตัวตรวจสอบสิทธิ์การเข้าถึง (Authentication & Authorization) ก่อนที่ Request จะหลุดไปถึง Controller เช่น JWT Auth Guard |
+| `Interceptors` | จัดการหรือดัดแปลงผลลัพธ์ (Response) ก่อนส่งกลับไปยัง Client หรือเพิ่มตรรกะการทำงานก่อน/หลังเมธอด |
+| `Exception Filters` | ตัวดักจับข้อผิดพลาดทั่วทั้งแอปพลิเคชันและจัดรูปแบบ JSON Error Response ให้เป็นมาตรฐานเดียวกัน |
+
+## 3. ตัวอย่างโค้ดการใช้งาน
+
+### โครงสร้างพื้นฐาน Module, Controller และ Service
+
+ตัวอย่างการสร้างระบบจัดการสินค้า (Products) ที่แบ่งการทำงานเป็น Service และ Controller พร้อมผูกกันใน Module:
+
+```typescript filename="src/products/products.service.ts"
+import { Injectable, NotFoundException } from '@nestjs/common';
+
+export interface Product {
+  id: string;
+  name: string;
+  price: number;
+}
+
+@Injectable()
+export class ProductsService {
+  private products: Product[] = [
+    { id: '1', name: 'Mechanical Keyboard', price: 3490 },
+    { id: '2', name: 'Ergonomic Mouse', price: 1890 },
+  ];
+
+  findAll(): Product[] {
+    return this.products;
+  }
+
+  findOne(id: string): Product {
+    const product = this.products.find((p) => p.id === id);
+    if (!product) {
+      throw new NotFoundException(`ไม่พบสินค้ารหัส ${id} ในระบบ`);
+    }
+    return product;
+  }
+}
+```
+
+```typescript filename="src/products/products.controller.ts"
+import { Controller, Get, Param } from '@nestjs/common';
+import { ProductsService, Product } from './products.service';
+
+@Controller('products')
+export class ProductsController {
+  // นำเข้า Service ผ่านระบบ Dependency Injection ใน Constructor
+  constructor(private readonly productsService: ProductsService) {}
+
+  @Get()
+  getAll(): Product[] {
+    return this.productsService.findAll();
+  }
+
+  @Get(':id')
+  getById(@Param('id') id: string): Product {
+    return this.productsService.findOne(id);
+  }
+}
+```
+
+```typescript filename="src/products/products.module.ts"
+import { Module } from '@nestjs/common';
+import { ProductsController } from './products.controller';
+import { ProductsService } from './products.service';
+
+@Module({
+  controllers: [ProductsController],
+  providers: [ProductsService],
+  exports: [ProductsService], // อนุญาตให้ Module อื่นนำ Service ไปใช้ต่อได้
+})
+export class ProductsModule {}
+```
+
+## 4. Callout สำคัญที่ควรรู้
+
+<Callout type="tip" title="สร้างไฟล์และโครงสร้างอัตโนมัติด้วย Nest CLI">
+ประหยัดเวลาในการสร้างไฟล์ Boilerplate ด้วยการสั่งงานผ่าน Terminal เช่น `nest g mo products` (สร้างโมดูล), `nest g co products` (สร้างคอนโทรลเลอร์) และ `nest g s products` (สร้างเซอร์วิส) ซึ่ง Nest CLI จะลงทะเบียนไฟล์เหล่านี้เข้าสู่ `AppModule` ให้โดยอัตโนมัติ
+</Callout>
+
+<Callout type="note" title="NestJS 11 กับการรองรับ Fastify เต็มรูปแบบ">
+โดยค่าเริ่มต้น NestJS จะรันบน Express ซึ่งมีความเข้ากันได้สูงกับมิดเดิลแวร์ในชุมชน Node.js แต่หากระบบต้องการ Throughput มหาศาล สามารถสลับไปใช้ `@nestjs/platform-fastify` ได้ทันที ซึ่งให้ประสิทธิภาพการประมวลผลสูงกว่า Express เกือบ 2 เท่า
+</Callout>
+
+<Callout type="warning" title="ระวังปัญหา Circular Dependency ระหว่างโมดูล">
+เมื่อ Module A เรียกใช้งาน Module B และในขณะเดียวกัน Module B ก็เรียกใช้งาน Module A จะส่งผลให้ระบบ Dependency Injection ทำงานล้มเหลว หากจำเป็นต้องออกแบบให้พึ่งพากัน ต้องใช้ตัวช่วย `forwardRef()` ในการฉีด Dependency
+</Callout>
+
+## 5. ข้อควรระวังและ Best Practices
+
+- **แยก Business Logic ออกจาก Controller**: Controller มีหน้าที่เพียงรับ Input, ตรวจสอบสิทธิ์ และส่งต่อผลลัพธ์เท่านั้น ไม่ควรเขียนการคำนวณซับซ้อนหรือการเชื่อมต่อฐานข้อมูลใน Controller ให้โยนงานตรรกะทั้งหมดไปไว้ใน Service
+- **เปิดใช้งาน Global ValidationPipe เสมอ**: ในไฟล์ `main.ts` ควรใส่ `app.useGlobalPipes(new ValidationPipe({ whitelist: true }))` เพื่อตัดฟิลด์แปลกปลอมที่ไม่ได้นิยามไว้ใน DTO ทิ้ง ป้องกันการถูกโจมตีแบบ Mass Assignment
+- **จัดการ Environment Variables ด้วย `@nestjs/config`**: อย่าเรียกใช้ `process.env` กระจัดกระจายทั่วทั้งโปรเจกต์ ควรนำเข้า `ConfigModule` พร้อมตรวจสอบตัวแปรด้วย Validation Schema (เช่น Joi หรือ Zod) เพื่อให้ระบบแจ้งเตือนทันทีหากตัวแปรสภาพแวดล้อมไม่ครบถ้วน
+- **หลีกเลี่ยงการเก็บ State ไว้ใน Service**: Service ใน NestJS เป็น Singleton โดยปริยาย (Instance เดียวใช้ร่วมกันทุก Request) จึงไม่ควรนำข้อมูลเฉพาะของผู้ใช้งานแต่ละคนมาเก็บไว้ในตัวแปรของ Service เพราะอาจเกิดปัญหาข้อมูลสับสนข้ามคำขอได้
+
+## 6. แหล่งอ้างอิง (Official Documentation)
+
+- [NestJS Official Documentation](https://docs.nestjs.com) — คู่มือและเอกสารการใช้งานหลักอย่างเป็นทางการ
+- [NestJS Architecture Overview](https://docs.nestjs.com/first-steps) — ภาพรวมโครงสร้างและแนวคิดสถาปัตยกรรม NestJS
+- [NestJS Dependency Injection Fundamentals](https://docs.nestjs.com/fundamentals/custom-providers) — ทำความเข้าใจระบบ Dependency Injection และ Custom Providers

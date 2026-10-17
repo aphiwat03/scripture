@@ -1,0 +1,83 @@
+---
+title: Database & API
+category: Frontend
+parentTitle: Next.js 16
+version: v16.4
+updatedAt: 2026-10-17
+---
+
+## 1. คืออะไร / ใช้ทำไม
+
+**Database & Backend Integration** คือการจัดวางสถาปัตยกรรมให้ Next.js เชื่อมโยงกับฐานข้อมูล PostgreSQL โดยตรงผ่าน **Prisma ORM** หรือทำหน้าที่เป็น Frontend ที่สื่อสารกับบริการหลังบ้านระดับองค์กร (เช่น **NestJS API**)
+
+ช่วยให้ทีมพัฒนามีความยืดหยุ่นในการเลือกใช้ทั้งแบบ Full-Stack ในโปรเจกต์เดียว หรือแบบแยก Frontend/Backend เมื่อระบบมีขนาดใหญ่ขึ้น
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### การสร้าง Prisma Singleton ป้องกัน Connection รั่วไหล
+
+```typescript filename="src/lib/prisma.ts"
+import { PrismaClient } from '@prisma/client';
+
+const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
+
+export const prisma = globalForPrisma.prisma ?? new PrismaClient();
+
+// ป้องกันการสร้าง Connection ใหม่ทุกครั้งที่มี Hot Reload ในโหมด Development
+if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
+```
+
+### การดึงข้อมูลใน Server Component
+
+```tsx filename="src/app/orders/page.tsx"
+import { prisma } from '@/lib/prisma';
+
+export default async function OrdersPage() {
+  // ทางเลือก A: ดึงข้อมูลจาก PostgreSQL โดยตรงผ่าน Prisma
+  const recentOrders = await prisma.order.findMany({
+    take: 5,
+    orderBy: { createdAt: 'desc' },
+  });
+
+  // ทางเลือก B: ยิงต่อไปยัง NestJS Backend API ภายนอก
+  // const res = await fetch(`${process.env.BACKEND_API_URL}/orders`, { cache: 'no-store' });
+  // const recentOrders = await res.json();
+
+  return (
+    <div className="max-w-xl mx-auto py-8">
+      <h1 className="text-xl font-bold mb-4">รายการคำสั่งซื้อล่าสุด</h1>
+      <ul className="space-y-2">
+        {recentOrders.map((order) => (
+          <li key={order.id} className="p-3 border rounded-xl flex justify-between">
+            <span>คำสั่งซื้อ #{order.id}</span>
+            <span className="font-semibold">฿{Number(order.totalAmount).toLocaleString()}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- **Prisma Direct**:
+  - *ควรใช้*: เหมาะสำหรับโปรเจกต์ขนาดเล็กถึงกลางที่ต้องการความเร็วในการพัฒนาแบบ Full-Stack
+  - *ไม่ควรใช้*: ใน Client Component เด็ดขาด เพราะ Prisma รันได้เฉพาะบน Node.js Runtime
+- **External Backend (NestJS)**:
+  - *ควรใช้*: เหมาะกับระบบขนาดใหญ่ที่มี Business Logic ซับซ้อน มีบริการหลายตัว (Microservices) หรือใช้งานร่วมกับ Mobile App
+
+## 4. ข้อควรระวัง
+
+<Callout type="warning" title="ระวังปัญหา Connection Pool เต็ม">
+ในสภาพแวดล้อม Serverless หรือ Next.js Dev Mode การไม่ใช้ Singleton Pattern จะสร้าง Instance ของ PrismaClient ขึ้นมาใหม่เรื่อยๆ จน PostgreSQL ปฏิเสธการเชื่อมต่อ ควรใช้ Prisma Accelerate หรือ PgBouncer เมื่อขึ้น Production
+</Callout>
+
+<Callout type="tip" title="แยกชั้น Service Logic">
+หากเขียน Prisma ใน Next.js ให้แยกฟังก์ชันฐานข้อมูลไว้ในโฟลเดอร์ `services/` หรือ `lib/db/` ไม่ควรเขียนคำสั่ง Query กระจัดกระจายในคอมโพเนนต์
+</Callout>
+
+## 5. แหล่งอ้างอิงทางการ
+
+- [Prisma with Next.js Guide](https://www.prisma.io/docs/guides/other/troubleshooting-orm/help-articles/nextjs-prisma-client-dev-practices)
+- [Next.js Fetching Data from a Database](https://nextjs.org/docs/app/building-your-application/data-fetching/fetching)

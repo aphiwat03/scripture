@@ -1,0 +1,76 @@
+---
+title: Server Actions
+category: Frontend
+parentTitle: Next.js 16
+version: v16.4
+updatedAt: 2026-10-17
+---
+
+## 1. คืออะไร / ใช้ทำไม
+
+**Server Actions** (`'use server'`) คือฟังก์ชันอะซิงโครนัสที่รันบนเซิร์ฟเวอร์สำหรับรับข้อมูลจากฟอร์มและบันทึกข้อมูล (Mutation) โดยไม่ต้องเขียน API แยก ส่วน **Route Handlers** (`route.ts`) คือการสร้าง RESTful API Endpoint มาตรฐาน
+
+ช่วยลดความซ้ำซ้อนของการเขียน API Controller และทำให้การส่งฟอร์มเป็นแบบ Type-safe ตั้งแต่หน้าบ้านจนถึงหลังบ้าน
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### การเขียน Server Action สำหรับจัดการข้อมูล
+
+```typescript filename="src/app/actions/items.ts"
+'use server';
+
+import { revalidatePath } from 'next/cache';
+
+export async function createItemAction(formData: FormData) {
+  const title = formData.get('title') as string;
+
+  if (!title || title.trim().length === 0) {
+    throw new Error('กรุณาระบุชื่อรายการ');
+  }
+
+  // ตัวอย่าง: บันทึกข้อมูลลงฐานข้อมูลโดยตรง
+  // await db.item.create({ data: { title } });
+
+  // ล้างแคชหน้านั้นเพื่อให้แสดงข้อมูลใหม่ทันที
+  revalidatePath('/items');
+}
+```
+
+### การเขียน Route Handler สำหรับ Endpoint ภายนอก
+
+```typescript filename="src/app/api/webhooks/route.ts"
+import { NextResponse } from 'next/server';
+
+export async function POST(request: Request) {
+  try {
+    const payload = await request.json();
+    // ประมวลผล Webhook เช่น Stripe Payment Notification
+    return NextResponse.json({ received: true }, { status: 200 });
+  } catch {
+    return NextResponse.json({ error: 'Invalid Payload' }, { status: 400 });
+  }
+}
+```
+
+## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- **Server Actions**:
+  - *ควรใช้*: เป็นตัวเลือกหลักสำหรับการทำ Mutation (เพิ่ม, ลบ, แก้ไขข้อมูล) ในแอป Next.js เอง เพราะใช้งานร่วมกับ `<form>` ได้ง่ายและสั่ง `revalidatePath` ได้ทันที
+  - *ไม่ควรใช้*: ดึงข้อมูลเพื่อนำมาแสดงผล (ให้ใช้ Server Components ดึงแทน)
+- **Route Handlers**:
+  - *ควรใช้*: เมื่อต้องเปิด API ให้ภายนอกเชื่อมต่อ (Mobile Apps, Webhooks, Third-party integrations) หรือการรับส่งข้อมูลแบบสตรีมมิ่ง/ไบนารีไฟล์
+
+## 4. ข้อควรระวัง
+
+<Callout type="warning" title="Server Actions เป็น Public Endpoints">
+แม้ฟังก์ชันจะดูเหมือนฟังก์ชันธรรมดา แต่เบื้องหลังมันคือ HTTP POST Endpoint สาธารณะ ต้องตรวจสอบ Authentication และสิทธิ์ของผู้ใช้เสมอภายใน Server Action ทุกตัว
+</Callout>
+
+<Callout type="tip" title="สั่ง revalidatePath ทันทีหลัง Mutation">
+หลังจากแก้ไขข้อมูลเสร็จเรียบร้อย ให้เรียก `revalidatePath('/path')` เพื่อให้ Next.js อัปเดตแคชของหน้านั้นทันทีโดยที่ผู้ใช้ไม่ต้องกดรีเฟรชหน้าจอ
+</Callout>
+
+## 5. แหล่งอ้างอิงทางการ
+
+- [Next.js Server Actions and Mutations](https://nextjs.org/docs/app/building-your-application/data-fetching/server-actions-and-mutations)
+- [Route Handlers](https://nextjs.org/docs/app/building-your-application/routing/route-handlers)

@@ -1,0 +1,276 @@
+---
+title: App Router & Client
+category: Frontend
+parentTitle: shadcn/ui
+version: shadcn/ui & Radix UI
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การนำ shadcn/ui มาใช้งานร่วมกับ **Next.js 16 App Router** ต้องอาศัยความเข้าใจที่ถูกต้องเกี่ยวกับ **React Server Components (RSC)** และเส้นแบ่งของขอบเขต **`"use client"` Boundary**:
+
+ความจริงที่นักพัฒนาต้องทราบ:
+- **คอมโพเนนต์ส่วนใหญ่ของ shadcn/ui จำเป็นต้องมี `"use client"`**: เนื่องจาก Radix UI Primitives ภายในจำเป็นต้องใช้ React State (`useState`), Lifecycle Hooks (`useEffect`, `useId`), และ DOM Event Handlers (`onClick`, `onKeyDown`) สำหรับจัดการ Focus Trap และ Keyboard Navigation
+- **แต่ไม่ได้หมายความว่าคุณต้องเปลี่ยนหน้าทั้งหน้าเป็น Client Component!**: สถาปัตยกรรมที่ดีที่สุดคือการรักษา `page.tsx` และ Layout หลักให้เป็น **Server Components 100%** (เพื่อความเร็วในการดึงข้อมูลตรงจากฐานข้อมูลและความเป็นเลิศด้าน SEO) แล้วดึงเฉพาะชิ้นส่วนที่มีการโต้ตอบ (Interactive Leaves) เช่น ปุ่ม Dialog หรือ Dropdown มาเป็น Client Components
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. ลำดับการประมวลผลและการข้ามขอบเขต (Client-Server Composition)
+- เมื่อ `page.tsx` (Server Component) ดึงข้อมูลผู้ใช้จากฐานข้อมูล มันสามารถส่งข้อมูลนั้นเป็น `props` ไปยัง Client Component ของ shadcn ได้โดยตรง
+- ข้อมูลที่ถูกส่งข้าม Boundary ต้องสามารถแปลงเป็นรูปแบบที่ส่งผ่านเครือข่ายได้ (Serializable) เช่น Object, Array, String, Number (ห้ามส่ง Class Instance หรือฟังก์ชัน JavaScript)
+- **เทคนิคการส่ง Server Components เข้าไปเป็น Children**: คุณสามารถส่ง Server Component ให้ไปเรนเดอร์อยู่ภายใน Client Component ได้ ผ่านช่องทาง `children` prop โดยที่ Server Component นั้นยังคงรันอยู่บนเซิร์ฟเวอร์เหมือนเดิม ไม่ถูกแปลงเป็น Client Bundle!
+
+### 2. สาเหตุของ Hydration Mismatch และวิธีป้องกัน
+- **Hydration Error** เกิดขึ้นเมื่อ HTML ที่สร้างบนเซิร์ฟเวอร์ (Server HTML) ไม่ตรงกับผลลัพธ์แรกที่ React Client พยายามวาด (Client Initial Render)
+- มักเกิดจาก:
+  1. การใช้ `Date.now()` หรือการฟอร์แมตวันที่ที่ขึ้นอยู่กับ Timezone ของเครื่องผู้ใช้
+  2. การอ่านค่าจาก `window` หรือ `localStorage` ทันทีในการเรนเดอร์รอบแรก
+  3. สคริปต์สลับ Theme ของ `next-themes` (แก้ไขได้โดยใส่ `suppressHydrationWarning` บน `<html>`)
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### สถาปัตยกรรมระดับองค์กร: หน้าจัดการสมาชิกองค์กร (แยก Server Component & Client Leaf)
+
+#### 1. ไฟล์เซิร์ฟเวอร์: `app/team/page.tsx` (Server Component 100%)
+```tsx filename="app/team/page.tsx"
+import { Suspense } from "react";
+import { CreateUserModal } from "./CreateUserModal";
+import { TeamTableClient } from "./TeamTableClient";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Users } from "lucide-react";
+
+// จำลองการดึงข้อมูลจาก Database ฝั่ง Server
+async function getTeamMembers() {
+  // ไม่ส่งผลกระทบต่อ Client Bundle เพราะรันบน Server เท่านั้น
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  return [
+    { id: "usr_1", name: "อนันต์ สุขใจ", email: "anan@company.io", role: "Owner" },
+    { id: "usr_2", name: "พิมพา รุ่งเรือง", email: "pimpa@company.io", role: "Developer" },
+    { id: "usr_3", name: "ธนกร มั่งมี", email: "thanakorn@company.io", role: "Viewer" },
+  ];
+}
+
+export default async function TeamPage() {
+  const members = await getTeamMembers();
+
+  return (
+    <main className="max-w-4xl mx-auto py-10 px-6 space-y-6">
+      {/* Header และข้อความสถิติถูกเรนเดอร์แบบ Static/SSR เพื่อ SEO */}
+      <div className="flex items-center justify-between pb-6 border-b">
+        <div className="flex items-center gap-3">
+          <div className="p-3 rounded-2xl bg-primary/10 text-primary">
+            <Users className="w-6 h-6" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">สมาชิกในทีม</h1>
+            <p className="text-sm text-muted-foreground">
+              มีสมาชิกทั้งหมด {members.length} คนในระบบคลาวด์ของคุณ
+            </p>
+          </div>
+        </div>
+
+        {/* Client Component เฉพาะปุ่มกดเปิด Modal */}
+        <CreateUserModal />
+      </div>
+
+      {/* ส่งข้อมูลตรงจาก Server ไปยัง Client Table */}
+      <Suspense fallback={<Skeleton className="h-48 w-full rounded-2xl" />}>
+        <TeamTableClient initialMembers={members} />
+      </Suspense>
+    </main>
+  );
+}
+```
+
+#### 2. ไฟล์ไคลเอนต์: `app/team/CreateUserModal.tsx` ("use client")
+```tsx filename="app/team/CreateUserModal.tsx"
+"use client";
+
+import * as React from "react";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { UserPlus, Loader2 } from "lucide-react";
+
+export function CreateUserModal() {
+  const [open, setOpen] = React.useState(false);
+  const [isPending, setIsPending] = React.useState(false);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setIsPending(true);
+    // เรียกใช้ Server Action หรือ API Route
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    setIsPending(false);
+    setOpen(false);
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button className="gap-2">
+          <UserPlus className="w-4 h-4" />
+          เชิญสมาชิกใหม่
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-md">
+        <form onSubmit={handleSubmit}>
+          <DialogHeader>
+            <DialogTitle>เชิญสมาชิกเข้าร่วมทีม</DialogTitle>
+            <DialogDescription>
+              ระบบจะส่งคำเชิญพร้อมลิงก์ตั้งรหัสผ่านไปยังอีเมลปลายทาง
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="inviteEmail">อีเมลสมาชิก</Label>
+              <Input id="inviteEmail" type="email" placeholder="colleague@company.io" required />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>
+              ยกเลิก
+            </Button>
+            <Button type="submit" disabled={isPending} className="gap-2">
+              {isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+              ส่งคำเชิญ
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+```
+
+#### 3. ไฟล์ตารางไคลเอนต์: `app/team/TeamTableClient.tsx` ("use client")
+```tsx filename="app/team/TeamTableClient.tsx"
+"use client";
+
+import * as React from "react";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Trash2 } from "lucide-react";
+
+interface Member {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+}
+
+export function TeamTableClient({ initialMembers }: { initialMembers: Member[] }) {
+  const [members, setMembers] = React.useState(initialMembers);
+
+  function removeMember(id: string) {
+    setMembers((prev) => prev.filter((m) => m.id !== id));
+  }
+
+  return (
+    <div className="rounded-2xl border bg-card">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>ชื่อสมาชิก</TableHead>
+            <TableHead>อีเมล</TableHead>
+            <TableHead>บทบาท</TableHead>
+            <TableHead className="text-right">จัดการ</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {members.map((member) => (
+            <TableRow key={member.id}>
+              <TableCell className="font-medium">{member.name}</TableCell>
+              <TableCell className="text-muted-foreground">{member.email}</TableCell>
+              <TableCell>
+                <Badge variant={member.role === "Owner" ? "default" : "secondary"}>
+                  {member.role}
+                </Badge>
+              </TableCell>
+              <TableCell className="text-right">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 text-destructive hover:bg-destructive/10"
+                  onClick={() => removeMember(member.id)}
+                  aria-label={`ลบสมาชิก ${member.name}`}
+                >
+                  <Trash2 className="w-4 h-4" />
+                </Button>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **วาง `"use client"` ไว้บนสุดของ `app/page.tsx` หรือ `app/layout.tsx`**<br/>เพียงเพราะต้องการใช้ปุ่ม Button ตัวเดียว ทำให้หน้าเว็บทั้งหน้าสูญเสียความสามารถ Server Component และทำลายขนาด Bundle | **ผลักดัน `"use client"` ไปไว้ที่ใบล่างสุด (Leaf Components)**<br/>แยกเฉพาะคอมโพเนนต์ที่มี Event Listener ออกมาเป็นไฟล์ Client Component ต่างหาก |
+| **พยายามดึงข้อมูลจาก Database (เช่น Prisma / Drizzle) ใน Client Component**<br/>ทำให้เสี่ยงข้อมูลลับหลุด และขนาด Bundle บวม | **ดึงข้อมูลใน Server Component แล้วส่งผ่าน Props**<br/>ปลอดภัย ข้อมูลถูกจัดการหลังบ้าน 100% |
+| **เรนเดอร์วันที่ `new Date().toLocaleDateString()` ตรงๆ ใน JSX**<br/>สร้าง Hydration Mismatch ทันทีเพราะเวลาของ Server มักเป็น UTC ส่วน Client เป็นเวลาท้องถิ่น | **ฟอร์แมตวันที่แบบกำหนด Timezone คงที่ หรือรอให้ Mount ก่อน**<br/>เพื่อให้ทั้งสองฝั่งได้ผลลัพธ์ตรงกันเสมอ |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้เมื่อ:
+- **สร้างเว็บ Next.js ยุคใหม่ (Next.js 16 App Router)**: ที่ต้องการทั้งความเร็วของการประมวลผลฝั่งเซิร์ฟเวอร์ และการโต้ตอบที่ลื่นไหลของ shadcn UI
+- **ระบบที่มีข้อมูลไดนามิกและฐานข้อมูล**: ดึงข้อมูลหลังบ้านได้อย่างปลอดภัยใน Server Component แล้วนำมาแสดงผลในตารางหรือการ์ด
+
+### ไม่ควรใช้เมื่อ:
+- **โปรเจกต์ที่เป็น Client-Only Single Page App (Vite / CRA)**: หากโปรเจกต์ไม่ได้ใช้ Next.js คุณสามารถใส่คอมโพเนนต์ได้ตามปกติโดยไม่ต้องกังวลเรื่อง RSC Boundary
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมคอมโพเนนต์อย่าง `Dialog`, `DropdownMenu`, และ `Select` ของ shadcn จึงต้องมี directive `"use client"` อยู่ที่หัวไฟล์เสมอ?
+**แนวทางตอบ:**
+เนื่องจากคอมโพเนนต์เหล่านี้ถูกสร้างขึ้นบน Radix UI Primitives ซึ่งทำงานเกี่ยวข้องกับ:
+1. **DOM Event Listeners**: การดักจับคลิก (`onClick`), การกดปุ่มแป้นพิมพ์ (`onKeyDown`) เพื่อปิดหน้าต่างหรือเลื่อนตัวเลือก
+2. **React State & Context**: การติดตามสถานะเปิด/ปิด (`open`, `setOpen`) และการส่งต่อค่าระหว่าง Sub-components
+3. **Browser APIs**: การสร้าง Focus Trap, การคำนวณตำแหน่งพิกัดของ Popup (BoundingClientRect) และการเรนเดอร์ผ่าน React Portal ไปยัง `document.body` ซึ่งทั้งหมดนี้สามารถทำงานได้เฉพาะในสภาพแวดล้อม Client (เบราว์เซอร์) เท่านั้น
+
+### Q2: เราสามารถส่ง React Server Component เข้าไปแสดงผลอยู่ภายใน Client Component ของ shadcn/ui ได้หรือไม่ และมีหลักการออกแบบสถาปัตยกรรมอย่างไร?
+**แนวทางตอบ:**
+- **ทำได้แน่นอน** ผ่านรูปแบบ **Children Prop Pattern (Slot Pattern)**
+- **หลักการ**:
+  - เราไม่สามารถ `import ServerComponent from './ServerComponent'` เข้าไปในไฟล์ที่มี `"use client"` ได้โดยตรง เพราะจะทำให้คอมโพเนนต์นั้นกลายสภาพเป็น Client Component ไปด้วย
+  - แต่วิธีที่ถูกต้องคือ ให้ Parent (ที่เป็น Server Component) นำเข้าทั้งสองตัว แล้วส่ง Server Component นั้นผ่านช่องทาง `children`:
+  ```tsx
+  // ใน app/page.tsx (Server Component):
+  <ClientDialogWrapper>
+    <ServerDataList /> {/* ตัวนี้ยังคงรันบน Server ได้ตามปกติ */}
+  </ClientDialogWrapper>
+  ```
+  - เซิร์ฟเวอร์จะประมวลผล `<ServerDataList />` เสร็จสิ้นเป็น HTML Stream แล้วจึงส่งไปวางในตำแหน่ง `children` ของ Client Dialog อย่างมีประสิทธิภาพสูงสุด

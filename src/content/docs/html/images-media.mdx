@@ -1,0 +1,147 @@
+---
+title: Images & Media
+category: Frontend
+parentTitle: HTML5
+version: HTML Living Standard
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+สื่อมัลติมีเดีย (รูปภาพ เสียง วิดีโอ) คือทรัพยากรที่มีขนาดไฟล์ใหญ่ที่สุดบนหน้าเว็บ การเลือกใช้วิธีแสดงผลที่ถูกต้องใน HTML5 ไม่เพียงแต่ช่วยให้ผู้ใช้เห็นภาพ แต่ยังตัดสิน **ความเร็วในการโหลด (Web Performance)** และ **ประสบการณ์การเข้าถึง (Accessibility)**
+
+- **`<img>`**: การแสดงผลภาพพื้นฐาน จำเป็นต้องมี `alt` เสมอ
+- **`width` & `height`**: การระบุสัดส่วนขนาดดั้งเดิมเพื่อจองพื้นที่ล่วงหน้า
+- **`<picture>` และ `srcset` / `sizes`**: การทำ Responsive Images เพื่อเสิร์ฟภาพขนาดพอดีกับหน้าจอ หรือสลับฟอร์แมตสมัยใหม่อย่าง AVIF / WebP
+- **`<figure>` & `<figcaption>`**: กล่องใส่สื่อพร้อมคำบรรยายภาพที่มีความหมายผูกพันกัน
+- **`loading="lazy"`**: การหน่วงเวลาโหลดภาพจนกว่าจะเลื่อนจอมาใกล้ถึง
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. Cumulative Layout Shift (CLS) กับ `width` และ `height`
+ในอดีต หากไม่ระบุ `width` และ `height` ในแท็ก `<img>` เบราว์เซอร์จะไม่ทราบว่าภาพมีขนาดกี่พิกเซลจนกว่าภาพจะดาวน์โหลดเสร็จ เมื่อภาพปรากฏ จะดันเนื้อหาด้านล่างให้กระตุกวูบลงไป (Layout Shift) 
+
+แต่ในเบราว์เซอร์ยุคปัจจุบัน หากเราใส่:
+```html
+<img src="banner.jpg" width="1200" height="600" alt="...">
+```
+เบราว์เซอร์จะคำนวณ **Aspect Ratio (2:1)** ได้ตั้งแต่ขั้นตอน Parsing HTML และจองพื้นที่กล่องสีขาวล่วงหน้าทันที ทำให้คะแนน Core Web Vitals (CLS) เป็น 0
+
+### 2. Resolution Switching vs Art Direction
+- **Resolution Switching (`srcset` ใน `<img>`)**: ภาพเดิมแต่เลือกขนาดไฟล์เล็ก/ใหญ่ตามความหนาแน่นพิกเซลของหน้าจอ (1x, 2x) หรือขนาด viewport
+- **Art Direction (`<picture>`)**: ภาพคนละมุมมอง เช่น บนเดสก์ท็อปใช้ภาพแนวนอนกว้างๆ แต่มือถือเปลี่ยนเป็นภาพสี่เหลี่ยมจัตุรัสที่ซูมเจาะใบหน้า
+
+---
+
+## 3. ตัวอย่างโค้ด (HTML5)
+
+### ตัวอย่างที่ 1: การใช้ `<picture>` สลับฟอร์แมตรูปภาพสมัยใหม่ (AVIF → WebP → JPG)
+
+```html filename="product-hero-image.html"
+<figure class="product-showcase">
+  <picture>
+    <!-- 1. ถ้าเบราว์เซอร์รองรับ AVIF (ไฟล์เล็กที่สุด ให้เลือกก่อน) -->
+    <source type="image/avif" srcset="/images/headphone.avif">
+
+    <!-- 2. ถ้าไม่รองรับ AVIF ให้ตรวจว่ารองรับ WebP หรือไม่ -->
+    <source type="image/webp" srcset="/images/headphone.webp">
+
+    <!-- 3. Fallback สุดท้ายสำหรับเบราว์เซอร์รุ่นเก่า พร้อมระบุ width/height และ lazy load -->
+    <img 
+      src="/images/headphone.jpg" 
+      alt="หูฟังไร้สาย Wireless Pro สีดำด้าน วางบนแท่นชาร์จอลูมิเนียม"
+      width="800" 
+      height="600"
+      loading="lazy"
+      decoding="async"
+    >
+  </picture>
+  <figcaption>ภาพตัวอย่างหูฟังไร้สาย Wireless Pro สี Space Gray</figcaption>
+</figure>
+```
+
+### ตัวอย่างที่ 2: วิดีโอพื้นเมือง (HTML5 Native Video) พร้อม Subtitles
+
+```html filename="product-video.html"
+<section class="video-preview">
+  <h2>วิดีโอสาธิตการใช้งาน</h2>
+  
+  <video 
+    controls 
+    preload="metadata" 
+    width="1280" 
+    height="720"
+    poster="/images/video-thumbnail.jpg"
+  >
+    <source src="/videos/tutorial.webm" type="video/webm">
+    <source src="/videos/tutorial.mp4" type="video/mp4">
+    
+    <!-- คำบรรยายสำหรับผู้บกพร่องทางการได้ยิน (Accessibility) -->
+    <track 
+      kind="subtitles" 
+      src="/captions/tutorial-th.vtt" 
+      srclang="th" 
+      label="ภาษาไทย" 
+      default
+    >
+    เบราว์เซอร์ของคุณไม่รองรับการเล่นวิดีโอ HTML5
+  </video>
+</section>
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ไม่ใส่ `alt` หรือใส่ `alt` ที่ไม่มีประโยชน์ และไม่ระบุขนาด
+
+```html
+<!-- ผิด: ไม่มี width/height ทำให้เกิด CLS และ alt ใส่ชื่อไฟล์ไม่มีประโยชน์ -->
+<img src="banner-sale-2026.jpg" alt="banner-sale-2026.jpg">
+
+<!-- ผิด: ภาพ LCP (Hero Banner ส่วนบนสุดของหน้า) ดันไปใส่ loading="lazy" -->
+<img src="hero.jpg" loading="lazy" alt="โปรโมชั่นใหญ่">
+```
+
+### ✅ โค้ดที่ถูกต้อง: ระบุ `alt` บรรยายสาระ, มีขนาดป้องกันกระตุก, และปรับการโหลดอย่างชาญฉลาด
+
+```html
+<!-- ภาพตกแต่งที่ไม่มีความหมาย ให้ใช้ alt="" เพื่อให้ Screen reader ข้าม -->
+<img src="/icons/sparkle.svg" alt="" role="presentation" width="16" height="16">
+
+<!-- ภาพสำคัญบนสุดของจอ (Hero Image): โหลดทันทีพร้อมเพิ่มลำดับความสำคัญ -->
+<img 
+  src="/images/hero-spring.webp" 
+  alt="โปรโมชั่นสินค้าไอทีลดสูงสุด 50% ต้อนรับเปิดเทอม" 
+  width="1200" 
+  height="500" 
+  fetchpriority="high"
+>
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรทำ
+- ใส่ `alt` ในแท็ก `<img>` ทุกตัวเสมอ (ถ้าเป็นภาพตกแต่งให้ใช้ `alt=""`)
+- ใส่ `width` และ `height` (หรือ CSS `aspect-ratio`) เสมอเพื่อกำจัดปัญหา CLS
+- ใส่ `loading="lazy"` เฉพาะภาพที่อยู่ **ด้านล่างของหน้าจอ (Below the fold)**
+
+### ไม่ควรทำ
+- **ห้ามใส่ `loading="lazy"` กับภาพแบนเนอร์ด้านบนสุด (LCP Image)**: เพราะจะทำให้คะแนนความเร็ว Largest Contentful Paint แย่ลงอย่างเห็นได้ชัด
+- ห้ามใช้ภาพกราฟิกที่มีข้อความตัวหนังสือเยอะๆ ฝังอยู่ในรูป เพราะ Search Engine และ Screen Reader อ่านไม่ออก
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการใส่แอตทริบิวต์ `width` และ `height` ในแท็ก `<img>` จึงช่วยแก้ปัญหา Cumulative Layout Shift (CLS) ได้?
+**แนวทางคำตอบ**: เบราว์เซอร์สมัยใหม่จะนำค่าตัวเลขจาก `width` และ `height` มาคำนวณอัตราส่วนภาพ (`aspect-ratio`) โดยอัตโนมัติ ทำให้สามารถจัดสรรพื้นที่ว่างใน Render Tree สำหรับรูปภาพนั้นไว้ล่วงหน้าได้ทันทีก่อนที่ตัวไฟล์ภาพจริงจะดาวน์โหลดเสร็จ เมื่อภาพโหลดมาถึงและวาดลงบนหน้าจอ จึงไม่เกิดการขยับหรือดันตำแหน่งของข้อความที่อยู่ด้านล่าง
+
+### Q2: แท็ก `<picture>` ต่างจากการใช้ `srcset` ในแท็ก `<img>` ธรรมดาอย่างไร?
+**แนวทางคำตอบ**: 
+- `<img> srcset` เหมาะสำหรับการทำ **Resolution Switching** (เลือกภาพเดิมแต่ความละเอียดต่างกันตามหน้าจอ โดยให้เบราว์เซอร์ตัดสินใจเองว่าขนาดไหนเหมาะสมที่สุด)
+- `<picture>` เหมาะสำหรับ **Art Direction** (บังคับตัดภาพคนละสัดส่วนในแต่ละขนาดหน้าจอ เช่น ตัดครอปรูปเฉพาะใบหน้าเมื่อเปิดบนจอมือถือ) และใช้สำหรับการทำ **Format Fallback** (เสิร์ฟไฟล์รุ่นใหม่อย่าง AVIF/WebP และถอยกลับเป็น JPG หากเบราว์เซอร์ไม่รองรับ)

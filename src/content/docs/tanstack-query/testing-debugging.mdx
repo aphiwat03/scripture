@@ -1,0 +1,218 @@
+---
+title: Testing & Mocking
+category: Frontend
+parentTitle: TanStack Query v5
+version: TanStack Query v5.x
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การทดสอบ (Testing) และการตรวจสอบข้อผิดพลาด (Debugging) คอมโพเนนต์ที่ใช้งาน **TanStack Query v5** มีกฎเหล็กสำคัญ 2 ประการที่ต้องปฏิบัติตาม:
+
+1. **กฎแห่งการแยกส่วนการทดสอบ (Test Isolation)**: ทุกๆ เคสการทดสอบ (`it` หรือ `test`) **ต้องได้รับอินสแตนซ์ `QueryClient` ตัวใหม่เอี่ยมเสมอ** ห้ามใช้ `QueryClient` ตัวเดิมร่วมกันระหว่างเคส เพื่อป้องกันไม่ให้ข้อมูลแคชจากเคสก่อนหน้าหลุดมารบกวนผลการทดสอบของเคสถัดไป
+2. **ต้องปิดระบบ Retry เสมอ (`retry: false`)**: ในโหมดทดสอบ หากคำขอล้มเหลว ระบบจะต้องพ่น Error ออกมาทันที การปล่อยให้มี Retry ตามค่าเริ่มต้น (3 ครั้ง) จะทำให้ Vitest หรือ Jest เกิดปัญหา **Test Timeout (เกิน 5,000ms)** เนื่องจากการหน่วงเวลา Exponential Backoff
+
+เครื่องมือหลักในการทำงาน:
+- **React Query Devtools**: สำหรับตรวจสอบสถานะแคช, สลับดูโหมด Offline, สั่ง Invalidate ด้วยตนเองบนหน้าต่างเบราว์เซอร์
+- **Vitest & React Testing Library (RTL)**: สำหรับรันชุดการทดสอบ
+- **Mock Service Worker (MSW v2)**: สำหรับจำลอง HTTP Network Request ในระดับเครือข่าย
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ทำไมต้องจำลองด้วย MSW แทนการ Mock `useQuery` ตรงๆ?
+
+```
+[วิธีที่ผิด: Mock useQuery ตรงๆ]
+Component ───► jest.fn().mockReturnValue({ data: [...] })
+(ไม่ได้ทดสอบวงจรชีวิตจริงของ TanStack Query, ไม่ได้ทดสอบสถานะ Pending, ไม่ได้ทดสอบ Error Boundary)
+
+--------------------------------------------------------------------------------
+
+[วิธีที่ถูกต้อง: ใช้งาน QueryClient จริง + ดักจับด้วย MSW v2]
+Component ───► useQuery ───► QueryClient ───► fetch() ───► [MSW Interceptor ดักจับที่ Network Layer]
+                                                                     │
+                                      (ส่ง Response 200 หรือ 500 จำลอง) ◄┘
+(ทดสอบการทำงานเสมือนจริง 100%: ทั้ง Cache, Loading Skeleton, Retry, และการ Re-render)
+```
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+การเซ็ตอัพยูทิลิตีสำหรับการทดสอบและการเขียนเทสเคสสำหรับระบบสินค้า:
+
+### ไฟล์ที่ 1: Test Utility Helper สร้าง Fresh QueryClient
+
+```tsx filename="src/test/utils/render-with-query.tsx"
+import React, { ReactElement } from 'react';
+import { render, RenderOptions } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+
+// ฟังก์ชันสร้าง QueryClient สะอาดตัวใหม่สำหรับการทดสอบแต่ละเคส
+export function createTestQueryClient() {
+  return new QueryClient({
+    defaultOptions: {
+      queries: {
+        // ❌ ปิด retry เสมอในเทส เพื่อป้องกัน Test Timeout
+        retry: false,
+        // ปิด gcTime ชั่วคราวเพื่อความรวดเร็วในการรันเทส
+        gcTime: Infinity,
+      },
+      mutations: {
+        retry: false,
+      },
+    },
+  });
+}
+
+// Custom Render Wrapper
+export function renderWithClient(
+  ui: ReactElement,
+  client?: QueryClient,
+  options?: Omit<RenderOptions, 'wrapper'>
+) {
+  const queryClient = client ?? createTestQueryClient();
+
+  const Wrapper = ({ children }: { children: React.ReactNode }) => (
+    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+  );
+
+  return {
+    ...render(ui, { wrapper: Wrapper, ...options }),
+    queryClient,
+  };
+}
+```
+
+### ไฟล์ที่ 2: ชุดการทดสอบ Integration Test ด้วย Vitest + MSW v2
+
+```tsx filename="src/features/products/components/__tests__/ProductCatalog.test.tsx"
+import { describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest';
+import { screen, waitFor } from '@testing-library/react';
+import { http, HttpResponse } from 'msw';
+import { setupServer } from 'msw/node';
+import { renderWithClient } from '@/test/utils/render-with-query';
+import { ProductCatalogView } from '../ProductCatalogView';
+
+// 1. ตั้งค่า MSW Server เพื่อจำลอง API
+const server = setupServer(
+  http.get('/api/products', () => {
+    return HttpResponse.json([
+      { id: 'p1', name: 'เมาส์ไร้สายบลูทูธ', price: 890, category: 'gadgets' },
+      { id: 'p2', name: 'คีย์บอร์ดกลไก RGB', price: 2490, category: 'gadgets' },
+    ]);
+  })
+);
+
+beforeAll(() => server.listen());
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
+
+describe('ProductCatalogView Integration Tests', () => {
+  it('ควรแสดง Skeleton ก่อน จากนั้นแสดงรายการสินค้าเมื่อดึงสำเร็จ', async () => {
+    renderWithClient(<ProductCatalogView />);
+
+    // ตรวจสอบ Loading State แรกเริ่ม
+    expect(screen.getByText(/กำลังโหลดข้อมูลสินค้า/i)).toBeInTheDocument();
+
+    // รอจนกว่าข้อมูลสินค้าจริงจะปรากฏบนหน้าจอ
+    await waitFor(() => {
+      expect(screen.getByText('เมาส์ไร้สายบลูทูธ')).toBeInTheDocument();
+      expect(screen.getByText('฿890')).toBeInTheDocument();
+      expect(screen.getByText('คีย์บอร์ดกลไก RGB')).toBeInTheDocument();
+    });
+  });
+
+  it('ควรแสดงข้อความ Error เมื่อ API ตอบกลับด้วยสถานะ 500', async () => {
+    // Override Handler ให้ส่งข้อผิดพลาด 500
+    server.use(
+      http.get('/api/products', () => {
+        return new HttpResponse(null, { status: 500 });
+      })
+    );
+
+    renderWithClient(<ProductCatalogView />);
+
+    // รอจนกว่าหน้าจอจะเรนเดอร์ Error Message
+    await waitFor(() => {
+      expect(screen.getByText(/เกิดข้อผิดพลาดในการโหลดสินค้า/i)).toBeInTheDocument();
+    });
+  });
+});
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม (useEffect vs TanStack Query)
+
+| ด้านการทดสอบ | วิธีเดิม (Mock Hook `useQuery` หรือ `useState`) | การทดสอบ TanStack Query ร่วมกับ MSW |
+| :--- | :--- | :--- |
+| **ความสมจริง** | เป็นการจำลองภาพลวงตา ไม่ได้ทดสอบโค้ดภายใน Hook จริง | ทดสอบการไหลของข้อมูลจริงตั้งแต่ Network ไปจนถึง DOM |
+| **การจัดการ Race Condition** | ตรวจสอบไม่ได้เลยในการทดสอบ | สามารถจำลอง Network Latency ด้วย MSW เพื่อทดสอบได้แม่นยำ |
+| **การทดสอบ Cache Invalidation** | ต้อง Mock ฟังก์ชันสปาย (`jest.spyOn`) ลึกและซับซ้อน | ตรวจสอบได้โดยตรงผ่าน `queryClient.getQueryData()` |
+
+---
+
+## 5. ผิด vs ถูก
+
+### แบบที่ผิด ❌: ประกาศ `queryClient` ตัวเดียวใช้ร่วมกันทุกเคสในเทสไฟล์
+
+```tsx
+// ❌ ผิด: ใช้ Client ร่วมกันข้ามเทสเคส
+const globalTestClient = new QueryClient();
+
+describe('Bad Tests', () => {
+  it('Test 1', () => {
+    // แคชข้อมูลสินค้าลงใน globalTestClient
+    renderWithClient(<ProductList />, globalTestClient);
+  });
+
+  it('Test 2', () => {
+    // ❌ เทสนี้จะได้รับแคชที่ตกค้างมาจาก Test 1 ทันที ทำให้ผลการทดสอบผิดพลาด!
+    renderWithClient(<ProductList />, globalTestClient);
+  });
+});
+```
+
+### แบบที่ถูก ✅: สร้าง `QueryClient` ตัวใหม่ในทุกๆ ครั้งที่เรียก `render`
+
+```tsx
+// ✅ ถูกต้อง: แต่ละเคสได้หน่วยความจำแคชใหม่เอี่ยม ไม่ปนเปื้อนกัน
+describe('Good Tests', () => {
+  it('Test 1', () => {
+    const client = createTestQueryClient();
+    renderWithClient(<ProductList />, client);
+  });
+
+  it('Test 2', () => {
+    const client = createTestQueryClient();
+    renderWithClient(<ProductList />, client);
+  });
+});
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ MSW + QueryClient Integration Test เมื่อ:
+- ต้องการทดสอบ Feature สำคัญของระบบ เช่น กระบวนการสั่งซื้อสินค้า, ระบบชำระเงิน, ฟอร์มบันทึกข้อมูล
+- ต้องการทดสอบสถานะทางเครือข่ายที่ซับซ้อน เช่น การตอบ 500, การขาดการเชื่อมต่อ, การ Revalidate แคช
+
+### ใช้ Unit Test ทดสอบเฉพาะฟังก์ชันเพียวๆ เมื่อ:
+- ฟังก์ชันคำนวณภาษี, ตรรกะแปลงสกุลเงิน ซึ่งไม่มีการติดต่อกับ Network หรือ State ใดๆ
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมใน Unit และ Integration Test เราจึงจำเป็นต้องตั้งค่า `queries: { retry: false }` ใน QueryClient options เสมอ?
+**แนวทางตอบ**:
+เพราะค่าเริ่มต้นของ TanStack Query จะทำการ Retry ถึง 3 ครั้งเมื่อเกิด Error โดยมีการหน่วงเวลาแบบ Exponential Backoff (1 วินาที, 2 วินาที, 4 วินาที รวมกว่า 7 วินาที) หากเราทดสอบเคสที่คาดหวังให้เกิด Error (เช่น API ตอบ 500) การปล่อยให้ระบบ Retry จะทำให้ชุดการทดสอบใช้เวลานานผิดปกติ และจะถูก Test Runner เช่น Vitest หรือ Jest สั่งตัดจบด้วยข้อผิดพลาด **Timeout Error (ปกติคือ 5,000ms)** การปิด `retry: false` จะทำให้คำขอล้มเหลวในทันที ช่วยให้เทสรันได้รวดเร็วระดับมิลลิวินาที
+
+### Q2: เหตุใดการใช้ Mock Service Worker (MSW) จึงเป็นวิธีที่ดีกว่าการ Mock Hook `useQuery` ตรงๆ ด้วย `vi.mock()`?
+**แนวทางตอบ**:
+การ Mock ด้วย `vi.mock('@tanstack/react-query')` เป็นการบายพาส (Bypass) ตรรกะภายในทั้งหมดของไลบรารีทิ้งไป ทำให้เราไม่ได้ทดสอบพฤติกรรมจริงของคอมโพเนนต์เลย เช่น การเปลี่ยนผ่านจาก `isPending` เป็น `success`, การทำงานของ `staleTime`, หรือการอัปเดตของแคชเมื่อเกิด Invalidation ในทางตรงกันข้าม MSW จะทำการดักจับที่ระดับชั้น Network (Service Worker หรือ Node.js http layer) ปล่อยให้ TanStack Query รันตรรกะจริงอย่างสมบูรณ์แบบ ทำให้ผลการทดสอบมีความน่าเชื่อถือสูงสุดและตรงกับการใช้งานจริงของผู้ใช้

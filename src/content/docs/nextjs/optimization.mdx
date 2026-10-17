@@ -1,0 +1,84 @@
+---
+title: Optimization
+category: Frontend
+parentTitle: Next.js 16
+version: v16.4
+updatedAt: 2026-10-17
+---
+
+## 1. คืออะไร / ใช้ทำไม
+
+**Optimization** ใน Next.js 16 คือชุดเครื่องมือเพิ่มประสิทธิภาพเว็บไซต์ให้ได้คะแนน Core Web Vitals สูงสุด ทั้งการแปลงรูปภาพเป็น WebP/AVIF อัตโนมัติ (`next/image`), การโหลดฟอนต์โดยปราศจากอาการกระตุก (`next/font`), และการทำ OpenGraph สำหรับ Search Engine
+
+ช่วยเพิ่มอัตราการเข้าถึงจาก Google (SEO Ranking), ลดอัตราการตีกลับของผู้ใช้ (Bounce Rate) และประหยัดแบนด์วิดท์เซิร์ฟเวอร์
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### การใช้งาน `next/font` และ Metadata API
+
+```tsx filename="src/app/layout.tsx"
+import { Inter } from 'next/font/google';
+import type { Metadata } from 'next';
+
+// next/font: ดาวน์โหลดฟอนต์ล่วงหน้าตั้งแต่ตอน Build ป้องกัน Cumulative Layout Shift (CLS: 0)
+const inter = Inter({
+  subsets: ['latin'],
+  display: 'swap',
+  variable: '--font-inter',
+});
+
+export const metadata: Metadata = {
+  title: {
+    default: 'Scripture Documentation',
+    template: '%s | Scripture',
+  },
+  description: 'เอกสารรวมการใช้งาน Full-Stack Tech Stack ครบวงจร',
+  openGraph: {
+    title: 'Scripture Documentation',
+    description: 'เรียนรู้ Next.js 16, NestJS, Prisma, PostgreSQL',
+    images: [{ url: '/og-image.png', width: 1200, height: 630 }],
+  },
+};
+```
+
+### การใช้งาน `next/image`
+
+```tsx filename="src/components/BannerImage.tsx"
+import Image from 'next/image';
+
+export default function BannerImage() {
+  return (
+    <div className="relative w-full h-72 overflow-hidden rounded-2xl">
+      <Image
+        src="/banner.jpg"
+        alt="ภาพหน้าปกเอกสาร"
+        fill
+        priority // ดาวน์โหลดภาพนี้ก่อนเพื่อนเพื่อลดค่า LCP สำหรับรูปด้านบนสุดของจอ
+        sizes="(max-width: 768px) 100vw, 1200px"
+        className="object-cover"
+      />
+    </div>
+  );
+}
+```
+
+## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- **`next/image`**: ควรใช้แทนแท็ก `<img>` เสมอในทุกกรณี / *ไม่ควรใส่* `priority` กับรูปทุกรูปในหน้า ให้ใส่เฉพาะรูปที่เป็นจุดโฟกัสหลักด้านบนสุดของจอ (Above the Fold) เท่านั้น
+- **`next/font`**: ใช้แทนการดึง Google Fonts ผ่าน `<link>` ใน HTML เพราะ `next/font` จะดาวน์โหลดและโฮสต์ฟอนต์ให้อัตโนมัติโดยไม่มีการยิงไปภายนอกขณะรัน
+
+## 4. ข้อควรระวัง
+
+<Callout type="warning" title="ลงทะเบียน Remote Domain ใน next.config.ts">
+หากรูปภาพมาจาก Domain ภายนอก (เช่น AWS S3, Cloudinary, Supabase Storage) ต้องลงทะเบียนโดเมนใน `images.remotePatterns` ภายในไฟล์ `next.config.ts` เสมอ มิเช่นนั้น Next.js จะปฏิเสธการโหลดรูปภาพ
+</Callout>
+
+<Callout type="tip" title="ระบุ sizes ให้ตรงกับ Layout จริงเสมอ">
+เมื่อใช้รูปภาพแบบ `fill` ต้องระบุค่า `sizes="..."` ให้ตรงกับขนาดที่แสดงผลบนหน้าจอจริง เพื่อให้ Next.js เลือกส่งไฟล์รูปภาพที่มีความละเอียดเหมาะสมที่สุดไปให้ผู้ใช้
+</Callout>
+
+## 5. แหล่งอ้างอิงทางการ
+
+- [Next.js Image Optimization](https://nextjs.org/docs/app/building-your-application/optimizing/images)
+- [Next.js Font Optimization](https://nextjs.org/docs/app/building-your-application/optimizing/fonts)
+- [Next.js Metadata and SEO](https://nextjs.org/docs/app/building-your-application/optimizing/metadata)

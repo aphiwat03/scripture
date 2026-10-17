@@ -1,0 +1,130 @@
+---
+title: Meta & SEO
+category: Frontend
+parentTitle: HTML5
+version: HTML Living Standard
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ส่วนหัวของเอกสาร (`<head>`) คือ **"ห้องควบคุมและฝ่ายประชาสัมพันธ์ (PR Room)"** ของเว็บไซต์ ข้อมูลที่อยู่ในนี้แทบทั้งหมดจะไม่ปรากฏบนหน้าจอให้ผู้ใช้เห็นโดยตรง แต่จะถูกส่งให้ **Search Engine Bots (Google, Bing)** และ **Social Media Crawlers (Facebook, LINE, X)** นำไปประมวลผล
+
+องค์ประกอบหลักด้าน Meta & SEO:
+- **`<title>`**: หัวข้อหน้าเว็บที่แสดงบนแท็บเบราว์เซอร์ และเป็นบรรทัดแรกที่คนเห็นใน Google Search
+- **`<meta name="description">`**: ข้อความสรุปย่อความยาวประมาณ 150-160 ตัวอักษร
+- **Open Graph (`og:*`)**: โปรโตคอลที่ทำให้เวลาแชร์ลิงก์ลง LINE หรือ Facebook แล้วมีรูปภาพพรีวิว หัวข้อ และคำบรรยายที่สวยงาม
+- **`<link rel="canonical">`**: การระบุ "URL ตัวจริง" เพื่อป้องกันปัญหา Google ลงโทษจากเนื้อหาซ้ำซ้อน (Duplicate Content)
+- **`<meta name="robots">`**: คำสั่งบอก Bot ว่าจะให้อนุญาตเก็บข้อมูลหน้านี้หรือไม่ (`index`, `noindex`, `nofollow`)
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. ทำไม Canonical URL ถึงสำคัญยิ่งยวด?
+ในเว็บ E-Commerce หน้าสินค้าเดียวกันมักถูกเปิดผ่านหลาย URL เช่น:
+- `https://store.com/products/keyboard` (URL หลัก)
+- `https://store.com/products/keyboard?ref=facebook` (มี Tracking Tag)
+- `https://store.com/products/keyboard?color=black` (มี Filter)
+
+หากไม่มี `<link rel="canonical" href="https://store.com/products/keyboard">` ตัว Googlebot จะคิดว่าทั้ง 3 หน้าเป็นหน้าเว็บที่ลอกเลียนแบบกันเอง และจะทำการกระจายคะแนน SEO (Split PageRank) ทำให้ไม่มีหน้าใดติดอันดับสูงเลย
+
+### 2. ข้อกำหนดของ `og:image`
+รูปภาพ Open Graph **ต้องเป็น Absolute URL ที่มี `https://` เต็มรูปแบบเสมอ** (ห้ามใช้ Relative Path เช่น `/images/og.jpg`) เพราะ Social Media Crawlers วิ่งเข้ามาอ่านรูปจากภายนอกโดเมน
+
+---
+
+## 3. ตัวอย่างโค้ด (HTML5)
+
+### ตัวอย่างที่ 1: ชุด Meta Tags ฉบับสมบูรณ์สำหรับหน้ารายละเอียดสินค้า
+
+```html filename="product-meta.html"
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- 1. SEO พื้นฐาน -->
+  <title>คีย์บอร์ดกลไกไร้สาย Pro Max — Scripture Store</title>
+  <meta name="description" content="สั่งซื้อคีย์บอร์ดกลไกไร้สาย Pro Max สวิตช์เงียบ แบตเตอรี่อึด 40 ชั่วโมง เชื่อมต่อบลูทูธ 3 อุปกรณ์พร้อมกัน รับประกันศูนย์ไทย 2 ปี">
+  
+  <!-- 2. Canonical URL ป้องกันเนื้อหาซ้ำซ้อน -->
+  <link rel="canonical" href="https://store.scripture.dev/products/keyboard-pro-max">
+
+  <!-- 3. Robots: อนุญาตให้เก็บข้อมูลและไต่ลิงก์ต่อไป -->
+  <meta name="robots" content="index, follow">
+
+  <!-- 4. Open Graph สำหรับ Facebook และ LINE -->
+  <meta property="og:site_name" content="Scripture Store">
+  <meta property="og:type" content="product">
+  <meta property="og:title" content="คีย์บอร์ดกลไกไร้สาย Pro Max">
+  <meta property="og:description" content="คีย์บอร์ดไร้สายสวิตช์เงียบ แบตเตอรี่อึด 40 ชม. ส่งฟรีทั่วประเทศ">
+  <!-- สำคัญ: ต้องเป็น Absolute URL ขนาดแนะนำ 1200x630 px -->
+  <meta property="og:image" content="https://store.scripture.dev/assets/og-keyboard.jpg">
+  <meta property="og:url" content="https://store.scripture.dev/products/keyboard-pro-max">
+
+  <!-- 5. Twitter Card (X) -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="คีย์บอร์ดกลไกไร้สาย Pro Max">
+  <meta name="twitter:image" content="https://store.scripture.dev/assets/og-keyboard.jpg">
+
+  <!-- 6. Favicon สำหรับแท็บเบราว์เซอร์และ Bookmark -->
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+</head>
+```
+
+### ตัวอย่างที่ 2: การสั่ง Noindex สำหรับหน้า Dashboard ภายในที่ไม่ต้องการให้คนค้นเจอ
+
+```html filename="admin-dashboard.html"
+<head>
+  <meta charset="UTF-8">
+  <title>ระบบจัดการหลังบ้าน — แผงควบคุมผู้ดูแล</title>
+  <!-- สั่งให้ Search Engine ห้ามเก็บหน้านี้เข้าสารบัญ และห้ามไต่ลิงก์ต่อ -->
+  <meta name="robots" content="noindex, nofollow">
+</head>
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ใช้ Relative Path ใน og:image และลืม Canonical
+
+```html
+<!-- ผิด: 1. og:image เป็น Relative Path บอท Facebook/LINE จะดึงรูปไม่ขึ้น
+         2. ขาด canonical URL ทำให้โดนบทลงโทษ Duplicate Content -->
+<meta property="og:title" content="หน้าโปรโมชั่น">
+<meta property="og:image" content="/images/banner.jpg">
+```
+
+### ✅ โค้ดที่ถูกต้อง: ใช้ Full HTTPS URL เสมอ และใส่ Canonical
+
+```html
+<link rel="canonical" href="https://myshop.com/promo">
+<meta property="og:title" content="โปรโมชั่นลดราคาพิเศษ">
+<meta property="og:image" content="https://myshop.com/images/banner.jpg">
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรทำ
+- เขียน `<title>` ให้ไม่เกิน 60 ตัวอักษร และมีชื่อแบรนด์หรือคีย์เวิร์ดสำคัญ
+- เขียน `description` ให้อยู่ระหว่าง 140-160 ตัวอักษร เพื่อไม่ให้ข้อความถูกตัดคำในหน้า Google
+- จัดเตรียมภาพ `og:image` สัดส่วน 1.91:1 (ขนาด 1200 x 630 px) เป็น Absolute URL
+
+### ไม่ควรทำ
+- **ห้ามใส่ `meta name="keywords"` อีกต่อไป**: Google Search ประกาศยกเลิกการใช้แอตทริบิวต์นี้ตั้งแต่ปี 2009 การฝืนใส่คำซ้ำๆ อาจถูกมองว่าเป็น Spam
+- ห้ามใส่ `noindex` ในหน้า Landing Page ที่ต้องการหาลูกค้า
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: แท็ก `<link rel="canonical">` มีประโยชน์อย่างไรต่อการทำ SEO?
+**แนวทางคำตอบ**: แท็ก Canonical มีหน้าที่บอก Search Engine ว่า URL ใดคือ **"ต้นฉบับที่แท้จริง (Master/Preferred URL)"** ของหน้านั้นๆ มีประโยชน์ในการแก้ปัญหา **Duplicate Content** เมื่อหน้าเว็บเดิมสามารถเข้าถึงได้จากหลาย URL เช่น หน้าที่มี Query Parameters ติดมาจากการคลิกโฆษณา (`?utm_source=...`), หน้าเวอร์ชัน HTTP และ HTTPS, หรือหน้าที่มีพารามิเตอร์การจัดเรียงสินค้า ช่วยรวมคะแนนความน่าเชื่อถือ (Link Equity) ไปไว้ที่ URL หลักเพียงหน้าเดียว
+
+### Q2: ทำไมรูปภาพในแท็ก Open Graph (`og:image`) จึงต้องใช้ Absolute URL เสมอ?
+**แนวทางคำตอบ**: เพราะเครื่องมือดึงข้อมูลพรีวิว (Scraper / Crawler) ของแพลตฟอร์มโซเชียลมีเดีย เช่น Facebook, LINE, หรือ X เป็นระบบภายนอกที่ส่งบอทเข้ามาดึงเฉพาะ HTML Metadata ของหน้าเว็บ หากเราใส่เป็น Relative URL เช่น `/images/preview.jpg` บอทจะไม่ทราบว่าต้องไปดาวน์โหลดรูปภาพจากโดเมนใด จึงทำให้การ์ดพรีวิวแสดงผลลัพธ์เป็นหน้าต่างสีเทาว่างเปล่าไม่มีรูปภาพ

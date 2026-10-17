@@ -1,0 +1,283 @@
+---
+title: queryFn Architecture
+category: Frontend
+parentTitle: TanStack Query v5
+version: TanStack Query v5.x
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+`queryFn` คือฟังก์ชัน Asynchronous ที่ทำหน้าที่ติดต่อกับโลกภายนอก (API, Microservice หรือ Database) เพื่อดึงข้อมูลกลับมาให้ TanStack Query จัดการ
+
+หลักการสำคัญในการออกแบบสถาปัตยกรรม `queryFn` ระดับ Production:
+1. **แยกส่วน API Client ออกจาก UI Component**: ไม่เขียน URL หรือตรรกะการ Fetch แบบฝังตัว (Inline) อยู่ใน JSX
+2. **ต้อง Throw Error เมื่อ HTTP Status ไม่สำเร็จ**: ฟังก์ชัน `fetch()` มาตรฐานของเบราว์เซอร์จะไม่ขว้าง Error เมื่อเซิร์ฟเวอร์ตอบกลับรหัส `404 Not Found` หรือ `500 Internal Server Error` แต่จะมองว่าคำขอสำเร็จ (Resolved) หากเราไม่ตรวจเช็ค `res.ok` และไม่ Throw Error ตัว TanStack Query จะเข้าใจผิดว่าข้อมูลนั้นสำเร็จและนำไปแคชเป็นสถานะ `success`
+3. **ส่งต่อ `signal` (AbortSignal) เสมอ**: เพื่อเปิดใช้งานระบบยกเลิกคำขออัตโนมัติ (Automatic Request Cancellation)
+4. **ทำ Runtime Schema Validation ด้วย Zod**: เพื่อรับประกันว่าข้อมูลที่เซิร์ฟเวอร์ส่งกลับมาตรงกับ TypeScript Type จริงๆ ก่อนส่งต่อให้ UI
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. โครงสร้างของ `QueryFunctionContext`
+
+เมื่อ TanStack Query เรียกใช้งาน `queryFn` มันจะส่งอ็อบเจกต์พิเศษที่เรียกว่า `QueryFunctionContext` เข้ามาให้เป็นพารามิเตอร์แรกเสมอ:
+
+```ts
+type QueryFunctionContext<TQueryKey, TPageParam = never> = {
+  queryKey: TQueryKey;
+  signal: AbortSignal;
+  pageParam?: TPageParam;
+  meta: Record<string, unknown> | undefined;
+};
+```
+
+### 2. การทำงานของ `AbortSignal` ในการยกเลิก Request อัตโนมัติ
+
+```
+[ผู้ใช้คลิกดูสินค้า ID: 101] ───► ยิง Request A (พร้อม signal A)
+           │
+           │ (ผู้ใช้เปลี่ยนใจทันทีกดดูสินค้า ID: 102 ภายใน 100ms)
+           ▼
+[TanStack Query ตรวจพบ Key เปลี่ยน]
+   │
+   ├─► สั่ง signal A.abort() ทันที! (เบราว์เซอร์ตัดการเชื่อมต่อ Request A ทันที)
+   └─► เริ่มยิง Request B (พร้อม signal B ตัวใหม่)
+```
+
+การส่ง `signal` เข้าไปยัง `fetch({ signal })` ช่วยประหยัดแบนด์วิดท์ของผู้ใช้ และลดภาระประมวลผลของเซิร์ฟเวอร์ลงได้อย่างมหาศาล
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+โครงสร้างการออกแบบ API Client ร่วมกับ Zod และ `queryFn`:
+
+### ไฟล์ที่ 1: Custom API Client และ Custom Error Class
+
+```ts filename="src/lib/api-client.ts"
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    public statusText: string,
+    public data?: unknown
+  ) {
+    super(`API Error ${status}: ${statusText}`);
+    this.name = 'ApiError';
+  }
+}
+
+interface RequestOptions extends RequestInit {
+  params?: Record<string, string | number | boolean | undefined>;
+}
+
+export async function apiClient<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
+  const { params, headers, ...customConfig } = options;
+
+  let url = endpoint;
+  if (params) {
+    const searchParams = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined) searchParams.append(key, String(value));
+    });
+    const queryString = searchParams.toString();
+    if (queryString) url += `?${queryString}`;
+  }
+
+  const response = await fetch(url, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...headers,
+    },
+    ...customConfig,
+  });
+
+  if (!response.ok) {
+    let errorData: unknown;
+    try {
+      errorData = await response.json();
+    } catch {
+      errorData = null;
+    }
+    // โยน Custom Error เพื่อให้ TanStack Query ตรวจจับและเข้าสถานะ isError
+    throw new ApiError(response.status, response.statusText, errorData);
+  }
+
+  return response.json();
+}
+```
+
+### ไฟล์ที่ 2: นิยาม Zod Schema และ queryFn สำหรับคำสั่งซื้อ (Order)
+
+```ts filename="src/features/orders/api/order-service.ts"
+import { z } from 'zod';
+import { QueryFunctionContext } from '@tanstack/react-query';
+import { apiClient } from '@/lib/api-client';
+
+// 1. Zod Schema สำหรับตรวจสอบโครงสร้างคำสั่งซื้อ
+export const OrderItemSchema = z.object({
+  productId: z.string(),
+  productName: z.string(),
+  quantity: z.number().int().positive(),
+  unitPrice: z.number(),
+});
+
+export const OrderDetailSchema = z.object({
+  id: z.string(),
+  orderNumber: z.string(),
+  createdAt: z.string(),
+  status: z.enum(['pending', 'processing', 'shipped', 'delivered', 'cancelled']),
+  totalAmount: z.number(),
+  items: z.array(OrderItemSchema),
+});
+
+export type OrderDetail = z.infer<typeof OrderDetailSchema>;
+
+// 2. queryFn Architecture พร้อม Signal Cancellation และ Zod Validation
+export async function getOrderDetail({
+  queryKey,
+  signal,
+}: QueryFunctionContext<readonly ['orders', 'detail', string]>): Promise<OrderDetail> {
+  const [, , orderId] = queryKey; // ดึง Parameter จาก Query Key โดยตรง
+
+  const rawData = await apiClient<unknown>(`/api/orders/${orderId}`, {
+    signal, // ส่งต่อ AbortSignal เพื่อยกเลิกคำขอเมื่อ Unmount
+  });
+
+  // ตรวจสอบความถูกต้องของข้อมูล Runtime ป้องกันบั๊กจาก API
+  const parsed = OrderDetailSchema.safeParse(rawData);
+  if (!parsed.success) {
+    console.error('API Response Schema Mismatch:', parsed.error);
+    throw new Error('โครงสร้างข้อมูลคำสั่งซื้อไม่ถูกต้อง');
+  }
+
+  return parsed.data;
+}
+```
+
+### ไฟล์ที่ 3: คอมโพเนนต์แสดงผลหน้าคำสั่งซื้อ
+
+```tsx filename="src/features/orders/components/OrderTrackingView.tsx"
+'use client';
+
+import React from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { getOrderDetail, OrderDetail } from '../api/order-service';
+
+export function OrderTrackingView({ orderId }: { orderId: string }) {
+  const { data: order, isPending, isError, error } = useQuery({
+    queryKey: ['orders', 'detail', orderId] as const,
+    queryFn: getOrderDetail,
+    staleTime: 15 * 1000,
+  });
+
+  if (isPending) {
+    return <div className="h-48 rounded-xl bg-gray-100 animate-pulse" />;
+  }
+
+  if (isError) {
+    return (
+      <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-red-600">
+        เกิดข้อผิดพลาด: {error.message}
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+      <div className="flex justify-between border-b pb-4">
+        <div>
+          <h2 className="text-lg font-bold">หมายเลขคำสั่งซื้อ: {order.orderNumber}</h2>
+          <span className="text-xs text-gray-500">วันที่สั่งซื้อ: {order.createdAt}</span>
+        </div>
+        <span className="rounded-full bg-blue-100 px-3 py-1 text-xs font-semibold text-blue-800 uppercase">
+          {order.status}
+        </span>
+      </div>
+
+      <ul className="mt-4 divide-y">
+        {order.items.map((item) => (
+          <li key={item.productId} className="py-2 flex justify-between text-sm">
+            <span>{item.productName} x {item.quantity}</span>
+            <span className="font-semibold">฿{(item.unitPrice * item.quantity).toLocaleString()}</span>
+          </li>
+        ))}
+      </ul>
+
+      <div className="mt-4 border-t pt-4 text-right">
+        <span className="text-sm text-gray-500">ยอดรวมสุทธิ: </span>
+        <span className="text-xl font-bold text-emerald-600">฿{order.totalAmount.toLocaleString()}</span>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม (useEffect vs TanStack Query)
+
+| ปัจจัย | วิธีเดิม (Inline fetch ใน useEffect) | สถาปัตยกรรม `queryFn` + API Client |
+| :--- | :--- | :--- |
+| **HTTP Error Handling** | มักลืมตรวจ `res.ok` ทำให้ Response 500 ถูกมองว่าสำเร็จ | จัดการขว้าง `ApiError` จากศูนย์กลาง TanStack Query เข้าสู่ `isError` ทันที |
+| **Request Cancellation** | ต้องเขียน `new AbortController()` และ return cleanup เองทุกหน้า | รับ `signal` จาก `QueryFunctionContext` ส่งต่อให้ `fetch` ได้ใน 1 บรรทัด |
+| **Runtime Validation** | ใช้ `as OrderDetail` หลอก TypeScript หาก API มีการเปลี่ยนฟิลด์จะเกิด White Screen of Death | ใช้ `Zod.parse` ตรวจสอบ หากไม่ตรงจะ Fail อย่างปลอดภัยพร้อม Log แจ้งเตือน |
+| **การ Re-use ฟังก์ชัน API** | ดึงข้อมูลกระจายตามไฟล์ ย้ายไปหน้าอื่นต้องก๊อปปี้โค้ด | ฟังก์ชัน `queryFn` เป็น Pure Function เรียกใช้ซ้ำได้ทั้งใน React และ Node.js |
+
+---
+
+## 5. ผิด vs ถูก
+
+### แบบที่ผิด ❌: ส่งคืน `res.json()` ตรงๆ โดยไม่ตรวจ `res.ok`
+
+```tsx
+// ❌ ผิดมหันต์: ถ้าเซิร์ฟเวอร์ตอบ 404 หรือ 500 fetch() จะไม่ reject!
+// ผลลัพธ์: useQuery จะคิดว่าสำเร็จ และ data จะมีค่าเป็น { error: "Not Found" }
+const { data, isError } = useQuery({
+  queryKey: ['order', id],
+  queryFn: async () => {
+    const res = await fetch(`/api/orders/${id}`);
+    return res.json(); // ❌ ไม่มี throw Error ทำให้ isError จะไม่เป็น true!
+  },
+});
+```
+
+### แบบที่ถูก ✅: เช็ค `res.ok` หรือใช้ API Client Wrapper ที่ Throw เสมอ
+
+```tsx
+// ✅ ถูกต้อง: ดักจับ status code และ throw Error เสมอเมื่อไม่สำเร็จ
+const { data, isError } = useQuery({
+  queryKey: ['order', id],
+  queryFn: async ({ signal }) => {
+    const res = await fetch(`/api/orders/${id}`, { signal });
+    if (!res.ok) {
+      throw new Error(`โหลดข้อมูลไม่สำเร็จ (Status: ${res.status})`);
+    }
+    return res.json();
+  },
+});
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรทำ Runtime Validation (Zod) ใน `queryFn` เมื่อ:
+- ข้อมูลส่งมาจาก Third-Party API ภายนอกที่เราไม่ได้เป็นผู้พัฒนาเอง
+- ฟิลด์ในข้อมูลมีความเสี่ยงสูงต่อการเกิด Crash บน UI (เช่น ค่าที่เป็นตัวเลขคำนวณเงิน, Nested Array)
+
+### อาจใช้เพียง TypeScript Interface ธรรมดาเมื่อ:
+- เป็นโปรเจกต์ Fullstack ที่ใช้ End-to-end Type Safety เช่น tRPC หรือ Server Actions ซึ่งมีการแชร์ Types ระหว่างหน้าบ้านและหลังบ้านอย่างปลอดภัยอยู่แล้ว เพื่อลดภาระการ Parse บนอุปกรณ์ความเร็วต่ำ
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการใช้ Native `fetch` ใน `queryFn` โดยไม่เขียน `if (!res.ok) throw new Error()` จึงถือเป็นข้อผิดพลาดร้ายแรง?
+**แนวทางตอบ**:
+เพราะข้อกำหนดของ Promise จาก `window.fetch()` จะ Reject เฉพาะเมื่อเกิด Network Failure (เช่น สายแลนหลุด หรือ DNS ล่ม) เท่านั้น แต่ในกรณีที่เซิร์ฟเวอร์ตอบกลับมาเป็น HTTP Error เช่น `400 Bad Request`, `401 Unauthorized`, `404 Not Found`, หรือ `500 Internal Server Error` ตัว `fetch()` จะถือว่าการเชื่อมต่อสำเร็จ (Resolved) หากเราไม่ตรวจเช็ค `res.ok` แล้วสั่ง `throw new Error()` ตัว TanStack Query จะไม่ทราบว่าเกิดข้อผิดพลาด ส่งผลให้ `isError` เป็น `false`, `isPending` เป็น `false`, และข้อมูล Error Payload จะถูกเก็บลงในตัวแปร `data` เสมือนข้อมูลปกติ ทำให้ UI พังในจังหวะ Render
+
+### Q2: พารามิเตอร์ `signal` ที่ส่งมาใน `QueryFunctionContext` มีหลักการทำงานอย่างไร?
+**แนวทางตอบ**:
+`signal` คืออินสแตนซ์ของ `AbortSignal` ที่สร้างขึ้นโดยอัตโนมัติจาก Query Instance นั้นๆ เมื่อเราส่ง `signal` ไปยัง `fetch(url, { signal })` หากคอมโพเนนต์ถูก Unmount ก่อนที่คำขอจะเสร็จ หรือหาก Query Key เปลี่ยนไปเนื่องจากผู้ใช้เปลี่ยน Filter ตัว TanStack Query จะสั่ง `abort()` ทันที ทำให้เบราว์เซอร์ยุติการดาวน์โหลดข้อมูลและปิด TCP Connection นั้น ช่วยประหยัดแบนด์วิดท์ ป้องกันปัญหา Race Condition และป้องกัน Memory Leak ได้อย่างมีประสิทธิภาพ

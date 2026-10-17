@@ -1,0 +1,456 @@
+---
+title: Data Wrangling & Pipelines
+category: Frontend
+parentTitle: Recharts
+version: Recharts v3 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+หัวใจสำคัญของการสร้าง Data Visualization ที่ถูกต้องและน่าเชื่อถือไม่ได้อยู่ที่ความสวยงามของกราฟ แต่อยู่ที่ **"ความสมบูรณ์และโครงสร้างของข้อมูล (Data Integrity & Shape)"**
+
+Recharts ถูกออกแบบมาให้รับชุดข้อมูลในรูปแบบมาตรฐานที่เป็น **"Array of Flat Objects"** เสมอ ตัวอย่างเช่น:
+
+```typescript
+// โครงสร้างที่ Recharts ต้องการ (Chart-ready Format)
+[
+  { date: '2026-10-01', revenue: 15000, cost: 9000 },
+  { date: '2026-10-02', revenue: 22000, cost: 12000 },
+]
+```
+
+ทว่าในโลกการทำงานจริง ข้อมูลจากฐานข้อมูลระดับ Enterprise ผ่าน **NestJS, Prisma ORM หรือ REST/GraphQL API** แทบไม่เคยส่งข้อมูลมาในรูปแบบนี้โดยตรง แต่มักจะมาในรูปแบบใดรูปแบบหนึ่งดังต่อไปนี้:
+
+1. **Transaction Records (ข้อมูลธุรกรรมดิบ)**: แต่ละรายการมี `id`, `createdAt`, `amount`, `status`, `category`
+2. **Sparse Time-series (ข้อมูลที่มีช่องว่างของเวลา)**: วันที่ไม่มีการขายจะไม่มีเรคอร์ดในฐานข้อมูล ส่งผลให้วันที่กระโดดข้าม
+3. **Relational / Nested Objects**: ข้อมูลซ้อนกันหลายระดับ เช่น `order.items[].product.category`
+
+หน้าที่ของ Fullstack Developer จึงเป็นการสร้าง **Data Transformation Pipeline** เพื่อทำ Data Cleansing, Grouping, Zero-filling, และ Normalization ให้พร้อมป้อนเข้าสู่ Recharts อย่างมีประสิทธิภาพสูงสุด
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### สถาปัตยกรรม Data Wrangling Pipeline
+
+```
+[ Backend: NestJS + Prisma ORM ]
+  │  (ยิง Query ดึง Transactions หรือ prisma.order.groupBy)
+  ▼
+[ Raw API Payload ]
+  [ { date: '2026-10-01', amount: 500 }, { date: '2026-10-03', amount: 800 } ]  <-- วันที่ 02 หายไป!
+  │
+  ▼
+[ Pipeline 1: Group By & Aggregate (Map/Hash Table - O(N)) ]
+  จัดกลุ่มตามวัน และรวมยอด (Reduce)
+  │
+  ▼
+[ Pipeline 2: Zero-filling Gap Ranges (Date Filling) ]
+  สร้าง Timeline ครบทุกวัน และเติมยอดขาย 0 ให้กับวันที่ 02
+  │
+  ▼
+[ Pipeline 3: Normalization & Percentage Calculation (Optional) ]
+  คำนวณสัดส่วน 100% สำหรับ Stacked Bar หรือ Donut Chart
+  │
+  ▼
+[ useMemo Optimization Layer ]
+  แคชข้อมูลผลลัพธ์ ไม่ให้คำนวณซ้ำเมื่อ Parent Re-render
+  │
+  ▼
+[ Recharts Chart Component ]
+  วาด SVG กราฟได้อย่างถูกต้อง สเกลสมส่วน เส้นไม่กระโดด
+```
+
+### การบริหาร Time Complexity: $O(N)$ vs $O(N^2)$
+
+ข้อผิดพลาดที่พบบ่อยในการแปลงข้อมูลบน Client คือการใช้ฟังก์ชันค้นหาซ้อนลูป เช่น:
+
+```typescript
+// ❌ ผิดมหันต์: Time Complexity คือ O(Days * Records) = O(N^2)
+dateRange.map(day => {
+  const sum = transactions
+    .filter(t => isSameDay(t.createdAt, day)) // ลูปค้นหาซ้ำทุกวัน!
+    .reduce((acc, curr) => acc + curr.amount, 0);
+  return { date: day, total: sum };
+});
+```
+
+วิธีที่ถูกต้องคือการใช้ **Hash Map (หรือ JavaScript `Map`)** เพื่อรวมยอดในลูปแรก $O(N)$ แล้วจึงนำ Map มา Lookup ตอนจับคู่ช่วงเวลาด้วย $O(1)$ ส่งผลให้ Pipeline ทำงานเร็วขึ้นหลายสิบเท่าเมื่อมีรายการธุรกรรมหลักพันถึงหลักหมื่นรายการ
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่างที่ 1: Time-series Zero-filling & Grouping Pipeline
+
+ตัวอย่างนี้สาธิตฟังก์ชันแปลงข้อมูลธุรกรรมดิบให้กลายเป็น Time-series รายวัน โดยตรวจสอบและเติมวันที่ที่ไม่มีการสั่งซื้อให้เป็น `0` เพื่อป้องกันเส้นกราฟหักมุมกระโดดข้ามวัน
+
+```tsx filename="src/lib/transformers/sales-pipeline.ts"
+export interface RawTransaction {
+  id: string;
+  createdAt: string; // ISO 8601 string
+  amount: number;
+  category: 'hardware' | 'software' | 'services';
+}
+
+export interface DailyChartPoint {
+  date: string;
+  displayDate: string;
+  hardware: number;
+  software: number;
+  services: number;
+  total: number;
+}
+
+/**
+ * ฟังก์ชันสร้างช่วงวันที่แบบต่อเนื่อง (Continuous Date Array)
+ */
+function generateDateRange(startDate: Date, endDate: Date): string[] {
+  const dates: string[] = [];
+  const current = new Date(startDate);
+  current.setHours(0, 0, 0, 0);
+
+  const end = new Date(endDate);
+  end.setHours(0, 0, 0, 0);
+
+  while (current <= end) {
+    dates.push(current.toISOString().split('T')[0]); // 'YYYY-MM-DD'
+    current.setDate(current.getDate() + 1);
+  }
+  return dates;
+}
+
+/**
+ * Pipeline แปลง Raw Transactions เป็น Chart-ready Data พร้อม Zero-filling
+ */
+export function transformTransactionsToDailyChart(
+  transactions: RawTransaction[],
+  startDate: Date,
+  endDate: Date
+): DailyChartPoint[] {
+  // 1. สร้าง Hash Map สำหรับสะสมยอดขาย: Key = 'YYYY-MM-DD'
+  const aggregationMap = new Map<string, { hardware: number; software: number; services: number }>();
+
+  // 2. รวมยอดขายแบบ O(N)
+  for (const tx of transactions) {
+    const txDate = tx.createdAt.split('T')[0];
+    const current = aggregationMap.get(txDate) || { hardware: 0, software: 0, services: 0 };
+
+    if (tx.category === 'hardware') current.hardware += tx.amount;
+    else if (tx.category === 'software') current.software += tx.amount;
+    else if (tx.category === 'services') current.services += tx.amount;
+
+    aggregationMap.set(txDate, current);
+  }
+
+  // 3. สร้าง Timeline วันที่ครบถ้วน และเติม 0 สำหรับวันที่ไม่มีข้อมูล (Zero-filling)
+  const fullDateRange = generateDateRange(startDate, endDate);
+
+  return fullDateRange.map((dateStr) => {
+    const metrics = aggregationMap.get(dateStr) || { hardware: 0, software: 0, services: 0 };
+    const dateObj = new Date(dateStr);
+    
+    // จัด Format ภาษาไทยสำหรับแกนกราฟ
+    const displayDate = new Intl.DateTimeFormat('th-TH', {
+      day: 'numeric',
+      month: 'short',
+    }).format(dateObj);
+
+    return {
+      date: dateStr,
+      displayDate,
+      hardware: metrics.hardware,
+      software: metrics.software,
+      services: metrics.services,
+      total: metrics.hardware + metrics.software + metrics.services,
+    };
+  });
+}
+```
+
+#### การนำไปใช้งานใน React Component ร่วมกับ `useMemo`
+
+```tsx filename="src/components/dashboard/transaction-trend-chart.tsx"
+'use client';
+
+import * as React from 'react';
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import { RawTransaction, transformTransactionsToDailyChart } from '@/lib/transformers/sales-pipeline';
+
+interface Props {
+  transactions: RawTransaction[];
+  startDate: Date;
+  endDate: Date;
+}
+
+export function TransactionTrendChart({ transactions, startDate, endDate }: Props) {
+  // ป้องกันการคำนวณซ้ำทุก Render ด้วย useMemo
+  const chartData = React.useMemo(() => {
+    return transformTransactionsToDailyChart(transactions, startDate, endDate);
+  }, [transactions, startDate, endDate]);
+
+  return (
+    <div className="w-full rounded-2xl border border-border bg-card p-6 shadow-sm">
+      <h3 className="mb-1 text-lg font-bold text-card-foreground">
+        ยอดขายสะสมแยกตามแผนกสินค้า
+      </h3>
+      <p className="mb-6 text-sm text-muted-foreground">
+        ข้อมูลสมบูรณ์พร้อมระบบชดเชยวันที่ไม่มีรายการสั่งซื้อ (Zero-filled)
+      </p>
+
+      <div className="h-[340px] w-full min-w-0">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={chartData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" vertical={false} className="stroke-border/60" />
+            <XAxis dataKey="displayDate" tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} />
+            <YAxis tickFormatter={(v) => `฿${(v / 1000).toFixed(0)}k`} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} />
+            <Tooltip
+              formatter={(value: number) => [`฿${value.toLocaleString()}`, '']}
+              labelClassName="font-semibold text-foreground"
+            />
+            <Legend />
+            <Line type="monotone" dataKey="hardware" name="ฮาร์ดแวร์" stroke="#3b82f6" strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="software" name="ซอฟต์แวร์" stroke="#10b981" strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="services" name="บริการ" stroke="#f59e0b" strokeWidth={2} dot={false} />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: Prisma Aggregation Adapter & 100% Percentage Share Calculator
+
+ตัวอย่างนี้แสดงการแปลงผลลัพธ์จากคำสั่ง `prisma.orderItem.groupBy` ของ NestJS Backend มาคำนวณหาสัดส่วนเปอร์เซ็นต์ (Percentage Share) เพื่อใช้กับ **Donut Chart** และ **100% Stacked BarChart**
+
+```tsx filename="src/lib/transformers/category-share-pipeline.ts"
+// ผลลัพธ์ดิบจาก NestJS Backend (Prisma groupBy response)
+export interface PrismaCategoryGroupResult {
+  categoryId: string;
+  categoryName: string;
+  _sum: {
+    totalRevenue: number | null;
+    quantity: number | null;
+  };
+}
+
+export interface DonutChartItem {
+  id: string;
+  name: string;
+  revenue: number;
+  percentage: number; // สัดส่วน 0 - 100%
+  formattedPercentage: string; // เช่น '24.5%'
+}
+
+/**
+ * ฟังก์ชันคำนวณสัดส่วนร้อยละสำหรับ Donut / Pie Chart
+ */
+export function calculateCategoryShare(
+  data: PrismaCategoryGroupResult[]
+): DonutChartItem[] {
+  // 1. รวมยอดขายทั้งหมดเป็นตัวหาร
+  const grandTotal = data.reduce((sum, item) => sum + (item._sum.totalRevenue || 0), 0);
+
+  if (grandTotal === 0) return [];
+
+  // 2. คำนวณร้อยละของแต่ละกลุ่ม
+  return data
+    .map((item) => {
+      const revenue = item._sum.totalRevenue || 0;
+      const share = (revenue / grandTotal) * 100;
+
+      return {
+        id: item.categoryId,
+        name: item.categoryName,
+        revenue,
+        percentage: Number(share.toFixed(1)),
+        formattedPercentage: `${share.toFixed(1)}%`,
+      };
+    })
+    .sort((a, b) => b.revenue - a.revenue); // เรียงจากยอดมากไปน้อย
+}
+```
+
+#### การนำไปใช้ใน Donut Chart
+
+```tsx filename="src/components/dashboard/category-share-donut.tsx"
+'use client';
+
+import * as React from 'react';
+import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts';
+import { calculateCategoryShare, PrismaCategoryGroupResult } from '@/lib/transformers/category-share-pipeline';
+
+const PALETTE = ['#2563eb', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
+
+interface Props {
+  apiData: PrismaCategoryGroupResult[];
+}
+
+export function CategoryShareDonut({ apiData }: Props) {
+  const chartData = React.useMemo(() => calculateCategoryShare(apiData), [apiData]);
+
+  return (
+    <div className="flex flex-col items-center rounded-2xl border border-border bg-card p-6 shadow-sm">
+      <h3 className="self-start text-lg font-bold text-card-foreground">
+        สัดส่วนยอดขายตามหมวดหมู่
+      </h3>
+      
+      <div className="relative h-[260px] w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            <Tooltip
+              formatter={(value: number, name: string, item: any) => [
+                `฿${value.toLocaleString()} (${item.payload.formattedPercentage})`,
+                name,
+              ]}
+            />
+            <Pie
+              data={chartData}
+              dataKey="revenue"
+              nameKey="name"
+              innerRadius={65}
+              outerRadius={95}
+              paddingAngle={4}
+            >
+              {chartData.map((entry, index) => (
+                <Cell key={`cell-${entry.id}`} fill={PALETTE[index % PALETTE.length]} />
+              ))}
+            </Pie>
+          </PieChart>
+        </ResponsiveContainer>
+
+        {/* จุดศูนย์กลางแสดงข้อความบอกภาพรวม (Center Stat) */}
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+          <span className="text-xs text-muted-foreground">หมวดหมู่ทั้งหมด</span>
+          <span className="text-xl font-extrabold text-foreground">{chartData.length} กลุ่ม</span>
+        </div>
+      </div>
+
+      {/* Custom Legend แสดงเปอร์เซ็นต์อย่างชัดเจน */}
+      <div className="mt-4 grid w-full grid-cols-2 gap-2 text-xs">
+        {chartData.map((item, index) => (
+          <div key={item.id} className="flex items-center gap-2">
+            <span
+              className="h-2.5 w-2.5 rounded-full"
+              style={{ backgroundColor: PALETTE[index % PALETTE.length] }}
+            />
+            <span className="truncate text-muted-foreground">{item.name}</span>
+            <span className="ml-auto font-semibold text-foreground">{item.formattedPercentage}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีอื่น (Client Wrangling vs Backend Aggregation vs Database View)
+
+| ปัจจัย | Client-side Wrangling (TypeScript) | Backend Aggregation (NestJS/Prisma) | Database Materialized View (PostgreSQL) |
+| :--- | :--- | :--- | :--- |
+| **ขนาดของ Payload ข้าม Network** | สูง (เพราะต้องโหลด Raw Transactions ส่งมาที่เบราว์เซอร์) | **ต่ำมาก** (ส่งเฉพาะผลรวม เช่น 30 จุดตามวันที่) | **ต่ำมากที่สุด** (ดึงจาก Cache ตารางล่วงหน้า) |
+| **ความยืดหยุ่นในการแปลงข้อมูล** | **ยืดหยุ่นสูงสุด** ปรับ Filter, เปลี่ยน Timezone, หรือจัดกลุ่มตาม UI ได้ทันที | ปานกลาง ต้องออก REST endpoint ใหม่เมื่อเพิ่มมิติข้อมูล | ต่ำ ต้อง Migrate Schema หรือ Refresh View |
+| **ผลกระทบต่อ Memory/CPU** | ใช้ CPU ของเบราว์เซอร์ผู้ใช้ อาจกระตุกหากมีเกิน 50,000 แถว | ใช้ CPU ฝั่ง Node.js Server | ใช้ทรัพยากรฝั่งฐานข้อมูล |
+| **คำแนะนำในการสถาปัตยกรรม** | เหมาะกับข้อมูลธุรกรรมหลักร้อยถึงพันจุด หรือฟิลเตอร์แบบไดนามิก | **แนะนำเป็นหลักสำหรับระบบ Production ทั่วไป** | เหมาะกับ Big Data รายงานระดับองค์กรหลายล้านเรคอร์ด |
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practices)
+
+### ข้อผิดพลาดที่ 1: ละเลยการทำ Zero-filling จนเส้นกราฟกระโดดข้ามช่วงเวลา
+
+```typescript
+// ❌ ผิด: ส่งข้อมูลดิบที่มีเฉพาะวันที่มียอดขายเข้า Recharts
+const rawData = [
+  { date: '2026-10-01', sales: 100 },
+  { date: '2026-10-05', sales: 300 } // วันที่ 2, 3, 4 หายไป
+];
+// ผลลัพธ์: กราฟจะลากเส้นตรงจาก 1 ไป 5 ทำให้ผู้ใช้เข้าใจผิดว่ามียอดขายเฉลี่ยคงที่ตลอด 4 วัน
+
+// ✅ ถูกต้อง: เติม 0 ให้กับวันที่ขาดหายไปเสมอ
+const filledData = [
+  { date: '2026-10-01', sales: 100 },
+  { date: '2026-10-02', sales: 0 },
+  { date: '2026-10-03', sales: 0 },
+  { date: '2026-10-04', sales: 0 },
+  { date: '2026-10-05', sales: 300 }
+];
+```
+
+### ข้อผิดพลาดที่ 2: วาง Data Pipeline ไว้ใน Component Body โดยไม่มี `useMemo`
+
+```tsx
+// ❌ ผิด: ทุกครั้งที่คอมโพเนนต์ re-render (เช่น ผู้ใช้ขยับเมาส์ หรือมี state อื่นเปลี่ยน)
+// ฟังก์ชันลูปข้อมูล 10,000 แถวจะถูกรันซ้ำทุกครั้ง ทำให้ UI กระตุก
+export function BadChart({ rawOrders }: Props) {
+  const chartData = rawOrders.map(...).filter(...).reduce(...);
+  return <LineChart data={chartData} ... />;
+}
+
+// ✅ ถูกต้อง: ครอบด้วย useMemo เพื่อให้รันเฉพาะเมื่อ rawOrders เปลี่ยนแปลง
+export function GoodChart({ rawOrders }: Props) {
+  const chartData = React.useMemo(() => {
+    return transformOrders(rawOrders);
+  }, [rawOrders]);
+  return <LineChart data={chartData} ... />;
+}
+```
+
+### ข้อผิดพลาดที่ 3: ส่ง Key ที่มีค่า `undefined` หรือ `null` ปะปน
+
+```typescript
+// ❌ ผิด: มีบาง Object ที่ค่าเป็น undefined
+const data = [
+  { date: '01', profit: 200 },
+  { date: '02' } // profit เป็น undefined! Recharts จะหยุดวาดเส้นขาดช่วง
+];
+
+// ✅ ถูกต้อง: กำหนด Fallback Value เป็น 0 หรือ null อย่างชัดเจน
+const sanitizedData = data.map(d => ({
+  date: d.date,
+  profit: d.profit ?? 0
+}));
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรทำ Data Wrangling บน Client-side เมื่อ:
+- ข้อมูลมีขนาดเล็กถึงปานกลาง (`< 5,000` เรคอร์ด) เช่น ยอดขายรายเดือนของลูกค้ารายบุคคล
+- ผู้ใช้ต้องการสลับฟิลเตอร์อย่างรวดเร็ว เช่น กรองระหว่าง "ฮาร์ดแวร์" กับ "ซอฟต์แวร์" โดยไม่ต้องการยิง API ใหม่ให้เสียเวลา
+- จำเป็นต้องจัด Format วันที่และเวลาตาม Locale / Timezone ประจำเครื่องผู้ใช้งาน (User's Local Browser Time)
+
+### ไม่ควรทำ Data Wrangling บน Client-side เมื่อ:
+- ข้อมูลธุรกรรมดิบมีขนาดใหญ่เกิน 10,000 เรคอร์ดขึ้นไป (ควรสั่ง `SUM()`, `AVG()` หรือ `GROUP BY` ในระดับ PostgreSQL หรือ NestJS Service)
+- อุปกรณ์เป้าหมายของผู้ใช้คือสมาร์ตโฟนสเปกประหยัด (Budget Mobile Devices) ซึ่งมีขีดจำกัดด้าน RAM และ CPU
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: หากมีข้อมูลธุรกรรมประวัติการขาย 50,000 รายการในฐานข้อมูล และต้องการแสดงกราฟยอดขายรายวัน 30 วันที่ผ่านมา คุณจะออกแบบ Data Pipeline สถาปัตยกรรมอย่างไรระหว่าง Backend (NestJS/Prisma) และ Frontend (Next.js/Recharts)?
+**แนวทางตอบแบบ Senior Developer**:
+1. **หลีกเลี่ยงการส่ง 50,000 เรคอร์ดข้าม Network**: จะไม่ดึงข้อมูลดิบมาทำ reduce บน Client เด็ดขาด เพราะจะเกิดปัญหา Network Latency และ Memory Bloat
+2. **ทำ Database-level Aggregation**: ใน NestJS ให้ใช้ `prisma.order.groupBy` หรือเขียน Raw SQL Query ด้วย `date_trunc('day', created_at)` พร้อมคำสั่ง `SUM(amount)` ซึ่ง PostgreSQL จะรันเสร็จในเวลาไม่กี่มิลลิวินาทีผ่าน Index
+3. **ส่ง Compact Payload**: ส่งเฉพาะข้อมูลที่ Aggregate แล้วกลับมายัง Client ซึ่งจะมีขนาดเพียง 30 แถว (ประมาณ 2-3 KB)
+4. **Client-side Responsibility**: ฝั่ง Client (Next.js) จะทำหน้าที่เพียง Zero-filling (กรณีบางวันที่ยอดขายเป็น 0 และ DB ไม่ได้คืนแถวมา) และจัดฟอร์แมตภาษาไทยสำหรับแกน X ด้วย `useMemo`
+
+### Q2: ในการทำกราฟเส้นแบบ Time-series ทำไมการทำ "Zero-filling" จึงเป็นข้อบังคับด้าน Data Ethics & UX (ความถูกต้องในการตีความข้อมูล)?
+**แนวทางตอบแบบ Senior Developer**:
+หากเราไม่เติม 0 ในวันที่ไม่มีข้อมูล กราฟเส้นจะเชื่อมต่อจุดข้อมูลที่มีอยู่เข้าด้วยกันโดยตรง เช่น จากวันที่ 1 ต.ค. (ยอด 1,000 บาท) ไปยังวันที่ 5 ต.ค. (ยอด 1,000 บาท) โดยข้ามวันที่ 2, 3, 4 ไป เส้นกราฟจะปรากฏเป็นเส้นตรงแนวนอนที่คงที่ ทำให้ผู้บริหารหรือผู้ใช้งานเข้าใจผิดว่าธุรกิจยังมียอดขายต่อเนื่อง ทั้งที่ความเป็นจริง 3 วันนั้นยอดขายเป็น 0 บาท การทำ Zero-filling ช่วยสะท้อนความจริงว่ากราฟตกลงแตะแกนศูนย์ ทำให้การวิเคราะห์ทางธุรกิจ (Business Intelligence) มีความเที่ยงตรงและไม่ก่อให้เกิดความเข้าใจผิด

@@ -1,0 +1,134 @@
+---
+title: Primitives & Types
+category: Frontend
+parentTitle: TypeScript
+version: v5.6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ใน JavaScript ดั้งเดิม ตัวแปรสามารถเปลี่ยนชนิดข้อมูลไปมาได้อย่างอิสระ (Dynamically Typed) เช่น เริ่มต้นเป็นตัวเลข แล้วถูกเปลี่ยนเป็นข้อความ ซึ่งมักก่อให้เกิดบั๊กยอดฮิตอย่าง `TypeError: Cannot read properties of undefined` ตอนรันบนโปรดักชัน
+
+**TypeScript Primitive & Core Types** เปรียบเหมือน "ป้ายกำกับเตือนภัย" ที่บังคับให้ตัวแปรแต่ละตัวต้องเก็บข้อมูลเฉพาะชนิดที่กำหนดไว้เท่านั้น ได้แก่ `string`, `number`, `boolean`, `null`, `undefined`, และชนิดข้อมูลพิเศษอย่าง `any`, `unknown`, `never`
+
+---
+
+## 2. หลักการเบื้องหลัง (Type Erasure)
+
+- **Compile Time**: TypeScript Compiler (`tsc`) จะตรวจสอบการกำหนดค่า การเรียกใช้งานเมธอด (เช่น `.toUpperCase()` บนตัวเลขจะโดนดักจับทันที)
+- **Runtime**: ทุก Type Annotation เช่น `: string`, `: number[]` จะ **ถูกลบทิ้งไปทั้งหมด (Type Erasure)** ตัวโค้ดที่รันจริงในเบราว์เซอร์หรือ Node.js จะกลายเป็น JavaScript ธรรมดา 100%
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: Primitives, Arrays, และ Tuples
+
+```typescript
+// 1. Primitive types
+const customerName: string = 'Somchai Prasert';
+const orderAmount: number = 2450.50;
+const isVipCustomer: boolean = true;
+
+// 2. Arrays: ระบุชนิดข้อมูลของสมาชิกในอาเรย์
+const productSkus: string[] = ['SKU-001', 'SKU-002', 'SKU-003'];
+const prices: Array<number> = [190, 450, 1200];
+
+// 3. Tuple: อาเรย์ความยาวคงที่และระบุตำแหน่งของแต่ละ Type ชัดเจน (เช่น พิกัด GPS หรือ [Key, Value])
+const storeCoordinate: [latitude: number, longitude: number] = [13.7563, 100.5018];
+const userRolePair: [userId: string, role: string] = ['usr-99', 'MANAGER'];
+```
+
+### ตัวอย่างที่ 2: Enum vs Union of String Literals, any vs unknown vs never
+
+```typescript
+// ทางเลือก A: TypeScript Enum (จะถูกแปลงเป็น JavaScript IIFE Object ตอน runtime)
+export enum OrderStatusEnum {
+  PENDING = 'PENDING',
+  PAID = 'PAID',
+  SHIPPED = 'SHIPPED',
+}
+
+// ทางเลือก B: Union of Literals (แนะนำมากกว่า! เบากว่าและไม่สร้างโค้ดส่วนเกินตอน runtime)
+export type OrderStatus = 'PENDING' | 'PAID' | 'SHIPPED';
+
+// any vs unknown vs never:
+// 1. any: ปิดการทำงานของ TypeScript ทันที (อันตรายที่สุด)
+let unsafePayload: any = JSON.parse('{}');
+unsafePayload.nonExistentMethod(); // TS ไม่เตือนอะไรเลย แต่โปรแกรมจะแครชตอนรัน!
+
+// 2. unknown: ปลอดภัยกว่า any เพราะบังคับให้ตรวจสอบ Type ก่อนนำไปใช้งาน
+let rawApiResponse: unknown = fetchUserData();
+// rawApiResponse.toUpperCase(); // ❌ TS Error: 'rawApiResponse' is of type 'unknown'
+
+if (typeof rawApiResponse === 'string') {
+  console.log(rawApiResponse.toUpperCase()); // ✅ ปลอดภัยหลังจาก Narrowing แล้ว
+}
+
+// 3. never: ชนิดข้อมูลของสิ่งที่ไม่สามารถเกิดขึ้นได้ (เช่น ฟังก์ชันที่ throw error เสมอ หรือ infinite loop)
+function fail(message: string): never {
+  throw new Error(`System Failure: ${message}`);
+}
+```
+
+---
+
+## 4. ผิด vs ถูก (Common Mistakes)
+
+### กรณีที่ 1: การใช้ `any` หนีปัญหา Type Error
+```typescript
+// ❌ ผิด: ใช้ any เพื่อให้โค้ดผ่าน ทำให้สูญเสียประโยชน์ของ TypeScript ทั้งหมด
+function calculateTotal(order: any) {
+  return order.items.reduce((sum: any, item: any) => sum + item.cost, 0);
+  // ถ้า backend เปลี่ยนชื่อฟิลด์จาก cost เป็น price โปรแกรมจะแครชเงียบๆ!
+}
+
+// ✅ ถูก: นิยาม Type ที่ชัดเจน หรือใช้ unknown ถ้าไม่แน่ใจ
+interface OrderItem {
+  id: string;
+  price: number;
+  quantity: number;
+}
+
+interface Order {
+  id: string;
+  items: OrderItem[];
+}
+
+function calculateTotal(order: Order): number {
+  return order.items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+}
+```
+*Compiler Error หากเขียนผิด*: หากเผลอพิมพ์ `item.cost` ในโค้ดที่ถูก คอมไพเลอร์จะแจ้งเตือนทันที: `Property 'cost' does not exist on type 'OrderItem'. Did you mean 'price'?`
+
+### กรณีที่ 2: ใช้ Enum ตัวเลขดั้งเดิม (Numeric Enum) ที่ยอมรับตัวเลขแปลกปลอม
+```typescript
+// ❌ ผิด: Numeric Enum ยอมให้ส่งตัวเลขที่ไม่ได้รับอนุญาตเข้ามาได้
+enum Status { Inactive, Active }
+let myStatus: Status = 999; // คอมไพล์ผ่านไม่มีปัญหา แต่ค่าผิดในทางธุรกิจ!
+
+// ✅ ถูก: ใช้ String Literal Union
+type Status = 'INACTIVE' | 'ACTIVE';
+let myStatus: Status = 'ACTIVE';
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- **`unknown`**: ควรใช้รับข้อมูลจากภายนอกที่ไม่ทราบโครงสร้างล่วงหน้า (เช่น ข้อมูลจาก `JSON.parse()`, Third-party API)
+- **`any`**: ห้ามใช้เป็นอันขาด ยกเว้นกรณี Migration โค้ด JavaScript เก่าอย่างเร่งด่วน
+- **Union of Literals**: ควรใช้แทน `enum` ในโปรเจกต์สมัยใหม่เพราะโค้ดสะอาดกว่า ไม่สร้าง JS Object แปลกปลอมตอน compile
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ความแตกต่างระหว่าง `any` กับ `unknown` คืออะไร?
+**แนวทางคำตอบ**: ทั้งคู่รับค่าได้ทุกชนิดข้อมูล แต่ `any` จะเป็นการปิดระบบ Type Check ทั้งหมด อนุญาตให้เข้าถึง Properties ใดๆ ก็ได้โดยไม่มีการตรวจสอบ ส่งผลให้เกิดข้อผิดพลาดตอนรันได้ ส่วน `unknown` ถือเป็น Type-safe Any โดย TypeScript จะไม่อนุญาตให้เรียกใช้งานเมธอดใดๆ บนตัวแปรนั้น จนกว่าเราจะทำการตรวจสอบ Type ให้แน่ชัดก่อน (Type Narrowing)
+
+### Q2: Type `never` มีประโยชน์อย่างไรในการใช้งานจริง?
+**แนวทางคำตอบ**: ใช้ใน 2 สถานการณ์หลัก:
+1. บอกว่าฟังก์ชันจะไม่มีวันส่งคืนค่ากลับมา (เช่น ฟังก์ชันที่โยน Error หรือรันลูปไม่รู้จบ)
+2. ใช้ทำ **Exhaustive Check** ในบล็อก `switch/case` เพื่อให้มั่นใจว่าเราได้ดักจับเงื่อนไขครบทุกเคสแล้ว หากมีเคสใหม่เพิ่มเข้ามา คอมไพเลอร์จะแจ้ง Error ทันที

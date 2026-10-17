@@ -1,0 +1,124 @@
+---
+title: Controllers
+category: Backend
+parentTitle: NestJS 11
+version: v11.0
+updatedAt: 2026-10-17
+---
+
+## 1. คืออะไร และแก้ปัญหาอะไร
+
+**Controllers** ใน NestJS คือหน่วยประมวลผลด่านหน้าที่รับผิดชอบการจัดการ **HTTP Requests** ที่ส่งเข้ามายังเซิร์ฟเวอร์ และส่งมอบ **HTTP Responses** ที่เหมาะสมกลับไปยังไคลเอนต์ (เบราว์เซอร์หรือโมบายแอปพลิเคชัน)
+
+ในระบบ Node.js ดั้งเดิม การเขียน Routing มักใช้รูปแบบ Callback Function กระจัดกระจาย เช่น `app.get('/api/users', (req, res) => { ... })` ซึ่งเมื่อระบบมีเส้นทางบริการจำนวนมาก จะทำให้การจัดการโครงสร้าง URL การดึงพารามิเตอร์ และการทดสอบระบบทำได้ยาก Controllers ใน NestJS เข้ามาแก้ปัญหานี้ด้วยการใช้คลาสเชิงวัตถุร่วมกับ **Decorators** กำหนดเส้นทาง Route Prefix, HTTP Method, และแยกตัวแปรจาก Request อย่างเป็นระเบียบ ช่วยลดความซ้ำซ้อนของโค้ด และสร้างมาตรฐาน RESTful API ที่ชัดเจน
+
+## 2. Module และ Feature หลัก
+
+NestJS มี Decorators ที่ครอบคลุมทุกแง่มุมของการจัดการ HTTP Request และ Response บน Controller ดังนี้:
+
+| Decorator / ฟีเจอร์ | ใช้ทำอะไร |
+| --- | --- |
+| `@Controller('path')` | กำหนดให้คลาสนั้นเป็น Controller พร้อมระบุ Base Route Prefix เช่น `@Controller('users')` |
+| `@Get()`, `@Post()`, `@Put()`, `@Delete()` | กำหนด HTTP Method ที่รองรับสำหรับแต่ละเมธอดภายในคลาส |
+| `@Param('name')` | สกัดค่าพารามิเตอร์จาก URL Path เช่น `/users/:id` จะอ่านค่าได้ด้วย `@Param('id')` |
+| `@Query('name')` | สกัดค่า Query String จาก URL เช่น `/search?keyword=nest` จะอ่านได้ด้วย `@Query('keyword')` |
+| `@Body()` | สกัดข้อมูล Request Body ที่ส่งเข้ามา (มักใช้คู่กับ DTO Class เพื่อตรวจสอบข้อมูล) |
+| `@HttpCode(status)` | กำหนด HTTP Status Code ที่จะตอบกลับ เช่น `@HttpCode(HttpStatus.CREATED)` (201) หรือ 204 |
+| `@UseGuards(...)` | ผูก Guard เพื่อตรวจสอบสิทธิ์การเข้าถึงเฉพาะ Route หรือทั้ง Controller |
+
+## 3. ตัวอย่างโค้ดการใช้งาน
+
+### ตัวอย่าง RESTful Controller พร้อม DTO และ Validation
+
+ตัวอย่างการสร้าง `UsersController` ที่รองรับการค้นหา, ดึงข้อมูลตาม ID, และสร้างผู้ใช้งานใหม่ผ่าน DTO:
+
+```typescript filename="src/users/dto/create-user.dto.ts"
+import { IsEmail, IsNotEmpty, IsString, MinLength } from 'class-validator';
+
+export class CreateUserDto {
+  @IsNotEmpty({ message: 'กรุณาระบุชื่อ-นามสกุล' })
+  @IsString()
+  name: string;
+
+  @IsEmail({}, { message: 'รูปแบบอีเมลไม่ถูกต้อง' })
+  email: string;
+
+  @MinLength(8, { message: 'รหัสผ่านต้องมีความยาวอย่างน้อย 8 ตัวอักษร' })
+  password: string;
+}
+```
+
+```typescript filename="src/users/users.controller.ts"
+import {
+  Controller,
+  Get,
+  Post,
+  Delete,
+  Param,
+  Query,
+  Body,
+  HttpCode,
+  HttpStatus,
+  ParseIntPipe,
+} from '@nestjs/common';
+import { UsersService } from './users.service';
+import { CreateUserDto } from './dto/create-user.dto';
+
+@Controller('users')
+export class UsersController {
+  constructor(private readonly usersService: UsersService) {}
+
+  // GET /users?role=admin
+  @Get()
+  async findAll(@Query('role') role?: string) {
+    return this.usersService.findAll(role);
+  }
+
+  // GET /users/:id (ใช้ ParseIntPipe แปลง string เป็น number อัตโนมัติ)
+  @Get(':id')
+  async findOne(@Param('id', ParseIntPipe) id: number) {
+    return this.usersService.findById(id);
+  }
+
+  // POST /users
+  @Post()
+  @HttpCode(HttpStatus.CREATED) // ส่ง HTTP 201 กลับไปเมื่อสร้างสำเร็จ
+  async create(@Body() createUserDto: CreateUserDto) {
+    return this.usersService.create(createUserDto);
+  }
+
+  // DELETE /users/:id
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT) // ส่ง HTTP 204 (ไม่มีเนื้อหากลับไป)
+  async remove(@Param('id', ParseIntPipe) id: number) {
+    await this.usersService.remove(id);
+  }
+}
+```
+
+## 4. Callout สำคัญที่ควรรู้
+
+<Callout type="tip" title="NestJS ทำ JSON Serialization ให้อัตโนมัติ">
+ใน Controller ของ NestJS คุณสามารถส่งคืน JavaScript Object, Array หรือ Promise ได้โดยตรง ตัวเฟรมเวิร์กจะแปลงข้อมูลเป็น JSON Format และส่งค่า HTTP Status Code 200 (หรือ 201 สำหรับ `@Post()`) กลับไปให้อัตโนมัติ โดยไม่จำเป็นต้องสั่ง `res.status(200).json(...)` เหมือนใน Express
+</Callout>
+
+<Callout type="note" title="หลีกเลี่ยงการใช้ @Res() โดยไม่จำเป็น">
+หากคุณนำเข้า `@Res()` หรือ `@Response()` จาก Express มาใช้ในพารามิเตอร์ของเมธอด NestJS จะเปลี่ยนเข้าสู่โหมดควบคุมด้วยตนเอง (Manual Mode) ทันที ส่งผลให้คุณสมบัติอัตโนมัติบางอย่าง เช่น Interceptors และ Exception Filters อาจทำงานไม่สมบูรณ์ หากต้องการใช้ ให้เติม `{ passthrough: true }` เสมอ
+</Callout>
+
+<Callout type="warning" title="อย่าปล่อยให้ข้อมูลผ่านเข้า Controller โดยไม่ใช้ DTO">
+การรับ `@Body() body: any` โดยไม่มีคลาส DTO และตัวตรวจทาน (Validation) เป็นช่องโหว่ความปลอดภัยที่ร้ายแรง เพราะผู้ไม่หวังดีสามารถแนบฟิลด์แปลกปลอม เช่น `isAdmin: true` เข้ามาทำลายระบบได้
+</Callout>
+
+## 5. ข้อควรระวังและ Best Practices
+
+- **ควบคุมความรับผิดชอบให้กระชับ (Keep Controllers Thin)**: Controller ควรทำหน้าที่เพียงเป็นตัวเชื่อมระหว่าง HTTP Request กับ Application Service หากพบว่าเมธอดใน Controller มีความยาวเกิน 15-20 บรรทัด นั่นเป็นสัญญาณว่าควรย้ายตรรกะการคำนวณหรือการเรียกฐานข้อมูลไปไว้ใน Service
+- **ใช้ Type Pipes แปลงข้อมูล**: ข้อมูลจาก URL Path และ Query String จะเข้ามาเป็น String เสมอ ควรใช้ Built-in Pipes เช่น `ParseIntPipe`, `ParseUUIDPipe` หรือ `ParseBoolPipe` เพื่อแปลงชนิดข้อมูลและปฏิเสธคำขอที่ไม่ตรงเงื่อนไขตั้งแต่ชั้นแรก
+- **กำหนด HTTP Status Code ให้ตรงตามมาตรฐาน RESTful**: ใช้ `@HttpCode(HttpStatus.NO_CONTENT)` (204) เมื่อเป็นการลบสำเร็จโดยไม่มีข้อมูลตอบกลับ หรือ 201 เมื่อมีการสร้างทรัพยากรใหม่
+- **รวมกลุ่ม Endpoint ด้วย Path Prefix ที่สอดคล้องกัน**: วางแผน Route ให้เป็นลำดับขั้นชัดเจน เช่น `@Controller('orders')` และมี Sub-routes เป็น `/:id/items` เพื่อให้ API สื่อความหมายเข้าใจง่ายสำหรับผู้ใช้งาน
+
+## 6. แหล่งอ้างอิง (Official Documentation)
+
+- [NestJS Controllers Documentation](https://docs.nestjs.com/controllers) — คู่มือการใช้งาน Controllers และ Routing อย่างเป็นทางการ
+- [Request Object & Param Decorators](https://docs.nestjs.com/controllers#request-object) — รายการ Decorator ทั้งหมดสำหรับสกัดข้อมูลจาก HTTP Request
+- [Validation and Pipes in NestJS](https://docs.nestjs.com/pipes) — วิธีการใช้ ValidationPipe ร่วมกับ Data Transfer Objects

@@ -1,0 +1,236 @@
+---
+title: State Variants & Pseudo-classes
+category: Frontend
+parentTitle: Tailwind CSS v4
+version: Tailwind v4.0 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ในแอปพลิเคชันเว็บระดับโปรดักชัน องค์ประกอบ UI ไม่ได้อยู่นิ่ง แต่มีปฏิสัมพันธ์ตอบสนองกับผู้ใช้ตลอดเวลา:
+- **Interaction States**: `hover:`, `focus:`, `focus-visible:`, `active:`, `disabled:`
+- **Structural Pseudo-classes**: `first:`, `last:`, `odd:`, `even:`
+- **Relational Selectors**:
+  - `group-*`: เปลี่ยนสไตล์ขององค์ประกอบลูกตามสถานะของกล่องแม่
+  - `peer-*`: เปลี่ยนสไตล์ขององค์ประกอบข้างเคียง (Sibling) ตามสถานะของ element ก่อนหน้า
+  - `has-*`: คลาสแห่งอนาคต (Parent Selector) ที่เปลี่ยนสไตล์กล่องแม่ตามสถานะขององค์ประกอบลูกด้านใน
+- **Accessibility & State Attributes**: `aria-*` (เช่น `aria-expanded:`, `aria-invalid:`) และ `data-*` (เช่น `data-[state=open]:`)
+
+Tailwind CSS v4 จัดการเงื่อนไขเหล่านี้ผ่านระบบ Variants ที่สอดคล้องกับมาตรฐาน Modern CSS อย่างไร้รอยต่อ
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### กลไกการคอมไพล์ Variants และ Modern CSS `:has()`
+1. **Focus-visible vs Focus**:
+   `focus-visible:` ทำงานผ่าน `:focus-visible` pseudo-class ซึ่งเบราว์เซอร์จะแสดงผลเฉพาะเมื่อผู้ใช้กดคีย์บอร์ด (Tab Navigation) เท่านั้น แต่จะไม่แสดงกรอบรบกวนสายตาเมื่อคลิกด้วยเมาส์
+2. **The `peer` Sibling Combinator**:
+   เมื่อใส่คลาส `peer` บน Input และ `peer-focus:text-indigo-600` บน Label ที่ตามหลังมา Oxide Engine จะสร้าง CSS:
+   ```css
+   .peer:focus ~ .peer-focus\:text-indigo-600 {
+     color: #4f46e5;
+   }
+   ```
+   *(หมายเหตุ: Element พี่น้องต้องถูกประกาศตามหลัง element ที่มีคลาส `peer` ตามธรรมชาติของ CSS `~`)*
+3. **The `:has()` Selector Mechanism**:
+   คลาส `has-[:checked]:border-indigo-600` ถูกคอมไพล์เป็น:
+   ```css
+   .card:has(:checked) {
+     border-color: #4f46e5;
+   }
+   ```
+   ช่วยให้เราสามารถเปลี่ยนสไตล์ของ Card ทั้งใบเมื่อผู้ใช้คลิกเลือก Radio หรือ Checkbox ด้านในได้โดยไม่ต้องพึ่ง State ใน JavaScript!
+
+---
+
+## 3. ตัวอย่างโค้ด (Tailwind v4 & TSX)
+
+### ตัวอย่างที่ 1: ฟอร์มอินพุตพร้อม Floating Label (AccessibleInputField ด้วย Peer & Focus-visible)
+
+```tsx filename="src/components/AccessibleInputField.tsx"
+import { AlertCircle, Check } from "lucide-react";
+
+interface InputFieldProps {
+  id: string;
+  label: string;
+  type?: string;
+  error?: string;
+  isValid?: boolean;
+  disabled?: boolean;
+}
+
+export function AccessibleInputField({
+  id,
+  label,
+  type = "text",
+  error,
+  isValid = false,
+  disabled = false,
+}: InputFieldProps) {
+  return (
+    <div className="relative w-full">
+      <input
+        id={id}
+        type={type}
+        disabled={disabled}
+        placeholder=" "
+        aria-invalid={Boolean(error)}
+        aria-describedby={error ? `${id}-error` : undefined}
+        className="peer h-12 w-full rounded-xl border border-neutral-300 bg-white px-3.5 pt-4 text-sm text-neutral-900 transition-all focus:border-indigo-600 focus:outline-none focus-visible:ring-4 focus-visible:ring-indigo-600/15 disabled:cursor-not-allowed disabled:bg-neutral-100 disabled:text-neutral-400 aria-[invalid=true]:border-rose-500 aria-[invalid=true]:focus-visible:ring-rose-500/20 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:disabled:bg-neutral-800"
+      />
+
+      {/* Floating Label: ขยับตำแหน่งและย่อขนาดเมื่อ Input ถูก Focus หรือมีข้อความด้านใน */}
+      <label
+        htmlFor={id}
+        className="pointer-events-none absolute left-3.5 top-3.5 z-10 origin-[0] -translate-y-2.5 scale-75 text-xs text-neutral-500 transition-all duration-200 peer-placeholder-shown:translate-y-0 peer-placeholder-shown:scale-100 peer-placeholder-shown:text-sm peer-focus:-translate-y-2.5 peer-focus:scale-75 peer-focus:font-medium peer-focus:text-indigo-600 dark:text-neutral-400 dark:peer-focus:text-indigo-400"
+      >
+        {label}
+      </label>
+
+      {/* ไอคอนสถานะตรวจสอบ */}
+      <div className="pointer-events-none absolute right-3.5 top-3.5 flex items-center">
+        {error && <AlertCircle className="size-5 text-rose-500" />}
+        {!error && isValid && <Check className="size-5 text-emerald-500" />}
+      </div>
+
+      {error && (
+        <p id={`${id}-error`} className="mt-1.5 text-xs font-medium text-rose-500">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: การ์ดตัวเลือกแพ็กเกจอัจฉริยะ (SelectablePricingCard ด้วย `has-*` และ `group-*`)
+
+```tsx filename="src/components/SelectablePricingCard.tsx"
+import { Check, ShieldCheck } from "lucide-react";
+
+interface PlanOption {
+  id: string;
+  name: string;
+  price: string;
+  quota: string;
+}
+
+export function SelectablePricingCard({
+  plans,
+}: {
+  plans: PlanOption[];
+}) {
+  return (
+    <fieldset className="flex flex-col gap-3 w-full max-w-md">
+      <legend className="text-sm font-semibold text-neutral-800 dark:text-neutral-200 mb-2">
+        เลือกแผนบริการที่คุณต้องการ
+      </legend>
+
+      {plans.map((plan) => (
+        // ใช้ has-[:checked] เพื่อเปลี่ยนสไตล์ทั้งกล่องเมื่อ Radio ภายในถูกเลือก
+        <label
+          key={plan.id}
+          className="group relative flex cursor-pointer items-center justify-between rounded-2xl border-2 border-neutral-200 bg-white p-4.5 transition-all hover:border-indigo-300 has-[:checked]:border-indigo-600 has-[:checked]:bg-indigo-50/40 has-[:focus-visible]:ring-4 has-[:focus-visible]:ring-indigo-600/20 dark:border-neutral-800 dark:bg-neutral-900 dark:hover:border-neutral-700 dark:has-[:checked]:border-indigo-500 dark:has-[:checked]:bg-indigo-950/20"
+        >
+          <div className="flex items-center gap-3.5">
+            <input
+              type="radio"
+              name="plan_selection"
+              value={plan.id}
+              className="size-4 text-indigo-600 focus:ring-0 focus:outline-none"
+            />
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-bold text-neutral-900 group-hover:text-indigo-600 dark:text-white dark:group-hover:text-indigo-400">
+                  {plan.name}
+                </span>
+                <span className="opacity-0 transition-opacity group-has-[:checked]:opacity-100">
+                  <ShieldCheck className="size-4 text-indigo-600 dark:text-indigo-400" />
+                </span>
+              </div>
+              <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                {plan.quota}
+              </p>
+            </div>
+          </div>
+
+          <div className="text-right">
+            <span className="text-base font-extrabold text-neutral-900 dark:text-white">
+              {plan.price}
+            </span>
+            <span className="block text-[11px] text-neutral-400">/เดือน</span>
+          </div>
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับ CSS ปกติ
+
+| Tailwind Variant | Native CSS Selector Equivalent | ตัวอย่างการใช้งาน |
+| :--- | :--- | :--- |
+| `hover:bg-neutral-100` | `&:hover { background-color: ...; }` | เปลี่ยนสีเมื่อนำเมาส์ชี้ |
+| `focus-visible:ring-2` | `&:focus-visible { box-shadow: ...; }` | แสดงกรอบเฉพาะเมื่อเลื่อนด้วย Keyboard Tab |
+| `group-hover:translate-x-1` | `.group:hover & { transform: translateX(...); }` | ขยับไอคอนลูกเมื่อผู้ใช้ชี้ที่การ์ดแม่ |
+| `peer-checked:block` | `.peer:checked ~ & { display: block; }` | แสดงเนื้อหาเมื่อ Checkbox พี่น้องถูกเลือก |
+| `has-[:checked]:border-indigo-600` | `&:has(:checked) { border-color: ...; }` | ไฮไลต์กล่องแม่ทันทีเมื่อมีตัวเลือกลูกถูกติ๊ก |
+
+---
+
+## 5. ผิด vs ถูก
+
+### จุดที่ 1: การใช้ `focus:` แทน `focus-visible:` บนปุ่ม
+```tsx
+// ❌ ผิด: เมื่อผู้ใช้คลิกเมาส์ที่ปุ่ม กรอบ Focus จะค้างอยู่ ทำให้ UI ดูไม่เรียบร้อย
+<button className="focus:ring-2 focus:ring-indigo-600">
+  ยืนยันข้อมูล
+</button>
+
+// ✅ ถูก: ใช้ focus-visible เพื่อให้แสดงผลเฉพาะการใช้คีย์บอร์ดนำทาง (Accessibility Best Practice)
+<button className="focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600">
+  ยืนยันข้อมูล
+</button>
+```
+*เหตุผล*: `:focus` ทำงานทุกครั้งที่มีการคลิกหรือแตะ ทำให้เกิดขอบสีที่ไม่พึงประสงค์ในสายตาผู้ใช้ทั่วไป แต่ `:focus-visible` จะทำงานอย่างฉลาดเฉพาะตอนที่จำเป็นต่อการเข้าถึง (A11y) เท่านั้น
+
+### จุดที่ 2: วางคลาส `peer` ไว้ผิดตำแหน่งลำดับ DOM
+```tsx
+// ❌ ผิด: วาง Label ก่อน Input แต่ใช้ peer บน Input ทำให้ peer-focus ใน Label ไม่ทำงาน!
+<label className="peer-focus:text-indigo-600">อีเมล</label>
+<input className="peer" />
+
+// ✅ ถูก: วาง Input (peer) ไว้ก่อน Element พี่น้องที่ต้องการรับผลกระทบเสมอ
+<input className="peer" />
+<label className="peer-focus:text-indigo-600">อีเมล</label>
+```
+*เหตุผล*: CSS General Sibling Combinator (`~`) และ Adjacent Sibling Combinator (`+`) สามารถเลือกได้เฉพาะ Element ที่อยู่ **ลำดับถัดไป (Following Siblings)** ใน DOM Tree เท่านั้น ไม่สามารถเลือกย้อนหลังขึ้นไปได้
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้
+- ใช้ `focus-visible:` สำหรับ Interactive Elements ทั้งหมด เช่น Button, Link, Input, Dropdown Trigger
+- ใช้ `has-*` เพื่อหลีกเลี่ยงการเขียน React State สำหรับสไตล์ตกแต่งพื้นฐาน (CSS-driven State) เช่น Radio Card Selection
+- ใช้ `group-*` เมื่อต้องการสร้าง Hover Effects เชื่อมโยงกันระหว่างกล่องแม่กับไอคอนหรือลูกศรด้านใน
+
+### ไม่ควรใช้
+- ไม่ควรใช้ `peer-*` ข้ามระดับ Parent ลึกๆ หากโครงสร้าง HTML มีความซับซ้อนหลายชั้น ควรใช้ React State หรือ Context จัดการแทน เพื่อให้อ่านโค้ดเข้าใจง่าย
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมจึงควรเลือกใช้ `focus-visible:` แทน `focus:` บนองค์ประกอบจำพวกปุ่มกด (Buttons) ในระบบ Design System?
+**แนวทางคำตอบ**: 
+การใช้ `focus:` แบบดั้งเดิมจะทำให้เบราว์เซอร์แสดงเส้นกรอบ Focus Ring ทุกครั้งที่ผู้ใช้คลิกด้วยเมาส์หรือแตะบนหน้าจอสัมผัส ซึ่งส่งผลกระทบต่อความสวยงามของ UI (Visual Disruption) ในทางตรงกันข้าม `focus-visible:` ถูกออกแบบตามมาตรฐาน Accessibility โดยจะเปิดใช้งานเฉพาะเมื่อเบราว์เซอร์ตรวจจับว่าผู้ใช้กำลังควบคุมด้วยคีย์บอร์ด (เช่น ปุ่ม Tab) หรือเทคโนโลยีช่วยเหลือ (Screen Reader) เท่านั้น ทำให้ได้ทั้งความสวยงามและคงมาตรฐานการเข้าถึงที่สมบูรณ์แบบ
+
+### Q2: คลาส `has-*` ใน Tailwind CSS มีประโยชน์อย่างไร และช่วยลดความซับซ้อนของ React Component ได้อย่างไร?
+**แนวทางคำตอบ**: 
+คลาส `has-*` อาศัย CSS `:has()` pseudo-class ซึ่งทำหน้าที่เป็น Parent Selector ช่วยให้เราสามารถกำหนดสไตล์ขององค์ประกอบแม่ได้โดยอิงจากสถานะขององค์ประกอบลูก (เช่น `has-[:checked]:border-indigo-600`) ในอดีต หากเราต้องการไฮไลต์กรอบของการ์ดเมื่อผู้ใช้คลิก Checkbox ภายใน เราจำเป็นต้องเขียน State ใน React เช่น `const [selected, setSelected] = useState(false)` แล้วส่ง Event Handler ไปดักคลิก แต่ด้วย `has-*` เราสามารถผลักภาระนี้ให้ CSS จัดการเองได้ทันที ลด Re-render ใน React และทำให้โค้ดกระชับขึ้นอย่างมาก

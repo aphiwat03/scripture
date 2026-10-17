@@ -1,0 +1,257 @@
+---
+title: Core Components
+category: Frontend
+parentTitle: shadcn/ui
+version: shadcn/ui & Radix UI
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+คอมโพเนนต์กลุ่ม **Core Components** ใน shadcn/ui คือบล็อกตัวต่อพื้นฐานที่สุดในการสร้างส่วนต่อประสานกับผู้ใช้ (User Interface):
+- **Form Controls**: `Button`, `Input`, `Label`, `Textarea`, `Select`, `Checkbox`, `Switch`
+- **Data & Layout Presentation**: `Card`, `Badge`, `Separator`, `Avatar`, `Skeleton`
+
+คอมโพเนนต์เหล่านี้ถูกออกแบบมาภายใต้มาตรฐานเดียวกัน:
+1. **ความสอดคล้อง (Aesthetic Consistency)**: ทุกชิ้นใช้โทนสี, ขอบมน (`rounded-md` / `rounded-xl`), ฟอนต์, และเส้นขอบ (`border-input`) ที่เชื่อมโยงกับตัวแปร CSS เดียวกัน
+2. **Accessible Form Associations**: ทุกฟิลด์ Input และ Label รองรับการเชื่อมโยง `htmlFor` และ `id` เพื่อให้ผู้ใช้สามารถคลิกข้อความ Label แล้วเคอร์เซอร์วิ่งไปยังช่องกรอกข้อมูลได้ทันที
+3. **Smooth Micro-interactions**: มี Focus Ring (`focus-visible:ring-1`) ชัดเจน ช่วยอำนวยความสะดวกให้ผู้ใช้งานที่ใช้คีย์บอร์ดนำทาง
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. ความแตกต่างระหว่าง Native HTML vs Radix Select
+- ใน HTML ดั้งเดิม `<select>` มีข้อจำกัดร้ายแรง: เบราว์เซอร์ระบบปฏิบัติการ (iOS, Android, Windows) จะบังคับหน้าตาเมนู Dropdown ทำให้เราไม่สามารถใส่ไอคอน, ปรับเงา, หรือทำ Dark Mode ได้อย่างแท้จริง
+- ใน shadcn/ui `<Select>` ถูกสร้างขึ้นบน `@radix-ui/react-select`:
+  - เรนเดอร์เป็น Custom DOM Nodes ที่ตกแต่งด้วย Tailwind CSS ได้ 100%
+  - แต่ยังคงพฤติกรรม Accessibility ระดับสูงสุด: รองรับ Typeahead (พิมพ์ตัวอักษรเพื่อเลื่อนไปยังตัวเลือกนั้น), ปุ่มลูกศรขึ้น-ลง, และประกาศค่าไปยัง Screen Reader ผ่าน Hidden native input เพื่อให้ฟอร์ม submit ได้ตามปกติ
+
+### 2. การทำงานของ `<Skeleton>` ป้องกัน CLS (Cumulative Layout Shift)
+- `<Skeleton>` ใน shadcn เป็นเพียง `div` ที่ใส่คลาส `animate-pulse rounded-md bg-muted`
+- เมื่อดึงข้อมูลจากเครือข่าย การวาง Skeleton ที่มีมิติ (Width & Height) สอดคล้องกับขนาดจริงของข้อมูล ช่วยลดค่า Core Web Vitals (CLS) ให้เป็นศูนย์ เพราะเบราว์เซอร์จัดสรรพื้นที่ไว้ล่วงหน้าแล้ว
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### หน้าจอจริง: "User Profile & Security Settings Card" (รวม Core Components ครบชุด)
+
+```tsx filename="app/settings/UserProfileCard.tsx"
+"use client";
+
+import * as React from "react";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
+import { Loader2, ShieldCheck, UserCheck } from "lucide-react";
+
+export function UserProfileCard() {
+  const [isLoading, setIsLoading] = React.useState(false);
+  const [isTwoFactor, setIsTwoFactor] = React.useState(true);
+  const [subscribeNewsletter, setSubscribeNewsletter] = React.useState(false);
+
+  // จำลอง Loading Skeleton
+  if (isLoading) {
+    return (
+      <Card className="max-w-2xl mx-auto">
+        <CardHeader className="gap-2">
+          <Skeleton className="h-6 w-1/3" />
+          <Skeleton className="h-4 w-2/3" />
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center gap-4">
+            <Skeleton className="h-16 w-16 rounded-full" />
+            <div className="space-y-2 flex-1">
+              <Skeleton className="h-4 w-1/4" />
+              <Skeleton className="h-4 w-1/2" />
+            </div>
+          </div>
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-20 w-full" />
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="max-w-2xl mx-auto border-border shadow-xs">
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <div className="space-y-1">
+            <CardTitle className="text-xl font-bold">ข้อมูลบัญชีผู้ใช้งาน</CardTitle>
+            <CardDescription>
+              จัดการข้อมูลส่วนบุคคลและความปลอดภัยของระบบ Cloud
+            </CardDescription>
+          </div>
+          <Badge variant="secondary" className="gap-1.5 px-3 py-1">
+            <UserCheck className="w-3.5 h-3.5 text-emerald-500" />
+            ยืนยันตัวตนแล้ว
+          </Badge>
+        </div>
+      </CardHeader>
+
+      <CardContent className="space-y-6">
+        {/* Avatar Profile Section */}
+        <div className="flex items-center gap-4">
+          <Avatar className="h-16 w-16 border-2 border-border shadow-xs">
+            <AvatarImage src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150" alt="Somchai" />
+            <AvatarFallback className="bg-primary/10 text-primary font-bold">SC</AvatarFallback>
+          </Avatar>
+          <div className="space-y-1">
+            <h4 className="text-sm font-semibold">สมชาย วงศ์สวัสดิ์</h4>
+            <p className="text-xs text-muted-foreground">ตำแหน่ง: Senior Solutions Architect</p>
+          </div>
+          <Button variant="outline" size="sm" className="ml-auto">
+            เปลี่ยนรูปภาพ
+          </Button>
+        </div>
+
+        <Separator />
+
+        {/* Inputs & Label Section */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <Label htmlFor="fullname">ชื่อ-นามสกุล</Label>
+            <Input id="fullname" defaultValue="สมชาย วงศ์สวัสดิ์" />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="email">อีเมลประจำองค์กร</Label>
+            <Input id="email" type="email" defaultValue="somchai@company.co.th" />
+          </div>
+        </div>
+
+        {/* Select Component */}
+        <div className="space-y-2">
+          <Label htmlFor="role">บทบาทในคลัสเตอร์ (Role)</Label>
+          <Select defaultValue="admin">
+            <SelectTrigger id="role">
+              <SelectValue placeholder="เลือกสิทธิ์การเข้าถึง" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="admin">Cluster Administrator (สิทธิ์เต็ม)</SelectItem>
+              <SelectItem value="developer">Developer (อ่าน-เขียน เฉพาะโปรเจกต์)</SelectItem>
+              <SelectItem value="viewer">Auditor (อ่านอย่างเดียว)</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        {/* Textarea Component */}
+        <div className="space-y-2">
+          <Label htmlFor="bio">ประวัติย่อ (Bio)</Label>
+          <Textarea
+            id="bio"
+            placeholder="อธิบายความรับผิดชอบของคุณในทีม..."
+            rows={3}
+            defaultValue="ดูแลระบบ High Availability Kubernetes Cluster และ Cloud Cost Optimization"
+          />
+        </div>
+
+        <Separator />
+
+        {/* Security & Notification: Switch and Checkbox */}
+        <div className="space-y-4">
+          <div className="flex items-center justify-between rounded-xl border p-4 bg-muted/20">
+            <div className="space-y-0.5">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-primary" />
+                <Label htmlFor="2fa" className="text-sm font-semibold cursor-pointer">
+                  การยืนยันตัวตนแบบสองขั้นตอน (2FA)
+                </Label>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                ปกป้องบัญชีด้วยรหัส OTP ผ่าน Google Authenticator
+              </p>
+            </div>
+            <Switch
+              id="2fa"
+              checked={isTwoFactor}
+              onCheckedChange={setIsTwoFactor}
+            />
+          </div>
+
+          <div className="flex items-center space-x-2">
+            <Checkbox
+              id="newsletter"
+              checked={subscribeNewsletter}
+              onCheckedChange={(checked) => setSubscribeNewsletter(Boolean(checked))}
+            />
+            <Label
+              htmlFor="newsletter"
+              className="text-xs font-normal text-muted-foreground cursor-pointer"
+            >
+              รับข่าวสารอัปเดตความปลอดภัยและสถานะระบบทางอีเมลทุกสัปดาห์
+            </Label>
+          </div>
+        </div>
+      </CardContent>
+
+      <CardFooter className="flex justify-between border-t border-border pt-6">
+        <Button variant="ghost">คืนค่าเดิม</Button>
+        <Button className="gap-2">
+          บันทึกการเปลี่ยนแปลง
+        </Button>
+      </CardFooter>
+    </Card>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **ใช้ `<label>` ดั้งเดิมโดยไม่ใส่ `htmlFor`**<br/>ทำให้การคลิกที่ข้อความไม่เปิดช่อง Input ส่งผลเสียต่อ Mobile UX และผู้ใช้ที่ใช้เมาส์ลำบาก | **ใช้ `<Label htmlFor="inputId">` คู่กับ `<Input id="inputId">`**<br/>shadcn Label ผูกกับ Radix Label รองรับการโฟกัสอัตโนมัติ |
+| **ใช้ `div` ทำปุ่ม Toggle หรือ Switch เอง**<br/>ขาดคุณสมบัติ `role="switch"` และ `aria-checked` ทำให้ผู้พิการทางสายตาไม่ทราบว่าเปิดหรือปิดอยู่ | **ใช้ `<Switch checked={...} onCheckedChange={...} />`**<br/>ได้พฤติกรรม Toggle สากลพร้อมสถานะทาง ARIA ครบถ้วน |
+| **ใช้รูปภาพเปล่าๆ สำหรับ Avatar โดยไม่มี Fallback**<br/>หาก URL รูปภาพเสีย (Broken image link) หน้าจอจะแสดงกรอบรูปแตกที่ดูไม่เป็นมืออาชีพ | **ใช้ `<Avatar>` ร่วมกับ `<AvatarFallback>`**<br/>หากรูปโหลดไม่สำเร็จ ระบบจะสลับไปแสดงตัวอักษรย่อ (Initials) สวยงามทันที |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้เมื่อ:
+- **สร้างแบบฟอร์มการกรอกข้อมูลทุกประเภท**: ตั้งแต่หน้าลงทะเบียน, การตั้งค่าบัญชี, ไปจนถึงฟอร์มชำระเงิน
+- **การ์ดแสดงผลข้อมูล Dashboard**: ใช้ `Card`, `Badge`, และ `Avatar` เพื่อจัดระเบียบเนื้อหาให้ดูสะอาดตา
+- **หน้าจอที่รอการดึงข้อมูล**: ใช้ `Skeleton` แทน Spinner หมุนๆ ช่วยให้ผู้ใช้รู้สึกว่าเว็บโหลดเร็วขึ้น (Perceived Performance)
+
+### ไม่ควรใช้เมื่อ:
+- **ต้องการ Dropdown ของมือถือแบบ Native Wheel**: หากแอปพลิเคชันเป็น Mobile Web ที่เจาะจงว่าต้องการให้เด้ง Native Wheel Picker ของ iOS การใช้ Radix Select อาจให้ประสบการณ์ที่ต่างออกไป
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไม shadcn/ui จึงเลือกสร้าง `<Select>` บน Radix UI แทนที่จะแต่งสไตล์ให้กับแท็ก `<select>` ของ HTML ดั้งเดิม?
+**แนวทางตอบ:**
+1. **ข้อจำกัดของ Native `<select>`**: แท็กดั้งเดิมของเบราว์เซอร์ไม่สามารถจัดสไตล์ให้สวยงามหรือสอดคล้องกับ Design System ได้ (เช่น ไม่สามารถใส่ Avatar ในตัวเลือก, ปรับความโค้งมนของกรอบป็อปอัป หรือใส่แอนิเมชันตอนเปิดปิด)
+2. **การรักษา Accessibility ในระดับสูงสุด**: Radix Select จำลองพฤติกรรมของ ARIA 1.2 Combobox/Listbox อย่างสมบูรณ์แบบ ทั้งการใช้คีย์บอร์ดนำทาง, Typeahead search, และยังคงมี Hidden Input เพื่อส่งค่าไปยัง FormData ของเซิร์ฟเวอร์ได้อย่างไร้รอยต่อ
+
+### Q2: ในการทำ Skeleton Loading Component มีแนวทางปฏิบัติอย่างไรเพื่อป้องกันปัญหา Cumulative Layout Shift (CLS)?
+**แนวทางตอบ:**
+1. **จับคู่มิติขนาดให้ตรงกับคอนเทนต์จริง (Exact Dimensions Matching)**: กำหนดความสูง (`h-*`) และความกว้าง (`w-*`) ของ Skeleton ให้ใกล้เคียงกับขนาดของ Typography และรูปภาพจริงที่จะโหลดเข้ามา
+2. **รักษา Hierarchy และ Spacing**: ใช้ Gap, Padding, และ Margin ใน Container เดียวกันกับข้อมูลจริง เพื่อไม่ให้โครงสร้างเลย์เอาต์กระตุกขยับเมื่อข้อมูลจริงถูกสลับเข้ามาแทนที่ Skeleton

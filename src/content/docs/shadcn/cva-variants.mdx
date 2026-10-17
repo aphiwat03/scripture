@@ -1,0 +1,232 @@
+---
+title: cva & asChild Slot
+category: Frontend
+parentTitle: shadcn/ui
+version: shadcn/ui & Radix UI
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+เมื่อเราต้องสร้าง Component System ที่รองรับความหลากหลายของรูปแบบ (Variants) ขนาด (Sizes) และเงื่อนไขการแสดงผล shadcn/ui เลือกใช้ 2 เครื่องมือหลักที่ทรงประสิทธิภาพที่สุด:
+
+1. **`cva` (Class Variance Authority)**: ไลบรารีสำหรับสร้าง Type-Safe Component Variants ช่วยให้เรากำหนด Base Classes, Variants, Sizes, Default Variants และ Compound Variants (สไตล์พิเศษเมื่อตรงกับหลายเงื่อนไขพร้อมกัน) ได้อย่างเป็นระเบียบ พร้อมสร้าง TypeScript Type ให้อัตโนมัติ
+2. **`asChild` Pattern (Radix UI Slot)**: เทคนิคการทำ **Polymorphic Component** ยุคใหม่ แทนที่การใช้ `as` prop แบบดั้งเดิมใน Styled-components โดย `asChild` ช่วยให้คอมโพเนนต์สามารถส่งต่อคุณสมบัติ (Props, Event Handlers, Classes) ไปยัง Child Element ตัวแรกได้โดยตรง โดยไม่สร้าง DOM Wrapper ขึ้นมาครอบอีกชั้น
+
+```tsx
+// ใช้งานร่วมกันอย่างทรงพลัง:
+<Button variant="outline" size="lg" asChild>
+  <Link href="/pricing">ดูตารางราคา</Link>
+</Button>
+```
+ผลลัพธ์: เรนเดอร์เป็นแท็ก `<a>` ที่มีสไตล์ของปุ่มขนาดใหญ่ โดยไม่มีแท็ก `<button>` ซ้อนอยู่ข้างนอก
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. การทำงานของ `cva()`
+ฟังก์ชัน `cva()` รับพารามิเตอร์ 2 ตัว:
+- **Base String**: คลาสพื้นฐานที่คอมโพเนนต์นั้นต้องมีเสมอ
+- **Config Object**: ประกอบด้วย `variants`, `compoundVariants`, และ `defaultVariants`
+
+เมื่อเราเรียกใช้ฟังก์ชันผลลัพธ์ เช่น `buttonVariants({ variant: "destructive", size: "sm" })`:
+- CVA จะวิเคราะห์ตาราง Mapping ในหน่วยความจำอย่างรวดเร็ว
+- นำ Base string มารวมกับคลาสที่ตรงกับ Variants ที่เลือก
+- และถ้าตรงกับ `compoundVariants` เช่น `{ variant: "destructive", size: "lg" }` มันจะเติมคลาสพิเศษของคู่นั้นเข้ามาด้วย
+
+### 2. เบื้องหลังของ Radix UI `<Slot>`
+ในอดีต หากเราต้องการให้ Button เรนเดอร์เป็นลิงก์ เรามักเขียน:
+```tsx
+// ❌ ปัญหา Invalid HTML DOM:
+<button>
+  <a href="/dashboard">หน้าแดชบอร์ด</a>
+</button>
+```
+เบราว์เซอร์จะประเมินว่าโครงสร้างนี้ผิดมาตรฐาน (Interactive element nested within another interactive element) และทำลาย Accessibility ทันที
+
+Radix UI นำเสนอคอมโพเนนต์ `<Slot>`:
+- เมื่อระบุ `asChild={true}` คอมโพเนนต์ Button จะไม่เรนเดอร์แท็ก `<button>`
+- แทนที่จะเรนเดอร์แท็กของตนเอง มันจะใช้ฟังก์ชัน `React.cloneElement` โคลน Child ตัวแรก (เช่น `<Link>`)
+- รวม `className` ของ Button เข้ากับ Child
+- ผสาน Event Handlers เช่น `onClick`, `onKeyDown` เพื่อให้พฤติกรรม Keyboard ของทั้งสองส่วนทำงานร่วมกันได้อย่างสมบูรณ์
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### 1. การสร้าง Action Callout Banner ด้วย CVA
+```tsx filename="components/ui/banner.tsx"
+import * as React from "react";
+import { cva, type VariantProps } from "class-variance-authority";
+import { Slot } from "@radix-ui/react-slot";
+import { cn } from "@/lib/utils";
+
+const bannerVariants = cva(
+  // Base classes: โครงสร้างพื้นฐาน
+  "relative w-full rounded-2xl border p-4 flex items-start gap-3 transition-all",
+  {
+    variants: {
+      intent: {
+        info: "bg-sky-500/10 border-sky-500/20 text-sky-950 dark:text-sky-200",
+        warning: "bg-amber-500/10 border-amber-500/20 text-amber-950 dark:text-amber-200",
+        danger: "bg-rose-500/10 border-rose-500/20 text-rose-950 dark:text-rose-200",
+        success: "bg-emerald-500/10 border-emerald-500/20 text-emerald-950 dark:text-emerald-200",
+      },
+      elevation: {
+        flat: "shadow-none",
+        raised: "shadow-md hover:shadow-lg",
+      },
+      density: {
+        compact: "p-3 text-xs",
+        normal: "p-4 text-sm",
+        relaxed: "p-6 text-base",
+      },
+    },
+    // สไตล์พิเศษเมื่อเงื่อนไขทับซ้อนกัน (Compound Variants)
+    compoundVariants: [
+      {
+        intent: "danger",
+        elevation: "raised",
+        className: "border-rose-500/40 ring-2 ring-rose-500/10",
+      },
+    ],
+    defaultVariants: {
+      intent: "info",
+      elevation: "flat",
+      density: "normal",
+    },
+  }
+);
+
+export interface BannerProps
+  extends React.HTMLAttributes<HTMLDivElement>,
+    VariantProps<typeof bannerVariants> {
+  asChild?: boolean;
+}
+
+export function Banner({
+  className,
+  intent,
+  elevation,
+  density,
+  asChild = false,
+  ...props
+}: BannerProps) {
+  const Comp = asChild ? Slot : "div";
+  return (
+    <Comp
+      className={cn(bannerVariants({ intent, elevation, density, className }))}
+      {...props}
+    />
+  );
+}
+```
+
+### 2. นำไปใช้งานจริงในหน้า Payment Failure Notice
+```tsx filename="app/checkout/PaymentAlert.tsx"
+import Link from "next/link";
+import { AlertCircle, ArrowRight } from "lucide-react";
+import { Banner } from "@/components/ui/banner";
+import { Button } from "@/components/ui/button";
+
+export function PaymentAlert({ invoiceId }: { invoiceId: string }) {
+  return (
+    <div className="max-w-xl mx-auto py-8 space-y-4">
+      {/* ใช้งาน Banner ปกติ */}
+      <Banner intent="danger" elevation="raised" density="normal">
+        <AlertCircle className="w-5 h-5 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+        <div className="flex-1 space-y-1">
+          <h4 className="font-semibold">การชำระเงินไม่สำเร็จ (#{invoiceId})</h4>
+          <p className="text-muted-foreground text-xs leading-relaxed">
+            บัตรเครดิตของคุณถูกปฏิเสธโดยธนาคารผู้ออกบัตร กรุณาอัปเดตวิธีการชำระเงินเพื่อหลีกเลี่ยงการระงับบริการ
+          </p>
+        </div>
+      </Banner>
+
+      {/* ใช้งาน Button ร่วมกับ asChild และ Next.js Link */}
+      <div className="flex justify-end gap-3">
+        <Button variant="outline" asChild>
+          <Link href="/support">ติดต่อฝ่ายสนับสนุน</Link>
+        </Button>
+        <Button variant="destructive" asChild>
+          <Link href={`/billing/retry/${invoiceId}`}>
+            ลองชำระเงินอีกครั้ง
+            <ArrowRight className="w-4 h-4 ml-1.5" />
+          </Link>
+        </Button>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **ซ้อนแท็ก `<button><Link href="...">...</Link></button>`**<br/>สร้างโครงสร้าง HTML ผิดหลัก ทำให้ Screen Reader สับสน และเกิดปัญหากดคลิกซ้ำซ้อน | **ใช้ `<Button asChild><Link href="...">...</Link></Button>`**<br/>เรนเดอร์แท็ก `<a>` ตัวเดียวที่มีสไตล์และพฤติกรรมทั้งหมดของ Button |
+| **เขียน Switch-case หรือ if-else ยาวเหยียดเพื่อเปลี่ยนคลาส**<br/>```tsx
+let cls = "btn ";
+if (variant === "primary") cls += "bg-blue...";
+else if (variant === "danger") cls += "bg-red...";
+``` | **ใช้ `cva()` เพื่อนิยาม Variants อย่างเป็นระบบ**<br/>ได้ประโยชน์ทั้ง Type Safety จาก TypeScript, รองรับ Compound Variants, และแก้ไขง่าย |
+| **ใส่ Children หลายตัวเข้าไปใน `<Slot>`**<br/>```tsx
+<Button asChild>
+  <span>ไอคอน</span>
+  <Link href="/">หน้าแรก</Link>
+</Button>
+```<br/>ผลลัพธ์: Radix Slot จะ Error เพราะมันรับ Child ได้เพียง Element เดียว | **ใส่ Single Root Element ใน Child เสมอ**<br/>```tsx
+<Button asChild>
+  <Link href="/">
+    <HomeIcon /> หน้าแรก
+  </Link>
+</Button>
+``` |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้เมื่อ:
+- **สร้าง Design System Component**: เช่น Button, Badge, Alert, Card ที่มีหลากหลายสถานะ (Primary, Outline, Ghost, Danger)
+- **ต้องการเปลี่ยน Semantic Element เป็น Link**: เมื่อต้องการให้ปุ่มหรือการ์ดทำงานเป็น Next.js `<Link>` โดยไม่สูญเสียความสามารถด้านสไตล์
+- **โปรเจกต์ TypeScript ขนาดใหญ่**: ที่ต้องการ Autocomplete ให้ทีมเลือก variant และ size ได้อย่างถูกต้องโดยไม่ต้องเปิดเอกสารดู
+
+### ไม่ควรใช้เมื่อ:
+- **คอมโพเนนต์เดี่ยวที่ไม่มี Variant ใดๆ**: เช่น Header ของหน้าเว็บ หรือกล่องขอบดำธรรมดา ไม่จำเป็นต้องเขียน CVA ให้ซับซ้อน
+- **มีโครงสร้าง Sub-components ซับซ้อนภายใน**: หากต้องการส่งต่อพฤติกรรมไปยังลูกหลานหลายๆ ชั้น การใช้ Context API จะเหมาะสมกว่า Slot
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: `asChild` ใน Radix UI / shadcn ทำงานอย่างไร และมีข้อดีเหนือแนวคิด `as` prop (เช่น `<Button as="a" />`) แบบดั้งเดิมอย่างไร?
+**แนวทางตอบ:**
+- **ข้อจำกัดของ `as` prop แบบดั้งเดิม**:
+  1. การทำ TypeScript Type Inference มักมีปัญหา (Polymorphic TypeScript type inference มักจะทำให้ IDE ช้า หรือพิมพ์ type ซับซ้อนมาก)
+  2. เมื่อส่งคอมโพเนนต์อื่นเช่น Next.js `<Link>` ผ่าน `as={Link}` อาจเกิดปัญหา Props ชนกัน เช่น `href` หรือ event handlers
+- **ข้อดีของ `asChild` (Radix Slot)**:
+  1. **Clean DOM**: มันไม่สร้าง wrapper DOM node ใดๆ เพิ่มขึ้นมาเลย
+  2. **Props & Ref Merging**: Radix จะรวม props, refs, และ event listeners ของ parent กับ child เข้าด้วยกันอย่างปลอดภัย
+  3. **Type Safety สมบูรณ์แบบ**: TypeScript สามารถตรวจเช็ก props ของ child element ได้โดยตรง ไม่เกิดความสับสนเรื่อง type
+
+### Q2: จงอธิบายการทำงานของ `compoundVariants` ใน CVA พร้อมยกตัวอย่างกรณีการใช้งานจริง?
+**แนวทางตอบ:**
+`compoundVariants` คือคุณสมบัติใน CVA ที่ช่วยให้เราสามารถกำหนดชุดคลาสพิเศษ **เมื่อคอมโพเนนต์มี Props หลายตัวตรงตามเงื่อนไขพร้อมกัน**:
+- **ตัวอย่างการใช้งานจริง**: สมมติเรามีปุ่มที่มี `variant: "outline"` และ `color: "destructive"`
+  - สไตล์เดี่ยวของ `outline` คือพื้นหลังโปร่งใส ขอบสีเทา
+  - สไตล์เดี่ยวของ `destructive` คือพื้นหลังสีแดง ตัวอักษรสีขาว
+  - หากเราต้องการให้ปุ่ม "ขอบสีแดง ตัวอักษรสีแดง แต่พื้นหลังโปร่งใส" เมื่อส่งทั้งคู่พร้อมกัน เราจะระบุใน `compoundVariants`:
+  ```typescript
+  compoundVariants: [
+    {
+      variant: "outline",
+      color: "destructive",
+      className: "border-destructive text-destructive hover:bg-destructive/10",
+    },
+  ]
+  ```
+- ช่วยป้องกันการเขียนคลาสทับซ้อนที่ยุ่งเหยิงและยากต่อการบำรุงรักษา

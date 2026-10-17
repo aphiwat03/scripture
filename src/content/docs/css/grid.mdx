@@ -1,0 +1,141 @@
+---
+title: CSS Grid
+category: Frontend
+parentTitle: CSS
+version: CSS3 / Modern CSS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+หาก Flexbox คือระบบจัดเลย์เอาต์แบบ **1 มิติ (จัดการทีละแถว หรือทีละคอลัมน์)** **CSS Grid** ก็คือระบบจัดเลย์เอาต์แบบ **2 มิติ (Two-Dimensional)** ที่สามารถควบคุมทั้ง **"แถว (Rows)"** และ **"คอลัมน์ (Columns)"** ไปพร้อมกันได้อย่างสมบูรณ์แบบ
+
+หัวใจสำคัญของ CSS Grid:
+- **`fr` (Fraction Unit)**: หน่วยเศษส่วนของพื้นที่ว่างที่เหลือในคอนเทนเนอร์ เช่น `1fr 2fr` หมายถึงคอลัมน์หลังกว้างกว่าคอลัมน์แรก 2 เท่า
+- **`minmax(MIN, MAX)`**: กำหนดขนาดต่ำสุดและสูงสุดของช่อง
+- **`repeat(auto-fit, minmax(280px, 1fr))`**: มนต์วิเศษที่ช่วยให้สร้าง **Responsive Card Grid ที่ปรับขนาดตามจอมือถือถึงจอคอมได้อัตโนมัติ โดยไม่ต้องเขียน `@media query` แม้แต่บรรทัดเดียว!**
+- **Flexbox vs Grid เลือกอย่างไร?**:
+  - ใช้ **Flexbox** เมื่องานเป็น 1 มิติ และต้องการให้ขนาดเนื้อหาภายในเป็นตัวดันเลย์เอาต์ (Content-first เช่น Navbar, Tag list)
+  - ใช้ **Grid** เมื่องานเป็น 2 มิติ และต้องการกำหนดตารางหรือเส้นกรอบตายตัวจากแม่ลงไปหาลูก (Layout-first เช่น ตารางสินค้า, Dashboard Layout)
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ความแตกต่างระหว่าง `auto-fit` vs `auto-fill` ใน `minmax()`
+เมื่อหน้าจอกว้างมากพอที่จะมีพื้นที่เหลือทางขวามือ:
+- **`auto-fill`**: เบราว์เซอร์จะ **จองช่องว่างเปล่าจำลอง (Empty Tracks)** ทิ้งไว้ด้านขวา ทำให้การ์ดที่มีอยู่จริงยังคงขนาดเล็กเท่าเดิมไม่ยอมยืดขยาย
+- **`auto-fit` (แนะนำ)**: เบราว์เซอร์จะ **ยุบช่องว่างเปล่าทิ้ง** แล้วนำพื้นที่ที่เหลือทั้งหมดมาเกลี่ยขยายขนาดให้การ์ดที่มีอยู่จริงเต็มความกว้างแถวอย่างสวยงาม
+
+---
+
+## 3. ตัวอย่างโค้ด (Modern CSS)
+
+### ตัวอย่างที่ 1: ตะแกรงสินค้า Responsive อัตโนมัติ (ไม่ต้องง้อ Media Query)
+
+```css filename="product-grid.css"
+.product-grid {
+  display: grid;
+  /* สร้างคอลัมน์ใหม่อัตโนมัติ การ์ดกว้างอย่างน้อย 280px และขยายได้สูงสุด 1fr */
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 24px;
+}
+```
+
+### ตัวอย่างที่ 2: เลย์เอาต์ Dashboard ด้วย `grid-template-areas`
+
+```css filename="dashboard.css"
+.dashboard-layout {
+  min-height: 100dvh;
+  display: grid;
+  /* กำหนดโครงสร้างตาราง 2 คอลัมน์ (Sidebar 260px, เนื้อหา 1fr) */
+  grid-template-columns: 260px 1fr;
+  grid-template-rows: 64px 1fr;
+  grid-template-areas:
+    "sidebar header"
+    "sidebar main";
+}
+
+.dashboard-header {
+  grid-area: header;
+  background-color: #ffffff;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.dashboard-sidebar {
+  grid-area: sidebar;
+  background-color: #f8fafc;
+  border-right: 1px solid #e2e8f0;
+}
+
+.dashboard-main {
+  grid-area: main;
+  padding: 32px;
+  overflow-y: auto;
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ใช้ Flexbox ทำ Grid แบบลำบากคำนวณ Margin
+
+```css
+/* ผิด: ฝืนใช้ Flexbox ทำตาราง ต้องคอยคำนวณ calc() ลบ gap เอง และแถวสุดท้ายจัดไม่ตรง */
+.bad-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.bad-cards .card {
+  width: calc(33.333% - 11px);
+}
+```
+
+### ✅ โค้ดที่ถูกต้อง: ใช้ CSS Grid ตรงกับงาน
+
+```css
+/* ถูกต้อง: โค้ด 2 บรรทัด จบ สะอาด ยืดหยุ่น ไร้บั๊ก */
+.good-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+```
+
+---
+
+## 5. เทียบกับ Tailwind CSS v4
+
+| Modern CSS Grid Property | Tailwind CSS v4 Utility |
+| :--- | :--- |
+| `display: grid;` | `grid` |
+| `grid-template-columns: repeat(1, minmax(0, 1fr));` | `grid-cols-1` |
+| `@media (min-width: 768px) { repeat(3, ...); }` | `md:grid-cols-3` |
+| `grid-column: span 2 / span 2;` | `col-span-2` |
+| `gap: 24px;` | `gap-6` |
+
+```html
+<!-- ตัวอย่าง Responsive Grid ใน Tailwind CSS v4 -->
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+  <div class="card">สินค้า 1</div>
+  <div class="card">สินค้า 2</div>
+  <div class="card">สินค้า 3</div>
+  <div class="card">สินค้า 4</div>
+</div>
+```
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: เมื่อใดที่เราควรเลือกใช้ CSS Grid และเมื่อใดที่เราควรเลือกใช้ Flexbox?
+**แนวทางคำตอบ**:
+- **เลือกใช้ CSS Grid เมื่อ**: ต้องการจัดการเลย์เอาต์แบบ **2 มิติ (Two-Dimensional)** ที่ควบคุมทั้งแนวนอนและแนวตั้งพร้อมกัน, ต้องการให้แม่เป็นคนกำหนดตารางชัดเจน (Layout-first) เช่น ตะแกรงแสดงสินค้า (Product Grid), เลย์เอาต์ภาพรวมของหน้าจอ Dashboard หรือ Photo Gallery
+- **เลือกใช้ Flexbox เมื่อ**: ต้องการจัดการเลย์เอาต์แบบ **1 มิติ (One-Dimensional)** ไม่ว่าจะเป็นแถวเดียวหรือคอลัมน์เดียว, ต้องการให้ขนาดของเนื้อหาข้างในเป็นตัวช่วยกำหนดขนาดกล่อง (Content-first) เช่น Navigation Bar, แถวปุ่ม Action, หรือการจัดตำแหน่งกึ่งกลางแนวตั้ง
+
+### Q2: ในการเขียน `grid-template-columns: repeat(auto-fit, minmax(250px, 1fr))` ความแตกต่างระหว่าง `auto-fit` และ `auto-fill` คืออะไร?
+**แนวทางคำตอบ**: 
+- `auto-fill` จะสร้าง Column Tracks ใหม่เพิ่มขึ้นมาเรื่อยๆ ให้เต็มพื้นที่หน้าจอ แม้ว่าจะไม่มีการ์ดจริงมาวางก็ตาม (ทำให้เกิดช่องว่างเปล่าล่องหนทางขวา)
+- `auto-fit` จะยุบ Column Tracks ที่ไม่มีเนื้อหาจริงทิ้งไป แล้วนำพื้นที่ว่างที่เหลือทั้งหมดมาขยายขนาด (Stretch) ให้กับการ์ดที่มีอยู่จริงเต็มความกว้างแถวอย่างสมบูรณ์แบบ ซึ่งเป็นพฤติกรรมที่มักต้องการใน Responsive Card Grid

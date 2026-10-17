@@ -1,0 +1,96 @@
+---
+title: Client Fetching
+category: Frontend
+parentTitle: React 19
+version: v19.0
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+แม้ว่าใน React 19 และ Next.js จะเน้นการดึงข้อมูลบนเซิร์ฟเวอร์ (Server Components) แต่ในหลายสถานการณ์ การดึงข้อมูลฝั่งไคลเอนต์ (Client-Side Fetching) ยังคงจำเป็น เช่น หน้าที่ต้องการ Polling ข้อมูลเรียลไทม์, Infinite Scroll หรือหน้า Dashboard ที่เปลี่ยนตามการคลิก Filter ถี่ๆ ของผู้ใช้
+
+หัวใจสำคัญของการดึงข้อมูลฝั่ง Client คือการจัดการ **3 สถานะหลัก (Loading, Error, Success)** อย่างรัดกุมเพื่อไม่ให้หน้าจอค้างหรือกระตุก
+
+---
+
+## 2. ปัญหาคลาสสิกของการใช้ `useEffect` ดึงข้อมูล
+
+การเขียน `useEffect` เพื่อ `fetch` ข้อมูลโดยตรงมักประสบปัญหา:
+1. **Race Conditions**: คำขอที่ยิงไปก่อนกลับมาทีหลังคำขอใหม่ ทำให้ข้อมูลแสดงผลสลับกัน
+2. **ไม่มีระบบ Caching**: ทุกครั้งที่สลับแท็บไปมา คอมโพเนนต์จะยิงดึงข้อมูลใหม่ซ้ำๆ
+3. **Network Waterfalls**: คอมโพเนนต์ลูกต้องรอให้คอมโพเนนต์แม่ดึงเสร็จก่อนจึงจะเริ่มดึงของตัวเองได้
+
+ทางแก้คือการใช้ไลบรารีอย่าง **TanStack Query (React Query)** หรือ **SWR**
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: การจัดการ 3 สถานะด้วย `useState` + `useEffect` พร้อม Clean up
+
+```tsx filename="components/UserListManual.tsx"
+'use client';
+
+import React, { useState, useEffect } from 'react';
+
+interface User {
+  id: string;
+  name: string;
+}
+
+export function UserListManual() {
+  const [data, setData] = useState<User[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function loadUsers() {
+      try {
+        setLoading(true);
+        setError(null);
+        const res = await fetch('https://jsonplaceholder.typicode.com/users', {
+          signal: controller.signal,
+        });
+        if (!res.ok) throw new Error('ไม่สามารถดึงข้อมูลได้');
+        const json = await res.json();
+        setData(json);
+      } catch (err) {
+        if (err instanceof Error && err.name !== 'AbortError') {
+          setError(err.message);
+        }
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadUsers();
+    return () => controller.abort(); // ยกเลิกเมื่อ unmount
+  }, []);
+
+  if (loading) return <p className="animate-pulse text-muted text-sm">กำลังโหลดข้อมูล...</p>;
+  if (error) return <p className="text-red-500 text-sm">เกิดข้อผิดพลาด: {error}</p>;
+
+  return (
+    <ul className="divide-y text-sm">
+      {data.map((u) => <li key={u.id} className="py-2">{u.name}</li>)}
+    </ul>
+  );
+}
+```
+
+---
+
+## 4. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- *ควรใช้ Client Fetching*: เมื่อข้อมูลเป็นของส่วนตัวที่มีการ Refresh บ่อย, Infinite Scroll หรือการใช้ SWR/React Query ร่วมกับ Background Revalidation
+- *ไม่ควรใช้ Client Fetching*: เมื่อข้อมูลเป็นหน้าหลักที่ต้องการให้ Search Engine เก็บดัชนี (SEO) หรือข้อมูลที่สามารถดึงบน Server Component ได้ตั้งแต่แรก
+
+---
+
+## 5. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: Race Condition ในการดึงข้อมูลบน Client คืออะไรและป้องกันอย่างไร?
+**แนวทางคำตอบ**: เกิดขึ้นเมื่อผู้ใช้กดเปลี่ยน Filter อย่างรวดเร็ว (เช่น เลือกหน้า A แล้วเปลี่ยนไปหน้า B ทันที) หาก Response ของหน้า A ตอบกลับมาช้ากว่าหน้า B ข้อมูลของหน้า A จะถูกนำมาทับ ทำให้หน้าจอแสดงผลข้อมูลผิด ป้องกันได้โดยใช้ `AbortController` ใน Cleanup Function ของ `useEffect` เพื่อสั่งยกเลิก Request เก่าทิ้งทันที

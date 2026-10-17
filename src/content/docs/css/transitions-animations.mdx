@@ -1,0 +1,145 @@
+---
+title: Animations
+category: Frontend
+parentTitle: CSS
+version: CSS3 / Modern CSS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ภาพเคลื่อนไหว (Motion) ที่ดีในเว็บแอปพลิเคชันไม่ได้มีไว้เพื่อ "ความหวือหวา" แต่มีหน้าที่หลักคือ **"การบอกเล่าความต่อเนื่องของสถานะ (Continuity & Context)"** เช่น การบอกผู้ใช้ว่าเมนูกำลังเลื่อนมาจากไหน หรือการ์ดใบนี้สามารถคลิกได้
+
+เครื่องมือ 2 ตัวหลัก:
+- **`transition`**: การเปลี่ยนผ่านสถานะอย่างนุ่มนวลจาก A ไป B เมื่อมี Event กระตุ้น (เช่น `:hover`, `:focus`)
+- **`animation` & `@keyframes`**: แอนิเมชันที่ทำงานต่อเนื่องเป็นวัฏจักรหลายขั้นตอน โดยไม่ต้องรอให้มีคนเอาเมาส์มาชี้ (เช่น Loading Spinner, Pulse Alert)
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ทำไมการ Animate `transform` และ `opacity` ถึงลื่นไหล 60/120 FPS?
+กระบวนการวาดหน้าจอของเบราว์เซอร์มี 3 ขั้นตอน:
+```
+1. Layout (Reflow)  -->  2. Paint (Repaint)  -->  3. Composite (GPU)
+```
+- หากคุณสั่งเปลี่ยน `top`, `left`, `width`, `height`: เบราว์เซอร์ต้องคำนวณตำแหน่ง Layout ใหม่ทั้งจอ และระบายสีใหม่ (CPU ทำงานหนักมาก เกิดอาการกระตุก Dropped Frames)
+- หากคุณสั่งเปลี่ยน **`transform: translate(...)`** หรือ **`opacity`**: เบราว์เซอร์จะส่งงานตรงไปยัง **GPU Compositor Thread** โดยไม่ต้องคำนวณ Layout หรือ Repaint ใหม่เลย ภาพจึงลื่นไหลระดับ 60 ถึง 120 FPS!
+
+### การเคารพผู้ใช้ด้วย `prefers-reduced-motion`
+ผู้ใช้ที่มีภาวะความผิดปกติของระบบการทรงตัว (Vestibular Disorders) อาจเกิดอาการคลื่นไส้ เวียนศีรษะ หรือไมเกรนขึ้นได้เมื่อเห็นภาพเคลื่อนไหวที่หมุนหรือเลื่อนเร็วเกินไป กฎบัตร Accessibility บังคับให้เราต้องปิดหรือลดทอนแอนิเมชันเมื่อผู้ใช้เปิดโหมดลดการเคลื่อนไหวในระบบเครื่อง
+
+---
+
+## 3. ตัวอย่างโค้ด (Modern CSS)
+
+### ตัวอย่างที่ 1: การ์ด Interactive ที่ลื่นไหล 60 FPS ด้วย GPU Compositing
+
+```css filename="card-motion.css"
+.interactive-card {
+  background-color: #ffffff;
+  border-radius: 16px;
+  padding: 24px;
+  border: 1px solid #e2e8f0;
+  
+  /* 🌟 ระบุเฉพาะ property ที่จะเปลี่ยนผ่านอย่างชัดเจน ห้ามใส่ transition: all */
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.25s ease;
+  will-change: transform; /* บอก GPU ให้จัดเตรียม Layer ล่วงหน้า */
+}
+
+.interactive-card:hover {
+  /* ใช้ transform แทน top/margin */
+  transform: translateY(-4px) scale(1.01);
+  box-shadow: 0 12px 24px -4px rgba(0, 0, 0, 0.08);
+}
+```
+
+### ตัวอย่างที่ 2: Loading Spinner พร้อมการรองรับ Accessibility
+
+```css filename="spinner.css"
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.loading-spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid rgba(0, 113, 227, 0.15);
+  border-top-color: #0071e3;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+/* 🌟 เคารพการตั้งค่าของผู้ใช้: หยุดการหมุนทันทีหากเปิดโหมดลดการเคลื่อนไหว */
+@media (prefers-reduced-motion: reduce) {
+  .loading-spinner {
+    animation: none;
+    border-top-color: #0071e3;
+    opacity: 0.7;
+  }
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: Animate ด้วย `top` และ `left`
+
+```css
+/* ผิด: กระตุกอย่างรุนแรงบนมือถือ เพราะสั่งคำนวณ Reflow และ Repaint ทุกมิลลิวินาที */
+.bad-modal {
+  position: fixed;
+  top: -100px;
+  transition: top 0.3s ease;
+}
+.bad-modal.show {
+  top: 50%;
+}
+```
+
+### ✅ โค้ดที่ถูกต้อง: Animate ด้วย `transform`
+
+```css
+/* ถูกต้อง: GPU Composited เร็ว ลื่น ประหยัดแบตเตอรี่ */
+.good-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, calc(-50% - 20px));
+  opacity: 0;
+  transition: transform 0.25s ease-out, opacity 0.25s ease-out;
+}
+.good-modal.show {
+  transform: translate(-50%, -50%);
+  opacity: 1;
+}
+```
+
+---
+
+## 5. เทียบกับ Tailwind CSS v4
+
+| Modern Motion CSS | Tailwind CSS v4 Utility |
+| :--- | :--- |
+| `transition: transform 0.2s ease;` | `transition-transform duration-200 ease-out` |
+| `transform: scale(1.05);` | `hover:scale-105` |
+| `animation: spin 1s linear infinite;` | `animate-spin` |
+| `@media (prefers-reduced-motion: reduce)` | `motion-reduce:animate-none motion-reduce:transition-none` |
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการทำ Animation ใน CSS ด้วย `transform` และ `opacity` จึงมีประสิทธิภาพสูงกว่าการเปลี่ยน `width`, `height`, หรือ `top/left`?
+**แนวทางคำตอบ**: เพราะการเปลี่ยนแปลง `width`, `height`, หรือ `top/left` จะกระทบต่อรูปทรงเรขาคณิตของหน้าเว็บ ทำให้เบราว์เซอร์ต้องผ่านกระบวนการ **Layout (Reflow)** เพื่อคำนวณพิกัดของทุก Element ใหม่ทั้งหมด จากนั้นจึงเข้าสู่ขั้นตอน **Paint (Repaint)** ซึ่งทำงานบน CPU และใช้เวลาประมวลผลสูงมาก 
+ในทางตรงกันข้าม การเปลี่ยนแปลง `transform` และ `opacity` จะข้ามขั้นตอน Layout และ Paint ไปทั้งหมด โดยงานจะถูกส่งตรงไปประมวลผลที่ **Composite Thread บน GPU** ซึ่งมีฮาร์ดแวร์เร่งความเร็วเฉพาะทาง จึงสามารถเรนเดอร์ภาพเคลื่อนไหวได้ลื่นไหลระดับ 60/120 FPS โดยไม่ทำให้หน้าจอกระตุก
+
+### Q2: พร็อพเพอร์ตี้ `will-change` มีหน้าที่อะไร และทำไมจึงไม่ควรใส่ `will-change` กับทุก Element?
+**แนวทางคำตอบ**: `will-change` เป็นการส่งสัญญาณล่วงหน้าบอกเบราว์เซอร์ว่า Element นี้กำลังจะมีการเปลี่ยนแปลงคุณสมบัตินั้นในอนาคตอันใกล้ เพื่อให้เบราว์เซอร์จัดสรรหน่วยความจำและสร้าง Layer บน GPU รอไว้ล่วงหน้า 
+อย่างไรก็ตาม การใส่ `will-change` พร่ำเพรื่อจะสิ้นเปลืองหน่วยความจำ (VRAM) ของ GPU มหาศาล และอาจทำให้เครื่องทำงานช้าลงยิ่งกว่าเดิม จึงควรใส่เฉพาะ Element ที่มีแอนิเมชันที่ซับซ้อนจริงๆ หรือใส่เฉพาะตอนที่ผู้ใช้เริ่มเอาเมาส์มาแตะใกล้ๆ แล้วลบออกเมื่อแอนิเมชันสิ้นสุดลง

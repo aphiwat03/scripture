@@ -1,0 +1,660 @@
+---
+title: Supabase
+category: DATABASE
+version: Supabase Cloud (PostgreSQL 16)
+updatedAt: 2026-10-17
+---
+
+# Supabase
+
+นักพัฒนาจำนวนมากเข้าใจผิดว่า **Supabase** เป็นฐานข้อมูลชนิดใหม่หรือเป็นเพียงสำเนาของ Firebase แต่ในทางวิศวกรรม **หัวใจหลักของ Supabase คือฐานข้อมูล Dedicated PostgreSQL 16 มาตรฐานระดับ Enterprise 100%** ที่ถูกล้อมรอบด้วยชุดเครื่องมือ Open-source ชั้นเยี่ยมเพื่ออำนวยความสะดวกในการพัฒนาแอปพลิเคชันยุคใหม่ เอกสารฉบับนี้เจาะลึกสถาปัตยกรรมภายในของ Supabase, วิธีการเชื่อมต่อร่วมกับ **Prisma ORM** ผ่าน **Supavisor Pooler** อย่างถูกต้อง, การทำความเข้าใจพอร์ต `6543` เทียบกับ `5432`, กลไก **Row Level Security (RLS)** ไปจนถึงข้อควรระวังในการนำขึ้นใช้งานจริงสำหรับระบบ **Smart Butcher Marketplace**
+
+| หัวข้อในหน้านี้ | สาระสำคัญ |
+| :--- | :--- |
+| **1. สถาปัตยกรรมของ Supabase ในฐานะ Managed PostgreSQL แพลตฟอร์ม** | โครงสร้างภายใน (PostgreSQL 16, PostgREST, GoTrue, Realtime, Storage, Supavisor) และการใช้งานเป็น Pure Managed DB |
+| **2. การเชื่อมต่อ Supabase ร่วมกับ Prisma (Direct Connection vs Supavisor Pooler)** | การตั้งค่า `DATABASE_URL` (พอร์ต 6543) คู่กับ `DIRECT_URL` (พอร์ต 5432) และประเด็น IPv4 vs IPv6 |
+| **3. ความแตกต่างของ Transaction Mode และ Session Mode ใน Connection Pooler** | เมื่อไหร่ต้องใช้พอร์ต 6543 (`?pgbouncer=true`) และเมื่อไหร่ต้องใช้พอร์ต 5432 บนโฮสต์ Pooler |
+| **4. แนวคิดและการทำงานของ Row Level Security (RLS) แบบสรุป** | การทำงานของ `ENABLE ROW LEVEL SECURITY`, `auth.uid()` และทำไม Prisma (`postgres` role) จึงข้าม RLS (`BYPASSRLS`) |
+| **5. ข้อควรระวังในการใช้งานจริง: Free Tier Pausing, ขีดจำกัด และการเลือก Region** | ปัญหาโปรเจกต์หลับหลัง 7 วัน, การเลือกโซน `ap-southeast-1` (Singapore) เพื่อลด Latency และขีดจำกัดด้านทรัพยากร |
+
+<Callout type="tip" title="สองแนวทางการใช้ Supabase ในสถาปัตยกรรมระดับ Production">
+คุณสามารถใช้ Supabase ได้ 2 รูปแบบ: (1) ใช้เป็น **Full BaaS (Backend-as-a-Service)** ที่ให้ฝั่ง Frontend เรียกใช้ Supabase SDK ตรงๆ ควบคู่กับกฎ RLS หรือ (2) ใช้เป็น **Pure Managed PostgreSQL 16 + Connection Pooler** โดยมีเซิร์ฟเวอร์ Backend ของเราเอง (เช่น NestJS หรือ Next.js Server Actions + Prisma ORM) เป็นผู้ควบคุม Business Logic ทั้งหมด ซึ่งในระบบร้านค้าเนื้อพรีเมียม **Smart Butcher Marketplace** เราเน้นแนวทางที่ 2 เป็นหลักเพื่อความรัดกุมของระบบตัดสต็อกและการเงิน
+</Callout>
+
+---
+
+## 1. สถาปัตยกรรมของ Supabase ในฐานะ Managed PostgreSQL แพลตฟอร์ม
+
+### แนวคิด (Concept)
+หากเราเช่าเซิร์ฟเวอร์เปล่ามาติดตั้ง PostgreSQL 16 เอง เราต้องดูแลตั้งค่าไฟล์ระบบ การทำ Connection Pooling การอัปเดตความปลอดภัย และการตั้งค่าเครือข่ายด้วยตัวเองทั้งหมด ในทางกลับกัน **Supabase** มอบอินสแตนซ์ **PostgreSQL 16 แท้ๆ (Dedicated Instance)** ให้กับทุกโปรเจกต์ พร้อมประกอบร่างบริการเสริมรอบข้างไว้ให้เสร็จสรรพ เปรียบเสมือน **"การเช่าครัวมาตรฐานระดับมิชลินที่มีทั้งห้องเย็น PostgreSQL 16, ระบบจัดการคิวเชฟ (Supavisor), ตู้เก็บภาพถ่ายเนื้อ (Storage) และพนักงานตรวจบัตรเข้างาน (GoTrue Auth) เตรียมไว้ให้พร้อมใช้งานทันที"**
+
+จุดเด่นที่สุดคือ ไม่ว่าคุณจะเลือกใช้บริการเสริมรอบข้างหรือไม่ ตัวฐานข้อมูลข้างในก็คือ PostgreSQL 16 มาตรฐาน 100% ที่คุณสามารถใช้ `pg_dump` ย้ายออกไปรันบน AWS RDS, Google Cloud SQL หรือ Docker ของตัวเองเมื่อไหร่ก็ได้โดยไม่มีการผูกขาดเทคโนโลยี (Zero Vendor Lock-in ในระดับฐานข้อมูล)
+
+### หลักการเบื้องหลัง (Under the Hood)
+ภายใต้หน้าจอ Dashboard ของ Supabase ประกอบด้วยบริการ Open-source 6 ส่วนที่ทำงานประสานกันอยู่หน้าฐานข้อมูล PostgreSQL 16:
+
+```text filename="docs/database/supabase.txt"
+                      ┌─────────────────────────────────────────┐
+                      │         API Gateway (Kong)              │
+                      └────┬──────────┬──────────┬──────────┬───┘
+                           │          │          │          │
+        ┌──────────────────┘          │          │          └──────────────────┐
+        ▼                             ▼          ▼                             ▼
+┌───────────────┐             ┌──────────────┐ ┌──────────────┐        ┌───────────────┐
+│   PostgREST   │             │ GoTrue (Auth)│ │   Realtime   │        │  Storage API  │
+│ (Auto REST/GQL)│             │ (JWT & Users)│ │ (WAL Stream) │        │  (S3 Backed)  │
+└───────┬───────┘             └──────┬───────┘ └──────┬───────┘        └───────┬───────┘
+        │                            │                │                        │
+        └────────────────────────────┴────────┬───────┴────────────────────────┘
+                                              │
+        ┌─────────────────────────┐           ▼
+        │  NestJS / Next.js App   │    ┌───────────────────────────────────────┐
+        │     (Prisma Client)     ├───►│   Supavisor (Connection Pooler)       │
+        └─────────────────────────┘    │   Port 6543 (Tx) / Port 5432 (Session)│
+                                       └──────────────────┬────────────────────┘
+                                                          │
+                                                          ▼
+                                       ┌───────────────────────────────────────┐
+                                       │       Dedicated PostgreSQL 16         │
+                                       │  Schemas: public, auth, storage, etc. │
+                                       └───────────────────────────────────────┘
+```
+
+1. **PostgreSQL 16 Core:** ฐานข้อมูลหลักที่มาพร้อม Extensions ยอดนิยมติดตั้งไว้ให้ล่วงหน้ากว่า 50 ตัว (เช่น `pgcrypto`, `uuid-ossp`, `pg_trgm`, `pg_stat_statements`, และ `pgvector`)
+2. **Supavisor:** ระบบ Cloud-native Connection Pooler ประสิทธิภาพสูง (เขียนด้วยภาษา Elixir) ที่เข้ามาแทนที่ PgBouncer แบบเดิม รองรับการเชื่อมต่อพร้อมกันได้นับหมื่นสาย
+3. **PostgREST:** ตัวแปลงตารางใน Schema `public` ให้กลายเป็น RESTful API อัตโนมัติ (ซึ่งหากเราใช้ Prisma ใน Backend เป็นหลัก เราควรปิดหรือล็อกการเข้าถึงผ่าน RLS)
+4. **GoTrue (Supabase Auth):** ระบบจัดการผู้ใช้และการออก JWT Token ที่เก็บข้อมูลผู้ใช้ไว้ใน Schema `auth.users` ของ PostgreSQL โดยตรง
+5. **Realtime Server:** ดักฟังการเปลี่ยนแปลงจาก Write-Ahead Log (WAL Replication) ของ PostgreSQL เพื่อส่งข้อมูลอัปเดตผ่าน WebSockets ไปยังหน้าเว็บแบบเรียลไทม์
+6. **Storage API:** เก็บไฟล์จริง (เช่น รูปถ่ายลายไขมันเนื้อวากิว) ไว้บน AWS S3 แต่เก็บ Metadata และสิทธิ์การเข้าถึงไว้ใน Schema `storage.objects` ของ PostgreSQL
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: การเปิดใช้งาน Extensions ทรงพลังของ PostgreSQL 16 บน Supabase ผ่านไฟล์ Migration
+เนื่องจาก Supabase มี Extensions ติดตั้งเตรียมไว้ให้ในโฟลเดอร์ `extensions` แล้ว เราสามารถสั่งเปิดใช้งาน `pg_trgm` (สำหรับค้นหาชื่อเนื้อแบบพิมพ์ผิดนิดหน่อยได้) และ `pg_stat_statements` ในระบบ **Smart Butcher Marketplace** ได้ทันที:
+
+```sql filename="prisma/migrations/20261017010000_enable_supabase_extensions/migration.sql"
+-- เปิดใช้งาน Extension สำหรับสร้าง UUID และฟังก์ชันเข้ารหัส
+CREATE EXTENSION IF NOT EXISTS "pgcrypto" WITH SCHEMA "extensions";
+
+-- เปิดใช้งาน Trigram Extension สำหรับการค้นหาชื่อเนื้อสเต๊กด้วยความเร็วสูง (Fuzzy Search)
+CREATE EXTENSION IF NOT EXISTS "pg_trgm" WITH SCHEMA "extensions";
+
+-- สร้าง GIN Trigram Index บนชื่อสินค้าในตาราง products เพื่อให้คำสั่ง ILIKE '%wagyu%' ทำงานระดับมิลลิวินาที
+CREATE INDEX IF NOT EXISTS "idx_products_name_trgm"
+ON "public"."products"
+USING GIN ("name" extensions.gin_trgm_ops);
+```
+
+#### ตัวอย่างที่ 2: การตรวจสอบรายการ Schemas และ Extensions ที่ทำงานอยู่ภายในโปรเจกต์ Supabase
+คิวรีสำหรับสำรวจโครงสร้างภายในคลัสเตอร์ PostgreSQL 16 บน Supabase เพื่อแยกแยะระหว่าง Schema ของระบบกับ Schema `public` ของร้านเรา:
+
+```sql filename="inspect_supabase_architecture.sql"
+-- 1. แสดงรายการ Schemas ทั้งหมดในโปรเจกต์ Supabase (แยกเห็นชัดเจนระหว่าง public กับระบบของ Supabase)
+SELECT
+    nspname AS schema_name,
+    pg_catalog.pg_get_userbyid(nspowner) AS schema_owner
+FROM pg_catalog.pg_namespace
+WHERE nspname NOT LIKE 'pg_%'
+  AND nspname <> 'information_schema'
+ORDER BY schema_name;
+
+-- 2. แสดงรายการ Extensions ที่เปิดใช้งานอยู่และเวอร์ชันปัจจุบันบน PostgreSQL 16
+SELECT
+    e.extname AS extension_name,
+    e.extversion AS version,
+    n.nspname AS installed_schema
+FROM pg_catalog.pg_extension e
+JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+ORDER BY e.extname;
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การแตะต้อง Schema ระบบ** | ใช้ Prisma Migrate ไปสั่งแก้โครงสร้างตารางใน Schema `auth` หรือ `storage` ของ Supabase โดยตรงจนระบบพัง | จัดการตารางธุรกิจทั้งหมด (`users`, `products`, `orders`, `payments`) ไว้ใน Schema `public` ของเราเอง |
+| **การซิงค์ข้อมูลกับ `auth.users`** | แก้ไขตาราง `auth.users` ด้วยมือเมื่อต้องการเพิ่มข้อมูลระดับสมาชิกของลูกค้า | สร้างตาราง `public.users` (หรือ `profiles`) ใน Schema `public` แล้วผูก Foreign Key หรือ Database Trigger เข้ากับ `auth.users.id` |
+| **การเปิด Data API ทิ้งไว้โดยไม่ใช้** | ใช้แค่ Prisma ต่อจาก Backend แต่เปิด Public Data API (PostgREST) ทิ้งไว้โดยไม่ได้เปิด RLS บนตาราง `public` | เปิดใช้งาน RLS บนทุกตารางใน `public` เสมอ (หรือปิดการเปิดเผย Schema `public` ออกทาง Data API ในตั้งค่าของ Supabase) |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Supabase เมื่อ:** ต้องการฐานข้อมูล Managed PostgreSQL 16 ที่มีระบบ Connection Pooler (Supavisor), ระบบจัดการไฟล์ (Storage) และ Dashboard ตรวจสอบประสิทธิภาพ (`pg_stat_statements` / Query Performance Advisor) พร้อมใช้งานทันทีโดยไม่ต้องจ้างทีม DBA เต็มเวลาในช่วงเริ่มต้นถึงระดับกลาง
+- **ไม่ควรใช้การเรียก PostgREST จากฝั่ง Browser โดยตรงเมื่อ:** เป็นตรรกะทางธุรกิจที่ซับซ้อนและมีความลับสูง เช่น การคำนวณส่วนลดหลายชั้น การตัดสต็อกเนื้อวากิวพร้อมตรวจสอบยอดเงินใน `payments` ซึ่งควรทำผ่าน Backend Server (NestJS / Next.js Server) ด้วย Prisma Transaction เท่านั้น
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: यदिบริษัทตัดสินใจเริ่มต้นด้วย Supabase ในวันนี้ แล้วอีก 2 ปีข้างหน้าต้องการย้ายฐานข้อมูลออกไปรันบน AWS RDS for PostgreSQL 16 จะเกิดปัญหา Vendor Lock-in ในระดับฐานข้อมูลหรือไม่?**
+  - **แนวคำตอบ:** ไม่เกิดปัญหา Vendor Lock-in ในระดับฐานข้อมูลเลยหากเราออกแบบตารางธุรกิจ (`users`, `categories`, `products`, `orders`, `order_items`, `payments`) ไว้ใน Schema `public` และเข้าถึงผ่าน Prisma ORM มาตรฐาน เพราะเนื้อแท้ของ Supabase คือ PostgreSQL 16 แท้ 100% เราสามารถใช้ `pg_dump --schema=public -Fc` ดึงทั้งโครงสร้างและข้อมูลทั้งหมดไป `pg_restore` ลงบน AWS RDS แล้วเปลี่ยนแค่ค่า `DATABASE_URL` ในไฟล์ `.env` ได้ทันที
+- **Q2: บริการ Supavisor ในสถาปัตยกรรมของ Supabase ทำหน้าที่อะไร และเข้ามาแก้ปัญหาใดของ PostgreSQL?**
+  - **แนวคำตอบ:** Supavisor คือ Cloud-native Connection Pooler ที่ทำหน้าที่เป็นตัวกลางรับการเชื่อมต่อจำนวนมากจากแอปพลิเคชันและ Serverless Functions (พอร์ต 6543 และ 5432 บนโฮสต์ Pooler) แล้วทำการสลับหมุนเวียนคำสั่ง (Multiplexing) ส่งต่อไปยังอินสแตนซ์ PostgreSQL 16 ด้วยจำนวนการเชื่อมต่อจริงเพียงไม่กี่สาย ช่วยแก้ปัญหาคอขวด Process-per-Connection และป้องกันข้อผิดพลาด `too many clients already`
+
+---
+
+## 2. การเชื่อมต่อ Supabase ร่วมกับ Prisma (Direct Connection vs Supavisor Pooler)
+
+### แนวคิด (Concept)
+จุดที่นักพัฒนาที่ใช้ **Prisma ORM คู่กับ Supabase** มักติดปัญหามากที่สุดคือการตั้งค่า Connection String ในไฟล์ `.env` เพราะในหน้า Settings ของ Supabase จะมี URL ให้เลือกหลายแบบ ทั้งพอร์ต `6543` และพอร์ต `5432` รวมถึงโฮสต์ที่เป็น Direct Database กับโฮสต์ที่เป็น Supavisor Pooler
+
+กฎเหล็กของการเชื่อมต่อ Prisma เข้ากับ Supabase มีเพียงหลักการเดียวที่ชัดเจนคือ **ต้องแยกสายการเชื่อมต่อออกเป็น 2 เส้น (`DATABASE_URL` และ `DIRECT_URL`)**:
+1. **`DATABASE_URL` (สายทำงานหลักของแอปพลิเคชัน):** ชี้ไปที่ **Supavisor Pooler พอร์ต `6543` (Transaction Mode)** พร้อมเติม `?pgbouncer=true`
+2. **`DIRECT_URL` (สายเฉพาะกิจสำหรับรัน Migration):** ชี้ไปที่ **พอร์ต `5432` (Session Mode บน Supavisor Pooler หรือ Direct Connection)** เพื่อให้ Prisma CLI สามารถล็อกตารางและรันคำสั่ง DDL ได้
+
+### หลักการเบื้องหลัง (Under the Hood)
+ทำไมการเข้าใจเรื่องเครือข่าย **IPv4 vs IPv6** บน Supabase ยุคใหม่จึงสำคัญมาก?
+1. **การเปลี่ยนผ่านสู่ IPv6 ของ Direct Connection (`db.<project_ref>.supabase.co`):**
+   ตั้งแต่ปี 2024 เป็นต้นมา โฮสต์เชื่อมต่อตรงเข้าฐานข้อมูลของ Supabase (`db.<ref>.supabase.co:5432`) ได้เปลี่ยนมาใช้ที่อยู่ **IPv6 เป็นค่าเริ่มต้น** (เว้นแต่จะซื้อ IPv4 Add-on เพิ่ม) ซึ่งเครือข่ายอินเทอร์เน็ตตามบ้าน, GitHub Actions Runners มาตรฐาน หรือผู้ให้บริการคลาวด์หลายเจ้ายังรองรับเฉพาะ **IPv4 เท่านั้น!** หากคุณนำโฮสต์ `db.<ref>.supabase.co` ไปใส่ใน `DIRECT_URL` แล้วรันบนเครือข่าย IPv4 จะเกิดข้อผิดพลาด `Can't reach database server` ทันที!
+2. **ทางออกด้วย Supavisor Pooler Host (`aws-0-<region>.pooler.supabase.com`):**
+   โฮสต์ของ Supavisor Pooler **รองรับทั้ง IPv4 และ IPv6 ฟรีทุกแพ็กเกจ!** และเปิดให้บริการพร้อมกันถึง 2 พอร์ตในโฮสต์เดียว:
+   - **พอร์ต `6543` บนโฮสต์ Pooler:** ทำงานในโหมด **Transaction Mode** -> ใช้เป็น `DATABASE_URL`
+   - **พอร์ต `5432` บนโฮสต์ Pooler:** ทำงานในโหมด **Session Mode** -> ใช้เป็น `DIRECT_URL` สำหรับรัน `prisma migrate deploy` บนเครือข่าย IPv4 ได้อย่างสมบูรณ์แบบ!
+
+```text filename="docs/database/supabase.txt"
+┌─────────────────────────────────────────────────────────────────────────┐
+│ แอปพลิเคชัน & CI/CD (เครือข่าย IPv4 / IPv6 เช่น Vercel, GitHub Actions) │
+└───────────────┬─────────────────────────────────────────┬───────────────┘
+                │                                         │
+   1. DATABASE_URL (Prisma Client)           2. DIRECT_URL (Prisma Migrate CLI)
+   พอร์ต 6543 + ?pgbouncer=true               พอร์ต 5432 (ไม่ต้องมี pgbouncer=true)
+                │                                         │
+                ▼                                         ▼
+┌───────────────────────────────────┐     ┌───────────────────────────────────┐
+│  Supavisor Pooler (Port 6543)     │     │  Supavisor Pooler (Port 5432)     │
+│  โหมด: Transaction Pooling        │     │  โหมด: Session Pooling            │
+└───────────────┬───────────────────┘     └───────────────┬───────────────────┘
+                │                                         │
+                └────────────────────┬────────────────────┘
+                                     ▼
+                    ┌─────────────────────────────────┐
+                    │   Supabase PostgreSQL 16 Engine │
+                    └─────────────────────────────────┘
+```
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: การตั้งค่า `schema.prisma` และไฟล์ `.env` สำหรับเชื่อมต่อ Supabase ผ่าน Supavisor (รองรับ IPv4 100%)
+รูปแบบการตั้งค่าที่ถูกต้องแม่นยำที่สุดสำหรับระบบ **Smart Butcher Marketplace** บนภูมิภาคสิงคโปร์ (`ap-southeast-1`):
+
+```prisma filename="prisma/schema.prisma"
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // ใช้สำหรับรันคิวรีทั้งหมดของแอปพลิเคชัน (ผ่านพอร์ต 6543 Transaction Mode)
+  url       = env("DATABASE_URL")
+  // ใช้สำหรับคำสั่ง prisma migrate dev / deploy เท่านั้น (ผ่านพอร์ต 5432 Session Mode)
+  directUrl = env("DIRECT_URL")
+}
+```
+
+```ini filename=".env"
+# สังเกตรูปแบบชื่อผู้ใช้ของ Supavisor จะต้องเป็น: postgres.[รหัสโปรเจกต์ของคุณ]
+# 1. DATABASE_URL -> ใช้พอร์ต 6543 และบังคับเติม ?pgbouncer=true เสมอ!
+DATABASE_URL="postgresql://postgres.abcdefghijklm:YourStrongPass@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=10"
+
+# 2. DIRECT_URL -> ใช้โฮสต์ Pooler ตัวเดียวกัน (เพื่อรองรับ IPv4) แต่เปลี่ยนเป็นพอร์ต 5432 (Session Mode) และไม่มี pgbouncer=true!
+DIRECT_URL="postgresql://postgres.abcdefghijklm:YourStrongPass@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres"
+```
+
+<Callout type="warning" title="ข้อควรระวังเมื่อรหัสผ่านฐานข้อมูลมีอักขระพิเศษ">
+หากรหัสผ่านฐานข้อมูลของคุณมีอักขระพิเศษ เช่น `@`, `#`, `:`, `/`, `?` หรือ `%` คุณต้องทำการแปลงเป็นรหัส **URL-Encoding (Percent-encoding)** ใน Connection String เสมอ (เช่น แปลง `@` เป็น `%40` และแปลง `#` เป็น `%23`) มิฉะนั้นตัวอ่าน URL ของ Prisma จะแยกส่วนชื่อโฮสต์ผิดและเชื่อมต่อไม่สำเร็จ
+</Callout>
+
+#### ตัวอย่างที่ 2: สคริปต์ตรวจสอบสุขภาพการเชื่อมต่อทั้งสองสาย (Healthcheck Diagnostic)
+ฟังก์ชันสำหรับทดสอบในขั้นตอนการ Deploy ว่าการเชื่อมต่อผ่าน Supavisor ทำงานได้ปกติและตรวจสอบเวอร์ชันของ PostgreSQL 16:
+
+```typescript filename="src/health/supabase-connection.health.ts"
+import { Injectable } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+
+@Injectable()
+export class SupabaseHealthService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async checkDatabaseConnectivity() {
+    const startTime = performance.now();
+
+    const result = await this.prisma.$queryRaw<
+      Array<{
+        pg_version: string;
+        current_db: string;
+        current_role: string;
+        server_time: Date;
+      }>
+    >`
+      SELECT
+        version() AS pg_version,
+        current_database() AS current_db,
+        current_user AS current_role,
+        NOW() AS server_time
+    `;
+
+    const latencyMs = Math.round((performance.now() - startTime) * 100) / 100;
+
+    return {
+      status: 'HEALTHY',
+      roundTripLatencyMs: latencyMs,
+      databaseInfo: result[0],
+    };
+  }
+}
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การกำหนด `DIRECT_URL` บนเครือข่าย IPv4** | ใช้ `db.<ref>.supabase.co:5432` บน GitHub Actions หรือเครื่องที่ไม่มี IPv6 ทำให้รัน Migration ไม่ผ่าน | ใช้ `aws-0-<region>.pooler.supabase.com:5432` (Session Mode Pooler) ซึ่งรองรับ IPv4 เต็มรูปแบบ |
+| **รูปแบบ Username ของ Pooler** | ใส่แค่ `postgres` เฉยๆ ตอนต่อเข้าโฮสต์ `pooler.supabase.com` ทำให้เกิด Error `Tenant or user not found` | ต้องระบุรหัสโปรเจกต์ต่อท้ายเป็น `postgres.<project_ref>` เสมอเมื่อต่อเข้าโฮสต์ของ Supavisor |
+| **การใช้พอร์ต 6543 โดยไม่มีแฟล็ก** | ใช้พอร์ต `6543` ใน `DATABASE_URL` แต่ลืมใส่ `?pgbouncer=true` ทำให้คิวรีที่สองพังเพราะ Prepared Statement ซ้ำ | เติม `?pgbouncer=true` ต่อท้าย URL ที่ใช้พอร์ต `6543` ทุกครั้งโดยไม่มีข้อยกเว้น |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `DATABASE_URL` (พอร์ต 6543) คู่กับ `DIRECT_URL` (พอร์ต 5432) เมื่อ:** ใช้ Prisma ORM กับ Supabase ในทุกสภาพแวดล้อมตั้งแต่ Local Dev, Staging ไปจนถึง Production
+- **ไม่ควรนำ `DIRECT_URL` (พอร์ต 5432) ไปใส่แทน `DATABASE_URL` ในแอปพลิเคชัน Serverless:** เพราะพอร์ต 5432 ทำงานแบบ Session Mode ซึ่งมีโควตาจำนวนสายจำกัดมากและจะเต็มทันทีเมื่อ Serverless ขยายตัว
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: หากขณะเชื่อมต่อเข้ากับ Supabase Pooler คุณได้รับข้อความแจ้งเตือนว่า `FATAL: Tenant or user not found` สาเหตุเกิดจากอะไรและแก้ไขอย่างไร?**
+  - **แนวคำตอบ:** เกิดจากการใส่ชื่อ Database User ใน Connection String เป็นคำว่า `postgres` เฉยๆ เนื่องจากโฮสต์ของ Supavisor Pooler (`aws-0-<region>.pooler.supabase.com`) เป็นโครงสร้างพื้นฐานแบบ Multi-tenant ที่ใช้โฮสต์กลางร่วมกันหลายโปรเจกต์ ตัว Pooler จึงต้องทราบว่าคุณกำลังจะเชื่อมต่อไปยังฐานข้อมูลของโปรเจกต์ไหนผ่านนามสกุลของชื่อผู้ใช้ วิธีแก้คือต้องเปลี่ยนชื่อผู้ใช้ใน URL ให้เป็นรูปแบบ `postgres.<รหัส_project_ref>` เสมอ
+- **Q2: ทำไมการรัน `npx prisma migrate deploy` บน GitHub Actions ที่ต่อตรงไปยัง `db.<project_ref>.supabase.co:5432` จึงมักล้มเหลวด้วยปัญหา Network Unreachable และควรเปลี่ยนไปใช้อะไรแทน?**
+  - **แนวคำตอบ:** เพราะโฮสต์ Direct Connection (`db.<project_ref>.supabase.co`) ของ Supabase ยุคใหม่แจกจ่ายเฉพาะที่อยู่ **IPv6** เท่านั้น ในขณะที่ Runner มาตรฐานของ GitHub Actions รองรับเฉพาะเครือข่าย **IPv4** วิธีแก้ไขโดยไม่ต้องเสียเงินซื้อ IPv4 Add-on คือเปลี่ยน `DIRECT_URL` ให้ชี้ไปที่โฮสต์ของ Supavisor Pooler ในโหมด Session ที่พอร์ต 5432 (`aws-0-<region>.pooler.supabase.com:5432`) ซึ่งรองรับ IPv4 ฟรีและรองรับการทำ Migration เต็มรูปแบบ
+
+---
+
+## 3. ความแตกต่างของ Transaction Mode และ Session Mode ใน Connection Pooler
+
+### แนวคิด (Concept)
+ในหัวข้อที่แล้วเราเห็นว่าโฮสต์ Supavisor Pooler ตัวเดียวกันของ Supabase เปิดให้เราเชื่อมต่อได้ทั้ง **พอร์ต `6543` (Transaction Mode)** และ **พอร์ต `5432` (Session Mode)**
+เพื่อให้เลือกใช้ได้อย่างแม่นยำในระบบ **Smart Butcher Marketplace** ให้จำเปรียบเทียบง่ายๆ ดังนี้:
+- **Transaction Mode (พอร์ต `6543`):** เหมือน **"ช่องจ่ายเงินด่วน (Express Checkout)"** ลูกค้ายื่นตระกร้าเนื้อ จ่ายเงินเสร็จปุ๊บ ต้องเดินออกจากช่องทันทีเพื่อให้คนถัดไปเข้ามาจ่ายเงินต่อในเสี้ยววินาทีถัดมา รองรับคนต่อแถวได้เป็นหมื่นคน แต่ห้ามวางของจองพื้นที่ค้างไว้ข้ามบิล
+- **Session Mode (พอร์ต `5432`):** เหมือน **"ห้องรับรองส่วนตัว (Private VIP Room)"** ทันทีที่คุณเดินเข้าไป คุณสามารถนั่งอยู่ในห้องนั้นได้ยาวนาน ตั้งค่าอุณหภูมิห้องเฉพาะตัว หรือวางล็อกเกอร์ส่วนตัวค้างไว้ได้จนกว่าคุณจะเดินออกจากตึกไปเอง แต่จำนวนห้องมีจำกัดมาก (เช่น มีแค่ 15 ห้อง)
+
+### หลักการเบื้องหลัง (Under the Hood)
+การทำงานระดับโปรโตคอลของทั้งสองโหมดใน Supavisor มีความแตกต่างกันใน 4 มิติหลัก:
+
+| คุณสมบัติทางเทคนิค | Transaction Mode (พอร์ต `6543`) | Session Mode (พอร์ต `5432` บน Pooler) |
+| :--- | :--- | :--- |
+| **จังหวะการคืนสายเข้า Pool** | คืนสายทันทีที่จบแต่ละ Transaction (`COMMIT` / `ROLLBACK`) หรือจบคำสั่งเดี่ยว | ยึดสายไว้ตลอดจนกว่า Client จะสั่งปิดการเชื่อมต่อระดับ TCP (`Disconnect`) |
+| **Prepared Statements (ระดับ Protocol)** | ❌ ไม่รองรับข้ามธุรกรรม (ใน Prisma ต้องใส่ `?pgbouncer=true`) | ✅ รองรับเต็มรูปแบบ 100% |
+| **Session-level Advisory Locks** | ❌ ไม่รองรับ (จึงใช้รัน `prisma migrate` ไม่ได้!) | ✅ รองรับเต็มรูปแบบ (ใช้เป็น `DIRECT_URL` สำหรับทำ Migration ได้) |
+| **คำสั่ง `SET` ระดับ Session / `LISTEN`** | ❌ ค่าที่ `SET` ไว้จะหายไปเมื่อจบธุรกรรม (ต้องใช้ `SET LOCAL` ภายใน Transaction แทน) | ✅ รองรับ `SET` ระดับ Session และ `LISTEN/NOTIFY` |
+| **งานที่เหมาะสมที่สุด** | **Prisma Client ใน API Server / Next.js / Serverless Functions** | **Prisma Migrate CLI, เครื่องมือ `pg_dump`, DBeaver/GUI** |
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: การตั้งค่าตัวแปรระดับธุรกรรมด้วย `SET LOCAL` เพื่อให้ทำงานบน Transaction Mode (พอร์ต `6543`) ได้อย่างปลอดภัย
+ในโหมด Transaction Pooling (พอร์ต `6543`) หากเราสั่ง `SET timezone = 'Asia/Bangkok';` หรือตั้งค่าตัวแปรลอยๆ นอก Transaction ค่าเหล่านั้นอาจหลุดไปติดกับสายของลูกค้าคนอื่น หรือหายไปในคิวรีถัดไป! ดังนั้นหากต้องการตั้งค่าพารามิเตอร์เฉพาะกิจบนพอร์ต `6543` ต้องใช้คำสั่ง **`SET LOCAL`** ภายในบล็อก `$transaction` เท่านั้น (ค่าจะถูกล้างกลับเป็นปกติทันทีเมื่อจบ `COMMIT`):
+
+```typescript filename="src/orders/localized-report.service.ts"
+import { Injectable } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+
+@Injectable()
+export class LocalizedReportService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async generateHeavyButcherSummaryReport() {
+    // ทำงานบนพอร์ต 6543 (Transaction Mode) อย่างปลอดภัยด้วยการรวมไว้ใน Interactive Transaction
+    return this.prisma.$transaction(async (tx) => {
+      // ✅ ใช้ SET LOCAL เพื่อให้มีผลเฉพาะใน Transaction นี้เท่านั้น และไม่ปนเปื้อนไปหาสายอื่นใน Pool!
+      await tx.$executeRaw`SET LOCAL work_mem = '32MB'`;
+      await tx.$executeRaw`SET LOCAL statement_timeout = '8s'`;
+
+      return tx.$queryRaw`
+        SELECT
+          c.name AS category_name,
+          COUNT(DISTINCT o.id)::int AS total_orders,
+          SUM(oi.subtotal) AS gross_revenue
+        FROM order_items oi
+        INNER JOIN orders o ON o.id = oi.order_id
+        INNER JOIN products p ON p.id = oi.product_id
+        INNER JOIN categories c ON c.id = p.category_id
+        WHERE o.status IN ('PAID', 'PREPARING_CUT', 'SHIPPING', 'DELIVERED')
+        GROUP BY c.id, c.name
+        ORDER BY gross_revenue DESC
+      `;
+    });
+  }
+}
+```
+
+#### ตัวอย่างที่ 2: การแยกสคริปต์งานบำรุงรักษาที่ต้องใช้ Session Mode (`DIRECT_URL` พอร์ต `5432`)
+สำหรับงานเบื้องหลังที่ต้องใช้ PostgreSQL Session-level Advisory Lock เพื่อรับประกันว่าจะมี Worker เพียงตัวเดียวที่กำลังซิงค์ราคาเนื้อนำเข้าประจำวัน เราจะสร้างการเชื่อมต่อเฉพาะกิจผ่าน `DIRECT_URL` (พอร์ต 5432 Session Mode):
+
+```typescript filename="src/jobs/daily-wagyu-price-sync.job.ts"
+import { PrismaClient } from '@prisma/client';
+
+export async function runExclusivePriceSyncJob() {
+  // สร้าง Client เฉพาะกิจสำหรับงาน Cronjob ที่ชี้ไปยังพอร์ต 5432 (Session Mode)
+  const sessionClient = new PrismaClient({
+    datasources: {
+      db: { url: process.env.DIRECT_URL },
+    },
+  });
+
+  const LOCK_KEY = 99887766;
+
+  try {
+    // ขอ Session-level Advisory Lock แบบไม่บล็อกรอนาน (pg_try_advisory_lock)
+    const lockResult = await sessionClient.$queryRaw<
+      Array<{ acquired: boolean }>
+    >`SELECT pg_try_advisory_lock(${LOCK_KEY}) AS acquired`;
+
+    if (!lockResult[0]?.acquired) {
+      console.log('⏳ Another worker is already syncing Wagyu prices. Skipping.');
+      return;
+    }
+
+    console.log('🔒 Lock acquired on Session Mode (5432). Syncing exchange rates...');
+    // ทำการอัปเดตราคาสินค้าตามอัตราแลกเปลี่ยนประจำวัน...
+  } finally {
+    // ปลดล็อกและปิดสาย Session Mode ทันทีเมื่อจบงานเพื่อคืนโควตาให้ระบบ
+    await sessionClient.$queryRaw`SELECT pg_advisory_unlock(${LOCK_KEY})`;
+    await sessionClient.$disconnect();
+  }
+}
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การใช้คำสั่ง `SET` บนพอร์ต 6543** | รัน `SET statement_timeout = '60s'` นอก Transaction บนพอร์ต 6543 ทำให้ค่าหลุดไปกระทบลูกค้าคนอื่นที่ใช้สายต่อ | ใช้ `SET LOCAL ...` ภายในบล็อก `prisma.$transaction` เสมอเมื่อเชื่อมต่อผ่านพอร์ต 6543 |
+| **การต่อโปรแกรม GUI (DBeaver)** | ใช้พอร์ต `6543` ต่อเข้า DBeaver หรือ TablePlus ทำให้โปรแกรมขึ้น Error เรื่อง Prepared Statement ตลอดเวลา | ใช้พอร์ต `5432` (Session Mode) เสมอเมื่อเชื่อมต่อจากโปรแกรม GUI หรือรัน `pg_dump` |
+| **การเปิดสายพอร์ต 5432 ทิ้งไว้** | ใช้สคริปต์ต่อเข้าพอร์ต `5432` แล้วลืมสั่ง `$disconnect()` ทำให้โควตา Session Pool เต็มจนรัน Migration ไม่ได้ | ปิดการเชื่อมต่อบนพอร์ต `5432` ในบล็อก `finally` ทันทีที่จบงานบำรุงรักษาหรือจบ Migration |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Transaction Mode (พอร์ต `6543`) เมื่อ:** เป็นการเชื่อมต่อของแอปพลิเคชันหลัก (Backend API, Next.js App Router, Serverless Functions) ที่รับโหลดจากลูกค้าหน้าร้าน
+- **ควรใช้ Session Mode (พอร์ต `5432`) เมื่อ:** รันคำสั่ง `prisma migrate`, รัน `pg_dump` / `pg_restore`, เชื่อมต่อผ่านเครื่องมือ GUI (DBeaver) หรือรันงานพิเศษที่ต้องใช้ Session-level Advisory Lock
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ทำไมการสั่ง `SET work_mem = '64MB';` โดยไม่มีคำว่า `LOCAL` บนการเชื่อมต่อแบบ Transaction Pooling (พอร์ต 6543) จึงถือเป็นอันตรายต่อสถาปัตยกรรม (Connection State Pollution)?**
+  - **แนวคำตอบ:** เพราะคำสั่ง `SET` ปกติจะมีผลติดอยู่กับโปรเซสของ PostgreSQL ตัวนั้นไปตลอดอายุของ Session ในโหมด Transaction Pooling ทันทีที่คำสั่งของเราจบลง Supavisor จะนำโปรเซส PostgreSQL ตัวนั้นไปหมุนเวียนให้คำขอของลูกค้ารายอื่นใช้งานต่อ ส่งผลให้ลูกค้ารายอื่นได้รับค่า `work_mem = '64MB'` ติดไปด้วยโดยไม่ตั้งใจ การใช้ `SET LOCAL` บังคับให้ค่าดังกล่าวมีผลเฉพาะภายใน Transaction ปัจจุบันเท่านั้น และ PostgreSQL จะรีเซ็ตค่ากลับสู่ค่าเริ่มต้นทันทีที่สั่ง `COMMIT` หรือ `ROLLBACK`
+- **Q2: หากต้องการใช้คำสั่ง `pg_advisory_lock()` บนพอร์ต 6543 (Transaction Mode) โดยไม่ต้องการเปิดพอร์ต 5432 เพิ่ม สามารถใช้ฟังก์ชันใดของ PostgreSQL แทนได้?**
+  - **แนวคำตอบ:** สามารถเปลี่ยนมาใช้ **Transaction-level Advisory Lock** ด้วยฟังก์ชัน `pg_advisory_xact_lock(key)` หรือ `pg_try_advisory_xact_lock(key)` ภายในบล็อก `BEGIN ... COMMIT` (`prisma.$transaction`) ได้เลย เพราะล็อกชนิดนี้ผูกติดกับอายุของ Transaction ไม่ได้ผูกกับ Session และจะถูกปลดล็อกให้อัตโนมัติทันทีที่ Transaction นั้นจบลง จึงทำงานร่วมกับพอร์ต 6543 ได้อย่างสมบูรณ์ 100%
+
+---
+
+## 4. แนวคิดและการทำงานของ Row Level Security (RLS) แบบสรุป
+
+### แนวคิด (Concept)
+**Row Level Security (RLS)** คือฟีเจอร์ความปลอดภัยระดับแถวข้อมูลที่มีมาให้ในตัวของ PostgreSQL 16 และถูกนำมาใช้เป็นหัวใจหลักของสถาปัตยกรรม Supabase
+แนวคิดของ RLS คือการฝัง **"ยามเฝ้าประตูระดับแถวข้อมูล"** ลงไปในตารางโดยตรง เช่น เรากำหนดกฎไว้บนตาราง `orders` ว่า *"ลูกค้าแต่ละคนจะมองเห็นเฉพาะแถวคำสั่งซื้อที่มีค่า `user_id` ตรงกับรหัสของตัวเองเท่านั้น"*
+เมื่อมีกฎนี้ทำงานอยู่ ต่อให้โค้ดฝั่งหน้าบ้านเขียนคิวรีสั่ง `SELECT * FROM orders;` (โดยลืมใส่ `WHERE user_id = ...`) ตัว Engine ของ PostgreSQL 16 จะแอบเติมเงื่อนไข `WHERE user_id = auth.uid()` เข้าไปในแผนการสืบค้นให้อัตโนมัติ ทำให้ลูกค้าไม่มีวันแอบดูใบสั่งซื้อเนื้อวากิวของคนอื่นได้เลย!
+
+แต่สิ่งสำคัญที่สุดที่นักพัฒนา Backend ต้องเข้าใจคือ: **เมื่อเราเชื่อมต่อด้วย Prisma ORM ผ่านบัญชี `postgres` (หรือ Role ที่มีสิทธิ์ `BYPASSRLS`) กฎ RLS ทั้งหมดจะถูกข้ามไปโดยอัตโนมัติ!**
+
+### หลักการเบื้องหลัง (Under the Hood)
+1. **พฤติกรรม Default-Deny เมื่อเปิด RLS:**
+   ทันทีที่เราสั่ง `ALTER TABLE orders ENABLE ROW LEVEL SECURITY;` บนตารางใดก็ตามใน PostgreSQL 16 โดยยังไม่ได้เขียน `CREATE POLICY` ผลลัพธ์คือ **ผู้ใช้ทั่วไป (`anon` และ `authenticated` ที่ผ่าน PostgREST API ของ Supabase) จะมองไม่เห็นข้อมูลเลยแม้แต่แถวเดียว (คืนค่า 0 แถว)** ซึ่งปลอดภัยมาก!
+2. **ฟังก์ชัน `auth.uid()` และ `auth.jwt()` ของ Supabase:**
+   เมื่อมีคำขอวิ่งผ่าน API Gateway ของ Supabase พร้อมแนบ JWT Token มาด้วย Supabase จะแกะข้อมูลจาก Token แล้วตั้งค่าลงในตัวแปรเฉพาะธุรกรรม (`request.jwt.claims`) จากนั้นฟังก์ชัน `auth.uid()` ใน PostgreSQL จะอ่านค่า `sub` (User ID) ออกมาใช้ตรวจสอบเทียบกับคอลัมน์ `user_id` ในแต่ละแถว
+3. **ทำไม Prisma Client ถึงมองเห็นข้อมูลทุกแถวแม้จะเปิด RLS ไว้?**
+   ใน Connection String มาตรฐานของ Supabase ที่เรานำมาใส่ใน Prisma (`postgresql://postgres.<ref>:...`) เราเชื่อมต่อด้วย Role **`postgres`** ซึ่งในระบบของ Supabase บัญชีนี้มีคุณสมบัติพิเศษคือ **`BYPASSRLS` (ข้ามกฎ Row Level Security ทั้งหมด)**
+   - **ข้อดี:** เซิร์ฟเวอร์ Backend ของเรา (เช่น NestJS หรือ Next.js API) สามารถทำงานประมวลผลหลังบ้าน ค้นหาออเดอร์ทั้งหมดเพื่อจัดส่ง หรือทำรายงานสรุปยอดขายได้อย่างอิสระและรวดเร็ว โดยเราเป็นผู้เขียนเงื่อนไข `where: { userId }` ควบคุมสิทธิ์ในโค้ด Backend เอง
+   - **ทำไมยังต้องเปิด RLS บนทุกตารางใน Schema `public` แม้เราจะใช้แค่ Prisma?** เพราะ Supabase เปิดบริการ **PostgREST (Data API)** เอาไว้ที่ URL สาธารณะของโปรเจกต์! หากเราไม่เปิด RLS ทิ้งไว้บนตาราง `orders` หรือ `users` ใครก็ตามที่รู้ `anon key` จากหน้าเว็บจะสามารถยิง HTTP Request เข้ามาที่ PostgREST เพื่อดูดข้อมูลตารางของเราออกไปได้ทั้งหมด! การสั่ง **`ENABLE ROW LEVEL SECURITY` (โดยไม่ต้องเขียน Policy เปิดให้ `anon`)** จึงเป็นการล็อกประตู PostgREST จากโลกภายนอกอย่างสมบูรณ์ ในขณะที่ Prisma ของเรายังทำงานผ่าน `postgres` role ได้ตามปกติ 100%!
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: การเปิด RLS บนทุกตารางเพื่อบล็อกการเข้าถึงจาก Public PostgREST API และตัวอย่างการเขียน Policy
+สคริปต์ SQL ที่ควรใส่ไว้ในไฟล์ Migration เพื่อล็อกตารางทั้งหมดของระบบ **Smart Butcher Marketplace** ไม่ให้รั่วไหลออกทาง Public API ของ Supabase พร้อมตัวอย่างการเขียน Policy ให้ลูกค้าอ่านรายการสินค้าและดูออเดอร์ของตัวเองได้:
+
+```sql filename="prisma/migrations/20261017080000_enable_rls_protection/migration.sql"
+-- 1. เปิดใช้งาน Row Level Security (RLS) บนทุกตารางใน Schema public!
+-- ทันทีที่เปิด บัญชีสาธารณะ (anon / authenticated) ที่ยิงผ่าน Supabase URL จะถูกบล็อกทันที (Default-Deny)
+-- ส่วน Prisma Client ที่ต่อด้วยบัญชี postgres (BYPASSRLS) จะยังคงทำงานได้ปกติ 100%
+ALTER TABLE "public"."users" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."categories" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."products" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."orders" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."order_items" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."payments" ENABLE ROW LEVEL SECURITY;
+
+-- 2. (ทางเลือกกรณีใช้ Supabase Client ฝั่งหน้าบ้านควบคู่ด้วย):
+-- อนุญาตให้ทุกคน (anon และ authenticated) อ่านรายการหมวดหมู่และสินค้าเนื้อสเต๊กได้เท่านั้น (ห้ามแก้ไข)
+CREATE POLICY "allow_public_read_categories"
+ON "public"."categories"
+FOR SELECT
+TO anon, authenticated
+USING (true);
+
+CREATE POLICY "allow_public_read_products"
+ON "public"."products"
+FOR SELECT
+TO anon, authenticated
+USING (true);
+
+-- 3. อนุญาตให้ลูกค้าที่ล็อกอินแล้ว (authenticated) ดูได้เฉพาะใบสั่งซื้อ (orders) ของตัวเองเท่านั้น
+-- เทคนิค Performance ของ PG 16: ครอบ (SELECT auth.uid()) ด้วยวงเล็บเพื่อให้ Optimizer คำนวณค่าแค่ครั้งเดียวต่อคิวรี (InitPlan Caching)!
+CREATE POLICY "customers_view_own_orders_only"
+ON "public"."orders"
+FOR SELECT
+TO authenticated
+USING ((SELECT auth.uid()) = "user_id");
+```
+
+#### ตัวอย่างที่ 2: การสร้าง Index รองรับคอลัมน์ที่ใช้ใน RLS Policy เพื่อป้องกันปัญหาตารางช้า
+เมื่อมีการใช้ RLS Policy ที่ตรวจสอบเงื่อนไข เช่น `(SELECT auth.uid()) = user_id` ทุกคิวรีที่วิ่งผ่าน Policy นี้จะถูกเติม `WHERE user_id = ...` เสมอ ดังนั้นคอลัมน์ `user_id` ในตาราง `orders` จึง **ต้องมี B-Tree Index มารองรับอย่างเคร่งครัด**:
+
+```sql filename="02_rls_performance_indexing.sql"
+-- สร้าง B-Tree Index บนคอลัมน์ที่ใช้ตรวจสอบใน RLS Policy เพื่อให้การเช็คสิทธิ์ทำงานแบบ Index Scan ในเสี้ยววินาที
+CREATE INDEX IF NOT EXISTS "idx_orders_user_id_rls"
+ON "public"."orders" ("user_id");
+
+-- ตรวจสอบสถานะว่าตารางใดใน Schema public ยังลืมเปิดใช้งาน RLS อยู่บ้าง (Security Audit Query)
+SELECT
+    schemaname,
+    tablename,
+    rowsecurity AS is_rls_enabled
+FROM pg_tables
+WHERE schemaname = 'public'
+  AND tablename <> '_prisma_migrations'
+ORDER BY is_rls_enabled ASC, tablename ASC;
+```
+
+<Callout type="tip" title="เคล็ดลับเพิ่มความเร็ว RLS Policy 10 เท่าด้วย (SELECT auth.uid())">
+ในการเขียนเงื่อนไข `USING` ของ RLS Policy บน Supabase แทนที่จะเขียน `USING (auth.uid() = user_id)` ตรงๆ ซึ่งอาจทำให้ PostgreSQL เรียกฟังก์ชัน `auth.uid()` ซ้ำทุกแถวที่สแกน ให้เขียนครอบด้วย Subquery เป็น **`USING ((SELECT auth.uid()) = user_id)`** เสมอ! วิธีนี้จะบังคับให้ Query Planner ของ PostgreSQL 16 ดึงค่า UUID ของผู้ใช้ออกมาเก็บไว้เป็นค่าคงที่เพียงครั้งเดียวก่อนเริ่มสแกน Index (`InitPlan`) ทำให้คิวรีเร็วขึ้นอย่างมหาศาล
+</Callout>
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การสร้างตารางด้วย Prisma บน Supabase** | รัน `prisma migrate` สร้างตารางใน `public` แล้วปล่อยทิ้งไว้โดยไม่เปิด RLS ทำให้หน้า Dashboard ขึ้นเตือนสีแดงและข้อมูลรั่วไหลผ่าน PostgREST API | สั่ง `ALTER TABLE ... ENABLE ROW LEVEL SECURITY;` บนทุกตารางที่สร้างใหม่ใน Schema `public` เสมอ |
+| **ความเข้าใจผิดเรื่องสิทธิ์ของ Prisma** | คิดว่าการเขียน RLS Policy บน Supabase จะช่วยกรองข้อมูลให้คำสั่ง `prisma.order.findMany()` อัตโนมัติ เลยไม่ใส่ `where: { userId }` ในโค้ด Backend | ทราบชัดเจนว่า Prisma ใช้ Role `postgres` ซึ่งข้าม RLS (`BYPASSRLS`) ดังนั้นในโค้ด Backend ต้องเขียนเงื่อนไข `where: { userId }` เสมอ |
+| **การเขียน `auth.uid()` ใน Policy** | เขียน `USING (auth.uid() = user_id)` เปล่าๆ และไม่สร้าง Index บน `user_id` ทำให้คิวรีช้าลงเมื่อตารางใหญ่ขึ้น | เขียน `USING ((SELECT auth.uid()) = user_id)` และสร้าง B-Tree Index บนคอลัมน์ `user_id` เสมอ |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรเปิด `ENABLE ROW LEVEL SECURITY` เสมอเมื่อ:** สร้างตารางใดๆ ก็ตามใน Schema `public` บนแพลตฟอร์ม Supabase ไม่ว่าคุณจะเรียกใช้งานผ่าน Supabase SDK หรือเรียกผ่าน Prisma ORM เพียงอย่างเดียวก็ตาม (เพื่อปิดประตูรั่วไหลทาง PostgREST)
+- **ไม่ควรพึ่งพา RLS แทนการตรวจสอบสิทธิ์ในชั้น Backend API เมื่อ:** แอปพลิเคชันของคุณเชื่อมต่อฐานข้อมูลด้วย Connection String ของ Role `postgres` (ที่มีสิทธิ์ `BYPASSRLS`)
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: หากโปรเจกต์ของคุณใช้เพียงแค่ NestJS + Prisma ORM ต่อเข้าฐานข้อมูล Supabase โดยที่ฝั่ง Frontend ไม่ได้ติดตั้ง `@supabase/supabase-js` เลย ทำไมการไม่เปิดใช้งาน RLS บนตารางใน Schema `public` จึงยังถือเป็นช่องโหว่ความปลอดภัยร้ายแรง?**
+  - **แนวคำตอบ:** เพราะโดยค่าเริ่มต้น Supabase จะเปิดบริการ **PostgREST (Auto-generated REST API)** เอาไว้สำหรับทุกตารางใน Schema `public` หากตารางใดไม่ได้เปิดใช้งาน RLS (`ENABLE ROW LEVEL SECURITY`) ตารางนั้นจะเปิดกว้างให้เข้าถึงผ่าน HTTP API ของโปรเจกต์ได้ทันที หากคีย์สาธารณะ (`anon key`) หลุดออกไปหรือถูกเปิดใช้งานอยู่ ผู้ไม่หวังดีจะสามารถยิง HTTP Request เข้ามาอ่านหรือลบข้อมูลในตารางทั้งหมดได้โดยไม่ต้องผ่านเซิร์ฟเวอร์ NestJS ของเราเลย การสั่ง `ENABLE ROW LEVEL SECURITY` บนทุกตาราง (โดยไม่ต้องเพิ่ม Policy ใดๆ) จะทำการบล็อกการเข้าถึงผ่าน PostgREST ทั้งหมดเป็น Default-Deny ทันที ในขณะที่ Prisma ที่ใช้บัญชี `postgres` (`BYPASSRLS`) ยังคงทำงานได้ตามปกติ
+- **Q2: ทำไมการเขียน RLS Policy ว่า `USING ((SELECT auth.uid()) = user_id)` จึงทำงานเร็วกว่า `USING (auth.uid() = user_id)` บนตารางขนาดใหญ่ใน PostgreSQL 16?**
+  - **แนวคำตอบ:** เพราะฟังก์ชัน `auth.uid()` มีสถานะเป็น `STABLE` เมื่อเขียนเรียกตรงๆ ในบางแผนการสืบค้น PostgreSQL อาจประเมินค่าฟังก์ชันนี้ซ้ำในทุกๆ แถวที่อ่านขึ้นมาตรวจสอบ แต่เมื่อครอบด้วย `(SELECT auth.uid())` ตัว Optimizer ของ PostgreSQL 16 จะมองว่าเป็น Scalar Subquery ที่ไม่ขึ้นกับแถวข้อมูล จึงแยกออกไปรันเป็น **`InitPlan` เพียงครั้งเดียว** ตอนเริ่มต้นคิวรี แล้วนำค่า UUID ที่ได้ไปใช้ค้นหาใน B-Tree Index ของ `user_id` โดยตรง
+
+---
+
+## 5. ข้อควรระวังในการใช้งานจริง: Free Tier Pausing, ขีดจำกัด และการเลือก Region
+
+### แนวคิด (Concept)
+ก่อนนำระบบ **Smart Butcher Marketplace** ขึ้นให้บริการจริงบน Supabase วิศวกรต้องทราบข้อจำกัดทางกายภาพและนโยบายของแพลตฟอร์ม เพื่อไม่ให้เกิดเหตุการณ์ "เช้าวันจันทร์ลูกค้าเข้าเว็บสั่งซื้อเนื้อไม่ได้เพราะฐานข้อมูลหลับไปเอง" หรือ "ลูกค้ากดคลิกดูสินค้าแต่ละหน้าต้องรอโหลดนานถึง 2 วินาทีเพราะเลือกตั้งเซิร์ฟเวอร์ไว้คนละซีกโลก"
+
+### หลักการเบื้องหลัง (Under the Hood)
+1. **กลไก Free Tier Project Pausing (การหยุดโปรเจกต์อัตโนมัติหลัง 7 วัน):**
+   บนแพ็กเกจ **Free Tier** ของ Supabase หากโปรเจกต์ไม่มีคำขอ API หรือไม่มีกิจกรรมในฐานข้อมูลต่อเนื่องกันเป็นเวลา **7 วัน** ระบบจะสั่งปิดเครื่องคอมพิวต์ (Pause Project) เพื่อประหยัดทรัพยากรคลาวด์ เมื่อโปรเจกต์อยู่ในสถานะ Paused การเชื่อมต่อจาก Prisma ทั้งหมดจะล้มเหลวทันที และต้องกดปุ่ม Restore ในหน้า Dashboard ซึ่งใช้เวลาปลุกเครื่องราว 2-5 นาที (แพ็กเกจ **Pro Tier ขึ้นไปจะไม่มีการสั่ง Pause โปรเจกต์เด็ดขาด**)
+2. **ผลกระทบของการเลือก Region ต่อ Network Latency (RTT):**
+   ทุกคิวรีที่ Prisma ส่งไปยังฐานข้อมูลต้องเดินทางไปและกลับผ่านสายเคเบิลใต้น้ำตามความเร็วแสงในใยแก้วนำแสง:
+   - หากกลุ่มลูกค้าและเซิร์ฟเวอร์แอปพลิเคชันอยู่ในประเทศไทย แต่เราเผลอสร้างโปรเจกต์ Supabase ไว้ที่ค่าเริ่มต้นคือ **`us-east-1` (North Virginia, สหรัฐอเมริกา)** ระยะทางไป-กลับเกือบ 28,000 กิโลเมตร จะทำให้เกิดค่าความหน่วงพื้นฐาน (**Network RTT**) สูงถึง **220 - 280 มิลลิวินาทีต่อ 1 คิวรี!** หากหน้าเว็บ 1 หน้าต้องยิงคิวรี 4 รอบ ลูกค้าจะต้องรอนานเกิน 1 วินาทีเต็มๆ ทั้งที่ SQL ใช้เวลาทำงานจริงแค่ 1 มิลลิวินาที!
+   - แต่หากเราเลือก Region เป็น **`ap-southeast-1` (Singapore)** ซึ่งเป็นศูนย์ข้อมูลที่ใกล้ประเทศไทยที่สุด ค่า Network RTT จะลดลงเหลือเพียง **12 - 25 มิลลิวินาทีเท่านั้น (เร็วขึ้นกว่า 10 เท่า!)**
+   - *ข้อสำคัญ:* Region ของฐานข้อมูลถูกผูกติดกับ Physical Data Center ตั้งแต่ตอนกดสร้างโปรเจกต์ หากเลือกผิดจะต้องสร้างโปรเจกต์ใหม่แล้วย้ายข้อมูลด้วย `pg_dump` / `pg_restore`
+3. **ขีดจำกัดด้านพื้นที่จัดเก็บและขนาดการเชื่อมต่อ (Compute Sizing & Limits):**
+   - **Free Tier:** พื้นที่ฐานข้อมูลจำกัดที่ **500 MB** (เมื่อเต็มฐานข้อมูลจะถูกเปลี่ยนเป็นโหมด Read-Only ทันที!), ใช้ซีพียูแบบ Shared CPU และมี RAM จำกัด ไม่มีการทำ Daily Backup อัตโนมัติ
+   - **Pro Tier:** เริ่มต้นด้วยพื้นที่ฐานข้อมูล **8 GB** (ขยายเพิ่มได้อัตโนมัติ), มี Daily Backup 7 วัน และสามารถเลือกอัปเกรดขนาด Compute Instance (Micro, Small, Medium, Large...) ซึ่งจะเพิ่มทั้งจำนวน CPU Cores, ขนาด RAM (`shared_buffers`) และโควตา `max_connections` ของ PostgreSQL 16 ตามขนาดเครื่อง
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: คิวรีตรวจสอบขนาดพื้นที่ฐานข้อมูลและขนาดตารางปัจจุบันเพื่อป้องกันดิสก์เต็ม (500MB Free / 8GB Pro Limit)
+เราสามารถรันคิวรีใน PostgreSQL 16 เพื่อตรวจสอบว่าฐานข้อมูลของร้าน **Smart Butcher Marketplace** ใช้พื้นที่ดิสก์ไปแล้วกี่เมกะไบต์ และตารางใดหรือ Index ตัวใดกินพื้นที่มากที่สุด:
+
+```sql filename="01_monitor_supabase_storage_quota.sql"
+-- 1. ตรวจสอบขนาดรวมของฐานข้อมูลปัจจุบันเทียบกับโควตาของแพ็กเกจ (เช่น 500 MB สำหรับ Free Tier)
+SELECT
+    current_database() AS db_name,
+    pg_size_pretty(pg_database_size(current_database())) AS current_size_pretty,
+    ROUND(pg_database_size(current_database()) / (1024.0 * 1024.0), 2) AS current_size_mb,
+    ROUND((pg_database_size(current_database()) / (500.0 * 1024.0 * 1024.0)) * 100, 2) AS free_tier_usage_percent;
+
+-- 2. แสดงอันดับตารางใน Schema public ที่ใช้พื้นที่ดิสก์มากที่สุด (แยกขนาดตารางจริง กับขนาด Index)
+SELECT
+    relname AS table_name,
+    pg_size_pretty(pg_total_relation_size(relid)) AS total_size,
+    pg_size_pretty(pg_relation_size(relid)) AS table_data_size,
+    pg_size_pretty(pg_indexes_size(relid)) AS indexes_size,
+    n_live_tup AS estimated_row_count
+FROM pg_stat_user_tables
+WHERE schemaname = 'public'
+ORDER BY pg_total_relation_size(relid) DESC;
+```
+
+#### ตัวอย่างที่ 2: การรวมคิวรีด้วย Relation Inclusion ใน Prisma เพื่อลดจำนวนรอบการเดินทางข้ามเครือข่าย (Minimizing Network RTTs)
+แม้เราจะเลือกโซน `ap-southeast-1` (Singapore) ที่มีค่า RTT ราว 15-20ms แล้ว การยิงคิวรีแยกกันหลายรอบตามลำดับ (Sequential Waterfalls) ก็ยังสะสมความหน่วงได้ เราจึงควรใช้ `include` หรือ `Promise.all` เพื่อดึงข้อมูลใบสั่งซื้อพร้อมรายการเนื้อและสถานะการชำระเงินให้จบในการเดินทางรอบเดียว:
+
+```typescript filename="src/orders/order-detail-optimized.service.ts"
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+
+@Injectable()
+export class OrderDetailOptimizedService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  // ❌ ช้าเพราะเสียเวลาเดินทางข้ามเครือข่ายไปสิงคโปร์ถึง 3 รอบตามลำดับ (3 x 20ms = 60ms+)
+  async getOrderWaterfallSlow(orderId: string, userId: string) {
+    const order = await this.prisma.order.findFirst({ where: { id: orderId, userId } });
+    if (!order) throw new NotFoundException();
+    const items = await this.prisma.orderItem.findMany({ where: { orderId } });
+    const payment = await this.prisma.payment.findUnique({ where: { orderId } });
+    return { order, items, payment };
+  }
+
+  // ✅ เร็วที่สุด: รวบการดึงข้อมูลทั้งหมดให้จบในการเดินทางไปที่ Supabase เพียงรอบเดียว!
+  async getOrderSingleTripFast(orderId: string, userId: string) {
+    const orderDetail = await this.prisma.order.findFirst({
+      where: {
+        id: orderId,
+        userId: userId,
+      },
+      select: {
+        id: true,
+        status: true,
+        totalAmount: true,
+        createdAt: true,
+        items: {
+          select: {
+            id: true,
+            quantityGrams: true,
+            unitPricePerKg: true,
+            subtotal: true,
+            product: {
+              select: {
+                sku: true,
+                name: true,
+                marblingScore: true,
+              },
+            },
+          },
+        },
+        payment: {
+          select: {
+            id: true,
+            paymentMethod: true,
+            paidAt: true,
+          },
+        },
+      },
+    });
+
+    if (!orderDetail) {
+      throw new NotFoundException(`Order ${orderId} not found`);
+    }
+
+    return orderDetail;
+  }
+}
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การเลือก Region ของฐานข้อมูล** | กดสร้างโปรเจกต์โดยไม่ดู Region ได้ค่าเริ่มต้นที่อเมริกา (`us-east-1`) ในขณะที่เซิร์ฟเวอร์แอปอยู่ที่สิงคโปร์ | เลือก Region ของ Supabase ให้ **อยู่ในโซนเดียวกับเซิร์ฟเวอร์ Backend** เสมอ (เช่น `ap-southeast-1` สิงคโปร์ สำหรับไทย) |
+| **การใช้ Free Tier บนระบบจริง** | ใช้ Free Tier รันระบบลูกค้าจริง พอหยุดยาวสงกรานต์ไม่มีคนเข้า 7 วัน ฐานข้อมูลถูก Pause จนระบบล่ม | ใช้ Free Tier สำหรับ Dev/Testing เท่านั้น และใช้ Pro Tier สำหรับระบบ Production จริงเสมอ |
+| **การเก็บไฟล์ไบนารีในตาราง** | เก็บรูปภาพเนื้อสเต๊กเป็น Base64 หรือ `BYTEA` ลงในตาราง PostgreSQL โดยตรงจนโควตา 500MB/8GB เต็มในพริบตา | เก็บไฟล์รูปภาพไว้ใน **Supabase Storage (หรือ S3/R2)** แล้วเก็บเฉพาะ URL/Path สั้นๆ ไว้ในตาราง `products` |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Supabase Free Tier เมื่อ:** กำลังเรียนรู้ พัฒนาโปรเจกต์ต้นแบบ (Prototype/MVP) หรือใช้เป็นฐานข้อมูลสำหรับสภาพแวดล้อมทดสอบชั่วคราว
+- **ควรอัปเกรดเป็น Supabase Pro Tier เมื่อ:** เปิดตัวระบบ Production ให้ลูกค้าใช้งานจริง เพราะต้องการการรับประกันว่าฐานข้อมูลจะไม่ถูก Pause มีระบบสำรองข้อมูลรายวัน และมีทรัพยากร Compute ที่เสถียร
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: หากเซิร์ฟเวอร์แอปพลิเคชัน Next.js ของคุณตั้งอยู่ที่สิงคโปร์ (`ap-southeast-1`) แต่ฐานข้อมูล Supabase ตั้งอยู่ที่สหรัฐอเมริกา (`us-east-1`) การเพิ่ม Index ในตารางจะช่วยแก้ปัญหาความหน่วง 250ms ต่อคิวรีได้หรือไม่ เพราะเหตุใด?**
+  - **แนวคำตอบ:** การเพิ่ม Index จะไม่ช่วยแก้ปัญหาความหน่วง 250ms นั้นได้เลย เพราะเวลาที่ใช้ในการค้นหาข้อมูลผ่าน Index ใน PostgreSQL อาจลดลงจาก 2ms เหลือ 0.2ms แล้ว แต่เวลาอีก 249.8ms คือ **เวลาที่สัญญาณแสงเดินทางไปและกลับผ่านสายเคเบิลใต้น้ำข้ามมหาสมุทรแปซิฟิก (Network Propagation Latency / RTT)** วิธีแก้ไขมีเพียงสองทางคือ ย้ายฐานข้อมูลมาไว้ที่โซนสิงคโปร์ (`ap-southeast-1`) ให้อยู่ใกล้กับเซิร์ฟเวอร์แอปพลิเคชันมากที่สุด และลดจำนวนรอบการยิงคิวรีต่อ 1 หน้าเว็บลง
+- **Q2: จะเกิดอะไรขึ้นกับฐานข้อมูล Supabase บนแพ็กเกจ Free Tier หากขนาดข้อมูลรวมใน PostgreSQL พุ่งเกินขีดจำกัด 500 MB?**
+  - **แนวคำตอบ:** แพลตฟอร์มจะทำการสลับโหมดของฐานข้อมูลเข้าสู่สถานะ **Read-Only Mode (อ่านได้อย่างเดียว)** เพื่อป้องกันดิสก์ของระบบล้น ส่งผลให้แอปพลิเคชันหน้าร้านยังสามารถดึงรายการสินค้า (`SELECT`) มาแสดงผลได้ แต่คำสั่งสร้างใบสั่งซื้อใหม่หรือบันทึกการจ่ายเงิน (`INSERT` / `UPDATE`) จะถูกปฏิเสธทั้งหมดจนกว่าผู้ดูแลระบบจะเข้าไปลบข้อมูลที่ไม่จำเป็นออกแล้วรัน `VACUUM FULL` คืนพื้นที่ดิสก์ หรืออัปเกรดขึ้นสู่แพ็กเกจ Pro
+
+---
+
+## ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การใช้ URL ตัวเดียวกันทั้งใน `DATABASE_URL` และ `DIRECT_URL`**
+   - **สาเหตุ:** คัดลอก URL พอร์ต 6543 ไปวางใส่ทั้งสองตัวแปรในไฟล์ `.env`
+   - **ผลกระทบ:** เวลาสั่งรัน `npx prisma migrate deploy` คำสั่งจะค้างจนเกิด Timeout เพราะพอร์ต 6543 (Transaction Mode) ไม่รองรับ Session-level Advisory Lock ของ Prisma Migrate
+   - **วิธีแก้:** ตั้ง `DATABASE_URL` ให้ใช้พอร์ต `6543` (`?pgbouncer=true`) และตั้ง `DIRECT_URL` ให้ใช้พอร์ต `5432` (โดยไม่มี `pgbouncer=true`)
+
+2. **การสร้างตารางใน Schema `public` ด้วย Prisma โดยไม่เปิดใช้งาน RLS**
+   - **สาเหตุ:** คิดว่าใช้แค่ Prisma ใน Backend ไม่ได้ใช้ Supabase Client หน้าบ้าน เลยไม่ต้องสนใจ RLS
+   - **ผลกระทบ:** ตารางใน `public` จะถูกเปิดเผยออกทาง PostgREST Data API ของ Supabase โดยไม่มีการป้องกัน
+   - **วิธีแก้:** สั่ง `ALTER TABLE ... ENABLE ROW LEVEL SECURITY;` บนทุกตารางในไฟล์ Migration เพื่อล็อกการเข้าถึงจากภายนอกเป็น Default-Deny
+
+3. **การลืมใส่รหัสโปรเจกต์ในชื่อผู้ใช้ (`postgres.<project_ref>`) เมื่อต่อผ่าน Supavisor**
+   - **สาเหตุ:** เปลี่ยนโฮสต์จาก Direct Connection มาเป็น Pooler แต่ใช้ชื่อผู้ใช้ `postgres` เฉยๆ เหมือนเดิม
+   - **ผลกระทบ:** เชื่อมต่อไม่ได้และได้รับข้อผิดพลาด `FATAL: Tenant or user not found`
+   - **วิธีแก้:** คัดลอกรูปแบบชื่อผู้ใช้ `postgres.<project_ref>` จากหน้า Database Settings ของ Supabase มาใช้อย่างถูกต้อง
+
+4. **การเลือก Region ของฐานข้อมูลอยู่คนละทวีปกับเซิร์ฟเวอร์ Backend**
+   - **สาเหตุ:** กดข้ามตัวเลือก Region ตอนสร้างโปรเจกต์ใหม่
+   - **ผลกระทบ:** ทุกคิวรีมีค่าความหน่วงพื้นฐาน (Network Latency) สูงระดับ 150-300ms ทำให้ระบบอืดทั้งเว็บ
+   - **วิธีแก้:** เลือก Region `ap-southeast-1` (Singapore) สำหรับระบบที่ให้บริการในประเทศไทย และวางเซิร์ฟเวอร์ Backend ไว้ใน Region เดียวกัน
+
+5. **การเก็บข้อมูล Log ขนาดใหญ่หรือไฟล์รูปภาพลงในตาราง PostgreSQL โดยตรง**
+   - **สาเหตุ:** บันทึกทุก HTTP Request Log หรือเก็บรูปสินค้าลงตารางฐานข้อมูลหลัก
+   - **ผลกระทบ:** พื้นที่ฐานข้อมูลเต็มโควตาอย่างรวดเร็ว เสียค่าใช้จ่ายสูง และทำให้การทำ Backup ช้าลง
+   - **วิธีแก้:** เก็บไฟล์มีเดียไว้ใน Supabase Storage / S3 และเก็บ Application Logs ไว้ในระบบจัดการ Log โดยเฉพาะ
+
+---
+
+## Checklist สรุป
+
+ตรวจสอบความถูกต้องของการตั้งค่า **Supabase Cloud (PostgreSQL 16)** สำหรับโปรเจกต์ **Smart Butcher Marketplace**:
+
+- [ ] **Region Co-location:** โปรเจกต์ Supabase ถูกสร้างใน Region `ap-southeast-1` (Singapore) ตรงกับตำแหน่งของเซิร์ฟเวอร์ Backend
+- [ ] **Dual URL Configured:** ตั้งค่า `DATABASE_URL` ชี้ไปยังโฮสต์ Supavisor พอร์ต `6543` พร้อม `?pgbouncer=true` และตั้งค่า `DIRECT_URL` ชี้ไปยังโฮสต์ Supavisor พอร์ต `5432` (รองรับ IPv4)
+- [ ] **RLS Enabled Everywhere:** ทุกตารางใน Schema `public` มีการสั่ง `ENABLE ROW LEVEL SECURITY` เรียบร้อยแล้ว ไม่มีคำเตือนสีแดงในหน้า Security Advisor
+- [ ] **Indexed RLS Columns:** หากมีการเขียน RLS Policy คอลัมน์ที่ใช้เปรียบเทียบกับ `(SELECT auth.uid())` มีการสร้าง B-Tree Index รองรับครบถ้วน
+- [ ] **Production Tier Active:** สำหรับสภาพแวดล้อม Production ได้อัปเกรดเป็นแพ็กเกจ Pro ขึ้นไปเพื่อป้องกันการถูก Pause อัตโนมัติและมีระบบสำรองข้อมูลรายวัน
+- [ ] **Storage Separated:** รูปภาพสินค้าเนื้อพรีเมียมและไฟล์ใบเสร็จถูกจัดเก็บแยกอยู่ใน Object Storage โดยเก็บเฉพาะพาธอ้างอิงในฐานข้อมูล
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อคุณเชี่ยวชาญการใช้งาน PostgreSQL 16 ทั้งแบบติดตั้งเองและบนคลาวด์อย่าง Supabase แล้ว ขั้นตอนสุดท้ายของหมวดฐานข้อมูลคือการมองภาพรวมทางสถาปัตยกรรมเพื่อเลือกใช้ฐานข้อมูลประเภทอื่นๆ (NoSQL, Redis, MongoDB) มาทำงานร่วมกับ PostgreSQL ได้อย่างลงตัว:
+
+<Callout type="tip" title="เส้นทางการศึกษาต่อสำหรับระบบฐานข้อมูลระดับ Production">
+1. **การเปรียบเทียบและทำงานร่วมกันระหว่าง SQL, MongoDB และ Redis:**  
+   👉 **[SQL vs NoSQL](/docs/database/sql-vs-nosql)** — เจาะลึกสถาปัตยกรรม Polyglot Persistence, การใช้ Redis ทำ Caching/Rate Limiting และเมื่อไหร่ควรใช้ MongoDB
+
+2. **การเจาะลึกระบบจัดการการเชื่อมต่อและการสำรองข้อมูลบน Supabase:**  
+   👉 **[Connection Pooling](/docs/database/connection-pooling)** และ **[Backup](/docs/database/backup)** — ทบทวนกลไกการทำงานของ Transaction Pooler และวิธีการตั้งเวลาสำรองข้อมูลจาก Supabase ด้วยตัวเอง
+
+3. **การจัดการอัปโหลดไฟล์รูปภาพสินค้าควบคู่กับฐานข้อมูล:**  
+   👉 **[File Upload](/docs/backend/file-upload)** และ **[Prisma ORM](/docs/backend/prisma-orm)** — เรียนรู้การจัดการอัปโหลดรูปภาพเนื้อสเต๊กขึ้น Cloud Storage และการเชื่อมโยงข้อมูลกับ Prisma
+</Callout>

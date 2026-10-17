@@ -1,0 +1,160 @@
+---
+title: UI Patterns
+category: Frontend
+parentTitle: CSS
+version: CSS3 / Modern CSS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ในยุคของ Modern Web Design ผู้ใช้ไม่ได้คาดหวังแค่หน้าเว็บที่ทำงานได้ แต่ต้องการ **"ความประณีตระดับงานศิลป์ (Craftsmanship & Polish)"**
+
+5 UI Patterns คลาสสิกที่ Fullstack Developer ต้องเขียนได้อย่างคล่องแคล่ว:
+1. **Glassmorphism (กระจกฝ้าแบบ Apple)**: การใช้ `backdrop-filter: blur()` เบลอเนื้อหาที่เลื่อนผ่านด้านหลัง
+2. **Skeleton Loading (ชิมเมอร์โครงร่าง)**: แสดงบล็อกโครงสร้างกระพริบระหว่างรอข้อมูลจาก API แทนที่จะใช้สปินเนอร์หมุนธรรมดา
+3. **Line Clamp (ตัดคำตามจำนวนบรรทัด)**: จำกัดความยาวข้อความให้อยู่ใน 2 หรือ 3 บรรทัด แล้วต่อท้ายด้วยจุดไข่ปลา (...)
+4. **Sticky Header พร้อม Scroll Padding**: ป้องกันไม่ให้หัวข้อจมหายใต้แถบเมนูด้านบนเมื่อกดลิงก์ Anchor
+5. **Modal Backdrop Overlay**: แผ่นฟิล์มสีดำโปร่งใสที่ปิดกั้นการคลิกด้านหลัง
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. ความลับของ Glassmorphism
+`backdrop-filter` ไม่ใช่ฟิลเตอร์ที่เบลอตัวเอง แต่เป็นฟิลเตอร์ที่ **"เบลอสิ่งที่อยู่ข้างหลังกล่องนี้"**
+> **ข้อบังคับ**: สีพื้นหลังของกล่อง (`background-color`) **ต้องมีความโปร่งใส (Alpha < 1)** เสมอ เช่น `rgba(255, 255, 255, 0.7)` หากใส่สีขาวทึบแสง เบลอจะไม่มีทางมองเห็นได้เลย
+
+### 2. ปัญหา Anchor จมใต้ Sticky Header แก้ด้วย `scroll-padding-top`
+เมื่อมี Header ลอยค้างสูง 64px (`position: sticky; top: 0;`) เมื่อคลิก `<a href="#section-2">` เบราว์เซอร์จะเลื่อนให้หัวข้อนั้นชิดขอบบนสุดของจอ ทำให้ **หัวข้อถูก Header บังมิด!**
+วิธีแก้มาตรฐานคือการใส่ที่ตัวแม่:
+```css
+html {
+  scroll-padding-top: 80px; /* เว้นระยะเผื่อความสูงของ Sticky Header */
+}
+```
+
+---
+
+## 3. ตัวอย่างโค้ด (Modern CSS)
+
+### ตัวอย่างที่ 1: Apple Glass Navbar และ Scroll Padding
+
+```css filename="glass-header.css"
+/* จัดการระยะเลื่อนเอกสารให้ไม่ชน Header */
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 72px;
+}
+
+/* แถบกระจกฝ้าสไตล์ Apple Glass */
+.glass-navbar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  height: 56px;
+  /* สีขาวโปร่งใส 75% */
+  background-color: rgba(255, 255, 255, 0.75);
+  /* เบลอเนื้อหาด้านหลัง */
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  /* เส้นขอบบางเฉียบสร้างมิติสะท้อนแสง */
+  border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+/* รองรับ Dark mode */
+html.dark .glass-navbar {
+  background-color: rgba(11, 15, 25, 0.75);
+  border-bottom-color: rgba(255, 255, 255, 0.1);
+}
+```
+
+### ตัวอย่างที่ 2: Skeleton Shimmer Loading & Line Clamp
+
+```css filename="skeleton.css"
+/* แอนิเมชันแสงสะท้อนวิ่งผ่าน (Shimmer) */
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.skeleton-box {
+  position: relative;
+  overflow: hidden;
+  background-color: #e2e8f0;
+  border-radius: 8px;
+}
+
+.skeleton-box::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background-image: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0,
+    rgba(255, 255, 255, 0.5) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  animation: shimmer 1.5s infinite;
+}
+
+/* ตัดข้อความให้อยู่ใน 2 บรรทัด */
+.truncate-multiline {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ใช้ `backdrop-filter` แต่ใส่พื้นหลังทึบ 100%
+
+```css
+/* ผิด: สีขาวทึบแสง #ffffff จะบดบังเอฟเฟกต์เบลอด้านหลังมิดชิด มองไม่เห็นความโปร่งแสง */
+.bad-glass {
+  background-color: #ffffff;
+  backdrop-filter: blur(12px);
+}
+```
+
+### ✅ โค้ดที่ถูกต้อง: ใส่สีพื้นหลังที่มีความโปร่งแสงเสมอ
+
+```css
+/* ถูกต้อง: สีโปร่งแสง 80% ให้แสงสะท้อนและเนื้อหาด้านหลังทะลุออกมาได้อย่างมีมิติ */
+.good-glass {
+  background-color: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(12px);
+}
+```
+
+---
+
+## 5. เทียบกับ Tailwind CSS v4
+
+| Modern UI Pattern | Tailwind CSS v4 Utility |
+| :--- | :--- |
+| `backdrop-filter: blur(16px);` | `backdrop-blur-md` หรือ `backdrop-blur-lg` |
+| Translucent background | `bg-white/75 dark:bg-black/75` |
+| `scroll-behavior: smooth;` | `scroll-smooth` |
+| `scroll-padding-top: 5rem;` | `scroll-pt-20` |
+| `-webkit-line-clamp: 2;` | `line-clamp-2` |
+| Skeleton pulse | `animate-pulse bg-slate-200 rounded` |
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: เมื่อมี Sticky Header อยู่ด้านบนของหน้าจอ เวลาคลิกลิงก์ภายในหน้า (Anchor Link เช่น `#faq`) ทำไมหัวข้อจึงมักถูก Header บัง และแก้ปัญหานี้ด้วยวิธีใดใน CSS สมัยใหม่?
+**แนวทางคำตอบ**: โดยธรรมชาติเมื่อเบราว์เซอร์เลื่อนหน้าจอไปยังตำแหน่ง Anchor ID มันจะเลื่อนให้ขอบบนสุดของ Element นั้นชนกับขอบบนสุดของ Viewport พอดี ซึ่งตรงกับตำแหน่งที่ Sticky Header ลอยค้างอยู่ ทำให้ส่วนหัวของข้อความถูก Header บดบังมิด 
+ในอดีตต้องแก้ด้วยการใส่ `margin-top: -80px; padding-top: 80px;` บนหัวข้อ แต่ใน CSS สมัยใหม่สามารถแก้ได้อย่างหมดจดด้วยการใส่พร็อพเพอร์ตี้ **`scroll-padding-top: [ความสูงของ Header];`** ที่แท็ก `html` หรือ Scroll Container เบราว์เซอร์จะเว้นช่องว่างด้านบนให้โดยอัตโนมัติเมื่อมีการ Scroll ไปยัง Anchor
+
+### Q2: พร็อพเพอร์ตี้ `filter: blur(...)` และ `backdrop-filter: blur(...)` แตกต่างกันอย่างไร?
+**แนวทางคำตอบ**:
+- `filter: blur(...)`: จะทำการเบลอ **"ตัว Element นั้นเองและลูกหลานทั้งหมดที่อยู่ข้างในกล่อง"** (ทำให้ข้อความและไอคอนข้างในมัวเบลออ่านไม่ออก)
+- `backdrop-filter: blur(...)`: จะทำการเบลอเฉพาะ **"เนื้อหาหรือเลเยอร์ที่อยู่ด้านหลังกล่องนี้"** ในขณะที่ข้อความ ปุ่ม และไอคอนที่อยู่ข้างในกล่องจะยังคงความคมชัด 100% สไตล์กระจกฝ้า (Frosted Glass)

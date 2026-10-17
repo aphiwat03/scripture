@@ -1,0 +1,288 @@
+---
+title: Pagination & Infinite
+category: Frontend
+parentTitle: TanStack Query v5
+version: TanStack Query v5.x
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การจัดการชุดข้อมูลขนาดใหญ่บนหน้าเว็บถูกแบ่งออกเป็น 2 รูปแบบหลัก:
+1. **Pagination (การแบ่งหน้าด้วยตัวเลข)**: ผู้ใช้กดเปลี่ยนหน้า 1, 2, 3 เพื่อดูข้อมูลทีละชุด
+2. **Infinite Scroll (การเลื่อนหน้าจอต่อเนื่อง)**: ข้อมูลชุดใหม่จะถูกโหลดมาต่อท้ายรายการเดิมเรื่อยๆ เมื่อผู้ใช้เลื่อนหน้าจอลงมาถึงด้านล่าง
+
+ใน **TanStack Query v5** มีการเปลี่ยนแปลงสำคัญระดับ Breaking Change ที่ต้องระวัง:
+- **ยกเลิก `keepPreviousData: true`**: เปลี่ยนมาใช้ **`placeholderData: keepPreviousData`** (ฟังก์ชันที่ Import มาจาก `@tanstack/react-query`) เพื่อรักษาความราบรื่นในการเปลี่ยนหน้าโดยไม่ให้หน้าจอกระพริบ
+- **`useInfiniteQuery` บังคับใส่ `initialPageParam`**: ใน v5 ต้องระบุค่าเริ่มต้นของตัวแปรหน้าเสมอ และคืนค่าเป็นโครงสร้าง `InfiniteData` ที่มี `{ pages, pageParams }`
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. การทำงานของ `placeholderData: keepPreviousData`
+
+เมื่อผู้ใช้กดเปลี่ยนจากหน้า 1 ไปหน้า 2:
+- ตามปกติ TanStack Query จะมองว่า Key `['products', 2]` ยังไม่มีข้อมูลในแคช ส่งผลให้ `isPending` กลายเป็น `true` และหน้าจอจะเด้งกลับไปเป็น Skeleton
+- เมื่อเปิดใช้งาน `placeholderData: keepPreviousData` ระบบจะนำข้อมูลของหน้า 1 มาแสดงค้างไว้ก่อนในขณะที่คำขอของหน้า 2 กำลังดึงอยู่ โดยเปิดสถานะ `isPlaceholderData = true`
+- ช่วยให้เราสามารถทำ CSS เช่น ปรับความทึบแสง (Opacity: 0.6) เพื่อบอกผู้ใช้ว่ากำลังโหลดหน้าถัดไป โดยที่หน้าจอไม่ยุบตัวและไม่กระพริบ
+
+### 2. โครงสร้างหน่วยความจำของ `useInfiniteQuery`
+
+```ts
+interface InfiniteData<TData, TPageParam = unknown> {
+  pages: TData[];        // อาร์เรย์ของข้อมูลแต่ละหน้าที่ดึงมา [Page1, Page2, Page3]
+  pageParams: TPageParam[]; // พารามิเตอร์ที่ใช้เรียกแต่ละหน้า [1, 2, 3]
+}
+```
+
+ใน v5 ยังเพิ่มตัวเลือก **`maxPages`** เพื่อจำกัดจำนวนหน้าที่อนุญาตให้เก็บไว้ใน RAM หากดึงเกิน ระบบจะตัดหน้าแรกๆ ทิ้ง เพื่อป้องกันไม่ให้เบราว์เซอร์กินหน่วยความจำจนเครื่องค้าง
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### แบบที่ 1: ตารางสินค้าพร้อมระบบ Pagination (`PaginatedProductCatalog.tsx`)
+
+```tsx filename="src/features/products/components/PaginatedProductCatalog.tsx"
+'use client';
+
+import React, { useState } from 'react';
+import { useQuery, keepPreviousData } from '@tanstack/react-query';
+
+interface Product {
+  id: string;
+  name: string;
+  price: number;
+  stock: number;
+}
+
+interface PaginatedResponse {
+  items: Product[];
+  totalItems: number;
+  totalPages: number;
+  currentPage: number;
+}
+
+async function fetchProductsPage(page: number): Promise<PaginatedResponse> {
+  const res = await fetch(`/api/products?page=${page}&limit=10`);
+  if (!res.ok) throw new Error('โหลดรายการสินค้าไม่สำเร็จ');
+  return res.json();
+}
+
+export function PaginatedProductCatalog() {
+  const [page, setPage] = useState(1);
+
+  const { data, isPending, isPlaceholderData } = useQuery({
+    queryKey: ['products', 'paginated', page],
+    queryFn: () => fetchProductsPage(page),
+    // v5 Pattern: ใช้ keepPreviousData เพื่อไม่ให้หน้าจอกระพริบ
+    placeholderData: keepPreviousData,
+    staleTime: 30 * 1000,
+  });
+
+  if (isPending) return <div className="h-64 rounded-xl bg-gray-100 animate-pulse" />;
+
+  return (
+    <div className="space-y-4">
+      <div className={`transition-opacity duration-200 ${isPlaceholderData ? 'opacity-50' : 'opacity-100'}`}>
+        <table className="w-full text-left border rounded-lg overflow-hidden">
+          <thead className="bg-gray-50 border-b text-xs uppercase text-gray-500">
+            <tr>
+              <th className="p-3">รหัสสินค้า</th>
+              <th className="p-3">ชื่อสินค้า</th>
+              <th className="p-3">ราคา</th>
+              <th className="p-3">คงเหลือ</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y text-sm">
+            {data?.items.map((prod) => (
+              <tr key={prod.id} className="hover:bg-gray-50">
+                <td className="p-3 text-gray-400">{prod.id}</td>
+                <td className="p-3 font-medium">{prod.name}</td>
+                <td className="p-3 text-emerald-600 font-semibold">฿{prod.price.toLocaleString()}</td>
+                <td className="p-3">{prod.stock} ชิ้น</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Pagination Controls */}
+      <div className="flex items-center justify-between border-t pt-4">
+        <span className="text-sm text-gray-500">
+          หน้า {page} จากทั้งหมด {data?.totalPages || 1} หน้า
+        </span>
+
+        <div className="flex gap-2">
+          <button
+            onClick={() => setPage((old) => Math.max(old - 1, 1))}
+            disabled={page === 1}
+            className="px-3 py-1.5 border rounded-lg text-sm disabled:opacity-40 hover:bg-gray-50"
+          >
+            ก่อนหน้า
+          </button>
+          <button
+            onClick={() => {
+              if (!isPlaceholderData && data && page < data.totalPages) {
+                setPage((old) => old + 1);
+              }
+            }}
+            disabled={isPlaceholderData || !data || page >= data.totalPages}
+            className="px-3 py-1.5 border rounded-lg text-sm disabled:opacity-40 hover:bg-gray-50"
+          >
+            ถัดไป
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+### แบบที่ 2: ฟีดสินค้าแบบ Infinite Scroll (`InfiniteProductFeed.tsx`)
+
+```tsx filename="src/features/products/components/InfiniteProductFeed.tsx"
+'use client';
+
+import React, { useEffect, useRef } from 'react';
+import { useInfiniteQuery } from '@tanstack/react-query';
+
+interface ProductFeedItem {
+  id: string;
+  name: string;
+  price: number;
+}
+
+interface FeedPage {
+  items: ProductFeedItem[];
+  nextCursor?: string;
+}
+
+async function fetchProductFeed({ pageParam }: { pageParam: string | null }): Promise<FeedPage> {
+  const url = pageParam ? `/api/products/feed?cursor=${pageParam}` : '/api/products/feed';
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('โหลดฟีดสินค้าไม่สำเร็จ');
+  return res.json();
+}
+
+export function InfiniteProductFeed() {
+  const observerTarget = useRef<HTMLDivElement>(null);
+
+  const {
+    data,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+    status,
+  } = useInfiniteQuery({
+    queryKey: ['products', 'infinite-feed'],
+    queryFn: fetchProductFeed,
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+  });
+
+  // Intersection Observer ดักจับเมื่อผู้ใช้เลื่อนลงมาถึงขอบล่าง
+  useEffect(() => {
+    const target = observerTarget.current;
+    if (!target) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && hasNextPage && !isFetchingNextPage) {
+          fetchNextPage();
+        }
+      },
+      { threshold: 0.1 }
+    );
+
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+
+  if (status === 'pending') return <div className="h-48 bg-gray-100 animate-pulse rounded" />;
+
+  // รวมรายการสินค้าจากทุกหน้าเข้าด้วยกันเพื่อแสดงผล
+  const allProducts = data?.pages.flatMap((page) => page.items) ?? [];
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+        {allProducts.map((product) => (
+          <div key={product.id} className="border p-4 rounded-xl bg-white shadow-sm">
+            <h3 className="font-semibold text-gray-800">{product.name}</h3>
+            <p className="text-emerald-600 font-bold mt-2">฿{product.price.toLocaleString()}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Sentinel Element สำหรับตรวจจับการ Scroll */}
+      <div ref={observerTarget} className="py-6 text-center text-sm text-gray-400">
+        {isFetchingNextPage && <p className="animate-spin text-blue-500">🔄 กำลังโหลดสินค้าเพิ่มเติม...</p>}
+        {!hasNextPage && <p>คุณดูสินค้าครบทั้งหมดแล้ว</p>}
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม (useEffect vs TanStack Query)
+
+| ความสามารถ | วิธีเดิม (เขียนด้วย `useState` ต่ออาร์เรย์เอง) | TanStack Query v5 |
+| :--- | :--- | :--- |
+| **การต่อข้อมูล (List Merging)** | `setItems(prev => [...prev, ...newItems])` มีความเสี่ยงต่อข้อมูลซ้ำ | แยกข้อมูลเป็น Pages ในโครงสร้าง `InfiniteData` เป็นสัดส่วน |
+| **การเปลี่ยนหน้าจอ (Pagination)** | หน้าจอกระพริบเป็นสีขาวทุกครั้งที่กดเปลี่ยนหน้า | ใช้ `placeholderData: keepPreviousData` ไม่กระพริบ 100% |
+| **การคืนค่าตำแหน่งเดิม (Back Navigation)** | กดย้อนกลับ ข้อมูลฟีดที่เลื่อนมาจะหายหมด ต้องเริ่มโหลดใหม่ | ข้อมูลทุกหน้าแคชอยู่ในหน่วยความจำ สลับกลับมาเห็นรายการเดิมทันที |
+| **Memory Limit** | เลื่อนหน้าจอไปเรื่อยๆ จนแท็บเบราว์เซอร์กินแรมหลาย GB และค้าง | มีอ็อปชัน `maxPages` ตัดหน้าแรกๆ ออกจาก RAM อัตโนมัติ |
+
+---
+
+## 5. ผิด vs ถูก
+
+### แบบที่ผิด ❌: ใช้ `keepPreviousData: true` ใน TanStack Query v5
+
+```tsx
+// ❌ ผิดใน v5: รูปแบบนี้ถูกตัดทิ้งแล้วจากไลบรารี
+const { data } = useQuery({
+  queryKey: ['products', page],
+  queryFn: () => fetchProducts(page),
+  keepPreviousData: true, // ❌ TypeScript จะแจ้ง Error ทันที!
+});
+```
+
+### แบบที่ถูก ✅: ใช้ `placeholderData: keepPreviousData`
+
+```tsx
+// ✅ ถูกต้อง: นำเข้า helper function จากแพ็กเกจ
+import { useQuery, keepPreviousData } from '@tanstack/react-query';
+
+const { data, isPlaceholderData } = useQuery({
+  queryKey: ['products', page],
+  queryFn: () => fetchProducts(page),
+  placeholderData: keepPreviousData, // ✅ v5 Standard
+});
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Pagination (แบ่งหน้า) เมื่อ:
+- ข้อมูลเป็นตารางรายงาน, ระบบหลังบ้าน (Admin Dashboard), รายการใบสั่งซื้อ ที่ต้องการให้ผู้ใช้อ้างอิงหมายเลขหน้าหรือแชร์ URL ที่มี `?page=2` ได้ชัดเจน
+
+### ควรใช้ Infinite Scroll เมื่อ:
+- ฟีดสินค้าใน E-Commerce, โซเชียลมีเดีย, ฟีดวิดีโอ หรือหน้าแสดงภาพแกลเลอรีบนอุปกรณ์มือถือ
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ใน TanStack Query v5 เหตุใด `keepPreviousData: true` จึงถูกแทนที่ด้วย `placeholderData: keepPreviousData` และมีประโยชน์เพิ่มเติมอย่างไร?
+**แนวทางตอบ**:
+ในเวอร์ชันก่อนหน้า `keepPreviousData` เป็นเพียงบูลีนแฟล็กพิเศษที่แยกการทำงานจากระบบ Placeholder Data แต่ใน v5 ทางทีมพัฒนาได้รวมศูนย์กลไกนี้เข้าสู่ระบบ **`placeholderData`** ซึ่งเป็นฟังก์ชันที่สามารถรับค่า `(previousData) => previousData` ได้อย่างยืดหยุ่น การเปลี่ยนนี้ทำให้ API มีความสอดคล้องกัน และยังคืนแฟล็ก **`isPlaceholderData: boolean`** ออกมาให้เราใช้ปรับแต่ง UI (เช่น การลดความทึบแสงของตาราง หรือการปิดปุ่ม Next ชั่วคราว) เพื่อป้องกันไม่ให้ผู้ใช้คลิกซ้ำซ้อนในขณะที่ข้อมูลกำลังเปลี่ยนหน้า
+
+### Q2: ใน `useInfiniteQuery` ฟังก์ชัน `getNextPageParam` ต้องคืนค่าอย่างไรเมื่อเซิร์ฟเวอร์แจ้งว่าหมดข้อมูลแล้ว?
+**แนวทางตอบ**:
+ฟังก์ชัน `getNextPageParam` จะต้องคืนค่าเป็น **`undefined`** หรือ **`null`** เมื่อไม่มีข้อมูลหน้าถัดไปแล้ว เมื่อ TanStack Query ได้รับค่า `undefined` หรือ `null` มันจะปรับสถานะ **`hasNextPage`** ให้กลายเป็น **`false`** ทันที ซึ่งคอมโพเนนต์จะสามารถนำค่านี้ไปใช้หยุดการทำงานของ Intersection Observer หรือซ่อนปุ่ม "โหลดเพิ่มเติม" ได้อย่างถูกต้อง

@@ -1,0 +1,152 @@
+---
+title: Architecture & BEM
+category: Frontend
+parentTitle: CSS
+version: CSS3 / Modern CSS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ปัญหาใหญ่ที่สุดของ CSS ในโปรเจกต์ขนาดใหญ่ไม่ใช่เรื่องการเขียนไม่เป็น แต่คือเรื่อง **"ความขัดแย้งของชื่อคลาส (Global Namespace Pollution)"** เมื่อโปรเจกต์มีนักพัฒนาหลายคน สไตล์ที่เขียนในหน้าหนึ่งมักจะแอบหลุดไปทำลายหน้าตาของอีกหน้าหนึ่งโดยไม่รู้ตัว
+
+ระเบียบวิธีและสถาปัตยกรรมที่ช่วยแก้ปัญหานี้:
+1. **BEM (Block Element Modifier)**: กฎการตั้งชื่อคลาสให้สื่อความหมายและมี Specificity ต่ำสม่ำเสมอ
+   - **Block**: องค์ประกอบหลักที่เป็นเอกเทศ เช่น `.btn`, `.card`
+   - **Element**: ชิ้นส่วนย่อยภายในบล็อก (ใช้ `__`) เช่น `.card__title`, `.card__image`
+   - **Modifier**: สถานะหรือรูปแบบพิเศษ (ใช้ `--`) เช่น `.btn--primary`, `.card--featured`
+2. **CSS Modules**: การคอมไพล์คลาสแบบอัตโนมัติ โดยระบบจะต่อท้ายชื่อคลาสด้วย Unique Hash เช่น `.card_title__x9a1` ทำให้คลาสมีผลเฉพาะในไฟล์ของ Component นั้นๆ (Scoped CSS)
+3. **Modern CSS Reset**: โค้ดชุดแรกสุดที่ช่วยล้างความแตกต่างของค่าเริ่มต้นในแต่ละเบราว์เซอร์
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ทำไม BEM ถึงห้ามใช้ Nesting ซ้อนลึกเกิน 1 ชั้น?
+การเขียน Selector ที่ซ้อนกันลึก เช่น:
+```css
+/* ❌ แย่มาก: Specificity สูงมาก และผูกติดกับโครงสร้าง HTML เกินไป */
+.dashboard .sidebar ul li.active a span { ... }
+```
+หากวันหนึ่งคุณเปลี่ยนโครงสร้างจาก `ul > li` ไปเป็น `div` สไตล์ทั้งหมดจะพังทันที! 
+BEM แก้ปัญหานี้ด้วยการบังคับให้ใช้ Flat Class เช่น:
+```css
+/* ✅ แข็งแกร่ง: Specificity ต่ำ (1 Class = 10 แต้มเสมอ) ย้ายตำแหน่งไปไหนก็ไม่พัง */
+.sidebar__link--active { ... }
+```
+
+---
+
+## 3. ตัวอย่างโค้ด (Modern CSS)
+
+### ตัวอย่างที่ 1: การใช้ BEM ในคอมโพเนนต์การ์ดโปรไฟล์
+
+```css filename="user-card.css"
+/* Block: บล็อกหลัก */
+.user-card {
+  box-sizing: border-box;
+  padding: 24px;
+  background-color: #ffffff;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+}
+
+/* Modifier ของ Block: การ์ดพิเศษสำหรับ VIP */
+.user-card--vip {
+  border-color: #f59e0b; /* สีทอง */
+  box-shadow: 0 4px 12px rgba(245, 158, 11, 0.15);
+}
+
+/* Elements: ชิ้นส่วนย่อยข้างในการ์ด */
+.user-card__avatar {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.user-card__name {
+  font-size: 18px;
+  font-weight: 600;
+  margin-top: 12px;
+}
+
+/* Modifier ของ Element: ปุ่มที่อยู่ในสถานะปิด */
+.user-card__btn--disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+```
+
+### ตัวอย่างที่ 2: Modern CSS Reset ฉบับมาตรฐานปี 2026
+
+```css filename="modern-reset.css"
+/* 1. ใช้ border-box ทุกที่ */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+/* 2. ลบ margin เริ่มต้นของแท็กที่พบบ่อย */
+body, h1, h2, h3, h4, p, figure, blockquote, dl, dd {
+  margin: 0;
+}
+
+/* 3. รูปภาพไม่ให้ล้นขอบจอ */
+img, picture, video, canvas, svg {
+  display: block;
+  max-width: 100%;
+}
+
+/* 4. ฟอร์มและปุ่มให้ใช้ฟอนต์เดียวกับระบบ */
+input, button, textarea, select {
+  font: inherit;
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: Selector ซ้อนยาวเหยียดและชื่อคลาสไร้ทิศทาง
+
+```css
+/* ผิด: Specificity สูง แก้ไขยาก และชื่อคลาสกำกวมมาก */
+.container .box .title { ... }
+.active { color: red; } /* คลาสระดับ Global ที่มีโอกาสชนกับจุดอื่น 100% */
+```
+
+### ✅ โค้ดที่ถูกต้อง: ตั้งชื่อตามสไตล์ BEM หรือใช้ CSS Modules
+
+```css
+/* ถูกต้อง: ชัดเจน ไม่ชนกับใคร และคะแนน Specificity สม่ำเสมอ */
+.pricing-card__title { ... }
+.pricing-card__btn--active { ... }
+```
+
+---
+
+## 5. เทียบกับ Tailwind CSS v4
+
+Tailwind CSS ช่วยให้คุณ **"ไม่ต้องมานั่งคิดชื่อคลาสแบบ BEM อีกต่อไป"**:
+
+| BEM Pattern | Tailwind CSS v4 Approach |
+| :--- | :--- |
+| `.user-card` | `<div class="p-6 bg-white rounded-xl border border-slate-200">` |
+| `.user-card__avatar` | `<img class="size-16 rounded-full object-cover">` |
+| `.user-card--vip` | ใช้ Template Literal หรือฟังก์ชัน `cn()` สลับคลาส |
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: BEM Methodology ประกอบด้วยอะไรบ้าง และช่วยลดปัญหาในการพัฒนา CSS ระดับองค์กรอย่างไร?
+**แนวทางคำตอบ**: BEM ย่อมาจาก Block, Element, Modifier 
+- **Block**: องค์ประกอบหลักที่เป็นอิสระ (เช่น `.modal`)
+- **Element**: ส่วนย่อยของบล็อกที่แยกออกไปทำงานเดี่ยวๆ ไม่ได้ (เช่น `.modal__header`, `.modal__close`)
+- **Modifier**: ตัวระบุเวอร์ชันหรือสถานะพิเศษ (เช่น `.modal--fullscreen`)
+BEM ช่วยลดปัญหาเรื่อง Specificity Wars เนื่องจากทุกสไตล์จะผูกอยู่กับ Single Class Name (คะแนนเท่ากันหมดที่ 10 แต้ม) และช่วยแก้ปัญหา Global Namespace Collision เพราะชื่อคลาสถูกผูกติดกับ Block ต้นสังกัดเสมอ ทำให้โค้ดมีความเป็นโมดูลและอ่านเข้าใจหน้าที่ได้ทันที
+
+### Q2: CSS Modules แตกต่างจาก Global CSS ปกติอย่างไรในการทำงานร่วมกับ React/Next.js?
+**แนวทางคำตอบ**: 
+- **Global CSS**: สไตล์ที่ประกาศจะสามารถส่งผลกระทบต่อทุก Element ในทุกหน้าของเว็บไซต์ที่มีชื่อคลาสนั้น เสี่ยงต่อการเกิด Class Name Clashing สูงมาก
+- **CSS Modules** (ไฟล์นามสกุล `.module.css`): เครื่องมือ Bundler (เช่น Webpack/Turbopack) จะทำการแปลงชื่อคลาสเดิมให้กลายเป็น **Hashed Class Name เฉพาะตัว** (เช่น `styles.title` จะถูกแปลงเป็น `styles_title__1f9a2` ใน HTML) ทำให้สไตล์ของแต่ละ Component ถูกจำกัดขอบเขต (Scoped) ไร้โอกาสที่คลาสจากต่างคอมโพเนนต์จะชนกันอย่างสิ้นเชิง

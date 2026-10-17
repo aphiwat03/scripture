@@ -1,0 +1,273 @@
+---
+title: Vanilla JS Usage
+category: Frontend
+parentTitle: Zustand v5
+version: Zustand v5.0
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+หนึ่งในพลังที่โดดเด่นที่สุดของ Zustand เหนือกว่า React Context API คือความสามารถในการ **อ่าน, อัปเดต, และดักฟัง State นอกขอบเขตของ React Component (Vanilla JavaScript Context)**:
+
+1. **`useStore.getState()`**: อ่านค่า Snapshot ปัจจุบันของ State ได้ทันทีจากไฟล์ `.ts` ธรรมดา เช่น การดึง Token ไปใส่ใน Request Header
+2. **`useStore.setState()`**: สั่งอัปเดต State จากภายนอกได้โดยตรง เช่น เมื่อได้รับ Event จาก WebSocket หรือเมื่อ Interceptor ตรวจพบ HTTP 401 Unauthorized แล้วสั่งเคลียร์เซสชัน
+3. **`useStore.subscribe()`**: ผูก Event Listener ดักฟังความเปลี่ยนแปลง เพื่อสั่งการฟังก์ชันภายนอก เช่น การแจ้งเตือน Browser Notification หรือการส่งข้อมูลไปยัง Google Analytics
+
+ความสามารถนี้ช่วยแก้ปัญหาที่พบบ่อยในการเขียน React เช่น "จะอ่าน Token จาก State ไปใส่ใน Axios/Fetch ได้อย่างไรโดยไม่ต้องส่ง Props หรือเรียก Hook ใน Component"
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+โครงสร้างสถาปัตยกรรมระหว่าง React Components และ Vanilla Services:
+
+```mermaid
+flowchart LR
+    subgraph ZustandCore ["Zustand Store (Vanilla JavaScript Closure)"]
+        StateData[("State Snapshot")]
+        GetState["getState()"]
+        SetState["setState()"]
+        Subscribe["subscribe()"]
+    end
+
+    subgraph ReactWorld ["React Component World"]
+        UIHook["useAuthStore(selector)\n(useSyncExternalStore)"]
+        Component["Dashboard View"]
+    end
+
+    subgraph VanillaWorld ["Vanilla JS Services (Outside React)"]
+        Axios["Axios / Fetch Interceptor"]
+        WS["WebSocket Client"]
+        Analytics["Analytics Logger"]
+    end
+
+    GetState <--> StateData
+    SetState --> StateData
+    StateData --> Subscribe
+
+    UIHook <--> StateData
+    UIHook --> Component
+
+    Axios -->|1. อ่าน Token: getState()| GetState
+    Axios -->|2. เซ็ตเมื่อ 401: setState()| SetState
+    WS -->|อัปเดตข้อความสด: setState()| SetState
+    Subscribe -->|แจ้งเตือนเมื่อเปลี่ยน| Analytics
+```
+
+- ตัว Store แท้จริงแล้วเป็นเพียง Vanilla JS Object ที่มีเมธอด `getState`, `setState`, `subscribe`, และ `destroy` ตัว Hook ใน React เป็นเพียงเลเยอร์บางๆ ที่นำเมธอดเหล่านี้ไปต่อกับ React 19
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+ตัวอย่างจริง: ระบบ **Axios Interceptor จัดการ Bearer Token และ Auto-Refresh Token** โดยทำงานร่วมกับ `authStore` นอก React
+
+### 1. Store สำหรับเก็บ Token และข้อมูลผู้ใช้
+
+```tsx filename="store/auth-store.ts"
+import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
+
+export interface AuthState {
+  accessToken: string | null;
+  refreshToken: string | null;
+  userId: string | null;
+  isAuthenticated: boolean;
+
+  setTokens: (access: string, refresh: string) => void;
+  clearAuth: () => void;
+}
+
+export const useAuthStore = create<AuthState>()(
+  persist(
+    (set) => ({
+      accessToken: null,
+      refreshToken: null,
+      userId: null,
+      isAuthenticated: false,
+
+      setTokens: (accessToken, refreshToken) =>
+        set({
+          accessToken,
+          refreshToken,
+          isAuthenticated: true,
+        }),
+
+      clearAuth: () =>
+        set({
+          accessToken: null,
+          refreshToken: null,
+          userId: null,
+          isAuthenticated: false,
+        }),
+    }),
+    {
+      name: 'app-auth-token-storage',
+    }
+  )
+);
+```
+
+### 2. ไฟล์ตั้งค่า Axios Client นอก React Component
+
+```tsx filename="lib/api-client.ts"
+import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
+import { useAuthStore } from '@/store/auth-store';
+
+export const apiClient = axios.create({
+  baseURL: process.env.NEXT_PUBLIC_API_URL || 'https://api.example.com/v1',
+  timeout: 10000,
+});
+
+// 1. Request Interceptor: อ่าน accessToken ผ่าน getState() นอก React
+apiClient.interceptors.request.use(
+  (config: InternalAxiosRequestConfig) => {
+    // ดึง Snapshot ล่าสุดจาก Zustand ได้ทันทีโดยไม่ต้องเรียก Hook!
+    const token = useAuthStore.getState().accessToken;
+
+    if (token && config.headers) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
+
+// 2. Response Interceptor: จัดการ Token หมดอายุ (HTTP 401)
+apiClient.interceptors.response.use(
+  (response) => response,
+  async (error: AxiosError) => {
+    const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
+
+    // เมื่อ Token หมดอายุและยังไม่ได้ลองรีเฟรช
+    if (error.response?.status === 401 && !originalRequest._retry) {
+      originalRequest._retry = true;
+      const currentRefreshToken = useAuthStore.getState().refreshToken;
+
+      if (!currentRefreshToken) {
+        // ไม่มี Refresh Token -> สั่ง Logout ทันทีผ่าน setState()
+        useAuthStore.getState().clearAuth();
+        if (typeof window !== 'undefined') window.location.href = '/login';
+        return Promise.reject(error);
+      }
+
+      try {
+        // ยิงขอ Access Token ชุดใหม่
+        const { data } = await axios.post('/api/auth/refresh', {
+          refreshToken: currentRefreshToken,
+        });
+
+        // อัปเดต Token ใหม่ลงใน Zustand ทันที (React UI จะอัปเดตตามอัตโนมัติ)
+        useAuthStore.getState().setTokens(data.accessToken, data.refreshToken);
+
+        // ยิงคำขอเดิมซ้ำด้วย Token ใหม่
+        originalRequest.headers.Authorization = `Bearer ${data.accessToken}`;
+        return apiClient(originalRequest);
+      } catch (refreshErr) {
+        // หาก Refresh ล้มเหลว -> ล้างข้อมูลผู้ใช้ทิ้ง
+        useAuthStore.getState().clearAuth();
+        if (typeof window !== 'undefined') window.location.href = '/login';
+        return Promise.reject(refreshErr);
+      }
+    }
+
+    return Promise.reject(error);
+  }
+);
+```
+
+### 3. การดักฟัง Event นอก React เพื่อส่ง Log เข้า Google Analytics
+
+```tsx filename="lib/analytics-listener.ts"
+import { useAuthStore } from '@/store/auth-store';
+
+// ดักฟังการเปลี่ยนแปลงสถานะ Authentication เพื่อบันทึก User Event
+if (typeof window !== 'undefined') {
+  useAuthStore.subscribe((state, prevState) => {
+    if (!prevState.isAuthenticated && state.isAuthenticated) {
+      console.log('[Analytics] User logged in:', state.userId);
+      // window.gtag?.('event', 'login', { method: 'JWT' });
+    } else if (prevState.isAuthenticated && !state.isAuthenticated) {
+      console.log('[Analytics] User logged out');
+      // window.gtag?.('event', 'logout');
+    }
+  });
+}
+```
+
+---
+
+## 4. เทียบกับวิธีอื่น (Context / Redux vs Zustand)
+
+| เครื่องมือ | การเข้าถึง State นอก React | ความยากง่ายในการใช้งาน |
+| :--- | :--- | :--- |
+| **React Context** | ❌ **ทำไม่ได้เด็ดขาด** (เกิด Error: Invalid hook call นอก Component) | ต้องใช้วิธีลักไก่ เช่น สร้าง Event Emitter หรือส่งผ่าน Callback |
+| **Redux Toolkit** | ✅ ทำได้ผ่าน `store.getState()` และ `store.dispatch()` | ต้อง Export `store` instance และระบุ Type `RootState` ให้ตรง |
+| **Zustand v5** | ✅ **ทำได้สมบูรณ์แบบทันที** ผ่าน `useStore.getState()` และ `setState()` | **เป็นธรรมชาติที่สุด ตัวแปร Hook มี Static Methods ในตัวครบถ้วน** |
+
+---
+
+## 5. ผิด vs ถูก
+
+### กรณีที่ 1: การพยายามเรียก Hook `useAuthStore()` ภายในฟังก์ชัน JavaScript ธรรมดา
+
+```tsx
+// ❌ ผิดมหันต์: เรียก Hook ใน Axios Interceptor หรือ Helper Function
+function getAuthHeader() {
+  const token = useAuthStore((s) => s.accessToken); // พังทันที! "React Hook can only be called inside the body of a function component"
+  return `Bearer ${token}`;
+}
+
+// ✅ ถูก: ใช้ useAuthStore.getState() ในโค้ดที่ไม่ใช่ React Component
+function getAuthHeader() {
+  const token = useAuthStore.getState().accessToken;
+  return `Bearer ${token}`;
+}
+```
+
+### กรณีที่ 2: ใช้ `getState()` ภายใน Component Body สำหรับข้อมูลที่ต้องการให้ UI Re-render ตาม
+
+```tsx
+// ❌ ผิดใน Component: ใช้ getState() อ่านค่าเพื่อนำไปแสดงผล
+export function BadComponent() {
+  const count = useCounterStore.getState().count; // จะไม่มีการ Re-render เมื่อ count ขยับ!
+  return <span>{count}</span>;
+}
+
+// ✅ ถูกใน Component: ใช้ Hook พร้อม Selector เพื่อให้เกิด Subscription
+export function GoodComponent() {
+  const count = useCounterStore((state) => state.count); // Re-render แม่นยำเมื่อ count เปลี่ยน
+  return <span>{count}</span>;
+}
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ `getState()` / `setState()` / `subscribe()` เมื่อ:
+- อยู่ใน **HTTP Clients** เช่น Axios Interceptors, Fetch Wrappers
+- อยู่ใน **Web Worker, Service Worker, หรือ WebSocket Listeners**
+- ฟังก์ชัน **Utility Helpers หรือ Event Listeners** ในระดับ `window` (เช่น `window.ononline`, `window.onoffline`)
+- ส่ง Action หรือ Metrics ไปยัง **Analytics / Error Tracking SDKs** (Sentry, Google Analytics)
+
+### ไม่ควรใช้:
+- ไม่ควรใช้ `getState()` ในเนื้อหลักของ React Component เพื่อแสดงผล เพราะจะสูญเสียการ Reactive และ UI จะค้างไม่อัปเดต
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไม Zustand ถึงอนุญาตให้นักพัฒนาสามารถเรียก `getState()` และ `setState()` นอก React Component ได้ ในขณะที่ React Context ทำไม่ได้?
+**แนวทางคำตอบ**:
+เพราะ **React Context** ผูกติดกับ Fiber Tree ของ React อย่างแนบแน่น ข้อมูลจะคงอยู่ได้ก็ต่อเมื่อมี `<Context.Provider>` ถูก Mount อยู่ใน Virtual DOM หากเราเรียก `useContext` นอก React ตัว Engine จะหา Provider ไม่เจอและโยนข้อผิดพลาดออกมา
+
+ในทางตรงกันข้าม **Zustand** ถูกออกแบบให้แกนกลางเป็น **Vanilla JavaScript Store** ที่ทำงานเป็น Singleton Closure นอก React Tree ตั้งแต่ต้น ตัว Hook ใน React เป็นเพียงหน้าต่างที่เชื่อมเข้ามาด้วย `useSyncExternalStore` เท่านั้น ดังนั้นเราจึงสามารถเข้าถึง Store ผ่านคำสั่ง `useStore.getState()` ได้จากทุกซอกทุกมุมของระบบ ไม่เว้นแม้แต่ไฟล์ Utility ทั่วไป
+
+### Q2: ในการใช้งาน `useStore.subscribe()` นอก React เรามีข้อควรระวังเรื่อง Memory Leak อย่างไรบ้าง?
+**แนวทางคำตอบ**:
+ฟังก์ชัน `useStore.subscribe()` จะคืนค่าเป็นฟังก์ชัน **Unsubscribe (`() => void`)** ออกมาเสมอ:
+- หากเรียก `subscribe` ในไฟล์ Global Singleton (เช่น Axios Interceptor ที่รันครั้งเดียวตอนเปิดแอป) อาจไม่จำเป็นต้องล้าง
+- แต่หากเรียก `subscribe` ภายใน Function, Class Instance, หรือ Dynamic Event Listener ที่มีอายุการทำงานจำกัด เราต้องจัดเก็บฟังก์ชัน Unsubscribe ไว้ และสั่งเรียกเพื่อถอด Listener ออกเมื่อเลิกใช้งานเสมอ มิฉะนั้น Listener เก่าจะตกค้างอยู่ในหน่วยความจำและทำงานซ้ำซ้อน

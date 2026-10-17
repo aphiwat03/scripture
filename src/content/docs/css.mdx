@@ -1,0 +1,41 @@
+---
+title: CSS
+category: Frontend
+version: Modern CSS & Tailwind v4
+updatedAt: 2026-10-17
+---
+
+## ภาพรวม Modern CSS & UI Engineering
+
+**CSS (Cascading Style Sheets)** ในปัจจุบันก้าวเข้าสู่ยุคใหม่ที่ทรงพลังกว่าเดิมอย่างก้าวกระโดด ฟีเจอร์สมัยใหม่อย่าง **CSS Grid**, **Flexbox**, **Container Queries**, **The `:has()` Relational Selector**, **Native CSS Variables**, **`@layer`**, และระบบสีใหม่อย่าง **`oklch()`** ช่วยให้วิศวกรซอฟต์แวร์สามารถสร้าง UI ที่ซับซ้อน ลื่นไหล และยืดหยุ่นได้โดยแทบไม่ต้องพึ่งพา JavaScript สำหรับงานด้านเลย์เอาต์อีกต่อไป
+
+ในยุคของ **Tailwind CSS v4** และ Component-Driven Architecture (React 19 / Next.js 16) หากเราไม่เข้าใจกลไกเบื้องหลังของ CSS อย่างถ่องแท้ เช่น **Box Model**, **Stacking Context & z-index**, **Specificity & Cascade**, หรือ **Reflow vs Repaint** เราจะไม่สามารถแก้ไขปัญหาเลย์เอาต์เพี้ยน หรือสร้าง Design System ระดับ Production ที่มีประสิทธิภาพได้เลย
+
+---
+
+## แผนผังเนื้อหา Modern CSS (Directory)
+
+บทเรียนนี้ถูกคัดสรรเฉพาะเนื้อหาที่ **Fullstack Developer ใช้งานจริงในชีวิตประจำวัน** ตัดฟีเจอร์โบราณที่เลิกใช้แล้วทิ้งไป และแบ่งออกเป็น 20 หัวข้อเชิงลึก:
+
+| หัวข้อ | ลิงก์อ่านเนื้อหา | คำอธิบายสังเขป |
+| :--- | :--- | :--- |
+| **1. พื้นฐานและวิธีเขียน** | [Basics & Syntax](/docs/css/basics) | Selector, Property, Value, External vs Inline, CSS Syntax |
+| **2. Selectors** | [Selectors](/docs/css/selectors) | Class, ID, Combinators, `:hover`, `:focus`, `:has()`, `::before/after` |
+| **3. Specificity & Cascade** | [Cascade & Specificity](/docs/css/cascade-specificity) | กฎการคำนวณคะแนน, Inheritance, `!important`, `@layer` |
+| **4. Box Model** | [Box Model](/docs/css/box-model) | Content, Padding, Border, Margin, `box-sizing: border-box`, Margin Collapse |
+| **5. หน่วยและฟังก์ชันคำนวณ** | [Units & clamp()](/docs/css/units-values) | `px`, `rem`, `em`, `%`, `vw/vh/dvh`, `clamp()`, `min()`, `max()`, `calc()` |
+| **6. สี พื้นหลัง และเส้นขอบ** | [Colors & oklch()](/docs/css/colors-backgrounds) | Hex, HSL, `oklch()`, Gradient, `box-shadow`, `border-radius` |
+| **7. Typography** | [Typography](/docs/css/typography) | Fonts, Line-height, Letter-spacing, การตัดคำภาษาไทย |
+| **8. Display และ Position** | [Display & Position](/docs/css/display-position) | `block/inline`, `relative/absolute/fixed/sticky`, Stacking Context |
+| **9. Flexbox** | [Flexbox Layout](/docs/css/flexbox) | Main/Cross axis, `justify-content`, `align-items`, `gap`, Layouts ยอดฮิต |
+| **10. CSS Grid** | [CSS Grid](/docs/css/grid) | `fr`, `grid-template-columns`, `minmax()`, `auto-fit/fill`, Grid vs Flexbox |
+| **11. Responsive Design** | [Responsive Design](/docs/css/responsive) | Mobile-first, Media queries, Breakpoints, Container queries |
+| **12. CSS Variables & Themes** | [Variables & Themes](/docs/css/variables-themes) | Custom properties, `:root`, Dark mode (`prefers-color-scheme`) |
+| **13. Transitions & Animations** | [Animations](/docs/css/transitions-animations) | `transition`, `transform`, `@keyframes`, `prefers-reduced-motion` |
+| **14. UI Patterns ยอดนิยม** | [UI Patterns](/docs/css/ui-patterns) | Glassmorphism, Modal overlay, Skeleton loading, Sticky header, `line-clamp` |
+| **15. สถาปัตยกรรม CSS** | [Architecture & BEM](/docs/css/architecture-bem) | BEM methodology, CSS Modules, Scoped vs Global, Modern Reset |
+| **16. Tailwind CSS v4** | [Tailwind CSS v4](/docs/css/tailwind-v4) | การแมป Utility Class, `@theme` CSS-first, `@apply`, Variants |
+| **17. CSS ใน React/Next.js** | [CSS in React/Next.js](/docs/css/react-nextjs-css) | `className`, CSS Modules, `globals.css`, `clsx`/`cn`, แก้ FOUC |
+| **18. Performance & a11y** | [Performance & a11y](/docs/css/performance-a11y) | Reflow vs Repaint, GPU Compositing, `:focus-visible`, Color contrast |
+| **19. การ Debug ด้วย DevTools** | [DevTools Debugging](/docs/css/devtools-debugging) | Inspect, Computed tab, ตรวจสอบ Specificity, ทดสอบ Responsive |
+| **20. Pitfalls & Q&A** | [Pitfalls & Q&A](/docs/css/pitfalls) | รวม Anti-patterns ยอดฮิต, คำถามสัมภาษณ์งาน, Checklist สรุป และ Roadmap |

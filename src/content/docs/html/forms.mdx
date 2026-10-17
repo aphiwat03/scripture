@@ -1,0 +1,172 @@
+---
+title: Forms
+category: Frontend
+parentTitle: HTML5
+version: HTML Living Standard
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+แบบฟอร์ม (`<form>`) คือ **"สะพานเชื่อมโยงหลักในการรับข้อมูลระหว่างผู้ใช้กับเซิร์ฟเวอร์"** ไม่ว่าจะเป็นระบบล็อกอิน การกรอกข้อมูลบัตรเครดิต หรือการตั้งค่าโปรไฟล์ 
+
+ความแตกต่างพื้นฐานที่สำคัญที่สุด:
+- **`name`**: คือ **"กุญแจสำคัญสำหรับส่งข้อมูล (Payload Key)"** หากไม่มี `name` ข้อมูลในช่อง input นั้นจะไม่ถูกส่งไปที่ Backend เมื่อเกิดการ Submit
+- **`id`**: คือ **"ตัวระบุเอกลักษณ์ในฝั่ง Client"** ใช้สำหรับผูกคู่กับ `<label for="id">` และใช้ใน CSS / JavaScript
+- **`<label>`**: ป้ายชื่อกำกับช่องกรอกข้อมูล ช่วยให้ผู้ใช้สามารถคลิกที่ตัวหนังสือเพื่อโฟกัสช่อง input ได้ทันที (ขยายพื้นที่ Click Target)
+- **`<button type="...">`**: ปุ่มในฟอร์มมี 3 ชนิด (`submit`, `button`, `reset`) โดยค่าเริ่มต้นของปุ่มในฟอร์มคือ `submit` เสมอ!
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+1. **Form Data Serialization**: เมื่อเกิดเหตุการณ์ Submit เบราว์เซอร์จะรวบรวม element ทั้งหมดที่มีแอตทริบิวต์ `name` แปลงเป็นคู่ Key-Value (`FormData` หรือ `application/x-www-form-urlencoded`) แล้วส่งตาม `method` (GET/POST) ไปยัง `action` URL
+2. **Mobile Keyboard Adaptation**: การเลือก `type` ของ input ที่ถูกต้อง (เช่น `email`, `tel`, `url`, หรือการใช้ `inputmode="numeric"`) จะสั่งให้สมาร์ตโฟนเปิดคีย์บอร์ดที่เหมาะสมขึ้นมาทันที เช่น แป้นตัวเลขขนาดใหญ่ หรือแป้นที่มีเครื่องหมาย `@` และ `.com`
+3. **Accessibility**: Screen Reader ไม่สามารถบอกผู้พิการได้ว่าช่องกรอกนี้คืออะไร หากไม่มีแท็ก `<label>` ผูกไว้ผ่าน `id` หรือการครอบตัว input ไว้ข้างใน `<label>`
+
+---
+
+## 3. ตัวอย่างโค้ด (HTML5)
+
+### ตัวอย่างที่ 1: ฟอร์มสมัครสมาชิกผู้ใช้งานใหม่ (User Registration Form)
+
+```html filename="register-form.html"
+<form action="/api/auth/register" method="POST" class="auth-form">
+  <h2>สร้างบัญชีผู้ใช้งานใหม่</h2>
+
+  <!-- 1. ช่องกรอกชื่อ-นามสกุล -->
+  <div class="form-group">
+    <label for="fullname">ชื่อ - นามสกุล</label>
+    <input 
+      type="text" 
+      id="fullname" 
+      name="fullName" 
+      autocomplete="name" 
+      required
+    >
+  </div>
+
+  <!-- 2. ช่องกรอกอีเมล (ขึ้นคีย์บอร์ดมี @ บนมือถือ) -->
+  <div class="form-group">
+    <label for="email">อีเมลสำหรับติดต่อ</label>
+    <input 
+      type="email" 
+      id="email" 
+      name="email" 
+      autocomplete="email" 
+      required
+    >
+  </div>
+
+  <!-- 3. ช่องกรอกรหัสผ่าน -->
+  <div class="form-group">
+    <label for="password">รหัสผ่าน (อย่างน้อย 8 ตัวอักษร)</label>
+    <input 
+      type="password" 
+      id="password" 
+      name="password" 
+      autocomplete="new-password" 
+      minlength="8" 
+      required
+    >
+  </div>
+
+  <!-- 4. ตัวเลือก Checkbox ยอมรับเงื่อนไข -->
+  <div class="form-checkbox">
+    <label>
+      <input type="checkbox" name="acceptTerms" required>
+      <span>ฉันยอมรับข้อกำหนดการใช้งานและนโยบายความเป็นส่วนตัว</span>
+    </label>
+  </div>
+
+  <!-- 5. ปุ่ม Submit ส่งฟอร์ม -->
+  <button type="submit" class="btn-primary">ยืนยันการสมัครสมาชิก</button>
+</form>
+```
+
+### ตัวอย่างที่ 2: ฟอร์มสั่งซื้อสินค้าพร้อม `<fieldset>`, `<select>` และ `<textarea>`
+
+```html filename="checkout-form.html"
+<form action="/api/orders/checkout" method="POST">
+  <!-- จัดกลุ่มข้อมูลการจัดส่งด้วย fieldset/legend -->
+  <fieldset>
+    <legend>ข้อมูลการจัดส่งและชำระเงิน</legend>
+
+    <div class="form-group">
+      <label for="payment-method">วิธีการชำระเงิน</label>
+      <select id="payment-method" name="paymentMethod">
+        <option value="promptpay">พร้อมเพย์ (PromptPay QR)</option>
+        <option value="credit_card">บัตรเครดิต / เดบิต</option>
+        <option value="cod">ชำระเงินปลายทาง (COD)</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label for="order-note">หมายเหตุเพิ่มเติมถึงผู้จัดส่ง (ถ้ามี)</label>
+      <textarea id="order-note" name="orderNote" rows="3" placeholder="เช่น ฝากไว้ที่ป้อมยาม..."></textarea>
+    </div>
+  </fieldset>
+
+  <div class="form-actions">
+    <!-- ระบุ type="button" เสมอเพื่อป้องกันไม่ให้ปุ่มนี้ไป Submit ฟอร์มโดยไม่ตั้งใจ -->
+    <button type="button" onclick="history.back()">ย้อนกลับ</button>
+    <button type="submit">ดำเนินการชำระเงิน</button>
+  </div>
+</form>
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ไม่ใส่ `name`, ลืมผูก `label`, และลืมระบุ `type` บนปุ่มทั่วไป
+
+```html
+<!-- ผิด: 1. ไม่มี name ข้อมูลส่งไปไม่ถึงเซิร์ฟเวอร์
+         2. label ไม่ได้ผูกกับ id กดข้อความแล้วไม่โฟกัส
+         3. ปุ่ม 'ล้างฟอร์ม' ลืมระบุ type กลายเป็นกดแล้ว Submit ทันที! -->
+<form>
+  <label>ชื่อผู้ใช้</label>
+  <input type="text" id="username">
+
+  <button onclick="clearInputs()">ล้างข้อมูล</button>
+  <button>บันทึก</button>
+</form>
+```
+
+### ✅ โค้ดที่ถูกต้อง: มี `name` ครบ, ผูก `for` กับ `id`, และระบุ `type="button"`
+
+```html
+<form action="/profile/update" method="POST">
+  <label for="username">ชื่อผู้ใช้</label>
+  <input type="text" id="username" name="username">
+
+  <button type="button" onclick="clearInputs()">ล้างข้อมูล</button>
+  <button type="submit">บันทึก</button>
+</form>
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรทำเสมอ
+- ทุกช่อง input ต้องมีแท็ก `<label>` กำกับเสมอ
+- ต้องใส่แอตทริบิวต์ `name` ให้กับทุก Input ที่ต้องการส่งค่าไปยังเซิร์ฟเวอร์
+- ทุกแท็ก `<button>` ที่อยู่ในฟอร์มและไม่ได้ทำหน้าที่ Submit จะต้องระบุ `type="button"` เสมอ
+
+### ไม่ควรทำ
+- **ห้ามใช้ Placeholder แทน Label**: Placeholder จะจางหายไปทันทีที่ผู้ใช้เริ่มพิมพ์ ทำให้ผู้ใช้จำไม่ได้ว่าช่องนี้ต้องกรอกอะไร
+- ห้ามซ้อนฟอร์มเข้าไปในฟอร์ม (`<form><form>...</form></form>`) เป็นข้อห้ามร้ายแรงตามมาตรฐาน HTML5
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ถ้าสร้าง `<button>` ไว้ในแท็ก `<form>` โดยไม่ได้ใส่แอตทริบิวต์ `type` จะเกิดอะไรขึ้นเมื่อผู้ใช้คลิกปุ่มนั้น?
+**แนวทางคำตอบ**: ตามข้อกำหนดของมาตรฐาน HTML5 หากไม่ระบุแอตทริบิวต์ `type` ให้กับแท็ก `<button>` ค่าเริ่มต้น (Default Value) จะเป็น `type="submit"` เสมอ ทำให้เมื่อผู้ใช้คลิกปุ่มดังกล่าว เบราว์เซอร์จะทำการส่งฟอร์ม (Form Submission) ทันที ซึ่งหากเราต้องการให้ปุ่มนั้นทำหน้าที่เป็นปุ่มกดทั่วไป (เช่น เปิดกล่องรหัสผ่าน หรือยกเลิก) ต้องระบุ `type="button"` เสมอ
+
+### Q2: ในการส่งฟอร์ม HTML แอตทริบิวต์ `id` และ `name` ทำหน้าที่แตกต่างกันอย่างไร?
+**แนวทางคำตอบ**:
+- `name` มีหน้าที่ส่งค่าไปยังเซิร์ฟเวอร์ โดยจะถูกใช้เป็น Key ของข้อมูลใน HTTP Request Payload (`key=value`) หากช่อง input ไม่มี `name` ข้อมูลจะไม่ถูกส่งไปเด็ดขาด
+- `id` มีหน้าที่ระบุเอกลักษณ์ของ Node ในฝั่ง Client บนเอกสาร DOM ใช้สำหรับการจัดรูปแบบใน CSS, การดึง element ด้วย JavaScript (`document.getElementById`), และที่สำคัญที่สุดคือการผูกคู่กับแอตทริบิวต์ `for` ในแท็ก `<label>` เพื่อประโยชน์ด้าน Accessibility

@@ -1,0 +1,144 @@
+---
+title: Zod Validation
+category: Frontend
+parentTitle: TypeScript
+version: v5.6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+TypeScript เป็นภาษาประเภท **Compile-time Type System** หมายความว่า มันตรวจเช็คความถูกต้องของโค้ดเฉพาะในระหว่างขั้นตอนการพัฒนาและ Build เท่านั้น เมื่อโค้ดถูกคอมไพล์เป็น JavaScript ไทป์ทั้งหมดจะถูก **ลบทิ้งจนหมด (Type Erasure)**
+
+ทำให้เกิดช่องโหว่สำคัญคือ: **TypeScript ไม่สามารถปกป้องแอปพลิเคชันจากข้อมูลที่ส่งเข้ามาใน Runtime ได้** เช่น ข้อมูลจาก API Response ภายนอก, Payload ที่ผู้ใช้ส่งผ่านฟอร์ม, หรือค่าใน Environment Variables
+
+**Zod** เปรียบเหมือน **"ยามเฝ้าประตู (Runtime Bouncer)"** ที่คอยตรวจพาสปอร์ตของข้อมูลจริงก่อนปล่อยให้โค้ดส่วนอื่นทำงาน และสามารถสร้าง TypeScript Type ให้เราอัตโนมัติด้วยคำสั่ง `z.infer<typeof schema>`
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+1. **Type Erasure**: คำสั่ง `interface User { email: string }` ไม่มีตัวตนใน JavaScript รันไทม์ หาก API ส่ง `{ email: 12345 }` หรือ `null` โค้ดจะผ่านการ compile แต่พังตอน runtime
+2. **Schema-First Typing**: Zod นิยาม Schema เป็น JavaScript Object ที่ทำงานจริงใน Runtime พร้อมสร้าง TypeScript type mirroring ผ่าน conditional inference types โดยไม่ต้องเขียนไทป์ซ้ำสองรอบ
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: การประกาศ Schema และการดึง Type ด้วย `z.infer`
+
+```typescript
+import { z } from 'zod';
+
+// 1. กำหนด Runtime Validation Schema
+export const UserRegistrationSchema = z.object({
+  id: z.string().uuid({ message: 'UUID ไม่ถูกต้อง' }),
+  email: z.string().email({ message: 'รูปแบบอีเมลไม่ถูกต้อง' }),
+  password: z.string().min(8, { message: 'รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร' }),
+  role: z.enum(['CUSTOMER', 'MERCHANT', 'ADMIN']).default('CUSTOMER'),
+  age: z.number().int().positive().optional(),
+});
+
+// 2. ดึง TypeScript Type ออกมาจาก Schema (ไม่ต้องประกาศ interface ซ้ำ)
+export type UserRegistrationInput = z.infer<typeof UserRegistrationSchema>;
+/*
+Type ที่ได้:
+type UserRegistrationInput = {
+  id: string;
+  email: string;
+  password: string;
+  role: "CUSTOMER" | "MERCHANT" | "ADMIN";
+  age?: number | undefined;
+}
+*/
+```
+
+### ตัวอย่างที่ 2: การตรวจสอบข้อมูลจริงด้วย `parse` และ `safeParse`
+
+```typescript
+// ฟังก์ชันรับข้อมูลที่ยังไม่ปลอดภัยจาก Request Body
+export function handleRegister(rawInput: unknown): { success: boolean; data?: UserRegistrationInput; error?: string } {
+  // safeParse จะไม่ throw exception แต่จะคืนค่าเป็น discriminated union { success: true, data } หรือ { success: false, error }
+  const result = UserRegistrationSchema.safeParse(rawInput);
+
+  if (!result.success) {
+    // ดึง error messages สรุปส่งกลับไปให้ผู้ใช้
+    const issueMessages = result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join(', ');
+    return { success: false, error: issueMessages };
+  }
+
+  // ณ จุดนี้ result.data ได้รับ Type Guard ปลอดภัย 100% เป็น UserRegistrationInput
+  const validUser: UserRegistrationInput = result.data;
+  console.log(`สมัครสมาชิกสำเร็จ: ${validUser.email} (บทบาท: ${validUser.role})`);
+  return { success: true, data: validUser };
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่เขียนผิด: ใช้ Type Assertion หลอกตัวเองกับข้อมูลภายนอก
+
+```typescript
+// ผิด: คิดว่า 'as User' จะทำให้ข้อมูลปลอดภัย
+async function fetchUser(id: string) {
+  const res = await fetch(`/api/users/${id}`);
+  const data = (await res.json()) as { id: string; email: string; balance: number };
+
+  // หาก Backend ส่ง { id: "1", email: null } มา โค้ดด้านล่างจะพัง TypeError ทันทีใน runtime!
+  console.log(data.email.toUpperCase());
+}
+```
+
+### ✅ โค้ดที่ถูกต้อง: ใช้ Zod ตรวจสอบจริงก่อนเข้าถึงข้อมูล
+
+```typescript
+import { z } from 'zod';
+
+const UserResponseSchema = z.object({
+  id: z.string(),
+  email: z.string(),
+  balance: z.number().nonnegative(),
+});
+
+async function fetchUser(id: string) {
+  const res = await fetch(`/api/users/${id}`);
+  const rawData: unknown = await res.json();
+
+  const parseResult = UserResponseSchema.safeParse(rawData);
+  if (!parseResult.success) {
+    throw new Error(`ข้อมูลผู้ใช้จาก API ผิดสเปก: ${parseResult.error.message}`);
+  }
+
+  // ปลอดภัยแน่นอน ทั้ง compile-time และ run-time
+  const user = parseResult.data;
+  console.log(user.email.toUpperCase());
+}
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้
+- ข้อมูลที่รับมาจาก **API ภายนอก (Third-party APIs)**
+- ข้อมูลจาก **Web Form Submission** (ร่วมกับ React Hook Form ผ่าน `@hookform/resolvers/zod`)
+- การตรวจสอบค่าใน `process.env` (Environment Variables) ตอนเซิร์ฟเวอร์เริ่มทำงาน
+- Request Body และ Query Parameters ใน Server Actions หรือ Route Handlers
+
+### ไม่ควรใช้
+- ฟังก์ชันภายในระบบที่เป็น Pure Business Logic ซึ่งรับไทป์ที่ปลอดภัยอยู่แล้วจากโค้ดชั้นอื่น (จะทำให้เกิด Overhead การตรวจสอบซ้ำซ้อน)
+- ภายใน Loop ที่ทำงานถี่มากๆ ระดับแสนล้านรอบต่อวินาที เพราะการ parse มีค่าใช้จ่ายทาง CPU
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการใช้ TypeScript Interface เพียงอย่างเดียวจึงไม่เพียงพอในการป้องกันข้อผิดพลาดจากข้อมูล API?
+**แนวทางคำตอบ**: เพราะ TypeScript มีกลไก **Type Erasure** โค้ด interface ทั้งหมดจะหายไปหลังจากกระบวนการ Transpile ทำให้ใน Runtime โปรแกรมทำงานด้วย JavaScript ปกติ หากข้อมูลที่ส่งมาจาก API มีโครงสร้างไม่ตรงกับ Interface เช่น ขาด Property ที่ระบุไว้ หรือส่ง type ผิด โปรแกรมจะไม่ทราบล่วงหน้าและอาจเกิด runtime crash (เช่น `Cannot read properties of undefined`) การใช้ Zod จึงเข้ามาเติมเต็มช่องว่างนี้ด้วยการ validate ข้อมูลจริงใน runtime
+
+### Q2: ความแตกต่างระหว่าง `schema.parse()` และ `schema.safeParse()` ใน Zod คืออะไร? ควรเลือกใช้อันไหน?
+**แนวทางคำตอบ**: 
+- `schema.parse()` จะ throw `ZodError` ทันทีหากข้อมูลไม่ตรงกับ Schema เหมาะสำหรับกรณีที่ต้องการให้กระบวนการหยุดชะงักและมี Error Boundary หรือ try/catch คอยจับ
+- `schema.safeParse()` จะไม่ throw error แต่จะส่งกลับ object ในรูปแบบ Discriminated Union `{ success: true, data }` หรือ `{ success: false, error }` เหมาะอย่างยิ่งใน Form Validation, Next.js Server Actions หรือ Route Handlers เพราะทำให้เราจัดการ Error ส่งกลับไปยัง UI ได้อย่างนุ่มนวลและ Type-Safe

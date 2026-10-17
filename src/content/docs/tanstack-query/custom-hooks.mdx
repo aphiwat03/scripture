@@ -1,0 +1,256 @@
+---
+title: Custom Feature Hooks
+category: Frontend
+parentTitle: TanStack Query v5
+version: TanStack Query v5.x
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+เมื่อแอปพลิเคชันมีขนาดใหญ่ขึ้น การเขียน `useQuery` หรือ `useMutation` แบบแปะตรงๆ (Inline) ไว้ในคอมโพเนนต์ JSX ทุกไฟล์ จะทำให้เกิดปัญหาโค้ดกระจัดกระจาย (Code Fragmentation), การทำซ้ำซ้อน (Duplication) และยากต่อการปรับปรุงโครงสร้าง (Refactoring)
+
+**Custom Feature Hooks (ฮุกเฉพาะโดเมนการทำงาน)** คือแนวปฏิบัติมาตรฐานระดับองค์กร (Enterprise Best Practice) โดยเราจะห่อหุ้ม (Encapsulate):
+- ตัว **Query Key Factory**
+- ฟังก์ชัน **API Fetcher / Service**
+- ตัวเลือกการแคช (**`staleTime`**, **`gcTime`**, **`retry`**)
+- ตรรกะการ Invalidate แคชหลังการแก้ไขข้อมูล
+
+ไว้ภายใน Hook ตัวเดียว เช่น `useProducts()`, `useProductDetail(id)`, หรือ `useCreateOrder()` ส่งผลให้คอมโพเนนต์ฝั่ง UI มีหน้าที่เพียงอย่างเดียวคือ **การแสดงผล (Presentational Role)** โดยไม่ต้องรับรู้ว่าข้อมูลดึงมาจาก URL ใด หรือใช้ Key หน้าตาอย่างไร
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### สถาปัตยกรรมแบ่งชั้น 4 เลเยอร์ (4-Tier Layered Architecture)
+
+```
+[1. UI Component Layer]  (เช่น ProductCatalog.tsx, OrderList.tsx)
+         │  (บริโภคเฉพาะ data, isPending, mutate โดยไม่ต้องรู้จัก URL)
+         ▼
+[2. Custom Hook Layer]  (เช่น useProducts.ts, useOrders.ts)
+         │  (ควบคุม Query Key, staleTime, Invalidation, และ Data Transformation)
+         ▼
+[3. API Service Layer]  (เช่น products.api.ts)
+         │  (จัดการ HTTP Request, Request Cancellation, Zod Validation)
+         ▼
+[4. Cache & Network]    (TanStack Query Engine & Backend)
+```
+
+โครงสร้างโฟลเดอร์แบบ Feature-based ที่แนะนำ:
+```
+src/features/products/
+├── api/
+│   └── products.api.ts       # ฟังก์ชันติดต่อ Backend
+├── hooks/
+│   ├── useProducts.ts        # Custom Query Hook สำหรับรายการสินค้า
+│   ├── useProductDetail.ts   # Custom Query Hook สำหรับสินค้าเดี่ยว
+│   └── useCreateProduct.ts   # Custom Mutation Hook สำหรับสร้างสินค้า
+├── keys.ts                   # Query Key Factory
+├── types.ts                  # TypeScript Types / Zod Schemas
+└── components/
+    └── ProductCatalog.tsx    # Presentational Component
+```
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+การสร้างสถาปัตยกรรม Custom Feature Hooks สำหรับระบบสินค้า:
+
+### ไฟล์ที่ 1: API Service Layer
+
+```ts filename="src/features/products/api/products.api.ts"
+import { apiClient } from '@/lib/api-client';
+
+export interface Product {
+  id: string;
+  name: string;
+  price: number;
+  category: string;
+}
+
+export interface ProductFilters {
+  category?: string;
+  search?: string;
+}
+
+export const productsApi = {
+  getAll: (filters?: ProductFilters, signal?: AbortSignal): Promise<Product[]> => {
+    return apiClient<Product[]>('/api/products', {
+      params: filters as Record<string, string>,
+      signal,
+    });
+  },
+  getById: (id: string, signal?: AbortSignal): Promise<Product> => {
+    return apiClient<Product>(`/api/products/${id}`, { signal });
+  },
+  create: (newProduct: Omit<Product, 'id'>): Promise<Product> => {
+    return apiClient<Product>('/api/products', {
+      method: 'POST',
+      body: JSON.stringify(newProduct),
+    });
+  },
+};
+```
+
+### ไฟล์ที่ 2: Custom Feature Hooks Layer
+
+```ts filename="src/features/products/hooks/useProducts.ts"
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { productsApi, Product, ProductFilters } from '../api/products.api';
+import { productKeys } from '../keys';
+
+// 1. Hook สำหรับดึงรายการสินค้าพร้อม Filter
+export function useProducts(filters?: ProductFilters) {
+  return useQuery({
+    queryKey: productKeys.list(filters || {}),
+    queryFn: ({ signal }) => productsApi.getAll(filters, signal),
+    staleTime: 60 * 1000,
+  });
+}
+
+// 2. Hook สำหรับดึงรายละเอียดสินค้าชิ้นเดียว
+export function useProductDetail(productId: string) {
+  return useQuery({
+    queryKey: productKeys.detail(productId),
+    queryFn: ({ signal }) => productsApi.getById(productId, signal),
+    enabled: Boolean(productId),
+    staleTime: 5 * 60 * 1000,
+  });
+}
+
+// 3. Hook สำหรับสร้างสินค้าใหม่ พร้อม Invalidate แคชอัตโนมัติ
+export function useCreateProduct() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: productsApi.create,
+    onSuccess: () => {
+      // สั่งรีเฟรชเฉพาะส่วนของ Product Lists
+      queryClient.invalidateQueries({
+        queryKey: productKeys.lists(),
+      });
+    },
+  });
+}
+```
+
+### ไฟล์ที่ 3: Presentational UI Component
+
+```tsx filename="src/features/products/components/ProductCatalogView.tsx"
+'use client';
+
+import React, { useState } from 'react';
+import { useProducts, useCreateProduct } from '../hooks/useProducts';
+
+export function ProductCatalogView() {
+  const [category, setCategory] = useState<string | undefined>('gadgets');
+
+  // UI เรียกใช้ Hook สั้นๆ สะอาดตา ปราศจากตรรกะ Query Key หรือ URL
+  const { data: products, isPending, isError } = useProducts({ category });
+  const createProduct = useCreateProduct();
+
+  const handleAddNew = () => {
+    createProduct.mutate({
+      name: 'หูฟังไร้สาย Pro',
+      price: 2990,
+      category: 'gadgets',
+    });
+  };
+
+  if (isPending) return <div className="p-6 animate-pulse">กำลังโหลดข้อมูลสินค้า...</div>;
+  if (isError) return <div className="p-6 text-red-500">เกิดข้อผิดพลาดในการโหลดสินค้า</div>;
+
+  return (
+    <div className="space-y-4 p-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-bold">คลังสินค้าหมวดหมู่อุปกรณ์</h2>
+        <button
+          onClick={handleAddNew}
+          disabled={createProduct.isPending}
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50"
+        >
+          {createProduct.isPending ? 'กำลังเพิ่ม...' : '+ เพิ่มสินค้าใหม่'}
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {products?.map((item) => (
+          <div key={item.id} className="border p-4 rounded-xl shadow-sm bg-white">
+            <h3 className="font-semibold">{item.name}</h3>
+            <p className="text-emerald-600 font-bold mt-2">฿{item.price.toLocaleString()}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม (useEffect vs TanStack Query)
+
+| มุมมอง | การเขียน `useQuery` ฝังใน JSX ตรงๆ | การใช้ Custom Feature Hooks |
+| :--- | :--- | :--- |
+| **ความสะอาดของ UI Code** | คอมโพเนนต์รกด้วย URL, Key Arrays และ Options | เหลือเพียงการดึง `data` มาแสดงผล สะอาด อ่านเข้าใจง่าย |
+| **การเปลี่ยน Endpoint API** | ต้องค้นหาและไล่แก้ตามไฟล์ TSX ทุกหน้าในระบบ | แก้ไขที่ `productsApi` เพียงไฟล์เดียว มีผลทันทีทั้งระบบ |
+| **การจัดการ Invalidation** | ลืม Invalidate หรือพิมพ์ Key ไม่ตรงกันในแต่ละหน้า | Invalidation ถูกล็อกไว้ใน `onSuccess` ของ Mutation Hook อัตโนมัติ |
+| **การทดสอบ (Testing)** | ต้อง Mock ทั้งหมดใน UI Component | สามารถแยกเขียน Unit Test สำหรับ Custom Hook ได้อย่างอิสระ |
+
+---
+
+## 5. ผิด vs ถูก
+
+### แบบที่ผิด ❌: เขียน Query Key และฟังก์ชัน Fetch กระจายตัวอยู่ใน UI
+
+```tsx
+// ❌ ผิด: ฮาร์ดโค้ด URL และ Key ซ้ำๆ ในคอมโพเนนต์
+export function BadComponent() {
+  const { data } = useQuery({
+    queryKey: ['products', 'list', 'electronics'],
+    queryFn: async () => {
+      const res = await fetch('/api/v1/products?cat=electronics');
+      return res.json();
+    },
+  });
+  return <div>{data?.length}</div>;
+}
+```
+
+### แบบที่ถูก ✅: ห่อหุ้มเป็น Domain Hook ที่พร้อมใช้งาน
+
+```tsx
+// ✅ ถูกต้อง: ใช้ Custom Hook สั้น บรรทัดเดียว มี Type ครบถ้วน
+export function GoodComponent() {
+  const { data } = useProducts({ category: 'electronics' });
+  return <div>{data?.length}</div>;
+}
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Custom Feature Hooks เมื่อ:
+- แอปพลิเคชันมี Entity ที่ถูกเรียกใช้งานจากหลายๆ หน้าจอ (เช่น User Profile, Shopping Cart, Notifications)
+- ต้องการให้ทีม Frontend Developer ทำงานร่วมกันได้อย่างเป็นระเบียบ มีการแบ่งหน้าที่ชัดเจนระหว่างผู้ดูแล API และผู้ออกแบบ UI
+
+### ไม่จำเป็นต้องสร้าง Custom Hook เมื่อ:
+- การดึงข้อมูลแบบ One-off สำหรับหน้าจอทดลองชั่วคราว หรือ Prototype ที่ยังไม่มีการใช้ซ้ำ
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการห่อหุ้ม `useQuery` และ `useMutation` ไว้ใน Custom Feature Hooks จึงถือเป็นหัวใจสำคัญของ Clean Architecture ใน React?
+**แนวทางตอบ**:
+เพราะสอดคล้องกับหลักการ **Separation of Concerns (การแยกความรับผิดชอบ)**:
+1. **Presentational Independence**: UI Component ไม่ควรต้องรู้รายละเอียดของเครือข่าย เช่น HTTP Method, URL Path, หรือโครงสร้าง Cache Key
+2. **Single Source of Truth**: การกำหนดค่า เช่น `staleTime`, การ Retry, และขั้นตอนการ Invalidate แคชจะถูกนิยามไว้ที่จุดเดียว หากวันข้างหน้า Backend ปรับเปลี่ยน API Endpoint หรือเปลี่ยนวิธีการ Invalidate ทีมสามารถแก้ไขได้ที่ Hook ไฟล์เดียวโดยไม่ต้องแตะต้อง UI Components เลยแม้แต่บรรทัดเดียว
+3. **Reusability & Testability**: ทำให้สามารถนำลอจิกไปใช้ซ้ำในคอมโพเนนต์อื่นได้ทันที และสามารถทดสอบ Hook ผ่าน `@testing-library/react-hooks` ได้โดยไม่ต้องเรนเดอร์ UI จริง
+
+### Q2: เราควรออกแบบ Parameter และ Return Values ของ Custom Query Hook อย่างไรเพื่อคงความยืดหยุ่นให้ผู้เรียกใช้?
+**แนวทางตอบ**:
+เราควรเปิดช่องให้ผู้เรียกใช้สามารถส่ง **`options?: Omit<UseQueryOptions<...>, 'queryKey' | 'queryFn'>`** เข้ามาเพิ่มเติมได้ เพื่อให้คอมโพเนนต์สามารถปรับแต่งพฤติกรรมเฉพาะจุดได้ เช่น การกำหนด `select` สำหรับแปลงข้อมูลย่อย หรือการปิด `enabled` ในบางจังหวะ โดยที่ตัว Hook ยังคงล็อก `queryKey` และ `queryFn` ไว้เพื่อความปลอดภัยของสถาปัตยกรรม

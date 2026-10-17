@@ -1,0 +1,172 @@
+---
+title: Form Validation
+category: Frontend
+parentTitle: HTML5
+version: HTML Living Standard
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**HTML5 Client-side Constraint Validation** คือระบบตรวจสอบความถูกต้องของข้อมูลที่สร้างมาพร้อมกับเบราว์เซอร์ โดยที่นักพัฒนาไม่ต้องเขียน JavaScript แม้แต่บรรทัดเดียว
+
+หน้าที่หลักคือ: **"การให้ผลตอบรับแก่ผู้ใช้ทันที (Instant User Feedback)"** เช่น เตือนว่าลืมกรอกช่องสำคัญ หรือพิมพ์รูปแบบอีเมลผิด ก่อนที่ข้อมูลจะถูกส่งออกไปเปลืองทรัพยากรเครือข่าย
+
+แอตทริบิวต์หลัก:
+- `required`: บังคับต้องกรอก ห้ามเว้นว่าง
+- `type="email"` / `type="url"`: ตรวจสอบรูปแบบอีเมลและเว็บไซต์
+- `min` / `max`: กำหนดค่าต่ำสุด-สูงสุดสำหรับตัวเลขและวันที่
+- `minlength` / `maxlength`: กำหนดจำนวนตัวอักษรต่ำสุด-สูงสุด
+- `pattern`: ใช้ Regular Expression (RegEx) กำหนดรูปแบบเจาะจง (เช่น รหัสไปรษณีย์ หรือเบอร์โทรศัพท์)
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. Constraint Validation API & CSS Selectors
+เมื่อผู้ใช้กด Submit เบราว์เซอร์จะประมวลผลคำสั่ง `element.checkValidity()` หากช่องใดไม่ผ่าน:
+- เบราว์เซอร์จะบล็อกการส่งฟอร์มทันที และแสดง Tooltip แจ้งเตือนในภาษาของระบบเครื่องผู้ใช้
+- CSS จะสามารถจับ State ด้วย `:invalid`, `:valid` หรือฟีเจอร์ใหม่ล่าสุดอย่าง `:user-invalid` (แสดงสีแดงเฉพาะหลังจากผู้ใช้พิมพ์ผิดและเลื่อนออกจากช่องแล้ว)
+
+### 2. ทำไม Client Validation จึง "ไม่ใช่ระบบความปลอดภัย"?
+> **กฎเหล็กของวิศวกรซอฟต์แวร์**: **Never Trust Client Input!**
+
+การตรวจสอบใน HTML5 มีจุดประสงค์เพื่อ **UX (ความสะดวกของผู้ใช้)** เท่านั้น ไม่สามารถป้องกันภัยคุกคามทางไซเบอร์ได้เลย เพราะ:
+1. ผู้ใช้สามารถเปิด DevTools แล้วลบคำว่า `required` ออกจากแท็ก HTML ได้อย่างง่ายดาย
+2. ผู้ไม่หวังดีสามารถใช้ Postman, curl, หรือเขียน Script ยิงตรงเข้าสู่ REST API หรือ Next.js Server Actions ได้โดยไม่ต้องเปิดหน้าเว็บเลยด้วยซ้ำ
+
+ดังนั้น **การตรวจสอบข้อมูลซ้ำสองที่ฝั่งเซิร์ฟเวอร์ (Server-side Validation ด้วย Zod / class-validator) จึงเป็นสิ่งจำเป็น 100% เสมอ**
+
+---
+
+## 3. ตัวอย่างโค้ด (HTML5)
+
+### ตัวอย่างที่ 1: การใช้แอตทริบิวต์ Validation พื้นฐานในฟอร์มจองห้องพัก
+
+```html filename="booking-form.html"
+<form action="/api/bookings" method="POST">
+  <h2>แบบฟอร์มสำรองห้องพัก</h2>
+
+  <!-- 1. บังคับกรอก และจำกัดความยาวชื่อ -->
+  <div class="field">
+    <label for="guest-name">ชื่อผู้เข้าพัก</label>
+    <input 
+      type="text" 
+      id="guest-name" 
+      name="guestName" 
+      minlength="2" 
+      maxlength="50" 
+      required
+    >
+  </div>
+
+  <!-- 2. ตรวจสอบจำนวนผู้เข้าพัก (1 ถึง 4 คน) -->
+  <div class="field">
+    <label for="guest-count">จำนวนผู้เข้าพัก</label>
+    <input 
+      type="number" 
+      id="guest-count" 
+      name="guestCount" 
+      min="1" 
+      max="4" 
+      value="1" 
+      required
+    >
+  </div>
+
+  <!-- 3. ตรวจสอบรูปแบบเบอร์โทรศัพท์มือถือ 10 หลักด้วย pattern -->
+  <div class="field">
+    <label for="tel">เบอร์โทรศัพท์มือถือ (10 หลัก)</label>
+    <input 
+      type="tel" 
+      id="tel" 
+      name="phone" 
+      pattern="^0[0-9]{9}$" 
+      title="กรุณากรอกเบอร์โทรศัพท์ 10 หลัก ขึ้นต้นด้วย 0 (เช่น 0812345678)" 
+      required
+    >
+  </div>
+
+  <button type="submit">ยืนยันการจอง</button>
+</form>
+```
+
+### ตัวอย่างที่ 2: การจัดสไตล์ CSS ร่วมกับ `:user-invalid` สมัยใหม่
+
+```css
+/* แสดงขอบสีแดงเฉพาะเมื่อผู้ใช้กรอกผิดและเลื่อนออกแล้ว (ไม่แสดงตั้งแต่หน้าโหลด) */
+input:user-invalid {
+  border-color: #ef4444;
+  background-color: #fef2f2;
+}
+
+/* แสดงขอบสีเขียวเมื่อกรอกถูกต้องสมบูรณ์ */
+input:user-valid {
+  border-color: #22c55e;
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ตรวจสอบแค่หน้าบ้าน ปล่อยหลังบ้านรับข้อมูลตรงๆ
+
+```typescript
+// ใน Backend (Route Handler หรือ Server Action)
+export async function POST(req: Request) {
+  const data = await req.json();
+  
+  // 💥 อันตรายร้ายแรง: เชื่อใจว่าหน้าบ้านมี required แล้ว ไม่ตรวจซ้ำ!
+  // หาก Hacker ยิง request มาโดยไม่มี email หรือส่ง string แปลกปลอม ระบบจะแครชหรือถูกเจาะทันที
+  await db.user.create({ data });
+}
+```
+
+### ✅ โค้ดที่ถูกต้อง: มี Validation ทั้งหน้าบ้าน (UX) และหลังบ้าน (Security)
+
+```typescript
+// ใน Backend: ใช้ Zod ตรวจสอบข้อมูลซ้ำที่ฝั่งเซิร์ฟเวอร์เสมอ
+import { z } from 'zod';
+
+const BookingSchema = z.object({
+  guestName: z.string().min(2).max(50),
+  guestCount: z.number().int().min(1).max(4),
+  phone: z.string().regex(/^0[0-9]{9}$/, 'เบอร์โทรศัพท์ไม่ถูกต้อง'),
+});
+
+export async function POST(req: Request) {
+  const rawData = await req.json();
+  
+  // ตรวจสอบความถูกต้องที่ฝั่ง Server ซ้ำเสมอ
+  const result = BookingSchema.safeParse(rawData);
+  if (!result.success) {
+    return Response.json({ error: result.error.issues }, { status: 400 });
+  }
+
+  // ปลอดภัย 100%
+  await db.booking.create({ data: result.data });
+}
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ HTML Form Validation
+- สำหรับการตรวจเช็คขั้นพื้นฐานเพื่อให้ User ทราบข้อผิดพลาดทันทีโดยไม่ต้องรอโหลดหน้าใหม่
+- ใส่ `pattern`, `minlength`, `maxlength` เพื่อป้องกันข้อผิดพลาดจากมนุษย์ (Human Error)
+
+### ข้อจำกัดที่ไม่ควรทำ
+- **ห้ามใช้เป็นด่านความปลอดภัยหลัก**: ต้องมี Server Validation เสมอ
+- หากต้องการปิดการทำงานของ Validation ชั่วคราว (เช่น ปุ่ม "บันทึกฉบับร่าง") ให้ใส่แอตทริบิวต์ `formnovalidate` บนปุ่มนั้น
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการทำ Form Validation บน HTML ฝั่ง Client ถึงไม่สามารถใช้เป็นกลไกด้านความปลอดภัย (Security Guarantee) ได้?
+**แนวทางคำตอบ**: เพราะสภาพแวดล้อมฝั่ง Client อยู่ภายใต้การควบคุมของผู้ใช้อย่างสมบูรณ์ ผู้ใช้สามารถเปิด Developer Tools เพื่อแก้ไขหรือลบแอตทริบิวต์ `required`, `pattern` ออกจาก DOM ได้ตามต้องการ หรือสามารถใช้เครื่องมืออย่าง Postman, curl ยิง HTTP Request โดยตรงเข้าสู่เซิร์ฟเวอร์โดยไม่ผ่านกระบวนการตรวจสอบของเบราว์เซอร์ Client-side Validation จึงมีไว้เพื่อยกระดับประสบการณ์ผู้ใช้ (UX) เท่านั้น ส่วนความปลอดภัยที่แท้จริงต้องทำที่ Server-side เสมอ
+
+### Q2: แอตทริบิวต์ `title` มีบทบาทอย่างไรเมื่อใช้งานคู่กับ `pattern` ในแท็ก `<input>`?
+**แนวทางคำตอบ**: เมื่อกำหนดเงื่อนไข Regular Expression ผ่านแอตทริบิวต์ `pattern` หากผู้ใช้กรอกข้อมูลไม่ตรงกับรูปแบบที่กำหนด เบราว์เซอร์จะนำข้อความที่ระบุไว้ในแอตทริบิวต์ `title` ไปแสดงผลเป็นคำใบ้ (Hint message) ภายใน Tooltip แจ้งเตือน ช่วยอธิบายให้ผู้ใช้เข้าใจว่าต้องกรอกข้อมูลในรูปแบบใดจึงจะถูกต้อง

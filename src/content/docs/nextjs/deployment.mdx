@@ -1,0 +1,73 @@
+---
+title: Deployment
+category: Frontend
+parentTitle: Next.js 16
+version: v16.4
+updatedAt: 2026-10-17
+---
+
+## 1. คืออะไร / ใช้ทำไม
+
+**Deployment** คือกระบวนการเตรียมและนำแอปพลิเคชัน Next.js ไปรันบนระบบ Production อย่างมีประสิทธิภาพ ผ่านการบิลด์โค้ด (`next build`), การทำ Standalone Output เพื่อลดขนาด Docker Image, หรือการ Deploy ผ่านแพลตฟอร์มอย่าง Vercel
+
+ช่วยให้เว็บสามารถรองรับทราฟฟิกจริงได้เสถียร ประหยัดค่าใช้จ่ายเซิร์ฟเวอร์ และมีขั้นตอน CI/CD ที่เป็นอัตโนมัติ
+
+## 2. ตัวอย่างโค้ด (TypeScript / Docker)
+
+### การตั้งค่า Standalone Output ใน `next.config.ts`
+
+```typescript filename="next.config.ts"
+import type { NextConfig } from 'next';
+
+const nextConfig: NextConfig = {
+  // บิลด์เฉพาะไฟล์ที่จำเป็นลงในโฟลเดอร์ .next/standalone
+  output: 'standalone',
+};
+
+export default nextConfig;
+```
+
+### Dockerfile แบบ Multi-stage build สำหรับ Next.js 16
+
+```dockerfile filename="Dockerfile"
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM node:20-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+# คัดลอกไฟล์ที่จำเป็นจากขั้นตอนการบิลด์
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+
+EXPOSE 3000
+CMD ["node", "server.js"]
+```
+
+## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- **Vercel**:
+  - *ควรใช้*: สำหรับทีมที่ต้องการความเร็วในการส่งมอบงาน มีระบบ Preview Deployment และ Edge Network ทั่วโลก
+- **Docker Standalone**:
+  - *ควรใช้*: สำหรับการติดตั้งบนเซิร์ฟเวอร์ส่วนตัว (On-Premises, AWS ECS, GCP Cloud Run) เพื่อควบคุมค่าใช้จ่ายแบนด์วิดท์
+- *ไม่ควรใช้*: การรัน `npm run dev` ใน Production เด็ดขาด
+
+## 4. ข้อควรระวัง
+
+<Callout type="warning" title="อย่าลืมคัดลอก public และ .next/static">
+เมื่อใช้ `output: 'standalone'` จะต้องคัดลอกโฟลเดอร์ `public` และ `.next/static` ตามตัวอย่าง Dockerfile เสมอ เพราะตัว `server.js` ไม่ได้รวมไฟล์สถิตเหล่านี้เข้าไปด้วย
+</Callout>
+
+<Callout type="tip" title="ทดสอบ Production Build ในเครื่องก่อนเสมอ">
+ก่อน Deploy ขึ้นเซิร์ฟเวอร์จริง ให้รันคำสั่ง `npm run build` และ `npm run start` บนเครื่องตนเองเพื่อตรวจจับ Type Error และ Build Issue ล่วงหน้า
+</Callout>
+
+## 5. แหล่งอ้างอิงทางการ
+
+- [Next.js Deploying Documentation](https://nextjs.org/docs/app/building-your-application/deploying)
+- [Docker Deployment with Next.js](https://github.com/vercel/next.js/tree/canary/examples/with-docker)

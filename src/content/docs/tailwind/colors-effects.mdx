@@ -1,0 +1,209 @@
+---
+title: Colors, Borders & Shadows
+category: Frontend
+parentTitle: Tailwind CSS v4
+version: Tailwind v4.0 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+Tailwind CSS v4 ก้าวข้ามขีดจำกัดเดิมของระบบสี sRGB แบบดั้งเดิม ด้วยการเปลี่ยนชุดสีพาเลทมาตรฐานทั้งหมดมาสู่ **OKLCH Color Space** (Oklch คือโมเดลสีที่อิงตามการรับรู้จริงของสายตามนุษย์ Perceptually Uniform) ทำให้ความสว่าง (Perceived Lightness) ในแต่ละเฉดสีมีความสมดุลและสีสดใสกว่าเดิมในหน้าจอแสดงผลยุคใหม่ (Wide-Gamut P3 Displays)
+
+นอกจากนี้ Tailwind v4 ยังมีฟีเจอร์เด่นด้าน Effect:
+- **Opacity Modifier (`/alpha`)**: กำหนดความโปร่งแสงของสีได้ทันที เช่น `bg-indigo-600/50`, `text-white/80`, `border-black/10` โดยไม่กระทบองค์ประกอบลูกด้านใน
+- **Ring vs Border**: `border` ส่งผลต่อ Box Model (กินพื้นที่พิกเซล) แต่ `ring` ใช้เงา `box-shadow` ซ้อนชั้นนอกโดยไม่ดันโครงสร้าง Layout ให้ขยับ
+- **Modern Gradients**: รองรับ Linear และ Radial Gradients ได้กระชับ เช่น `bg-linear-to-r from-blue-600 to-indigo-600`
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ปริภูมิสี OKLCH และ Opacity Modifiers
+1. **OKLCH Color Model**:
+   โครงสร้างประกอบด้วย 3 มิติหลัก:
+   ```css
+   /* oklch(Lightness Chroma Hue / Alpha) */
+   --color-blue-600: oklch(0.55 0.22 260);
+   ```
+   - **Lightness (L)**: ความสว่างตั้งแต่ 0 (ดำสนิท) ถึง 1 (ขาวสนิท)
+   - **Chroma (C)**: ความอิ่มตัวและความสดของสี
+   - **Hue (H)**: องศาวงล้อสี (0 - 360 องศา)
+2. **Opacity Modifier Parsing**:
+   เมื่อคุณเขียน `bg-blue-600/40` ใน Tailwind v4 เครื่องยนต์ Oxide จะสร้าง CSS สมัยใหม่ที่ผสาน alpha โดยตรง:
+   ```css
+   background-color: oklch(0.55 0.22 260 / 0.4);
+   ```
+3. **Ring Mechanics**:
+   `ring-2 ring-indigo-500` ทำงานผ่านเงา CSS:
+   ```css
+   box-shadow: 0 0 0 2px var(--tw-ring-color);
+   ```
+   ทำให้ไม่เกิดอาการปุ่มกระตุก (Layout Shift) เมื่อผู้ใช้โฟกัสหรือคลิก
+
+---
+
+## 3. ตัวอย่างโค้ด (Tailwind v4 & TSX)
+
+### ตัวอย่างที่ 1: การ์ดชำระเงินดิจิทัล (DigitalCreditCard)
+
+```tsx filename="src/components/DigitalCreditCard.tsx"
+import { Wifi, CreditCard } from "lucide-react";
+
+interface CreditCardProps {
+  holderName: string;
+  cardNumber: string;
+  expiry: string;
+  balance: string;
+}
+
+export function DigitalCreditCard({
+  holderName,
+  cardNumber,
+  expiry,
+  balance,
+}: CreditCardProps) {
+  return (
+    // การใช้ Linear Gradient แบบ v4, Rounded-3xl, Shadow ลึกแบบมีมิติ
+    <div className="relative aspect-[1.586/1] w-full max-w-sm overflow-hidden rounded-3xl bg-linear-to-br from-indigo-700 via-purple-700 to-pink-600 p-6 text-white shadow-2xl shadow-indigo-500/25 ring-1 ring-white/20">
+      {/* วงกลมตกแต่งเอฟเฟกต์แสงสะท้อน Glass overlay */}
+      <div className="pointer-events-none absolute -right-12 -top-12 size-48 rounded-full bg-white/10 blur-2xl" />
+      <div className="pointer-events-none absolute -bottom-10 -left-10 size-40 rounded-full bg-pink-500/20 blur-xl" />
+
+      <div className="relative z-10 flex h-full flex-col justify-between">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <CreditCard className="size-6 text-white/90" />
+            <span className="text-xs font-semibold tracking-widest uppercase text-white/80">
+              Infinite Platinum
+            </span>
+          </div>
+          <Wifi className="size-5 rotate-90 text-white/70" />
+        </div>
+
+        <div>
+          <p className="text-[11px] font-medium text-white/70">ยอดเงินคงเหลือ</p>
+          <h3 className="text-2xl font-black tracking-tight text-white drop-shadow-sm">
+            {balance}
+          </h3>
+        </div>
+
+        <div className="space-y-3">
+          <p className="font-mono text-sm tracking-widest text-white/90">
+            {cardNumber}
+          </p>
+          <div className="flex items-center justify-between text-xs text-white/80">
+            <span className="font-medium uppercase tracking-wider">{holderName}</span>
+            <span className="font-mono">{expiry}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: ป้ายกำกับสถานะ (StatusBadgeList ด้วย OKLCH & Ring)
+
+```tsx filename="src/components/StatusBadgeList.tsx"
+import { CheckCircle2, AlertTriangle, XCircle, Info } from "lucide-react";
+
+export function StatusBadgeList() {
+  return (
+    <div className="flex flex-wrap items-center gap-3 p-4">
+      {/* ป้ายสถานะ Success */}
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-500/20 dark:text-emerald-400">
+        <CheckCircle2 className="size-3.5 shrink-0" />
+        ดำเนินการสำเร็จ
+      </span>
+
+      {/* ป้ายสถานะ Warning */}
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-500/20 dark:text-amber-400">
+        <AlertTriangle className="size-3.5 shrink-0" />
+        รอการตรวจสอบ
+      </span>
+
+      {/* ป้ายสถานะ Danger */}
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-500/10 px-3 py-1 text-xs font-medium text-rose-700 ring-1 ring-inset ring-rose-500/20 dark:text-rose-400">
+        <XCircle className="size-3.5 shrink-0" />
+        ถูกยกเลิกแล้ว
+      </span>
+
+      {/* ป้ายสถานะ Info */}
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-500/10 px-3 py-1 text-xs font-medium text-sky-700 ring-1 ring-inset ring-sky-500/20 dark:text-sky-400">
+        <Info className="size-3.5 shrink-0" />
+        ข้อมูลเพิ่มเติม
+      </span>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับ CSS ปกติ
+
+| คุณสมบัติ | Tailwind v4 Utility | Pure Modern CSS |
+| :--- | :--- | :--- |
+| **พื้นหลังพร้อมความโปร่งแสง** | `bg-emerald-500/15` | `background-color: oklch(0.69 0.17 162 / 0.15);` |
+| **ขอบเงาไม่ดันเนื้อหา** | `ring-2 ring-indigo-500` | `box-shadow: 0 0 0 2px #6366f1;` |
+| **เงาลอยสีสันเฉพาะ** | `shadow-xl shadow-indigo-500/30` | `box-shadow: 0 20px 25px -5px oklch(0.55 0.22 260 / 0.3);` |
+| **มุมมนขั้นสุด** | `rounded-3xl` | `border-radius: 1.5rem; /* 24px */` |
+| **การไล่เฉดสี v4** | `bg-linear-to-r from-cyan-500 to-blue-500` | `background-image: linear-gradient(to right, #06b6d4, #3b82f6);` |
+
+---
+
+## 5. ผิด vs ถูก
+
+### จุดที่ 1: การใช้ `opacity-*` ควบคุมพื้นหลังจนทำให้ตัวหนังสือจางไปด้วย
+```tsx
+// ❌ ผิด: ใส่ opacity-50 ทำให้ทั้ง Card และข้อความข้างในโปร่งแสง จางจนอ่านแทบไม่ออก
+<div className="bg-black opacity-50 p-6 text-white rounded-xl">
+  <p>ข้อความสำคัญที่ต้องการให้อ่านชัดเจน</p>
+</div>
+
+// ✅ ถูก: ใช้ Opacity Modifier (/50) เฉพาะที่สีพื้นหลัง
+<div className="bg-black/50 p-6 text-white rounded-xl">
+  <p>ข้อความสำคัญที่ต้องการให้อ่านชัดเจน</p>
+</div>
+```
+*เหตุผล*: CSS property `opacity` จะส่งทอด (inherit) ไปยังโหนดลูกทั้งหมด ในขณะที่ syntax `/50` ของ Tailwind v4 จะใส่ alpha เฉพาะในฟังก์ชันสีของ `background-color` เท่านั้น
+
+### จุดที่ 2: สลับสับสนระหว่าง `border` และ `ring` บนสถานะ Hover / Focus
+```tsx
+// ❌ ผิด: เมื่อ hover แล้วเพิ่ม border-2 จะทำให้ขนาด element เปลี่ยน ดันองค์ประกอบข้างๆ สั่น
+<button className="rounded-lg hover:border-2 hover:border-indigo-600">
+  คลิกที่นี่
+</button>
+
+// ✅ ถูก: ใช้ ring-2 หรือ outline เพื่อไม่ให้เกิด Layout shift
+<button className="rounded-lg transition hover:ring-2 hover:ring-indigo-600">
+  คลิกที่นี่
+</button>
+```
+*เหตุผล*: `border` มีความหนาในโมเดล Box Sizing การเพิ่มหรือขยายความหนาตอน interaction จะส่งผลให้เนื้อหาโดยรอบกระตุก การใช้ `ring` อาศัย `box-shadow` ซึ่งไม่กินพื้นที่ physical space
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้
+- ใช้ **Opacity Modifier (`/alpha`)** สำหรับพื้นหลังการ์ด, ป้าย Badge, Overlays และเอฟเฟกต์โปร่งแสง
+- ใช้ **`ring`** สำหรับสถานะ Focus State, Active State และสถานะที่ต้องการกรอบโดยไม่กระทบขนาดมิติ
+- ใช้ชุดสีมาตรฐาน **OKLCH** ใน v4 เพื่อให้ได้ความสดของสีที่คมชัดสมจริงในทุกอุปกรณ์
+
+### ไม่ควรใช้
+- ไม่ควรใช้เงาสีเข้มจัด (`shadow-2xl shadow-black`) ทั่วทั้งหน้าเว็บไซต์จนดูรกตา ควรเน้นใช้เงาโทนเบาบางผสมสี (`shadow-indigo-500/10`)
+- ไม่ควรใช้ `border` เพิ่มความหนาในสถานะ `:hover` แบบฉับพลัน
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไม Tailwind CSS v4 จึงตัดสินใจเปลี่ยนค่าสีเริ่มต้นทั้งหมดมาใช้โมเดล OKLCH แทน sRGB/Hex?
+**แนวทางคำตอบ**: 
+โมเดลสีดั้งเดิมอย่าง sRGB หรือ Hex มีข้อบกพร่องเรื่องความสม่ำเสมอในการรับรู้ของสายตา (Non-perceptually uniform) ตัวอย่างเช่น สีเหลืองและสีน้ำเงินที่มีค่าความสว่างในระบบตัวเลขเท่ากัน แต่มนุษย์กลับรู้สึกว่าสีเหลืองสว่างจ้ากว่าสีน้ำเงินมาก ในขณะที่ **OKLCH** ถูกออกแบบให้แกนความสว่าง (Lightness) และความอิ่มตัว (Chroma) สัมพันธ์กับสายตามนุษย์อย่างแท้จริง นอกจากนี้ OKLCH ยังรองรับช่วงสีกว้าง (Wide Color Gamut P3) ที่แสดงผลได้สดใสและลุ่มลึกกว่าบนจอมือถือและแล็ปท็อปรุ่นใหม่
+
+### Q2: ใน Tailwind CSS ความแตกต่างเชิงกลไกระหว่าง `border-2 border-indigo-500` และ `ring-2 ring-indigo-500` คืออะไร?
+**แนวทางคำตอบ**: 
+`border` เป็น CSS property แท้ที่ถูกคำนวณรวมอยู่ในโมเดล Box Sizing หากเดิม element ไม่มี border แล้วเราเพิ่ม `border-2` ในช่วง `:hover` จะทำให้ขนาดกล่องขยายขึ้น 2px ดัน element ข้างเคียงให้สั่นกระตุก ในขณะที่ `ring` ของ Tailwind ถูกสร้างด้วย CSS `box-shadow` ซ้อนชั้น ซึ่งไม่มีพื้นที่ทางกายภาพใน Box Model จึงสามารถแสดงกรอบได้ทันทีโดยไม่รบกวน Layout โดยรอบ

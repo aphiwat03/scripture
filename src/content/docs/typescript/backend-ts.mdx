@@ -1,0 +1,73 @@
+---
+title: TS in Backend
+category: Frontend
+parentTitle: TypeScript
+version: v5.6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+จุดเด่นที่ทรงพลังที่สุดของการใช้ TypeScript ในโปรเจกต์แบบ Full-Stack (Next.js + NestJS + Prisma) คือความสามารถในการทำ **End-to-End Type Safety**
+
+เราสามารถใช้ Type ร่วมกันตั้งแต่ชั้น Database Schema (Prisma) ส่งผ่านไปยังชั้น Controller/DTO (NestJS) และแชร์ Type ไปยังหน้าบ้าน (Next.js/React) เมื่อมีการเปลี่ยนชื่อคอลัมน์ในฐานข้อมูล ตัว TypeScript จะแจ้งเตือนจุดที่ต้องแก้ไขตั้งแต่หน้าบ้านทันที
+
+---
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: การใช้ Prisma Generated Types ร่วมกับ Utility Types
+
+```typescript
+// Prisma จะสร้าง Type ให้โดยอัตโนมัติเมื่อสั่ง npx prisma generate
+import type { User as PrismaUser, Order as PrismaOrder } from '@prisma/client';
+
+// 1. ดึงเฉพาะฟิลด์ที่ต้องการส่งออกไปเป็น Response
+export type UserPublicProfile = Pick<PrismaUser, 'id' | 'email' | 'name' | 'role'>;
+
+// 2. Type ความสัมพันธ์ (Relation Types)
+export type UserWithOrders = PrismaUser & {
+  orders: PrismaOrder[];
+};
+```
+
+### ตัวอย่างที่ 2: DTO (Data Transfer Object) ใน NestJS พร้อม class-validator
+
+```typescript filename="dto/create-order.dto.ts"
+import { IsNotEmpty, IsNumber, IsString, Min, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
+
+export class OrderItemDto {
+  @IsString()
+  @IsNotEmpty()
+  sku: string;
+
+  @IsNumber()
+  @Min(1)
+  quantity: number;
+}
+
+export class CreateOrderDto {
+  @IsString()
+  @IsNotEmpty()
+  shippingAddress: string;
+
+  @ValidateNested({ each: true })
+  @Type(() => OrderItemDto)
+  items: OrderItemDto[];
+}
+```
+
+---
+
+## 3. กลยุทธ์การแชร์ Type ระหว่าง Frontend และ Backend
+
+1. **Monorepo (Turborepo / Nx)**: วางโฟลเดอร์ `packages/shared-types` ที่ export Type ให้ทั้ง Next.js และ NestJS นำเข้าได้โดยตรง
+2. **tRPC**: หากเป็นโปรเจกต์ TypeScript ล้วน สามารถใช้ tRPC เพื่อดึง Type ของ API Router ข้ามไปฝั่ง Client ได้โดยไม่ต้องเขียน DTO ซ้ำ
+
+---
+
+## 4. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมใน NestJS DTO ถึงต้องใช้ `class` แทนที่จะใช้ `interface`?
+**แนวทางคำตอบ**: เพราะ `interface` จะถูก **ลบทิ้งไปทั้งหมด (Type Erasure)** ตอนแปลงเป็น JavaScript ทำให้ไลบรารีอย่าง `class-validator` และ `class-transformer` ไม่สามารถเข้าถึง Metadata หรือ Decorators ในช่วง Runtime ได้ ในขณะที่ `class` ยังคงมีตัวตนอยู่จริงในไฟล์ JavaScript จึงสามารถตรวจสอบข้อมูลขาเข้าได้จริง

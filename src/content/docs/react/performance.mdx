@@ -1,0 +1,65 @@
+---
+title: Performance
+category: Frontend
+parentTitle: React 19
+version: v19.0
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ปัญหาประสิทธิภาพใน React มักไม่ได้เกิดจากตัว React ทำงานช้า แต่เกิดจาก:
+1. **การ Re-render ซ้ำซ้อนโดยไม่จำเป็น** ของคอมโพเนนต์ขนาดใหญ่
+2. **ขนาดไฟล์ JavaScript ที่ใหญ่เกินไป** ทำให้เบราว์เซอร์ดาวน์โหลดและประมวลผลช้า
+
+เทคนิคสำคัญในการแก้ปัญหาคือ **Code Splitting / Lazy Loading** (โหลดโค้ดเฉพาะเมื่อผู้ใช้ต้องการเปิดใช้งาน) และการผลัก State ลงไปไว้ใกล้จุดใช้งานมากที่สุด (Colocation)
+
+---
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### การทำ Lazy Loading ด้วย `React.lazy` และ `Suspense`
+
+```tsx filename="components/HeavyModalViewer.tsx"
+'use client';
+
+import React, { useState, Suspense, lazy } from 'react';
+
+// โค้ดของ HeavyChartModal จะไม่ถูกดาวน์โหลดมาจนกว่าผู้ใช้จะกดเปิดปุ่ม!
+const HeavyChartModal = lazy(() => import('./HeavyChartModal'));
+
+export function HeavyModalViewer() {
+  const [isOpen, setIsOpen] = useState(false);
+
+  return (
+    <div>
+      <button
+        onClick={() => setIsOpen(true)}
+        className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm"
+      >
+        เปิดกราฟการวิเคราะห์ขนาดใหญ่
+      </button>
+
+      {isOpen && (
+        <Suspense fallback={<div className="p-4 text-xs">กำลังดาวน์โหลดโมดูลกราฟ...</div>}>
+          <HeavyChartModal onClose={() => setIsOpen(false)} />
+        </Suspense>
+      )}
+    </div>
+  );
+}
+```
+
+---
+
+## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- *ควรทำ Lazy Loading*: กับ Modal ที่ไม่ได้เปิดบ่อย, แดชบอร์ดสรุปผลท้ายปี, หน้า Settings ที่มีเครื่องมือปรับแต่งซับซ้อน, ไลบรารีกราฟขนาดใหญ่ (เช่น Three.js, Recharts)
+- *ไม่ควร Lazy Load*: กับเนื้อหาหลักที่อยู่ด้านบนสุดของจอ (Above the Fold) เพราะจะทำให้ค่า First Contentful Paint (FCP) ช้าลง
+
+---
+
+## 4. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: วิธีที่ดีที่สุดในการลดการ Re-render ใน React โดยไม่ต้องพึ่ง `useMemo` หรือ `useCallback` คืออะไร?
+**แนวทางคำตอบ**: คือเทคนิค **"Push State Down"** (ย้าย State ลงไปอยู่ในคอมโพเนนต์ย่อยที่สุดที่ต้องการใช้ค่านั้น) หรือการใช้เทคนิค **"Component Composition"** (ส่ง JSX ผ่าน `children` หรือ Props) เพื่อให้คอมโพเนนต์แม่ไม่จำเป็นต้อง Re-render คอมโพเนนต์ลูกเมื่อ State ภายในเปลี่ยน

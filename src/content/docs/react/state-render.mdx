@@ -1,0 +1,175 @@
+---
+title: State & Render
+category: Frontend
+parentTitle: React 19
+version: v19.0
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**State** คือ "ความจำระยะสั้น" ของคอมโพเนนต์ เปรียบเหมือนภาพถ่าย (Snapshot) ของข้อมูล ณ ช่วงเวลาใดเวลาหนึ่ง เช่น ตัวเลขในตะกร้า, ค่าในช่องพิมพ์, หรือสถานะเปิด/ปิด Modal เมื่อ State เปลี่ยนแปลง React จะทำการ "ล้างฟิล์มและถ่ายภาพใหม่" ซึ่งกระบวนการนี้เรียกว่า **Re-render**
+
+การจัดการ State แก้ปัญหาที่แต่ก่อนนักพัฒนาต้องคอยตามหาแท็ก HTML ด้วย `querySelector` แล้วสั่งเปลี่ยนข้อความทีละจุด ซึ่งหากระบบมีข้อมูลซับซ้อน จะเกิดปัญหาข้อมูลไม่สอดคล้องกัน (Inconsistent State) ได้ง่ายมาก
+
+---
+
+## 2. หลักการทำงานเบื้องหลัง (Under the Hood)
+
+วงจรชีวิตการอัปเดตหน้าจอของ React แบ่งออกเป็น 3 ขั้นตอนเสมอ:
+
+1. **Trigger Phase**: มีสิ่งเร้าเกิดขึ้น เช่น ผู้ใช้คลิกปุ่ม แล้วเรียกฟังก์ชัน `setState()`
+2. **Render Phase**: React เรียกคอมโพเนนต์ของคุณให้ทำงานใหม่ เพื่อคำนวณว่า Virtual DOM หน้าตาใหม่เป็นอย่างไร (ขั้นตอนนี้เป็น Pure Calculation ไม่มีผลข้างเคียงต่อหน้าจอจริง)
+3. **Commit Phase**: React นำผลต่างที่คำนวณได้ ไปสั่งอัปเดตบน Real DOM เฉพาะจุดที่เปลี่ยนไป จากนั้นเบราว์เซอร์จึงทำการ Paint ภาพขึ้นจอ
+
+### Automatic Batching ใน React
+เมื่อมีการสั่ง `setState` หลายครั้งติดกันในฟังก์ชันเดียว React จะไม่ Re-render ทุกครั้ง แต่จะรวบรวม (Batch) การเปลี่ยนแปลงทั้งหมดไว้แล้วคำนวณ Render ใหม่เพียง **รอบเดียว** เพื่อประสิทธิภาพสูงสุด
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: การใช้ State และการอัปเดตแบบ Functional Updater
+
+```tsx filename="components/Counter.tsx"
+'use client';
+
+import React, { useState } from 'react';
+
+export function Counter() {
+  const [count, setCount] = useState<number>(0);
+
+  // การอัปเดตแบบพึ่งพาค่าเดิม ต้องใช้ Functional Updater
+  const handleTripleIncrement = () => {
+    // React จะต่อคิวฟังก์ชันเหล่านี้เข้าด้วยกัน
+    setCount((prev) => prev + 1);
+    setCount((prev) => prev + 1);
+    setCount((prev) => prev + 1);
+  };
+
+  return (
+    <div className="flex items-center gap-3">
+      <span className="text-xl font-bold font-mono">{count}</span>
+      <button
+        type="button"
+        onClick={handleTripleIncrement}
+        className="px-3 py-1.5 rounded-lg bg-accent text-white text-xs font-semibold"
+      >
+        +3 ทันที
+      </button>
+    </div>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: State ชนิด Object และ Array (Immutable Update)
+
+```tsx filename="components/UserProfileEditor.tsx"
+'use client';
+
+import React, { useState } from 'react';
+
+interface Profile {
+  name: string;
+  preferences: {
+    darkMode: boolean;
+    notifications: boolean;
+  };
+  tags: string[];
+}
+
+export function UserProfileEditor() {
+  const [profile, setProfile] = useState<Profile>({
+    name: 'Somchai',
+    preferences: { darkMode: true, notifications: false },
+    tags: ['developer', 'nextjs'],
+  });
+
+  // การอัปเดต Nested Object แบบ Immutable (สร้างก้อนใหม่เสมอ)
+  const toggleNotifications = () => {
+    setProfile((prev) => ({
+      ...prev,
+      preferences: {
+        ...prev.preferences,
+        notifications: !prev.preferences.notifications,
+      },
+    }));
+  };
+
+  // การเพิ่มสมาชิกใน Array แบบ Immutable
+  const addTag = (newTag: string) => {
+    setProfile((prev) => ({
+      ...prev,
+      tags: [...prev.tags, newTag], // ห้ามใช้ prev.tags.push()
+    }));
+  };
+
+  return (
+    <div className="p-4 border rounded-xl space-y-2 text-sm">
+      <p>ผู้ใช้: <strong>{profile.name}</strong></p>
+      <p>แจ้งเตือน: {profile.preferences.notifications ? 'เปิด' : 'ปิด'}</p>
+      <p>แท็ก: {profile.tags.join(', ')}</p>
+      <button
+        onClick={toggleNotifications}
+        className="px-3 py-1 bg-subtle rounded border text-xs"
+      >
+        สลับการแจ้งเตือน
+      </button>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก (Common Mistakes)
+
+### กรณีที่ 1: การแก้ไข State ตรงๆ (Mutation)
+```tsx
+// ❌ ผิด: ดัดแปลง Array เดิมตรงๆ โดยไม่สร้าง Reference ใหม่
+const handleAdd = () => {
+  items.push('New Item');
+  setItems(items); // React จะมองว่า items ตัวเดิมไม่มีการเปลี่ยนแปลง จึงไม่ยอม Re-render!
+};
+
+// ✅ ถูก: ใช้ Spread Operator สร้าง Array ก้อนใหม่เสมอ
+const handleAdd = () => {
+  setItems([...items, 'New Item']);
+};
+```
+*เหตุผล*: React เปรียบเทียบ State ตัวเก่าและใหม่ด้วย `Object.is()` (เปรียบเทียบ Memory Address) หากเราแก้ไส้ในแต่ Address เดิม React จะคิดว่าไม่มีอะไรเปลี่ยน
+
+### กรณีที่ 2: คิดว่า `setState` ทำงานเสร็จทันทีในบรรทัดถัดไป
+```tsx
+// ❌ ผิด: พยายามอ่านค่า state ทันทีหลังสั่ง set
+const handleClick = () => {
+  setCount(count + 1);
+  console.log(count); // จะยังคงได้ค่าเก่า เพราะการอัปเดตเป็น Asynchronous!
+};
+
+// ✅ ถูก: คำนวณค่าล่วงหน้าหรือรออ่านในรอบ Render ถัดไป
+const handleClick = () => {
+  const nextCount = count + 1;
+  setCount(nextCount);
+  console.log(nextCount); // ได้ค่าใหม่ถูกต้อง
+};
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- *ควรใช้*: เมื่อข้อมูลส่งผลกระทบต่อสิ่งที่แสดงผลบนหน้าจอ (UI) และต้องการให้หน้าจออัปเดตตาม
+- *ไม่ควรใช้*:
+  - ข้อมูลที่คำนวณได้จาก Props หรือ State อื่นอยู่แล้ว (เช่น `const fullName = firstName + ' ' + lastName` ไม่ต้องสร้าง State สำหรับ `fullName`)
+  - ข้อมูลที่ไม่เกี่ยวกับการเรนเดอร์หน้าจอ (เช่น Timer ID, Audio instance) ให้ใช้ `useRef` แทน
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไม State ใน React ถึงต้องเป็น Immutable (ห้ามแก้ไขตรงๆ)?
+**แนวทางคำตอบ**: เพื่อให้ React สามารถตรวจสอบการเปลี่ยนแปลงได้อย่างรวดเร็วผ่านการเปรียบเทียบ Shallow Comparison (`oldState === newState`) โดยไม่ต้องเสียเวลาทำ Deep Compare ตรวจสอบค่าข้างในทีละฟิลด์ นอกจากนี้ ความเป็น Immutable ยังช่วยสนับสนุนระบบ Time-travel Debugging และ Concurrent Rendering ใน React 19
+
+### Q2: Automatic Batching ใน React 18/19 คืออะไร?
+**แนวทางคำตอบ**: คือกลไกที่ React รวมการสั่ง `setState` หลายๆ ตัวที่เกิดขึ้นใน Event Callback เดียวกัน (รวมถึงใน `setTimeout`, `Promise`, และ Async Actions) ให้คำนวณ Render ใหม่เพียงครั้งเดียว ช่วยป้องกันอาการ Re-render ซ้ำซ้อนและทำให้แอปพลิเคชันทำงานได้ลื่นไหลขึ้น

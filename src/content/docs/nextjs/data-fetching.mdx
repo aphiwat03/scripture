@@ -1,0 +1,72 @@
+---
+title: Data Fetching
+category: Frontend
+parentTitle: Next.js 16
+version: v16.4
+updatedAt: 2026-10-17
+---
+
+## 1. คืออะไร / ใช้ทำไม
+
+**Data Fetching & Caching** ใน Next.js 16 คือกลไกการดึงข้อมูลบนเซิร์ฟเวอร์ด้วย `fetch()` โดยสามารถควบคุมได้อย่างละเอียดว่าจะให้ผลลัพธ์ถูกแคชไว้ล่วงหน้าเพื่อความเร็วสูงสุด (Static SSG / ISR) หรือดึงสดใหม่ทุกครั้ง (Dynamic SSR) เพื่อความถูกต้องของข้อมูลล่าสุด
+
+ช่วยแก้ปัญหาการจัดการแคชที่ซับซ้อน และเพิ่มความเร็วในการตอบสนองให้แก่ผู้ใช้งาน
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### การเลือกโหมด Caching ด้วย fetch()
+
+```tsx filename="src/app/market/page.tsx"
+export default async function MarketPage() {
+  // 1. Dynamic: ดึงข้อมูลสดใหม่ทุก Request (ค่าเริ่มต้นใน Next.js 15+)
+  const liveRes = await fetch('https://api.example.com/rates', {
+    cache: 'no-store',
+  });
+  const liveRates = await liveRes.json();
+
+  // 2. Incremental Static Regeneration (ISR): แคชไว้และอัปเดตใหม่ทุก 60 วินาที
+  const productRes = await fetch('https://api.example.com/products', {
+    next: { revalidate: 60 },
+  });
+  const products = await productRes.json();
+
+  // 3. Static: ดึงครั้งเดียวตอน Build และบันทึกแคชถาวร
+  const configRes = await fetch('https://api.example.com/config', {
+    cache: 'force-cache',
+  });
+  const siteConfig = await configRes.json();
+
+  return (
+    <div className="space-y-6 max-w-2xl mx-auto py-8">
+      <h1 className="text-2xl font-bold">ข้อมูลการเงินและตลาด</h1>
+      <p>อัตราแลกเปลี่ยนปัจจุบัน: {liveRates.USD_THB} บาท</p>
+      <p>จำนวนสินค้าในแคช: {products.length} รายการ</p>
+    </div>
+  );
+}
+```
+
+## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- **`cache: 'no-store'` (Dynamic)**:
+  - *ควรใช้*: กับข้อมูลเฉพาะบุคคล เช่น ยอดเงินคงเหลือ, ตะกร้าสินค้า, แดชบอร์ดผู้ดูแลระบบ
+  - *ไม่ควรใช้*: กับหน้าบทความทั่วไปเพราะจะทำให้เซิร์ฟเวอร์ต้องรับภาระประมวลผลสูง
+- **`next: { revalidate: 60 }` (ISR)**:
+  - *ควรใช้*: กับหน้ารายการสินค้า ข่าวสาร หรือบล็อกที่มีการแก้ไขเป็นระยะแต่ต้องการความเร็วในการเปิดอ่านระดับมิลลิวินาที
+- **`cache: 'force-cache'` (Static)**:
+  - *ควรใช้*: กับหน้าข้อมูลคงที่ นโยบายความเป็นส่วนตัว ข้อมูลติดต่อ
+
+## 4. ข้อควรระวัง
+
+<Callout type="warning" title="ค่าเริ่มต้น fetch() ไม่แคชอีกต่อไป">
+ตั้งแต่ Next.js 15 และ 16 เป็นต้นมา คำสั่ง `fetch()` จะมีค่าเริ่มต้นเป็น `cache: 'no-store'` (ไม่แคช) หากต้องการให้ทำแคชเพื่อความเร็วต้องระบุ `force-cache` หรือ `revalidate` ให้ชัดเจนเสมอ
+</Callout>
+
+<Callout type="note" title="Dynamic APIs ทำให้หน้ากลายเป็น Dynamic">
+หากมีการใช้ `cookies()`, `headers()`, หรืออ่าน `searchParams` ตัว Next.js จะถือว่าหน้านั้นเป็น Dynamic SSR โดยอัตโนมัติ
+</Callout>
+
+## 5. แหล่งอ้างอิงทางการ
+
+- [Next.js Data Fetching and Caching](https://nextjs.org/docs/app/building-your-application/data-fetching)
+- [Incremental Static Regeneration (ISR)](https://nextjs.org/docs/app/building-your-application/data-fetching/incremental-static-regeneration)

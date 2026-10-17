@@ -1,0 +1,42 @@
+---
+title: HTML5
+category: Frontend
+version: HTML Living Standard
+updatedAt: 2026-10-17
+---
+
+## ภาพรวม HTML5 & Modern Web Foundation
+
+**HTML (HyperText Markup Language)** คือรากฐานและกระดูกสันหลังของเว็บแอปพลิเคชันทุกชิ้นในโลก แม้ในยุคที่เทคโนโลยี Frontend จะพัฒนาไปไกลด้วย React 19, Next.js 16, TypeScript และ Tailwind CSS แต่สิ่งที่ถูกส่งมอบไปยังเบราว์เซอร์ของผู้ใช้ปลายทาง และสิ่งที่ Google Crawler ตรวจสอบ ก็คือ **HTML DOM** เสมอ
+
+ตามมาตรฐาน **HTML Living Standard (โดย WHATWG)** ในปัจจุบัน HTML5 ไม่ใช่แค่เรื่องของการวางข้อความ แต่เป็นระบบนิเวศน์ที่ครอบคลุมถึง:
+- **Semantic Structure**: การให้ความหมายที่ถูกต้องแก่องค์ประกอบของหน้า
+- **Accessibility Tree**: สะพานเชื่อมระหว่างโค้ดและ Screen Readers สำหรับผู้พิการ
+- **Browser Parsing Engine**: การแปลง Text เป็น DOM Tree และ Layout Tree
+- **Core Security & Performance**: การควบคุมลำดับการดาวน์โหลด Resource และป้องกันช่องโหว่ XSS
+
+---
+
+## แผนผังเนื้อหา HTML5 (Directory)
+
+บทเรียนนี้ถูกแบ่งออกเป็น 17 หัวข้อที่เรียงลำดับจากพื้นฐานของตัวเอกสาร ไปสู่ฟอร์มขั้นสูง การปรับแต่ง SEO/Accessibility และการใช้งานร่วมกับ Modern Frameworks (React & Next.js):
+
+| หัวข้อ | ลิงก์อ่านเนื้อหา | คำอธิบายสังเขป |
+| :--- | :--- | :--- |
+| **1. โครงสร้างเอกสาร** | [Doc Structure](/docs/html/document-structure) | `<!DOCTYPE>`, `<html>`, `<head>`, `charset`, `viewport`, Element vs Tag |
+| **2. Block vs Inline & DOM** | [Block vs Inline](/docs/html/block-inline-dom) | ความแตกต่างทางเรขาคณิต และกระบวนการสร้าง DOM Tree ของ Browser |
+| **3. Text & Headings** | [Text & Headings](/docs/html/text-content) | ลำดับ `h1-h6`, `p`, `strong vs b`, `em vs i`, `hr`, `br` |
+| **4. Links & Navigation** | [Links & Nav](/docs/html/links-navigation) | `<a>`, Absolute/Relative/Anchor, `target="_blank"`, `rel="noopener noreferrer"` |
+| **5. Lists & Tables** | [Lists & Tables](/docs/html/lists-tables) | `ul`, `ol`, `dl`, `table`, `th scope`, `colspan/rowspan`, ข้อห้าม table layout |
+| **6. Images & Media** | [Images & Media](/docs/html/images-media) | `img alt`, `picture`, `srcset/sizes`, `video`, `audio`, `loading="lazy"` |
+| **7. Semantic HTML** | [Semantic HTML](/docs/html/semantic-html) | `header`, `nav`, `main`, `section`, `article`, `aside`, `footer` vs `div` |
+| **8. Forms** | [Forms](/docs/html/forms) | ฟอร์มสมัยใหม่, input types, button types, fieldset, label คู่ input |
+| **9. Form Validation** | [Form Validation](/docs/html/form-validation) | Built-in validation (`required`, `pattern`, `min/max`) และเหตุผลที่ต้องมี Server check |
+| **10. Attributes ที่ใช้บ่อย** | [Attributes](/docs/html/attributes) | `id`, `class`, `data-*`, `hidden`, `disabled`, `readonly`, `tabindex` |
+| **11. Accessibility (a11y)** | [Accessibility](/docs/html/accessibility) | การสร้างเว็บที่ทุกคนเข้าถึงได้, ARIA roles/labels, Focus management |
+| **12. Meta & SEO** | [Meta & SEO](/docs/html/meta-seo) | Title, Description, Open Graph, Canonical, Robots, Favicons |
+| **13. Scripts & Resources** | [Scripts & Link](/docs/html/scripts-resources) | `defer` vs `async`, `preload`, `preconnect`, ผลกระทบต่อ Core Web Vitals |
+| **14. Entities & XSS** | [Entities & XSS](/docs/html/entities-xss) | การ Escape อักขระพิเศษ (`&lt;`, `&gt;`, `&amp;`) และการป้องกัน Script Injection |
+| **15. HTML ใน React (JSX)** | [HTML in React](/docs/html/react-html) | ความแตกต่าง JSX vs HTML (`className`, `htmlFor`), `dangerouslySetInnerHTML` |
+| **16. HTML ใน Next.js** | [HTML in Next.js](/docs/html/nextjs-html) | `next/image`, `next/link`, Metadata API, สาเหตุของ Hydration Error |
+| **17. Pitfalls & Q&A** | [Pitfalls & Q&A](/docs/html/pitfalls) | รวม Anti-patterns ยอดฮิต, คำถามสัมภาษณ์งาน, Checklist สรุป และ Roadmap |

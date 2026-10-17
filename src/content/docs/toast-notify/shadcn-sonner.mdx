@@ -1,0 +1,380 @@
+---
+title: shadcn/ui Sonner & Theming
+category: Frontend
+parentTitle: Toast Notify
+version: Sonner & React Toastify (Next.js 16)
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ในระบบนิเวศของ **shadcn/ui** ปรัชญาหลักไม่ใช่การติดตั้งไลบรารีสำเร็จรูปที่เป็น Black Box เข้ามาในโปรเจกต์ แต่คือ **"การคัดลอกโค้ดต้นฉบับ (Copy-paste Architecture) เข้ามาเป็นส่วนหนึ่งของ Source Code คุณเอง"** เพื่อให้นักพัฒนาสามารถควบคุมสไตล์ Design Tokens, ฟอนต์, ไอคอน และคลาส CSS ได้อย่างสมบูรณ์ 100%
+
+เดิมที shadcn/ui เคยใช้คอมโพเนนต์ `Toast` ที่สร้างขึ้นบน `@radix-ui/react-toast` ร่วมกับ Custom Hook `use-toast` แต่ในเวอร์ชันปัจจุบัน **shadcn/ui ได้ประกาศให้ Sonner เป็นมาตรฐานหลักอย่างเป็นทางการ** ผ่านคอมโพเนนต์ `components/ui/sonner.tsx` เนื่องจาก:
+1. **โค้ดสั้นและแบนราบกว่า**: ตัด Boilerplate ของ Context Provider และ Hook ที่ซับซ้อนออกไป
+2. **ผสานกับ Design Tokens ไร้รอยต่อ**: ใช้ตัวแปรสีจาก **Tailwind CSS v4** (`bg-background`, `text-foreground`, `border-border`) ได้ทันที
+3. **รองรับ Dark/Light Mode อัตโนมัติ**: ผ่านการเชื่อมต่อกับ `next-themes`
+
+```
+สถาปัตยกรรม 3 ชั้นของ shadcn/ui Sonner:
+┌────────────────────────────────────────────────────────┐
+│ 1. Application Layer (Components, Hooks, Services)     │
+│    - เรียกใช้: import { toast } from "sonner";        │
+└───────────────────────────┬────────────────────────────┘
+                            │ ยิง Event
+┌───────────────────────────▼────────────────────────────┐
+│ 2. shadcn Wrapper: components/ui/sonner.tsx            │
+│    - ผูกเข้ากับ useTheme() จาก next-themes             │
+│    - ฉีด Tailwind v4 Semantic Tokens ผ่าน classNames   │
+└───────────────────────────┬────────────────────────────┘
+                            │ Render Portal
+┌───────────────────────────▼────────────────────────────┐
+│ 3. Core Engine: sonner (NPM Package)                   │
+│    - บริหารจัดการ 3D Stacking, Gestures, Accessibility │
+└────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. ผ่าโครงสร้างโค้ด `components/ui/sonner.tsx`
+เมื่อคุณรันคำสั่ง `npx shadcn@latest add sonner` ไฟล์ที่สร้างขึ้นจะมีโครงสร้างดังนี้:
+
+```tsx filename="components/ui/sonner.tsx"
+"use client";
+
+import { useTheme } from "next-themes";
+import { Toaster as Sonner } from "sonner";
+
+type ToasterProps = React.ComponentProps<typeof Sonner>;
+
+const Toaster = ({ ...props }: ToasterProps) => {
+  const { theme = "system" } = useTheme();
+
+  return (
+    <Sonner
+      theme={theme as ToasterProps["theme"]}
+      className="toaster group"
+      toastOptions={{
+        classNames: {
+          toast:
+            "group toast group-[.toaster]:bg-background group-[.toaster]:text-foreground group-[.toaster]:border-border group-[.toaster]:shadow-lg",
+          description: "group-[.toast]:text-muted-foreground",
+          actionButton:
+            "group-[.toast]:bg-primary group-[.toast]:text-primary-foreground",
+          cancelButton:
+            "group-[.toast]:bg-muted group-[.toast]:text-muted-foreground",
+        },
+      }}
+      {...props}
+    />
+  );
+};
+
+export { Toaster };
+```
+
+### 2. กลไก CSS Variable Injection และ `group-[.toaster]`
+ความลับในการทำให้ Sonner มีหน้าตาเข้ากับธีมของ shadcn/ui อยู่ที่เทคนิค **Tailwind Group Modifier**:
+- ในคอมโพเนนต์หลัก ตัว `<Sonner />` ถูกกำหนดคลาสเป็น `className="toaster group"`
+- พารามิเตอร์ `toastOptions.classNames` จะกำหนดคลาสย่อยให้แต่ละส่วนของการ์ด:
+  - `group-[.toaster]:bg-background`: บังคับให้การ์ด Toast ดึงตัวแปรสีพื้นหลังจาก Design System ของโปรเจกต์ (`hsl(var(--background))` หรือ `@theme` ใน Tailwind v4)
+  - `group-[.toast]:text-muted-foreground`: ข้อความอธิบายจะใช้สีข้อความระดับรองอัตโนมัติ
+  - `group-[.toast]:bg-primary`: ปุ่ม Action จะกลายเป็นสีหลักของแบรนด์ทันที ไม่ว่าคุณจะตั้ง Primary Color เป็นสีฟ้า, ม่วง หรือเขียว
+
+### 3. การเรียกใช้งานฟังก์ชัน `toast` จากทุกจุดในระบบ
+เนื่องจากฟังก์ชัน `toast` ถูกพัฒนาขึ้นบนรูปแบบ Event Dispatcher อิสระ เราจึงสามารถเรียกใช้ได้จาก 3 เลเยอร์ในแอปพลิเคชัน:
+1. **Presentation Layer (React Components)**: ภายในปุ่มกดหรือ Event Handler
+2. **State Management & Custom Hooks**: เช่น ภายใน `useAuth()`, `useCartStore.subscribe()`
+3. **Infrastructure & Network Layer**: เช่น ภายใน HTTP Interceptors (Fetch Wrapper / Axios Interceptor) โดยไม่ต้องใช้ React Context
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่างที่ 1: การผ่าโค้ดและปรับแต่ง `components/ui/sonner.tsx` ให้รองรับภาษาไทย ไอคอน และ Tailwind CSS v4
+
+ตัวอย่างนี้แสดงการปรับแต่ง `components/ui/sonner.tsx` ให้มีสไตล์พรีเมียม รองรับวรรณยุกต์ภาษาไทย และ Re-export ฟังก์ชัน `toast` ออกมาในไฟล์เดียวกันเพื่อให้นำไปใช้ง่าย
+
+```tsx filename="src/components/ui/sonner.tsx"
+"use client";
+
+import * as React from "react";
+import { useTheme } from "next-themes";
+import { Toaster as Sonner, toast } from "sonner";
+import { 
+  CheckCircle2, 
+  AlertCircle, 
+  Info, 
+  AlertTriangle, 
+  Loader2 
+} from "lucide-react";
+
+type ToasterProps = React.ComponentProps<typeof Sonner>;
+
+export function Toaster({ ...props }: ToasterProps) {
+  const { theme = "system" } = useTheme();
+
+  return (
+    <Sonner
+      theme={theme as ToasterProps["theme"]}
+      className="toaster group"
+      // กำหนดไอคอนมาตรฐานของ Design System
+      icons={{
+        success: <CheckCircle2 className="w-4 h-4 text-emerald-500" />,
+        info: <Info className="w-4 h-4 text-blue-500" />,
+        warning: <AlertTriangle className="w-4 h-4 text-amber-500" />,
+        error: <AlertCircle className="w-4 h-4 text-destructive" />,
+        loading: <Loader2 className="w-4 h-4 animate-spin text-primary" />,
+      }}
+      toastOptions={{
+        classNames: {
+          toast:
+            "group toast font-sans leading-relaxed min-h-[3.25rem] " +
+            "group-[.toaster]:bg-background group-[.toaster]:text-foreground " +
+            "group-[.toaster]:border-border group-[.toaster]:shadow-lg " +
+            "group-[.toaster]:rounded-2xl group-[.toaster]:p-4",
+          description: "group-[.toast]:text-muted-foreground text-xs leading-normal mt-0.5",
+          actionButton:
+            "group-[.toast]:bg-primary group-[.toast]:text-primary-foreground " +
+            "group-[.toast]:rounded-xl font-medium text-xs px-3 py-1.5 transition-opacity hover:opacity-90",
+          cancelButton:
+            "group-[.toast]:bg-muted group-[.toast]:text-muted-foreground " +
+            "group-[.toast]:rounded-xl font-medium text-xs px-3 py-1.5 hover:bg-muted/80",
+          closeButton:
+            "group-[.toast]:bg-background group-[.toast]:text-foreground " +
+            "group-[.toast]:border-border group-[.toast]:hover:bg-accent",
+        },
+      }}
+      {...props}
+    />
+  );
+}
+
+// Re-export toast เพื่อให้นักพัฒนานำเข้าจาก @/components/ui/sonner ได้จากจุดเดียว
+export { toast };
+```
+
+---
+
+### ตัวอย่างที่ 2: บูรณาการข้ามเลเยอร์: TanStack Query Mutation + Global Fetch API Interceptor
+
+ตัวอย่างนี้สาธิตการเรียกใช้ `toast` จาก shadcn/ui ข้ามเลเยอร์ ทั้งใน Network Client สำหรับดักจับเซสชันหมดอายุ และใน React Query สำหรับการกลายพันธุ์ข้อมูล (Mutation)
+
+```tsx filename="src/lib/api-client.ts"
+import { toast } from "@/components/ui/sonner";
+
+/**
+ * Global Fetch Wrapper สำหรับดักจับ Network Errors ระดับล่างสุดของระบบ
+ */
+export async function apiClient<T>(
+  endpoint: string,
+  options?: RequestInit
+): Promise<T> {
+  try {
+    const res = await fetch(endpoint, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+      },
+    });
+
+    // ดักจับกรณี Unauthorized (401)
+    if (res.status === 401) {
+      toast.error("เซสชันหมดอายุแล้ว", {
+        description: "กรุณาเข้าสู่ระบบใหม่อีกครั้งเพื่อความปลอดภัย",
+        action: {
+          label: "ล็อกอินใหม่",
+          onClick: () => (window.location.href = "/auth/login"),
+        },
+      });
+      throw new Error("Unauthorized");
+    }
+
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      throw new Error(errorData.message || `HTTP error! status: ${res.status}`);
+    }
+
+    return await res.json();
+  } catch (error) {
+    if ((error as Error).message !== "Unauthorized") {
+      toast.error("การเชื่อมต่อเซิร์ฟเวอร์ล้มเหลว", {
+        description: "โปรดตรวจสอบการเชื่อมต่ออินเทอร์เน็ตของคุณ",
+      });
+    }
+    throw error;
+  }
+}
+```
+
+```tsx filename="src/features/team/components/InviteMemberModal.tsx"
+"use client";
+
+import * as React from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { toast } from "@/components/ui/sonner";
+import { apiClient } from "@/lib/api-client";
+import { Mail, UserPlus, Loader2 } from "lucide-react";
+
+interface InvitePayload {
+  email: string;
+  role: "admin" | "member" | "viewer";
+}
+
+export function InviteMemberModal() {
+  const [email, setEmail] = React.useState("");
+  const [role, setRole] = React.useState<"admin" | "member" | "viewer">("member");
+  const queryClient = useQueryClient();
+
+  // จัดการการส่งคำเชิญด้วย TanStack Query Mutation
+  const inviteMutation = useMutation({
+    mutationFn: (newMember: InvitePayload) =>
+      apiClient<{ message: string; inviteId: string }>("/api/team/invite", {
+        method: "POST",
+        body: JSON.stringify(newMember),
+      }),
+    onMutate: () => {
+      // แสดงสถานะระหว่างส่ง
+      return { toastId: toast.loading("กำลังส่งอีเมลคำเชิญ...") };
+    },
+    onSuccess: (data, variables, context) => {
+      if (context?.toastId) toast.dismiss(context.toastId);
+
+      toast.success("ส่งคำเชิญเรียบร้อยแล้ว", {
+        description: `ระบบได้ส่งลิงก์เข้าร่วมทีมไปยัง ${variables.email} แล้ว`,
+        action: {
+          label: "คัดลอกลิงก์",
+          onClick: () => {
+            navigator.clipboard.writeText(
+              `https://myapp.com/join/${data.inviteId}`
+            );
+            toast.info("คัดลอกลิงก์คำเชิญแล้ว");
+          },
+        },
+      });
+
+      setEmail("");
+      queryClient.invalidateQueries({ queryKey: ["team-members"] });
+    },
+    onError: (error: Error, _, context) => {
+      if (context?.toastId) toast.dismiss(context.toastId);
+
+      toast.error("ไม่สามารถส่งคำเชิญได้", {
+        description: error.message,
+      });
+    },
+  });
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!email) return;
+    inviteMutation.mutate({ email, role });
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4 rounded-2xl border border-border bg-card p-6 shadow-sm">
+      <div>
+        <h4 className="text-base font-semibold text-foreground flex items-center gap-2">
+          <UserPlus className="w-5 h-5 text-primary" />
+          เชิญเพื่อนร่วมทีมใหม่
+        </h4>
+        <p className="text-xs text-muted-foreground mt-1">
+          ผู้ใช้จะได้รับอีเมลพร้อมสิทธิ์การเข้าถึงแดชบอร์ดตามบทบาทที่ระบุ
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <label htmlFor="member-email" className="text-xs font-medium text-foreground">
+          อีเมลของผู้รับ
+        </label>
+        <div className="relative">
+          <Mail className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+          <input
+            id="member-email"
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="developer@company.com"
+            className="w-full rounded-xl border border-input bg-background pl-9 pr-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            required
+          />
+        </div>
+      </div>
+
+      <button
+        type="submit"
+        disabled={inviteMutation.isPending}
+        className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition-all disabled:opacity-50"
+      >
+        {inviteMutation.isPending ? (
+          <>
+            <Loader2 className="w-4 h-4 animate-spin" />
+            กำลังส่งคำเชิญ...
+          </>
+        ) : (
+          "ส่งคำเชิญทันที"
+        )}
+      </button>
+    </form>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีอื่น (shadcn Sonner vs Pure Sonner npm vs Deprecated `use-toast`)
+
+| มิติการเปรียบเทียบ | shadcn Sonner (`@/components/ui/sonner`) | Pure Sonner (`import { toast } from 'sonner'`) | Deprecated shadcn `use-toast` (Radix) |
+| :--- | :--- | :--- | :--- |
+| **การควบคุมสไตล์** | **สมบูรณ์แบบ** ผ่าน Tailwind Tokens ในโค้ดของตัวเอง | ใช้ Inline Styles ของ Sonner หรือเขียน CSS คลุมเอง | ใช้ Tailwind Class ผ่าน Radix UI Primitives |
+| **ความเข้ากันได้กับ Design Tokens** | **100% สอดคล้องกับธีม** (`border-border`, `bg-card`) | สีและเงาอาจไม่ตรงกับปุ่มหรือการ์ดอื่นๆ ในโปรเจกต์ | ตรงกับธีม แต่โค้ดคอมโพเนนต์ยาวเกือบ 200 บรรทัด |
+| **API ความสะดวกในการเรียกใช้** | `toast.success('...')` ได้จากทุกไฟล์ | `toast.success('...')` ได้จากทุกไฟล์ | ต้องเรียกผ่าน Hook `const { toast } = useToast()` ใน React เท่านั้น |
+| **การรองรับ Dark/Light Mode** | อัตโนมัติผ่าน `next-themes` ในตัว Wrapper | ต้องส่ง Props `theme` ไปยัง `<Toaster />` เอง | ต้องหุ้ม Provider หลายชั้น |
+| **สถานะการบำรุงรักษา** | **ตัวเลือกหลักที่แนะนำในปัจจุบัน** | อัปเดตต่อเนื่องโดย Emil Kowalski | **เลิกสนับสนุนแล้ว (Deprecated)** |
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practices)
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **ลืมใส่ `suppressHydrationWarning` บนแท็ก `<html>`**<br/>เมื่อใช้ร่วมกับ `next-themes` และ shadcn Sonner<br/>*ผลลัพธ์:* เกิด React Hydration Warning สีแดงเต็มหน้าต่าง Console | **ใส่ `suppressHydrationWarning` บนแท็ก `<html>` เสมอ**<br/>เพื่อให้เบราว์เซอร์ยอมรับการสลับคลาส `.dark` ของ ThemeProvider |
+| **นำเข้า `toast` ตรงๆ จาก package `sonner` ในบางไฟล์ และนำเข้าจาก `@/components/ui/sonner` ในบางไฟล์**<br/>ทำให้เกิดความสับสนในทีมเมื่อต้องการเพิ่ม Custom Helper | **Re-export `toast` จาก `@/components/ui/sonner`**<br/>และกำหนด ESLint Rule ให้นำเข้าจาก Path นี้เพียงแห่งเดียว |
+| **เขียนคลาสสีแบบ Hardcoded เช่น `bg-[#1a1a1a]` ทับใน Toaster**<br/>ทำให้ Toast กลายเป็นสีมืดแม้ผู้ใช้จะเปิดใช้งานเว็บไซต์ใน Light Mode | **ใช้ Semantic Design Tokens ของ shadcn เสมอ**<br/>เช่น `bg-background`, `text-foreground`, `border-border` |
+| **ลืมใส่คลาส `group` หรือ `toaster` ที่คอนเทนเนอร์หลัก**<br/>ทำให้ตัวคัดเลือก `group-[.toaster]:*` ไม่ทำงาน และสไตล์ตกแต่งหลุดหายทั้งหมด | **คงโครงสร้าง `className="toaster group"` ไว้ใน Toaster Wrapper เสมอ** |
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ shadcn Sonner เมื่อ:
+- **โปรเจกต์สร้างด้วย Next.js 16 และ shadcn/ui**: เป็นวิธีที่เรียบง่าย สะอาด และเป็นทางการที่สุด
+- **ต้องการให้ Toast มีโทนสี แสงเงา (Shadow) และฟอนต์ที่กลมกลืนกับคอมโพเนนต์อื่น**: เช่น กลมกลืนกับ Button, Dialog, และ DropdownMenu
+- **ต้องการเรียกใช้ Toast จากไฟล์ Utility หรือ Service นอก React Tree**: เช่น ในฟังก์ชัน Logout, Token Refresher หรือ HTTP Interceptor
+
+### ไม่ควรใช้เมื่อ:
+- **โปรเจกต์ไม่ได้ใช้ Tailwind CSS**: และไม่มีระบบ Design Tokens แบบ CSS Variables (ควรใช้ Pure Sonner ธรรมดาหรือ React Toastify)
+- **ระบบต้องการ Animation แบบหมุนควง หรือสไลด์แนวดิ่งแบบดั้งเดิมของ React Toastify**
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมทีมพัฒนาของ shadcn/ui จึงตัดสินใจเลิกใช้คอมโพเนนต์ Toast ดั้งเดิมที่พัฒนาบน `@radix-ui/react-toast` แล้วเปลี่ยนมาแนะนำ Sonner เป็นมาตรฐานหลักแทน?
+**แนวทางตอบแบบ Senior Developer:**
+"การเปลี่ยนแปลงครั้งนี้เกิดจาก 3 ปัจจัยหลักในเชิงสถาปัตยกรรม:
+1. **Developer Experience & DX**: ระบบเดิมของ Radix Toast บังคับให้นักพัฒนาต้องใช้ React Context และ Hook (`useToast()`) ซึ่งหมายความว่าเราไม่สามารถยิง Toast จากนอก React Component Tree ได้ (เช่น ใน Axios Interceptor หรือ Redux/Zustand Middleware) ในขณะที่ Sonner ใช้ Event Bus กลาง สามารถเรียกใช้ `toast()` ได้จากทุกบรรทัดโค้ดในโปรเจกต์
+2. **ความเรียบง่ายของ Codebase**: โค้ดคอมโพเนนต์ `toast.tsx` แบบเดิมของ Radix มีขนาดยาวกว่า 200 บรรทัด ประกอบด้วยหลาย Primitives ซ้อนกัน (`ToastProvider`, `ToastViewport`, `ToastAction`, `ToastClose`) บำรุงรักษายาก ในขณะที่ `components/ui/sonner.tsx` มีเพียงไม่กี่สิบบรรทัด
+3. **UX และ Animation ที่เหนือชั้น**: Sonner มีระบบ 3D Card Stacking และ Gesture Swipe-to-dismiss ที่สร้างไว้ในระดับแกนกลาง ซึ่งมอบประสบการณ์การใช้งานบนมือถือที่ลื่นไหลกว่ามาก"
+
+---
+
+### Q2: ใน `components/ui/sonner.tsx` คลาส CSS อย่าง `group-[.toaster]:bg-background` มีหลักการทำงานอย่างไรใน CSS และช่วยแก้ปัญหา Theming ใน Next.js ได้อย่างไร?
+**แนวทางตอบแบบ Senior Developer:**
+"คลาสนี้อาศัยคุณสมบัติ **Arbitrary Group Modifier** ของ Tailwind CSS:
+- คอนเทนเนอร์ระดับบนสุดของ Toaster จะมีคลาสระบุตัวตนคือ `toaster group`
+- เมื่อการ์ด Toast แต่ละใบถูกเรนเดอร์ลงใน DOM มันจะถูกใส่คลาส `group-[.toaster]:bg-background` ซึ่งคอมไพเลอร์ของ Tailwind จะแปลงเป็น CSS Selector: `.toaster.group .toast { background-color: var(--background); }`
+- **ประโยชน์ใน Next.js Theming**: เทคนิคนี้ทำให้เราสามารถใช้ CSS Variables ของ shadcn/ui (เช่น `--background`, `--foreground`) เข้าไปเขียนทับ (Override) สไตล์ดั้งเดิมแบบ Inline Style ของ Sonner ได้อย่างเด็ดขาด โดยไม่ต้องใช้ `!important` และเมื่อ `next-themes` ทำการสลับคลาส `.dark` ที่แท็ก `<html>` ตัวแปรสีใน CSS Variable จะเปลี่ยนค่าทันที ส่งผลให้ Toast เปลี่ยนโทนสีตามทั้งระบบได้อย่างไร้รอยต่อโดยไม่ต้อง Re-mount ตัว Toaster เลยแม้แต่น้อย"

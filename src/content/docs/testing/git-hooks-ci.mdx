@@ -1,0 +1,1008 @@
+---
+title: Git Hooks CI
+category: TESTING & QUALITY
+version: Husky 9 + lint-staged + GitHub Actions
+updatedAt: 2026-10-17
+---
+
+# Git Hooks CI
+
+คู่มือการวางระบบ **Automated Quality Gates** ตั้งแต่เครื่องของนักพัฒนาไปจนถึง Cloud CI/CD ด้วย **Husky v9**, **lint-staged**, **Commitlint (Conventional Commits)** และ **GitHub Actions** สำหรับสถาปัตยกรรม Fullstack (Next.js 16 + NestJS 11 + PostgreSQL 16 + Playwright) ของระบบ **Smart Butcher Marketplace** เพื่อรับประกันว่าไม่มีโค้ดที่พังหรือขาดการทดสอบหลุดรอดเข้าสู่สายการผลิตหลัก (`main` branch)
+
+| หมวดหมู่เนื้อหา | หัวข้อหลัก | เป้าหมายทางวิศวกรรม |
+| :--- | :--- | :--- |
+| **1. Pre-commit Gate** | การดักจับคุณภาพโค้ดก่อน Commit ด้วย Husky และ lint-staged | ตรวจสอบและจัดรูปแบบเฉพาะไฟล์ที่แก้ไขภายในไม่กี่วินาที |
+| **2. Commit Standards** | มาตรฐานข้อความ Commit ด้วย Conventional Commits | สร้างประวัติ Git ที่สื่อความหมายชัดเจนและพร้อมทำ Semantic Versioning |
+| **3. Core CI Pipeline** | การออกแบบ GitHub Actions CI Pipeline | ตรวจสอบ Install, Lint, Type-Check, Unit Test และ Build แบบอัตโนมัติ |
+| **4. Integration & E2E CI** | การรัน PostgreSQL 16 Service Container และ Playwright E2E | ทดสอบระบบฐานข้อมูลจริงและการสั่งซื้อเนื้อผ่านเบราว์เซอร์บน CI |
+| **5. Governance & Security** | Branch Protection Rules, GitHub Secrets และ Status Badges | บังคับใช้กฎความปลอดภัยระดับ Repository และป้องกันการ Force Push |
+
+---
+
+## 1. การดักจับคุณภาพโค้ดก่อน Commit ด้วย Husky และ lint-staged
+
+### แนวคิด (Concept)
+
+การรอให้ตรวจพบข้อผิดพลาดด้าน Linting หรือ Formatting บน GitHub Actions CI ใช้เวลานานเกินไป (ต้องรอ Push โค้ด, รอจองเครื่อง Runner, รอติดตั้งแพ็กเกจ รวมเวลา 2–5 นาที) เราจึงนำหลักการ **Shift-Left Testing** มาใช้ด้วยการตั้งด่านสกัดตั้งแต่จังหวะที่นักพัฒนาพิมพ์คำสั่ง `git commit` ในเครื่องตัวเอง
+
+แต่หากเราสั่งรัน `eslint .` และ `prettier --write .` ทั้งโปรเจกต์ทุกครั้งที่กด Commit ในโปรเจกต์ที่มีไฟล์มากกว่า 2,000 ไฟล์ นักพัฒนาจะต้องรอนาน 30–60 วินาทีต่อหนึ่ง Commit จนสุดท้ายทุกคนแอบใส่ `--no-verify` เพื่อข้ามการตรวจ ดังนั้นเราจึงต้องใช้คู่หูสำคัญ:
+- **Husky v9**: เครื่องมือจัดการ Git Hooks สมัยใหม่ที่ผูกสคริปต์ในโฟลเดอร์ `.husky/` เข้ากับเหตุการณ์ของ Git (เช่น `pre-commit`, `commit-msg`) โดยอัตโนมัติเมื่อรัน `npm install`
+- **lint-staged**: เครื่องมือกรองเฉพาะไฟล์ที่อยู่ในสถานะ **Git Staged (`git add`)** เท่านั้นมาส่งต่อให้ ESLint และ Prettier ประมวลผล ทำให้การตรวจก่อน Commit ใช้เวลาเพียง 1–2 วินาที!
+
+```mermaid filename="docs/testing/git-hooks-ci-diagram.mmd"
+flowchart LR
+    GitAdd["git add (Staged Files)"] --> GitCommit["git commit"]
+    GitCommit --> Husky["Husky v9 (.husky/pre-commit)"]
+    Husky --> LintStaged["lint-staged<br/>คัดเฉพาะไฟล์ที่ถูกแก้ไข"]
+    LintStaged --> ESLintPrettier["รัน ESLint --fix & Prettier --write"]
+    ESLintPrettier -->|ผ่าน 100%| CommitSuccess["สร้าง Commit สำเร็จรวดเร็ว"]
+    ESLintPrettier -->|พบ Error| CommitAbort["ยกเลิก Commit ทันที"]
+
+    style Husky fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    style LintStaged fill:#fef9c3,stroke:#ca8a04,color:#713f12
+    style CommitSuccess fill:#dcfce7,stroke:#16a34a,color:#14532d
+    style CommitAbort fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+```
+
+### หลักการเบื้องหลัง (Under the Hood)
+
+1. **กลไกของ Husky v9**: เมื่อสคริปต์ `"prepare": "husky"` ใน `package.json` ทำงาน Husky จะสั่ง `git config core.hooksPath .husky/_` เพื่อเปลี่ยนเส้นทางการค้นหา Git Hooks ของโปรเจกต์จาก `.git/hooks` (ซึ่งไม่สามารถแชร์ขึ้น Git ได้) มายังโฟลเดอร์ `.husky` ที่อยู่ใน Repository แทน
+2. **กลไก Stashing ของ lint-staged**: หากนักพัฒนาแก้ไขไฟล์ `order.service.ts` ไป 20 บรรทัด แต่เลือก `git add -p` เฉพาะ 10 บรรทัดแรก (มีบางส่วนเป็น Unstaged changes) `lint-staged` จะทำการสำรองส่วนที่ยังไม่ได้ Stage เก็บไว้ใน Git Stash ชั่วคราว แล้วรัน ESLint/Prettier เฉพาะกับโค้ดที่กำลังจะ Commit จริงๆ เท่านั้น เมื่อเสร็จแล้วจึงนำโค้ดที่เหลือคืนกลับมาอย่างปลอดภัย
+
+<Callout type="tip" title="ทำไมไม่ควรรัน tsc --noEmit ผ่าน lint-staged โดยตรงแบบรายไฟล์?">
+lint-staged จะส่งรายชื่อไฟล์ที่ถูกแก้ไขต่อท้ายคำสั่ง เช่น tsc --noEmit src/order.ts ซึ่งพฤติกรรมของคอมไพเลอร์ tsc เมื่อได้รับชื่อไฟล์ระบุตรงๆ คือมันจะเพิกเฉยต่อไฟล์ tsconfig.json ทันที! ส่งผลให้การตั้งค่า strict mode และ path aliases หายหมด หากต้องการเช็ค Type ก่อน Commit ต้องเขียนเป็นฟังก์ชันใน lint-staged.config.mjs ที่เรียก tsc --noEmit โดยไม่ส่งชื่อไฟล์ต่อท้าย
+</Callout>
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1 (ระดับพื้นฐาน): การตั้งค่า Husky v9, `package.json` และ `lint-staged.config.mjs`
+การตั้งค่าด่านตรวจ `pre-commit` ที่รันทั้ง ESLint, Prettier และการตรวจสอบ TypeScript ทั้งโปรเจกต์อย่างถูกต้องโดยไม่ทำลาย `tsconfig.json`
+
+```javascript filename="lint-staged.config.mjs"
+// @ts-check
+
+/** @type {import('lint-staged').Configuration} */
+export default {
+  // 1. ไฟล์ TypeScript และ React: รัน ESLint แก้อัตโนมัติ, จัดหน้าด้วย Prettier และตรวจ Type ทั้งโปรเจกต์
+  '*.{ts,tsx}': [
+    'eslint --fix --max-warnings 0',
+    'prettier --write',
+    () => 'tsc --noEmit',
+  ],
+
+  // 2. ไฟล์ตั้งค่าและเอกสาร: จัดรูปแบบด้วย Prettier อย่างเดียว
+  '*.{json,md,yml,yaml,mjs}': ['prettier --write'],
+};
+```
+
+#### ตัวอย่างที่ 2 (ระดับ Production): โมดูลตรวจสอบคำสั่งซื้อเนื้อพรีเมียมพร้อม Unit Test ที่ถูกรันตรวจสอบในจังหวะ Pre-commit
+โค้ดบริการตรวจสอบความถูกต้องของคำสั่งซื้อ (`Order`, `OrderItem`, `Product`, `User`) ที่ผ่านด่าน `lint-staged` และ `vitest related` ก่อนอนุญาตให้สร้าง Commit
+
+```typescript filename="src/domain/butcher-order-guard.ts"
+export interface User {
+  id: string;
+  email: string;
+  role: 'CUSTOMER' | 'BUTCHER' | 'ADMIN';
+  isVip: boolean;
+}
+
+export interface Category {
+  id: string;
+  name: string;
+  requiresColdTruck: boolean;
+}
+
+export interface Product {
+  id: string;
+  categoryId: string;
+  name: string;
+  sku: string;
+  pricePerKg: number;
+  stockKg: number;
+  dryAgedDays: number;
+}
+
+export interface OrderItem {
+  id: string;
+  productId: string;
+  weightKg: number;
+  unitPricePerKg: number;
+  subtotal: number;
+}
+
+export interface Order {
+  id: string;
+  userId: string;
+  items: OrderItem[];
+  totalAmount: number;
+  deliveryProvince: string;
+}
+
+export interface Payment {
+  id: string;
+  orderId: string;
+  amount: number;
+  status: 'PENDING' | 'PAID' | 'REFUNDED';
+}
+
+export function validatePreCommitOrderIntegrity(
+  order: Order,
+  productsById: ReadonlyMap<string, Product>,
+  payment: Payment,
+): { valid: boolean; reason?: string } {
+  if (order.items.length === 0) {
+    return { valid: false, reason: 'คำสั่งซื้อต้องมีรายการเนื้ออย่างน้อย 1 รายการ' };
+  }
+
+  let expectedTotal = 0;
+
+  for (const item of order.items) {
+    const product = productsById.get(item.productId);
+    if (!product) {
+      return { valid: false, reason: `ไม่พบเนื้อรหัส ${item.productId} ในระบบ` };
+    }
+
+    if (item.weightKg <= 0 || item.weightKg > product.stockKg) {
+      return {
+        valid: false,
+        reason: `น้ำหนักสั่งซื้อของ ${product.name} (${String(item.weightKg)} กก.) เกินสต็อกคงเหลือ`,
+      };
+    }
+
+    const expectedItemSubtotal = Math.round(item.weightKg * product.pricePerKg);
+    if (item.subtotal !== expectedItemSubtotal) {
+      return {
+        valid: false,
+        reason: `ยอดรวมย่อยของ ${product.name} ไม่ตรงกับราคาต่อกิโลกรัม`,
+      };
+    }
+
+    expectedTotal += expectedItemSubtotal;
+  }
+
+  if (order.totalAmount !== expectedTotal || payment.amount !== expectedTotal) {
+    return {
+      valid: false,
+      reason: 'ยอดชำระเงินรวมไม่ตรงกับผลรวมของรายการสินค้าเนื้อทั้งหมด',
+    };
+  }
+
+  return { valid: true };
+}
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```javascript filename="lint-staged.compare.mjs"
+// ❌ ผิด (Anti-pattern): ส่งชื่อไฟล์ต่อท้าย tsc --noEmit โดยตรง ทำให้ tsconfig.json ถูกเพิกเฉย!
+export const badLintStaged = {
+  '*.{ts,tsx}': [
+    'tsc --noEmit', // กลายเป็น tsc --noEmit file1.ts file2.ts (ไม่อ่าน tsconfig.json!)
+    'eslint',
+  ],
+};
+
+// ✅ ถูก (Best Practice): ใช้ Arrow Function คืนค่าคำสั่ง tsc --noEmit เพื่อบังคับให้อ่าน tsconfig.json เสมอ
+export const goodLintStaged = {
+  '*.{ts,tsx}': [
+    'eslint --fix --max-warnings 0',
+    'prettier --write',
+    () => 'tsc --noEmit',
+  ],
+};
+```
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+- **ควรใช้ใน `pre-commit` เสมอ**: การจัดรูปแบบโค้ด (`prettier --write`), การตรวจจับ Linting เฉพาะไฟล์ที่แก้ (`eslint --fix`) และการรัน Unit Test เฉพาะไฟล์ที่เกี่ยวข้อง (`jest --bail --findRelatedTests`)
+- **ไม่ควรใช้ใน `pre-commit`**: ห้ามรัน E2E Testing (Playwright) หรือสั่ง Build โปรเจกต์ทั้งหมด (`next build`) ใน `pre-commit` Hook เด็ดขาด เพราะใช้เวลานานหลายนาทีและจะทำลายสมาธิของนักพัฒนา ให้แยกงานหนักไปไว้บน GitHub Actions CI แทน
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+
+**Q1: หากนักพัฒนาในทีมบ่นว่าการมี Husky `pre-commit` ทำให้การ Commit ช้าลงมาก คุณจะปรับปรุงโครงสร้างนี้อย่างไรโดยไม่ลดทอนคุณภาพโค้ด?**
+- **แนวคำตอบ**: ตรวจสอบก่อนว่าใน `.husky/pre-commit` ได้รันคำสั่งทั้งโปรเจกต์หรือใช้ `lint-staged` หากยังไม่ได้ใช้ต้องเปลี่ยนมาใช้ `lint-staged` เพื่อตรวจเฉพาะไฟล์ที่ถูกแก้ไขพร้อมเปิด `--cache` ให้กับ ESLint ส่วนงานที่ใช้เวลานานอย่างการรัน Test Suite ทั้งหมดหรือการ Build ให้ย้ายไปทำงานบน GitHub Actions ตอนเปิด Pull Request แทน เพื่อให้ `pre-commit` จบภายในไม่เกิน 3 วินาที
+
+**Q2: ถ้ามีคนใช้ `git commit --no-verify` เพื่อข้าม Husky Hook ในเครื่องตัวเอง ระบบของเรายังปลอดภัยอยู่หรือไม่?**
+- **แนวคำตอบ**: Git Hooks ในเครื่อง Local มีไว้เพื่อเพิ่มความเร็วในการรับ Feedback (Developer Experience) เท่านั้น ไม่ใช่มาตรการรักษาความปลอดภัยขั้นสุดท้าย เพราะนักพัฒนาสามารถใส่ `--no-verify` ข้ามได้เสมอ ดังนั้นจึงต้องมี **GitHub Actions CI Pipeline** คู่กับ **Branch Protection Rules** บนเซิร์ฟเวอร์เป็นปราการด่านสุดท้ายที่ไม่มีใครข้ามได้
+
+---
+
+## 2. มาตรฐานข้อความ Commit ด้วย Conventional Commits
+
+### แนวคิด (Concept)
+
+ประวัติการแก้ไขโค้ด (`git log`) ที่เต็มไปด้วยข้อความอย่าง `"fix bug"`, `"update"`, `"wip"` หรือ `"แก้บั๊กนิดหน่อย"` ทำให้ทีมไม่สามารถสืบค้นย้อนหลังได้เลยว่าแต่ละ Commit กระทบส่วนใดของระบบ **Smart Butcher Marketplace**
+
+มาตรฐาน **Conventional Commits** จึงกำหนดโครงสร้างข้อความ Commit ที่ทั้งมนุษย์และเครื่องจักรสามารถเข้าใจได้ตรงกัน:
+`<type>(<scope>): <subject>`
+- **`feat(order)`**: เพิ่มฟีเจอร์ใหม่ เช่น ระบบจองเนื้อวากิวดรายเอจล่วงหน้า (มีผลให้เลขเวอร์ชัน Minor เพิ่มขึ้น)
+- **`fix(payment)`**: แก้ไขบั๊กในระบบ เช่น แก้ปัญหาคำนวณทศนิยม PromptPay ผิดพลาด (มีผลให้เลขเวอร์ชัน Patch เพิ่มขึ้น)
+- **`perf(inventory)`**, **`refactor(auth)`**, **`test(checkout)`**, **`ci(github)`**, **`docs(readme)`**, **`chore(deps)`**
+
+### หลักการเบื้องหลัง (Under the Hood)
+
+เมื่อนักพัฒนาสั่ง `git commit -m "feat(payment): support QR PromptPay webhook"` Git จะสร้างไฟล์ชั่วคราวชื่อ `.git/COMMIT_EDITMSG` แล้วเรียกสคริปต์ `.husky/commit-msg` โดยส่งพาธของไฟล์นี้เป็นอาร์กิวเมนต์ `$1`
+
+เครื่องมือ **Commitlint (`@commitlint/cli`)** จะอ่านข้อความจากไฟล์ `.git/COMMIT_EDITMSG` แล้วนำมาแยกส่วน (Parse) ด้วย Regular Expression เทียบกับกฎใน `commitlint.config.mjs`:
+1. ตรวจสอบว่า `type` อยู่ในรายการที่อนุญาตหรือไม่
+2. ตรวจสอบว่า `scope` ตรงกับโมดูลในระบบหรือไม่ (เช่น `user`, `product`, `category`, `order`, `payment`, `ci`)
+3. ตรวจสอบความยาวของหัวข้อไม่ให้เกิน 72–100 ตัวอักษร เพื่อไม่ให้ถูกตัดคำบนหน้าจอ GitHub
+
+<Callout type="note" title="ประโยชน์ทางตรงของ Conventional Commits ต่อระบบ Semantic Release">
+เมื่อข้อความ Commit ทุกตัวมีโครงสร้างมาตรฐาน เครื่องมืออย่าง semantic-release หรือ changesets สามารถกวาดอ่าน git log นับจาก Tag ล่าสุดเพื่อตัดสินใจอัปเกรดเลขเวอร์ชัน (Major.Minor.Patch) และสร้างไฟล์ CHANGELOG.md พร้อมประกาศ Release Notes อัตโนมัติบน GitHub ได้ทันทีโดยไม่ต้องเขียนมือแม้แต่บรรทัดเดียว
+</Callout>
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1 (ระดับพื้นฐาน): การตั้งค่า `commitlint.config.mjs` ที่บังคับ Scope ตามโดเมนของ Smart Butcher Marketplace
+กำหนดให้ทุก Commit ต้องระบุทั้ง `type` และ `scope` ที่สอดคล้องกับโมดูลจริงในโปรเจกต์
+
+```javascript filename="commitlint.config.mjs"
+// @ts-check
+
+export default {
+  extends: ['@commitlint/config-conventional'],
+  rules: {
+    'type-enum': [
+      2,
+      'always',
+      [
+        'feat',
+        'fix',
+        'perf',
+        'refactor',
+        'docs',
+        'test',
+        'build',
+        'ci',
+        'chore',
+        'revert',
+      ],
+    ],
+    // บังคับให้ระบุ Scope ตามโดเมนของระบบร้านค้าเนื้อพรีเมียม
+    'scope-enum': [
+      2,
+      'always',
+      [
+        'user',
+        'product',
+        'category',
+        'order',
+        'order-item',
+        'payment',
+        'auth',
+        'ci',
+        'deps',
+      ],
+    ],
+    'scope-empty': [2, 'never'],
+    'subject-case': [2, 'never', ['start-case', 'pascal-case', 'upper-case']],
+    'header-max-length': [2, 'always', 100],
+  },
+};
+```
+
+#### ตัวอย่างที่ 2 (ระดับ Production): ตัวแยกวิเคราะห์ประวัติ Commit อัตโนมัติสำหรับสร้างรายงาน Audit Trail ของระบบการเงินและสต็อกเนื้อ
+สคริปต์ TypeScript ที่อ่านข้อความ Conventional Commits เพื่อแยกแยะว่ามี Commit ใดบ้างที่กระทบโมดูลสำคัญ (`payment`, `order`, `product`) หรือมี `BREAKING CHANGE` ก่อนสั่ง Deploy ขึ้น Production
+
+```typescript filename="src/devops/release-commit-auditor.ts"
+export type AllowedCommitScope =
+  | 'user'
+  | 'product'
+  | 'category'
+  | 'order'
+  | 'order-item'
+  | 'payment'
+  | 'auth'
+  | 'ci'
+  | 'deps';
+
+export interface ParsedConventionalCommit {
+  rawHeader: string;
+  type: string;
+  scope: AllowedCommitScope;
+  isBreakingChange: boolean;
+  subject: string;
+}
+
+export interface ReleaseRiskReport {
+  recommendedBump: 'MAJOR' | 'MINOR' | 'PATCH';
+  touchesFinancialFlow: boolean;
+  commits: ParsedConventionalCommit[];
+}
+
+const COMMIT_HEADER_REGEX =
+  /^(?<type>feat|fix|perf|refactor|docs|test|build|ci|chore|revert)\((?<scope>user|product|category|order|order-item|payment|auth|ci|deps)\)(?<breaking>!)?:\s+(?<subject>.+)$/;
+
+export function parseConventionalCommitHeader(
+  header: string,
+): ParsedConventionalCommit {
+  const match = COMMIT_HEADER_REGEX.exec(header.trim());
+  if (!match?.groups) {
+    throw new Error(
+      `รูปแบบ Commit ไม่ถูกต้องตามมาตรฐาน: "${header}" (ตัวอย่างที่ถูก: "feat(order): add dry-aged reservation")`,
+    );
+  }
+
+  return {
+    rawHeader: header.trim(),
+    type: match.groups.type,
+    scope: match.groups.scope as AllowedCommitScope,
+    isBreakingChange: Boolean(match.groups.breaking),
+    subject: match.groups.subject,
+  };
+}
+
+export function generateReleaseRiskReport(
+  commitHeaders: readonly string[],
+): ReleaseRiskReport {
+  const parsedCommits = commitHeaders.map(parseConventionalCommitHeader);
+
+  const hasBreaking = parsedCommits.some((c) => c.isBreakingChange);
+  const hasFeature = parsedCommits.some((c) => c.type === 'feat');
+  const touchesFinancialFlow = parsedCommits.some(
+    (c) => c.scope === 'payment' || c.scope === 'order',
+  );
+
+  let recommendedBump: 'MAJOR' | 'MINOR' | 'PATCH' = 'PATCH';
+  if (hasBreaking) {
+    recommendedBump = 'MAJOR';
+  } else if (hasFeature) {
+    recommendedBump = 'MINOR';
+  }
+
+  return {
+    recommendedBump,
+    touchesFinancialFlow,
+    commits: parsedCommits,
+  };
+}
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```bash filename="git-commit-messages.compare.sh"
+# ❌ ผิด (Anti-pattern): ข้อความกำกวม ไม่บอกทั้งประเภทการแก้ไขและโมดูลที่ได้รับผลกระทบ
+git commit -m "fix bug"
+git commit -m "update order and payment files"
+git commit -m "WIP"
+
+# ✅ ถูก (Best Practice): ระบุ type(scope): subject ชัดเจน อ่านปุ๊บรู้ทันทีว่าแก้อะไรและทำไม
+git commit -m "fix(payment): prevent duplicate PromptPay webhook charge on retry"
+git commit -m "feat(product): add marbling score filter for A5 Wagyu category"
+git commit -m "refactor(order-item): extract custom cut thickness price calculation"
+```
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+- **ควรใช้เมื่อ**: ทำงานร่วมกันเป็นทีมตั้งแต่ 2 คนขึ้นไป หรือต้องการสร้างระบบ Release Notes อัตโนมัติ และต้องการให้การทำ `git bisect` เพื่อหาจุดกำเนิดบั๊กทำได้ง่าย
+- **ไม่ควรใช้**: หากนักพัฒนาเผลอสร้าง Commit ย่อยๆ ระหว่างทางใน Feature Branch ของตัวเอง ไม่จำเป็นต้องเข้มงวดทุก Commit ย่อยหากทีมตั้งค่า GitHub Pull Request ให้บังคับรวมเป็นหนึ่งเดียวด้วย **Squash and Merge** พร้อมตรวจชื่อ PR Title ด้วย Commitlint บน GitHub Actions
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+
+**Q1: เครื่องหมายอัศเจรีย์ `!` ใน Conventional Commits เช่น `feat(payment)!: migrate to Stripe v3 API` มีความหมายอย่างไร?**
+- **แนวคำตอบ**: เครื่องหมาย `!` หน้าเครื่องหมายทวิภาค (`:`) เป็นสัญลักษณ์ย่อที่ระบุว่า Commit นี้มี **Breaking Change** (การเปลี่ยนแปลงที่ไม่สามารถเข้ากันได้กับเวอร์ชันเก่า) ซึ่งจะสั่งให้เครื่องมือ Semantic Versioning ปรับเลขเวอร์ชันหลัก (Major Version เช่น จาก `1.4.2` เป็น `2.0.0`) ทันที
+
+---
+
+## 3. การออกแบบ GitHub Actions CI Pipeline (Install, Lint, Type-Check, Test, Build)
+
+### แนวคิด (Concept)
+
+แม้เราจะมี Husky คอยตรวจในเครื่องนักพัฒนาแล้ว แต่เครื่องแต่ละคนอาจมีสภาพแวดล้อมที่แตกต่างกัน (เช่น เวอร์ชันของ Node.js หรือตัวแปรในเครื่อง) ดังนั้น **GitHub Actions CI Pipeline** จึงทำหน้าที่เป็น **"ห้องปฏิบัติการกลางที่สะอาดบริสุทธิ์ (Clean-room Verification)"** ซึ่งจะรันตรวจสอบโค้ดทุกครั้งที่มีการเปิด Pull Request หรือ Push เข้าสู่สาขา `main`
+
+ลำดับขั้นตอนใน Pipeline ต้องเรียงตามหลัก **Fail-Fast (อะไรที่รันเร็วและใช้ทรัพยากรน้อยให้ตรวจก่อน)**:
+1. **Deterministic Install (`npm ci`)**: ติดตั้งแพ็กเกจตรงตาม `package-lock.json` ทุกตัวอักษรพร้อมใช้ระบบ Cache
+2. **Static Analysis (`lint` & `format:check` & `typecheck`)**: ใช้เวลาเพียง 10–20 วินาที หากโค้ดพิมพ์ผิดหรือ Type ไม่ตรงจะได้รู้ผลทันที
+3. **Unit Tests (`test:unit`)**: ทดสอบ Business Logic ของ `Product`, `Order`, `Payment` ในหน่วยความจำ
+4. **Production Build (`build`)**: ทดลองคอมไพล์ทั้ง Next.js 16 และ NestJS 11 เพื่อให้มั่นใจว่าโค้ดสามารถนำไปสร้าง Docker Image หรือ Deploy ขึ้นจริงได้ไม่พัง
+
+```mermaid filename="docs/testing/git-hooks-ci-diagram.mmd"
+flowchart LR
+    Trigger["PR / Push to main"] --> Install["1. npm ci<br/>(Cached node_modules)"]
+    Install --> Static["2. Lint + Format + TypeCheck<br/>(~15s Fail-Fast)"]
+    Static --> UnitTest["3. Unit Tests + Coverage<br/>(~30s)"]
+    UnitTest --> Build["4. Production Build<br/>(Next.js 16 & NestJS 11)"]
+    Build --> Ready["พร้อม Merge / Deploy"]
+
+    style Install fill:#f1f5f9,stroke:#64748b,color:#0f172a
+    style Static fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    style UnitTest fill:#fef9c3,stroke:#ca8a04,color:#713f12
+    style Build fill:#dcfce7,stroke:#16a34a,color:#14532d
+```
+
+### หลักการเบื้องหลัง (Under the Hood)
+
+1. **`npm ci` (Clean Install) vs `npm install`**: คำสั่ง `npm ci` จะลบโฟลเดอร์ `node_modules` เดิมทิ้งทั้งหมด แล้วอ่านเวอร์ชันของทุกแพ็กเกจจาก `package-lock.json` โดยตรงโดยไม่ทำการคำนวณ Dependency Tree ใหม่ และหากพบว่า `package.json` กับ `package-lock.json` ไม่ตรงกัน `npm ci` จะโยน Error และหยุดทำงานทันที ช่วยป้องกันปัญหาแพ็กเกจย่อยแอบอัปเดตเวอร์ชันเองบน CI
+2. **Concurrency Group**: เมื่อนักพัฒนา Push โค้ดแก้ไขตามคอมเมนต์ติดๆ กัน 3 ครั้งภายใน 1 นาที หากไม่ตั้งค่า `concurrency` บน GitHub Actions ระบบจะรัน CI ทั้ง 3 รอบพร้อมกันจนเปลืองโควตา การกำหนด `cancel-in-progress: true` จะสั่งยกเลิกรอบเก่าที่ยังรันไม่เสร็จแล้วรันเฉพาะ Commit ล่าสุดทันที
+
+<Callout type="warning" title="ห้ามใช้ npm install ในไฟล์ GitHub Actions เด็ดขาด">
+การใช้ npm install บน CI อาจทำให้ GitHub Actions ดึงแพ็กเกจเวอร์ชันย่อยใหม่กว่าที่นักพัฒนาทดสอบในเครื่องตัวเองมาติดตั้ง ส่งผลให้เกิดบั๊กที่เกิดขึ้นเฉพาะบน CI เท่านั้น จงใช้ npm ci (หรือ pnpm install --frozen-lockfile) เสมอเพื่อรับประกันความเหมือนเดิม 100%
+</Callout>
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1 (ระดับพื้นฐาน): ไฟล์ `.github/workflows/ci-quality.yml` ที่ออกแบบตามหลัก Fail-Fast และ Concurrency
+ไฟล์ Workflow มาตรฐานสำหรับตรวจสอบคุณภาพโค้ด TypeScript, ESLint, Prettier, Unit Test และการ Build โปรเจกต์
+
+```yaml filename=".github/workflows/ci-quality.yml"
+name: Smart Butcher - Quality & Unit CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# ยกเลิก Job เก่าของ PR เดียวกันทันทีเมื่อมีการ Push โค้ดใหม่เข้ามา
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-and-build:
+    name: Lint, Type-Check, Unit Test & Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 2. Setup Node.js 22 LTS with npm Cache
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: 3. Clean Install Dependencies
+        run: npm ci
+
+      - name: 4. Verify Code Formatting (Prettier)
+        run: npm run format:check
+
+      - name: 5. Run Static Code Analysis (ESLint v9)
+        run: npm run lint
+
+      - name: 6. Run TypeScript Strict Type-Checking
+        run: npm run typecheck
+
+      - name: 7. Execute Unit Tests with Coverage
+        run: npm run test:unit -- --coverage
+
+      - name: 8. Verify Production Build (Next.js 16 & NestJS 11)
+        env:
+          NODE_ENV: production
+        run: npm run build
+```
+
+#### ตัวอย่างที่ 2 (ระดับ Production): ชุดทดสอบ Unit Test ของระบบคำนวณส่วนลดและจัดสรรเนื้อดรายเอจที่รันในขั้นตอนที่ 7 ของ CI
+โค้ดบริการและชุดทดสอบ Jest/Vitest ที่ตรวจสอบความถูกต้องของการคำนวณราคา `Order`, `OrderItem`, `Category` และ `Payment` อย่างแม่นยำบน CI
+
+```typescript filename="src/services/butcher-pricing-engine.spec.ts"
+import type { Category, Product, User } from '../domain/butcher-order-guard';
+
+export interface PricedOrderSummary {
+  orderItems: {
+    productId: string;
+    weightKg: number;
+    subtotal: number;
+  }[];
+  coldChainSurcharge: number;
+  vipDiscount: number;
+  netPayableAmount: number;
+}
+
+export function calculateSmartButcherOrder(
+  user: User,
+  categoriesById: ReadonlyMap<string, Category>,
+  selections: readonly { product: Product; weightKg: number }[],
+): PricedOrderSummary {
+  let rawItemsTotal = 0;
+  let requiresColdTruck = false;
+
+  const orderItems = selections.map(({ product, weightKg }) => {
+    const category = categoriesById.get(product.categoryId);
+    if (category?.requiresColdTruck) {
+      requiresColdTruck = true;
+    }
+
+    const subtotal = Math.round(product.pricePerKg * weightKg);
+    rawItemsTotal += subtotal;
+
+    return {
+      productId: product.id,
+      weightKg,
+      subtotal,
+    };
+  });
+
+  const vipDiscount = user.isVip ? Math.round(rawItemsTotal * 0.1) : 0;
+  const coldChainSurcharge = requiresColdTruck && rawItemsTotal < 5000 ? 250 : 0;
+  const netPayableAmount = rawItemsTotal - vipDiscount + coldChainSurcharge;
+
+  return {
+    orderItems,
+    coldChainSurcharge,
+    vipDiscount,
+    netPayableAmount,
+  };
+}
+
+// ตัวอย่างชุดทดสอบที่ถูกเรียกโดย npm run test:unit บน GitHub Actions
+describe('calculateSmartButcherOrder (CI Unit Gate)', () => {
+  const wagyuCategory: Category = {
+    id: 'cat-wagyu',
+    name: 'Japanese A5 Wagyu',
+    requiresColdTruck: true,
+  };
+
+  const ribeyeProduct: Product = {
+    id: 'prod-ribeye-a5',
+    categoryId: 'cat-wagyu',
+    name: 'Miyazaki A5 Ribeye 45-Day Dry-Aged',
+    sku: 'WGY-RIB-45D',
+    pricePerKg: 4800,
+    stockKg: 12.5,
+    dryAgedDays: 45,
+  };
+
+  const categories = new Map<string, Category>([[wagyuCategory.id, wagyuCategory]]);
+
+  it(' waives cold-truck surcharge when raw total reaches 5,000 THB and applies 10% VIP discount', () => {
+    const vipCustomer: User = {
+      id: 'usr-vip-01',
+      email: 'chef@butcher.co.th',
+      role: 'CUSTOMER',
+      isVip: true,
+    };
+
+    const summary = calculateSmartButcherOrder(vipCustomer, categories, [
+      { product: ribeyeProduct, weightKg: 1.5 }, // 4,800 * 1.5 = 7,200 บาท
+    ]);
+
+    expect(summary.coldChainSurcharge).toBe(0);
+    expect(summary.vipDiscount).toBe(720);
+    expect(summary.netPayableAmount).toBe(6480);
+  });
+});
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```yaml filename=".github/workflows/ci.compare.yml"
+# ❌ ผิด (Anti-pattern): ไม่ตั้ง timeout-minutes, ใช้ npm install และไม่แคช node_modules
+jobs:
+  bad-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm install # เสี่ยงได้เวอร์ชันแพ็กเกจไม่ตรงกับเครื่องนักพัฒนา
+      - run: npm test
+
+# ✅ ถูก (Best Practice): กำหนด timeout-minutes ป้องกันค้างกินโควตา และใช้ npm ci คู่กับ cache
+jobs:
+  good-ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run validate
+```
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+- **ควรกำหนด `timeout-minutes` ในทุก Job เสมอ**: เพราะค่าเริ่มต้นของ GitHub Actions คือปล่อยให้รันได้นานถึง **360 นาที (6 ชั่วโมง)** หากมีเทสต์ตัวใดตัวหนึ่งเกิด Deadlock หรือรอ Database ค้าง โควตานาทีฟรีของทั้งองค์กรจะถูกเผาผลาญหมดภายในครั้งเดียว
+- **ไม่ควรใช้**: ไม่ควรรัน `build` ก่อนรัน `lint` และ `typecheck` เพราะขั้นตอน `build` ใช้เวลานานกว่ามาก หากโค้ดมี Syntax Error ควรให้พังตั้งแต่ด่าน `lint` ใน 15 วินาทีแรก
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+
+**Q1: ทำไมการแยกขั้นตอน `lint`, `typecheck`, `test` และ `build` ออกจากกันจึงสำคัญ และในโปรเจกต์ขนาดใหญ่เราจะลดเวลารวมของ CI ได้อย่างไร?**
+- **แนวคำตอบ**: การแยกขั้นตอนทำให้เมื่อ CI พัง นักพัฒนาสามารถคลิกดูที่ชื่อ Step บนหน้า GitHub PR แล้วรู้ได้ทันทีว่าพังเพราะ Type Error, Lint Error หรือ Unit Test โดยไม่ต้องไล่อ่าน Log ยาวหลายพันบรรทัด สำหรับโปรเจกต์ขนาดใหญ่สามารถลดเวลาได้ด้วยการแยก `lint`, `typecheck` และ `unit-test` ออกเป็น Parallel Jobs ที่รันพร้อมกันบนคนละเครื่อง Runner หรือใช้เครื่องมือจัดการ Monorepo Cache อย่าง Turborepo
+
+---
+
+## 4. การรัน PostgreSQL 16 Service Container และ Playwright E2E บน GitHub Actions
+
+### แนวคิด (Concept)
+
+การทดสอบเพียงแค่ Unit Test ด้วยการจำลองข้อมูล (Mock) ไม่สามารถตรวจจับบั๊กที่เกิดจากคำสั่ง SQL จริง, การทำ Database Transaction Locking ตอนตัดสต็อกเนื้อวากิวพร้อมกันหลายออเดอร์ หรือการแสดงผลหน้าเว็บจริงบนเบราว์เซอร์ได้
+
+GitHub Actions จึงมีฟีเจอร์ทรงพลังชื่อ **Service Containers (`services:`)** ที่ช่วยให้เราสามารถปลุกฐานข้อมูล **PostgreSQL 16** ขึ้นมาข้างๆ โค้ดของเราระหว่างรัน CI เพื่อทำการ:
+1. รัน Database Migrations และ Seed ข้อมูลเนื้อพรีเมียมเริ่มต้น (`Category`, `Product`, `User`)
+2. รัน Backend Integration Tests (NestJS 11 + Supertest) กับ PostgreSQL 16 ของจริง
+3. รัน **Playwright E2E Tests** เพื่อจำลองลูกค้าเปิดหน้าเว็บ Next.js 16 เลือกชิ้นเนื้อ ใส่ตะกร้า และกดชำระเงินจนครบกระบวนการ
+
+### หลักการเบื้องหลัง (Under the Hood)
+
+เมื่อเราระบุ `services: postgres:` ในไฟล์ GitHub Actions Workflow:
+1. GitHub Runner จะสั่ง `docker pull postgres:16-alpine` และ启动 Container ขึ้นมาก่อนเริ่มรัน Steps ของโปรเจกต์
+2. สิ่งที่สำคัญที่สุดคือการใช้ `--health-cmd pg_isready` ใน `options:` เพื่อให้ GitHub Actions **รอจนกว่า PostgreSQL จะบูตเสร็จและพร้อมรับ TCP Connection ที่พอร์ต 5432 จริงๆ** ก่อนจึงค่อยเริ่มรันขั้นต่อไป หากไม่มี Health Check ขั้นตอนการรัน Migration มักจะพังแบบสุ่มเพราะเชื่อมต่อฐานข้อมูลเร็วเกินไป
+3. สำหรับ Playwright เมื่อพบเทสต์ที่ล้มเหลวบน CI เราไม่เห็นหน้าจอของเครื่องเซิร์ฟเวอร์ จึงต้องตั้งค่า `actions/upload-artifact@v4` ที่มีเงื่อนไข `if: ${{ !cancelled() }}` เพื่ออัปโหลดไฟล์ `playwright-report` และไฟล์ Trace (`.zip`) กลับมาให้นักพัฒนาดาวน์โหลดไปเปิดดูย้อนหลังได้ทีละเฟรม
+
+<Callout type="tip" title="เทคนิคเร่งความเร็ว PostgreSQL 16 บน CI ด้วย tmpfs หรือ fsync=off">
+เนื่องจากข้อมูลใน PostgreSQL Service Container บน CI ใช้สำหรับการทดสอบชั่วคราวแล้วลบทิ้งทันทีหลังจบ Job เราสามารถส่งพารามิเตอร์ -c fsync=off -c full_page_writes=off ให้กับ Postgres เพื่อไม่ต้องรอการเขียนลงดิสก์จริง ช่วยให้การรัน Migration และการล้างข้อมูลระหว่างเทสต์เร็วขึ้นถึง 30-50%
+</Callout>
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1 (ระดับพื้นฐาน): GitHub Actions Workflow สำหรับรัน PostgreSQL 16 Service Container และ Playwright E2E
+ไฟล์ตั้งค่า `.github/workflows/e2e-playwright.yml` ระดับ Production ที่มี Health Check สำหรับฐานข้อมูลและเก็บรายงานเมื่อเทสต์พัง
+
+```yaml filename=".github/workflows/e2e-playwright.yml"
+name: Smart Butcher - E2E & Database Integration CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e-tests:
+    name: PostgreSQL 16 + Playwright E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # ปลุก PostgreSQL 16 Container พร้อมตรวจสอบความพร้อมด้วย pg_isready
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: butcher_ci
+          POSTGRES_PASSWORD: butcher_ci_secret
+          POSTGRES_DB: smart_butcher_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U butcher_ci -d smart_butcher_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DATABASE_URL: postgresql://butcher_ci:butcher_ci_secret@localhost:5432/smart_butcher_test
+      JWT_SECRET: ci-only-ephemeral-jwt-secret-key-2026
+
+    steps:
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 2. Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: 3. Clean Install Dependencies
+        run: npm ci
+
+      - name: 4. Install Playwright Chromium Browser
+        run: npx playwright install --with-deps chromium
+
+      - name: 5. Run Database Migrations & Seed Butcher Catalog
+        run: |
+          npm run db:migrate
+          npm run db:seed
+
+      - name: 6. Run Playwright E2E Suite
+        run: npx playwright test
+
+      - name: 7. Upload Playwright Trace & Report on Failure
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-e2e-report
+          path: playwright-report/
+          retention-days: 7
+```
+
+#### ตัวอย่างที่ 2 (ระดับ Production): สคริปต์ Seed ข้อมูลและเทสต์ E2E ที่ตรวจสอบการตัดสต็อกและการชำระเงินกับฐานข้อมูลจริง
+โค้ดเตรียมข้อมูล (`Category`, `Product`, `User`, `Order`, `Payment`) และการทดสอบแบบ End-to-End บน CI
+
+```typescript filename="e2e/butcher-checkout-flow.spec.ts"
+import { test, expect } from '@playwright/test';
+import type {
+  Category,
+  Order,
+  Payment,
+  Product,
+  User,
+} from '../src/domain/butcher-order-guard';
+
+export interface SeededMarketplaceFixture {
+  vipUser: User;
+  wagyuCategory: Category;
+  striploinProduct: Product;
+}
+
+export const ciSeedFixture: SeededMarketplaceFixture = {
+  vipUser: {
+    id: 'usr-ci-001',
+    email: 'vip.customer@smartbutcher.test',
+    role: 'CUSTOMER',
+    isVip: true,
+  },
+  wagyuCategory: {
+    id: 'cat-ci-dry-aged',
+    name: 'Dry-Aged Beef Collection',
+    requiresColdTruck: true,
+  },
+  striploinProduct: {
+    id: 'prod-ci-striploin',
+    categoryId: 'cat-ci-dry-aged',
+    name: 'Kobe A5 Striploin 60-Day Dry-Aged',
+    sku: 'KOBE-STR-60D',
+    pricePerKg: 6200,
+    stockKg: 5.0,
+    dryAgedDays: 60,
+  },
+};
+
+test.describe('Smart Butcher Checkout E2E on GitHub Actions', () => {
+  test('allows VIP user to order custom-cut dry-aged striploin and completes payment', async ({
+    page,
+  }) => {
+    await page.goto('/products/KOBE-STR-60D');
+
+    await expect(
+      page.getByRole('heading', { name: ciSeedFixture.striploinProduct.name }),
+    ).toBeVisible();
+
+    // เลือกน้ำหนักเนื้อ 1.0 กิโลกรัม
+    const weightInput = page.getByLabel('น้ำหนักที่ต้องการ (กก.):');
+    await weightInput.fill('1.0');
+
+    await page.getByRole('button', { name: 'สั่งตัดเนื้อชิ้นนี้' }).click();
+
+    // ตรวจสอบหน้าสรุปคำสั่งซื้อ (ลด 10% สำหรับ VIP จาก 6,200 เหลือ 5,580 บาท)
+    await page.goto('/checkout');
+    await expect(page.getByText('5,580 บาท')).toBeVisible();
+
+    // ยืนยันการชำระเงินและตรวจรับข้อมูล Order & Payment จาก API
+    const paymentResponsePromise = page.waitForResponse(
+      (res) =>
+        res.url().includes('/api/orders/checkout') && res.status() === 201,
+    );
+
+    await page.getByRole('button', { name: 'ชำระเงินด้วย PromptPay' }).click();
+
+    const response = await paymentResponsePromise;
+    const body = (await response.json()) as { order: Order; payment: Payment };
+
+    expect(body.order.totalAmount).toBe(5580);
+    expect(body.payment.status).toBe('PAID');
+  });
+});
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```yaml filename=".github/workflows/postgres-service.compare.yml"
+# ❌ ผิด (Anti-pattern): ไม่ใส่ health-cmd ให้ PostgreSQL และติดตั้งเบราว์เซอร์ทุกตัวโดยไม่จำเป็น
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - 5432:5432
+steps:
+  - run: npx playwright install # ดาวน์โหลดทั้ง Chromium, Firefox, WebKit เสียเวลาหลายนาที
+
+# ✅ ถูก (Best Practice): ใช้ pg_isready รอจนฐานข้อมูลพร้อม และติดตั้งเฉพาะเบราว์เซอร์ที่ใช้จริงใน PR
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - 5432:5432
+    options: >-
+      --health-cmd="pg_isready -U butcher_ci"
+      --health-interval=5s
+      --health-retries=5
+steps:
+  - run: npx playwright install --with-deps chromium
+```
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+- **ควรใช้ Service Container (`postgres:16-alpine`) เมื่อ**: ต้องการทดสอบ API, Prisma/TypeORM Migrations, Foreign Key Constraints และ Transaction Isolation Levels ให้ตรงกับฐานข้อมูลจริงบน Production
+- **ไม่ควรใช้**: ไม่ควรใช้ SQLite in-memory แทน PostgreSQL ในการทำ Integration Test หากระบบจริงใช้ฟีเจอร์เฉพาะของ PostgreSQL เช่น `JSONB`, `ENUM`, `UUID` หรือ `SELECT ... FOR UPDATE` เพราะพฤติกรรมเรื่อง Concurrency และการล็อกแถวข้อมูลแตกต่างกันอย่างสิ้นเชิง
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+
+**Q1: ทำไมในขั้นตอนการรัน Migration บน GitHub Actions บางครั้งจึงเกิด Error `ECONNREFUSED 127.0.0.1:5432` ทั้งที่ได้ประกาศ `services: postgres` ไว้แล้ว และต้องแก้ไขอย่างไร?**
+- **แนวคำตอบ**: เพราะการที่ Docker สตาร์ท Container ของ Postgres เสร็จ (`docker run`) ไม่ได้แปลว่ากระบวนการของฐานข้อมูลข้างในบูตเสร็จและพร้อมรับการเชื่อมต่อแล้ว หากไม่กำหนด `--health-cmd="pg_isready"` ในส่วน `options` ของ Service Container ตัว GitHub Runner จะเริ่มรัน Step ถัดไปทันทีทำให้ต่อพอร์ต 5432 ไม่ติด การใส่ `--health-cmd` จะบังคับให้ Runner รอจนกว่า `pg_isready` จะคืนค่าสำเร็จก่อนเสมอ
+
+---
+
+## 5. การตั้งค่า Branch Protection Rules, GitHub Secrets และ Status Badges
+
+### แนวคิด (Concept)
+
+แม้เราจะเขียนไฟล์ `.github/workflows/ci-quality.yml` ไว้อย่างดีเยี่ยม แต่หากไม่ได้ตั้งค่า **Branch Protection Rules (หรือ Repository Rulesets)** บน GitHub นักพัฒนาก็ยังสามารถกดปุ่ม **"Merge pull request" ทั้งที่ CI ขึ้นสีแดง** หรือแอบสั่ง `git push --force origin main` ทับโค้ดของเพื่อนร่วมทีมได้อยู่ดี
+
+การกำกับดูแลระดับ Production จึงประกอบด้วย 3 เสาหลัก:
+1. **Branch Protection Rules**: บล็อกการ Merge จนกว่า Required Status Checks (เช่น `quality-and-build` และ `e2e-tests`) จะผ่านเป็นสีเขียวทั้งหมด, บังคับให้มี Code Review อย่างน้อย 1–2 คน และปิดกั้นการ Force Push ลงสาขา `main`
+2. **GitHub Actions Secrets & Variables**: แยกค่าความลับ (`secrets.PAYMENT_WEBHOOK_SECRET`, `secrets.PROD_DATABASE_URL`) ออกจากตัวแปรทั่วไป (`vars.NEXT_PUBLIC_API_URL`) โดย GitHub จะทำการปิดบัง (Masking `***`) ค่าจาก `secrets` ในหน้าจอ Log อัตโนมัติ
+3. **CI Status Badges**: แสดงป้ายสถานะการทำงานล่าสุดของ Pipeline บนไฟล์ `README.md` เพื่อให้ทีมเห็นสุขภาพของโปรเจกต์ได้ทันที
+
+### หลักการเบื้องหลัง (Under the Hood)
+
+- **กลไก Secret Masking และการป้องกัน Fork PR**: GitHub Actions เก็บค่า `secrets` โดยเข้ารหัสด้วย Libsodium Sealed Boxes และถอดรหัสเฉพาะในหน่วยความจำของ Runner ขณะทำงาน พร้อมสั่งให้ Log Output Filter ดักจับสตริงที่ตรงกับค่า Secret แล้วแทนที่ด้วย `***` ทันที นอกจากนี้ เพื่อป้องกันผู้ไม่หวังดีเปิด Pull Request จาก Forked Repository แล้วแก้ไฟล์ `.yml` ให้พิมพ์ค่า Secret ออกมา GitHub จะไม่ส่งค่า `secrets` ให้กับ PR ที่มาจาก External Fork โดยอัตโนมัติ
+- **Require branches to be up to date before merging**: ตัวเลือกนี้ใน Branch Protection ป้องกันปัญหา **"Semantic Merge Conflict"** เช่น PR ก. เปลี่ยนชื่อฟิลด์ `pricePerKg` ใน `Product` ส่วน PR ข. เรียกใช้ `pricePerKg` แบบเดิม แม้ทั้งคู่จะรัน CI ผ่านในสาขาตัวเองและไม่มี Git Conflict ตอนรวมไฟล์ แต่ถ้านำมารวมกันโค้ดจะพังทันที การเปิดออปชันนี้บังคับให้ PR ข. ต้องดึงโค้ดล่าสุดจาก `main` มาทดสอบ CI ใหม่ก่อนอนุญาตให้กด Merge
+
+<Callout type="warning" title="ห้ามพิมพ์ออบเจกต์ process.env ทั้งก้อนออกทาง console.log บน CI">
+แม้ GitHub Actions จะพยายามปิดบังค่า Secret ด้วยเครื่องหมายดอกจัน แต่หากคุณแปลงค่า Secret เป็น Base64 หรือพิมพ์โครงสร้างออบเจกต์ที่ถูกตัดบรรทัดออกทาง Log ระบบตรวจจับข้อความอาจพลาดและทำให้ความลับรั่วไหลสู่สาธารณะได้ จึงต้องตรวจสอบตัวแปรแวดล้อมผ่านฟังก์ชัน Validation เท่านั้นโดยห้ามพิมพ์ค่าจริงออกมา
+</Callout>
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1 (ระดับพื้นฐาน): การฉีด GitHub Secrets และ Variables เข้าสู่ Workflow และการแสดง Status Badge
+ตัวอย่างการอ้างอิง `secrets` และ `vars` อย่างปลอดภัยในขั้นตอนการทดสอบเชื่อมต่อระบบชำระเงินและการแสดงผลสถานะใน `README.md`
+
+```yaml filename=".github/workflows/staging-deploy-verify.yml"
+name: Smart Butcher - Staging Verification
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  verify-staging-config:
+    name: Validate Production-Grade Environment & Secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: staging
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Clean Install
+        run: npm ci
+
+      - name: Verify Required Secrets Without Logging Sensitive Values
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          PROMPTPAY_MERCHANT_SECRET: ${{ secrets.PROMPTPAY_MERCHANT_SECRET }}
+          NEXT_PUBLIC_MARKETPLACE_URL: ${{ vars.NEXT_PUBLIC_MARKETPLACE_URL }}
+        run: npx tsx src/devops/verify-ci-env.ts
+```
+
+#### ตัวอย่างที่ 2 (ระดับ Production): สคริปต์ตรวจสอบความครบถ้วนของ Environment Variables และการจำลองการตรวจสอบ Branch Protection Readiness
+โค้ด TypeScript สำหรับตรวจสอบความพร้อมของตัวแปรแวดล้อมและจำลองเงื่อนไขการอนุมัติ Merge ของคำสั่งซื้อระดับวิกฤตโดยไม่เปิดเผยข้อมูลความลับ
+
+```typescript filename="src/devops/verify-ci-env.ts"
+export interface RequiredCiEnvironment {
+  DATABASE_URL: string;
+  PROMPTPAY_MERCHANT_SECRET: string;
+  NEXT_PUBLIC_MARKETPLACE_URL: string;
+}
+
+export interface EnvValidationResult {
+  isValid: boolean;
+  missingOrInvalidKeys: string[];
+}
+
+export function validateCiEnvironment(
+  env: NodeJS.ProcessEnv,
+): EnvValidationResult {
+  const missingOrInvalidKeys: string[] = [];
+
+  if (
+    typeof env.DATABASE_URL !== 'string' ||
+    !env.DATABASE_URL.startsWith('postgresql://')
+  ) {
+    missingOrInvalidKeys.push('DATABASE_URL (ต้องขึ้นต้นด้วย postgresql://)');
+  }
+
+  if (
+    typeof env.PROMPTPAY_MERCHANT_SECRET !== 'string' ||
+    env.PROMPTPAY_MERCHANT_SECRET.trim().length < 32
+  ) {
+    missingOrInvalidKeys.push(
+      'PROMPTPAY_MERCHANT_SECRET (ต้องมีความยาวไม่ต่ำกว่า 32 ตัวอักษร)',
+    );
+  }
+
+  if (
+    typeof env.NEXT_PUBLIC_MARKETPLACE_URL !== 'string' ||
+    !env.NEXT_PUBLIC_MARKETPLACE_URL.startsWith('https://')
+  ) {
+    missingOrInvalidKeys.push(
+      'NEXT_PUBLIC_MARKETPLACE_URL (ต้องเป็น URL ที่ใช้ https://)',
+    );
+  }
+
+  return {
+    isValid: missingOrInvalidKeys.length === 0,
+    missingOrInvalidKeys,
+  };
+}
+
+// ใช้ตรวจสอบสถานะก่อนอนุญาตให้ผ่านขั้นตอน CI โดยไม่สั่ง console.log ค่า Secret ออกมาเด็ดขาด!
+export function assertCiEnvironmentOrThrow(env: NodeJS.ProcessEnv): void {
+  const result = validateCiEnvironment(env);
+  if (!result.isValid) {
+    throw new Error(
+      `การตั้งค่า GitHub Secrets/Variables ไม่สมบูรณ์: ${result.missingOrInvalidKeys.join(', ')}`,
+    );
+  }
+}
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+```yaml filename=".github/workflows/secrets-handling.compare.yml"
+# ❌ ผิด (Anti-pattern): ฮาร์ดโค้ดรหัสผ่านไว้ในไฟล์ .yml หรือสั่ง echo ค่า Secret ออกมาดูตอน Debug
+steps:
+  - name: Bad Debug Step
+    env:
+      PAYMENT_KEY: ${{ secrets.PROMPTPAY_MERCHANT_SECRET }}
+    run: |
+      echo "Debugging key: $PAYMENT_KEY"
+
+# ✅ ถูก (Best Practice): ตรวจสอบเฉพาะความมีอยู่หรือความยาวของตัวแปรโดยไม่พิมพ์ค่าจริงออกมา
+steps:
+  - name: Safe Secret Presence Check
+    env:
+      PAYMENT_KEY: ${{ secrets.PROMPTPAY_MERCHANT_SECRET }}
+    run: |
+      if [ -z "$PAYMENT_KEY" ]; then
+        echo "::error::Missing PROMPTPAY_MERCHANT_SECRET in GitHub Secrets"
+        exit 1
+      fi
+```
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+- **ควรเปิด Branch Protection Rules บนสาขา `main` เสมอ**: โดยบังคับทั้ง `Require a pull request before merging`, `Require status checks to pass before merging` และ `Require branches to be up to date before merging`
+- **ไม่ควรใช้**: ห้ามนำค่า Private Key หรือรหัสผ่านของฐานข้อมูลไปใส่ใน GitHub **Variables (`vars.*`)** เพราะค่าใน `vars` จะแสดงผลเป็นข้อความปกติ (Plain text) ในหน้า Log ของทุกคนที่เข้ามาดู Actions ให้ใส่ใน **Secrets (`secrets.*`)** เท่านั้น
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+
+**Q1: ทำไมเราต้องเปิดออปชัน `"Require branches to be up to date before merging"` ใน Branch Protection Rules ทั้งที่ Git ไม่ได้แจ้งเตือนว่ามี Merge Conflict เลย?**
+- **แนวคำตอบ**: เพราะ Git ตรวจจับเฉพาะ Physical Text Conflict (การแก้บรรทัดเดียวกันในไฟล์เดียวกัน) แต่ไม่สามารถตรวจจับ **Logical / Semantic Conflict** ได้ เช่น PR ที่ 1 ลบฟังก์ชัน `calculateVipDiscount()` ทิ้งและ Merge เข้า `main` ไปแล้ว ส่วน PR ที่ 2 เขียนโค้ดใหม่ที่เรียกใช้ `calculateVipDiscount()` โดยแตกสาขาไปตั้งแต่ก่อนที่ PR ที่ 1 จะ Merge หากไม่บังคับให้ PR ที่ 2 ดึงโค้ดล่าสุดจาก `main` มารัน CI ใหม่ก่อน ทันทีที่กด Merge โค้ดบน `main` จะพังทันที
+
+---
+
+## ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การรันงานหนักใน `pre-commit` Hook**: การใส่ `npm run build` หรือการรัน E2E Test ทั้งชุดไว้ใน `.husky/pre-commit` ทำให้นักพัฒนาต้องรอนานหลายนาทีทุกครั้งที่ Commit จนสุดท้ายทุกคนหันไปใช้ `--no-verify`
+2. **การส่งชื่อไฟล์ต่อท้าย `tsc --noEmit` ใน `lint-staged`**: ทำให้ TypeScript Compiler เพิกเฉยต่อการตั้งค่าใน `tsconfig.json` ทั้งหมด
+3. **การใช้ `npm install` แทน `npm ci` บน GitHub Actions**: เปิดช่องให้แพ็กเกจถูกอัปเดตเวอร์ชันย่อยโดยไม่ตั้งใจและทำให้การติดตั้งช้าลง
+4. **การไม่กำหนด `timeout-minutes` ใน GitHub Actions**: เมื่อเกิดอาการค้างในเทสต์หรือฐานข้อมูล ระบบจะปล่อยให้รันต่อเนื่องสูงสุดถึง 6 ชั่วโมงจนโควตา CI ของทีมหมดเกลี้ยง
+
+---
+
+## Checklist สรุป
+
+- [ ] ติดตั้ง **Husky v9** (`"prepare": "husky"`) และกำหนด `.husky/pre-commit` ให้รัน `npx lint-staged`
+- [ ] ใน `lint-staged.config.mjs` ใช้ฟังก์ชัน `() => 'tsc --noEmit'` เพื่อให้ TypeScript อ่านไฟล์ `tsconfig.json` เสมอ
+- [ ] ติดตั้ง **Commitlint** ใน `.husky/commit-msg` เพื่อบังคับใช้รูปแบบ **Conventional Commits** พร้อมกำหนด Scope ตามโมดูลของระบบ
+- [ ] ในไฟล์ GitHub Actions ใช้ `npm ci` คู่กับ `cache: 'npm'`, ตั้งค่า `concurrency` (`cancel-in-progress: true`) และกำหนด `timeout-minutes` ทุก Job
+- [ ] ตั้งค่า **PostgreSQL 16 Service Container** พร้อมระบุ `--health-cmd="pg_isready ..."` ก่อนรัน Migration และ E2E Tests
+- [ ] ตั้งค่า `actions/upload-artifact@v4` เพื่อเก็บรายงาน Playwright Report เมื่อเทสต์บน CI ล้มเหลว
+- [ ] เปิดใช้งาน **Branch Protection Rules** บนสาขา `main` โดยบังคับให้ CI ผ่านครบทุกด่านก่อนอนุญาตให้กด Merge
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+หลังจากตั้งค่าระบบดักจับคุณภาพโค้ดด้วย Git Hooks และสร้าง CI Pipeline บน GitHub Actions เรียบร้อยแล้ว แนะนำให้ศึกษาต่อในหัวข้อการตรวจจับชนิดข้อมูลเชิงลึกและการ Debug ระบบเมื่อเกิดข้อผิดพลาด:
+
+1. **[Debugging & Type Checking](/docs/testing/debugging-type-checking)**: เจาะลึกการใช้ `tsc --noEmit`, การตั้งค่า VS Code Debugger สำหรับ Jest, NestJS 11 และ Next.js 16 รวมถึงการทำ Structured Logging
+2. **[ESLint v9 & Prettier v3](/docs/testing/eslint-prettier)**: ทบทวนการตั้งค่า Flat Config และกฎเหล็กที่ถูกเรียกใช้งานในขั้นตอน `lint-staged` และ CI
+3. **[E2E Testing with Playwright](/docs/testing/e2e-playwright)**: เรียนรู้การเขียนชุดทดสอบ Playwright เชิงลึกและการวิเคราะห์ไฟล์ Trace ที่ดาวน์โหลดมาจาก GitHub Actions Artifacts
+4. **[Backend Testing (NestJS + Supertest)](/docs/testing/backend-testing)**: การออกแบบชุดทดสอบ Integration Test ที่เชื่อมต่อกับ PostgreSQL 16 Service Container
+5. **[Docker & Containerization](/docs/backend/docker)** และ **[Backend Security](/docs/backend/security)**: ต่อยอดจากการทำ CI ไปสู่การสร้าง Production Container และการป้องกันช่องโหว่ความปลอดภัย

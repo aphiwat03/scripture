@@ -1,0 +1,281 @@
+---
+title: useMutation
+category: Frontend
+parentTitle: TanStack Query v5
+version: TanStack Query v5.x
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ในขณะที่ `useQuery` ถูกสร้างมาเพื่อการ "อ่าน" ข้อมูลแบบไม่มี Side-effect ตัว Hook **`useMutation`** ถูกออกแบบมาเพื่อการ **"สร้าง, แก้ไข หรือลบข้อมูล"** (Create, Update, Delete) ผ่าน HTTP Methods เช่น `POST`, `PUT`, `PATCH`, และ `DELETE`
+
+คุณสมบัติหลักของ `useMutation` ใน TanStack Query v5:
+1. **Lifecycle Callbacks**: มีจุดเชื่อมต่อการทำงานแบบครบวงจร (`onMutate`, `onSuccess`, `onError`, `onSettled`) ทั้งในระดับ Hook Definition และระดับ Call-site
+2. **จัดการสถานะ Mutation อัตโนมัติ**: ให้สถานะ `isPending` (แทนที่ `isLoading` ใน v4), `isSuccess`, `isError`, และ `variables` ที่ส่งไปล่าสุด
+3. **ทางเลือกในการสั่งทำงาน 2 รูปแบบ**:
+   - **`mutate`**: สั่งทำงานแบบ Fire-and-forget ดักจับผลลัพธ์ผ่าน Callbacks ไม่ขว้าง Unhandled Promise Rejection (แนะนำเป็นค่าเริ่มต้น)
+   - **`mutateAsync`**: คืนค่าเป็น Promise สามารถใช้ `await` ได้ แต่ **ต้องครอบ `try/catch` เสมอ** มิฉะนั้นแอปจะ Crash เมื่อเกิด Error
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### วงจรชีวิตของ Mutation (Mutation Lifecycle Flow)
+
+```
+[ผู้ใช้คลิก Submit Form]
+   │
+   ├─► mutate(variables)
+   │      │
+   │      ├─► 1. onMutate(variables)
+   │      │      (ทำงานทันทีก่อนยิง Network เหมาะกับการทำ Optimistic Update หรือเซฟ Snapshot)
+   │      │
+   │      ├─► 2. mutationFn(variables) [Network I/O: isPending = true]
+   │      │      │
+   │      │      ├─── [สำเร็จ] ──► 3. onSuccess(data, variables, context)
+   │      │      │
+   │      │      └─── [ล้มเหลว] ──► 4. onError(error, variables, context)
+   │      │
+   │      └─► 5. onSettled(data, error, variables, context)
+   │             (ทำงานเสมอไม่ว่าจะสำเร็จหรือล้มเหลว คล้ายกับ block finally)
+```
+
+### ความแตกต่างระหว่าง `mutate` และ `mutateAsync`
+- `mutate`: TanStack Query จะครอบ Error ภายในตัวเพื่อป้องกัน Unhandled Rejection หากเกิดข้อผิดพลาดจะส่งต่อไปยัง Callback `onError` เหมาะที่สุดกับ UI Components
+- `mutateAsync`: ส่ง Raw Promise ออกมา หากเกิดข้อผิดพลาดและเราไม่มี `catch()` เบราว์เซอร์จะพ่น Unhandled Promise Rejection เหมาะเมื่อต้องการทำ Chaining หลาย Mutation ต่อกันตามลำดับ (Sequential Execution)
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+ฟอร์มสร้างคำสั่งซื้อสินค้า (`CreateOrderForm.tsx`) เชื่อมต่อกับ **React Hook Form** และ **Zod Validation**:
+
+```tsx filename="src/features/orders/components/CreateOrderForm.tsx"
+'use client';
+
+import React from 'react';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+
+// 1. Zod Schema สำหรับฟอร์มสั่งซื้อ
+const createOrderSchema = z.object({
+  customerName: z.string().min(2, 'กรุณาระบุชื่อผู้สั่งซื้ออย่างน้อย 2 ตัวอักษร'),
+  shippingAddress: z.string().min(10, 'กรุณาระบุที่อยู่จัดส่งให้ชัดเจน'),
+  paymentMethod: z.enum(['credit_card', 'bank_transfer', 'promptpay']),
+  notes: z.string().optional(),
+});
+
+type CreateOrderFormValues = z.infer<typeof createOrderSchema>;
+
+interface OrderResponse {
+  orderId: string;
+  orderNumber: string;
+  totalAmount: number;
+  status: string;
+}
+
+// 2. ฟังก์ชัน API ยิง POST
+async function createOrderApi(payload: CreateOrderFormValues): Promise<OrderResponse> {
+  const res = await fetch('/api/orders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => null);
+    throw new Error(errorBody?.message || 'ไม่สามารถสร้างคำสั่งซื้อได้');
+  }
+
+  return res.json();
+}
+
+export function CreateOrderForm() {
+  const queryClient = useQueryClient();
+
+  const {
+    register,
+    handleSubmit,
+    reset,
+    formState: { errors },
+  } = useForm<CreateOrderFormValues>({
+    resolver: zodResolver(createOrderSchema),
+    defaultValues: {
+      customerName: '',
+      shippingAddress: '',
+      paymentMethod: 'promptpay',
+      notes: '',
+    },
+  });
+
+  // 3. useMutation จัดการบันทึกข้อมูล
+  const createOrderMutation = useMutation({
+    mutationFn: createOrderApi,
+    onSuccess: (data) => {
+      // 1. Invalidate แคชของรายการออเดอร์ เพื่อให้หน้ารายการดึงข้อมูลใหม่
+      queryClient.invalidateQueries({ queryKey: ['orders'] });
+      // 2. เคลียร์ตะกร้าสินค้า
+      queryClient.invalidateQueries({ queryKey: ['cart'] });
+      // 3. รีเซ็ตฟอร์ม
+      reset();
+      alert(`สั่งซื้อสำเร็จ! หมายเลขคำสั่งซื้อของคุณคือ ${data.orderNumber}`);
+    },
+    onError: (err: Error) => {
+      alert(`เกิดข้อผิดพลาด: ${err.message}`);
+    },
+  });
+
+  const onSubmit = (values: CreateOrderFormValues) => {
+    // ใช้ mutate แบบ Fire-and-forget ปลอดภัยจาก crash
+    createOrderMutation.mutate(values);
+  };
+
+  return (
+    <form onSubmit={handleSubmit(onSubmit)} className="max-w-xl space-y-4 rounded-xl border p-6 bg-white shadow-sm">
+      <h2 className="text-xl font-bold text-gray-900">ยืนยันข้อมูลการสั่งซื้อ</h2>
+
+      <div>
+        <label className="block text-sm font-medium text-gray-700">ชื่อผู้รับสินค้า</label>
+        <input
+          {...register('customerName')}
+          disabled={createOrderMutation.isPending}
+          className="mt-1 w-full rounded-md border p-2 text-sm disabled:bg-gray-100"
+          placeholder="นายสมชาย ใจดี"
+        />
+        {errors.customerName && (
+          <p className="mt-1 text-xs text-red-500">{errors.customerName.message}</p>
+        )}
+      </div>
+
+      <div>
+        <label className="block text-sm font-medium text-gray-700">ที่อยู่จัดส่ง</label>
+        <textarea
+          {...register('shippingAddress')}
+          disabled={createOrderMutation.isPending}
+          rows={3}
+          className="mt-1 w-full rounded-md border p-2 text-sm disabled:bg-gray-100"
+          placeholder="123/45 ถนนสุขุมวิท..."
+        />
+        {errors.shippingAddress && (
+          <p className="mt-1 text-xs text-red-500">{errors.shippingAddress.message}</p>
+        )}
+      </div>
+
+      <div>
+        <label className="block text-sm font-medium text-gray-700">ช่องทางชำระเงิน</label>
+        <select
+          {...register('paymentMethod')}
+          disabled={createOrderMutation.isPending}
+          className="mt-1 w-full rounded-md border p-2 text-sm disabled:bg-gray-100"
+        >
+          <option value="promptpay">พร้อมเพย์ (PromptPay QR)</option>
+          <option value="credit_card">บัตรเครดิต / เดบิต</option>
+          <option value="bank_transfer">โอนเงินผ่านบัญชีธนาคาร</option>
+        </select>
+      </div>
+
+      {createOrderMutation.isError && (
+        <div className="rounded bg-red-50 p-3 text-sm text-red-600">
+          {createOrderMutation.error.message}
+        </div>
+      )}
+
+      <button
+        type="submit"
+        disabled={createOrderMutation.isPending}
+        className="w-full flex items-center justify-center rounded-lg bg-blue-600 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:bg-blue-300 transition-colors"
+      >
+        {createOrderMutation.isPending ? (
+          <span className="flex items-center gap-2">
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+            กำลังประมวลผลคำสั่งซื้อ...
+          </span>
+        ) : (
+          'ชำระเงินและสร้างคำสั่งซื้อ'
+        )}
+      </button>
+    </form>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม (useEffect vs TanStack Query)
+
+| ความสามารถ | วิธีเดิม (เขียน `useState` คุมฟอร์ม) | TanStack Query (`useMutation`) |
+| :--- | :--- | :--- |
+| **สถานะ Loading/Submitting** | ต้องสร้าง `const [isSubmitting, setIsSubmitting] = useState(false)` | มี `isPending` ให้ใช้ทันที |
+| **การจัดการ Exception** | ต้องครอบ `try / catch / finally` และสั่ง `setIsSubmitting(false)` ทุกกิ่ง | จัดการ Lifecycle ให้เองผ่าน `onSuccess`, `onError`, `onSettled` |
+| **การป้องกันปุ่มเบิ้ล (Double Submit)** | หากลืมดัก flag หรือเกิด error ก่อน finally ปุ่มจะค้าง | `isPending` สะท้อนสถานะจริงของ Promise เสมอ |
+| **Cache Synchronization** | เมื่อบันทึกสำเร็จ ต้องส่ง callback ขึ้นไปบอก parent ให้โหลดใหม่ | เรียก `queryClient.invalidateQueries` สั่งอัปเดตทุกคอมโพเนนต์ที่ใช้แคชนี้ทันที |
+
+---
+
+## 5. ผิด vs ถูก
+
+### แบบที่ผิด ❌: เรียกใช้ `mutateAsync` โดยไม่มี `try / catch`
+
+```tsx
+// ❌ ผิดมหันต์: mutateAsync คืนค่า Raw Promise หากเซิร์ฟเวอร์ตอบ 400 หรือ 500
+// หน้าเว็บจะขึ้น Uncaught (in promise) Error และอาจทำให้ Next.js Error Boundary ทำงาน
+const { mutateAsync } = useMutation({ mutationFn: createOrderApi });
+
+const handleBadSubmit = async (data: FormValues) => {
+  // ❌ หาก API พัง บรรทัดนี้จะระเบิดทันที!
+  await mutateAsync(data);
+  router.push('/success');
+};
+```
+
+### แบบที่ถูก ✅: ใช้ `mutate` ทั่วไป หรือครอบ `try / catch` เมื่อใช้ `mutateAsync`
+
+```tsx
+// ✅ ถูกต้องแบบที่ 1: ใช้ mutate ธรรมดาพร้อม Callbacks (แนะนำที่สุด)
+const { mutate } = useMutation({ mutationFn: createOrderApi });
+
+const handleGoodSubmit = (data: FormValues) => {
+  mutate(data, {
+    onSuccess: () => router.push('/success'),
+    onError: (err) => toast.error(err.message),
+  });
+};
+
+// ✅ ถูกต้องแบบที่ 2: ใช้ mutateAsync ร่วมกับ try / catch
+const handleAsyncSubmit = async (data: FormValues) => {
+  try {
+    await mutateAsync(data);
+    router.push('/success');
+  } catch (err) {
+    toast.error('ไม่สามารถสร้างคำสั่งซื้อได้');
+  }
+};
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ `mutate` (Callbacks) เมื่อ:
+- การทำงานกับแบบฟอร์ม UI ทั่วไป
+- ต้องการให้จัดการ Error ผ่าน `onError` โดยไม่มีความเสี่ยงต่อ Unhandled Promise Rejection
+
+### ควรใช้ `mutateAsync` เมื่อ:
+- ต้องการรัน Mutation หลายตัวต่อเนื่องกันตามลำดับ เช่น ต้องสร้าง Invoice ให้เสร็จก่อน แล้วนำ `invoiceId` ไปสั่งตัดเงินผ่าน Payment Gateway ต่อ
+- ต้องการใช้ร่วมกับ `Promise.all` เพื่อยิงบันทึกหลายรายการพร้อมกัน
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมใน TanStack Query จึงแนะนำให้ใช้ `mutate` มากกว่า `mutateAsync` สำหรับการทำงานบน UI Component ทั่วไป?
+**แนวทางตอบ**:
+เพราะ `mutate` ถูกออกแบบมาเพื่อจัดการ Error ภายในตัวเองแบบปลอดภัย หากการทำงานของ `mutationFn` ล้มเหลว มันจะส่ง Error ไปยังฟังก์ชัน `onError` โดยไม่มีการปล่อย Unhandled Promise Rejection ออกมาสู่เบราว์เซอร์ ในทางกลับกัน `mutateAsync` จะส่ง Promise ดิบออกมา หากผู้ใช้เรียกใช้โดยไม่ครอบ `try/catch` แล้วเซิร์ฟเวอร์ตอบ Error กลับมา จะส่งผลให้เกิด Uncaught Exception ซึ่งอาจทำให้ทั้งหน้าแอปพลิเคชันพัง หรือถูก Error Boundary ดักจับจนแสดงหน้าจอขาวโดยไม่จำเป็น
+
+### Q2: เราสามารถส่ง Callbacks (`onSuccess`, `onError`) ได้ทั้งใน `useMutation({...})` และในฟังก์ชัน `mutate(data, {...})` ทั้งสองที่นี้ทำงานต่างกันอย่างไร?
+**แนวทางตอบ**:
+- Callbacks ใน **`useMutation({...})`**: จะทำงาน **ทุกครั้ง** และ **รับประกันว่าจะทำงานเสมอ** แม้คอมโพเนนต์จะถูก Unmount ไปแล้วในระหว่างที่กำลังรอคำขอ เหมาะสำหรับการทำ Cache Invalidation หรือ Refetch ข้อมูลส่วนกลาง
+- Callbacks ใน **`mutate(data, {...})`**: จะทำงานเฉพาะเมื่อคอมโพเนนต์นั้น **ยังคง Mount อยู่ในหน้าจอ** เท่านั้น หากผู้ใช้กดเปลี่ยนหน้าไปก่อนที่คำขอจะเสร็จ Callbacks ที่ส่งใน `mutate` จะไม่ถูกเรียก เหมาะกับงานเฉพาะหน้าของ UI เช่น การสั่งเปลี่ยนหน้า (`router.push`), การปิด Modal, หรือการแสดง Toast เฉพาะหน้านั้น

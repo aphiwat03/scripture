@@ -1,0 +1,152 @@
+---
+title: Basics & Syntax
+category: Frontend
+parentTitle: CSS
+version: CSS3 / Modern CSS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+หาก HTML คือ **"โครงสร้างกระดูกและผนังปูนของอาคาร"** CSS (Cascading Style Sheets) ก็คือ **"การตกแต่งภายใน สถาปัตยกรรม และการเลือกทาสี"**
+
+โครงสร้างของคำสั่ง CSS (Rule-set) ประกอบด้วย 3 ส่วนหลัก:
+1. **Selector**: ตัวชี้เป้า ว่าต้องการตกแต่ง Element ตัวใดในหน้าจอ (เช่น `.btn-primary`)
+2. **Property**: คุณสมบัติที่ต้องการเปลี่ยน (เช่น `background-color`, `padding`)
+3. **Value**: ค่าที่ต้องการกำหนดให้คุณสมบัตินั้น (เช่น `#0071e3`, `12px 24px`)
+
+วิธีการนำ CSS มาใช้งาน:
+- **External CSS (`<link rel="stylesheet">`)**: แยกไฟล์ `.css` ภายนอก (มาตรฐานสากลที่แนะนำที่สุด เพราะแคชได้และโค้ดสะอาด)
+- **Internal CSS (`<style>`)**: ใส่ใน `<head>` ของไฟล์ HTML (เหมาะกับ Critical CSS เล็กๆ)
+- **Inline CSS (`style="..."`)**: แปะลงในแท็กโดยตรง (หลีกเลี่ยงเป็นส่วนใหญ่ เพราะ Specificity สูงเกินไปและนำกลับมาใช้ซ้ำไม่ได้)
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+1. **CSSOM (CSS Object Model)**: เมื่อเบราว์เซอร์ดาวน์โหลดไฟล์ CSS มา มันจะแปลงข้อความสไตล์เป็นโครงสร้างต้นไม้ที่เรียกว่า CSSOM ควบคู่ไปกับ DOM Tree
+2. **Render-Blocking Nature**: ไฟล์ CSS ภายนอกใน `<head>` เป็นทรัพยากรประเภท **Render-Blocking** หมายความว่าเบราว์เซอร์จะไม่ยอมวาดหน้าจอ (Paint) จนกว่าจะดาวน์โหลดและ Parse CSS ทั้งหมดเสร็จ เพื่อป้องกันปัญหา **FOUC (Flash of Unstyled Content)** ซึ่งก็คืออาการที่ผู้ใช้เห็นหน้าจอเป็นข้อความดิบสีขาวดำกระตุกวูบก่อนจะมีสีสัน
+3. **Comments**: คอมเมนต์ใน CSS เขียนด้วย `/* ... */` (CSS ไม่มีคอมเมนต์แบบ `//` บรรทัดเดียว ยกเว้นใน SCSS)
+
+---
+
+## 3. ตัวอย่างโค้ด (CSS & HTML)
+
+### ตัวอย่างที่ 1: การประกาศ Rule-set ของปุ่มกด (Button Component)
+
+```css filename="buttons.css"
+/* Selector ชี้เป้าไปที่คลาส .btn-primary */
+.btn-primary {
+  /* Property: Value; */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 20px;
+  background-color: #0071e3; /* Apple Blue */
+  color: #ffffff;
+  border: 1px solid transparent;
+  border-radius: 9999px; /* Pill Shape */
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: none;
+}
+```
+
+### ตัวอย่างที่ 2: การโหลด External CSS ที่ถูกต้องใน HTML
+
+```html filename="index.html"
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <title>ระบบล็อกอิน — Scripture</title>
+  
+  <!-- วิธีที่ดีที่สุด: External CSS แยกไฟล์ ชัดเจน มีประสิทธิภาพ -->
+  <link rel="stylesheet" href="/styles/reset.css">
+  <link rel="stylesheet" href="/styles/theme.css">
+  <link rel="stylesheet" href="/styles/components.css">
+</head>
+<body>
+  <button type="button" class="btn-primary">เข้าสู่ระบบ</button>
+</body>
+</html>
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ใช้ Inline Styles กระจายเต็มหน้าจอ
+
+```html
+<!-- ผิด: นำกลับมาใช้ซ้ำไม่ได้, แคชไม่ได้, Specificity สูงมากจนแก้ทับยากในภายหลัง -->
+<div style="background-color: #f8fafc; padding: 24px; border-radius: 12px; margin-bottom: 16px;">
+  <h2 style="font-size: 20px; color: #0f172a; margin-bottom: 8px;">ยินดีต้อนรับ</h2>
+  <button style="background: #0071e3; color: white; padding: 8px 16px; border-radius: 6px;">ยืนยัน</button>
+</div>
+```
+
+### ✅ โค้ดที่ถูกต้อง: ประกาศเป็น Class แล้วนำมาใช้ซ้ำ
+
+```css
+/* ถูกต้อง: รวมสไตล์ไว้ที่คลาสเดียว ดูแลง่ายในจุดเดียว */
+.welcome-card {
+  background-color: #f8fafc;
+  padding: 24px;
+  border-radius: 12px;
+  margin-bottom: 16px;
+}
+
+.welcome-title {
+  font-size: 20px;
+  color: #0f172a;
+  margin-bottom: 8px;
+}
+```
+
+---
+
+## 5. เทียบกับ Tailwind CSS v4
+
+| Pure CSS Property | Tailwind CSS v4 Utility Class |
+| :--- | :--- |
+| `display: inline-flex;` | `inline-flex` |
+| `background-color: #0071e3;` | `bg-[#0071e3]` หรือ `bg-blue-600` |
+| `padding: 8px 16px;` | `px-4 py-2` |
+| `border-radius: 9999px;` | `rounded-full` |
+| `cursor: pointer;` | `cursor-pointer` |
+
+```html
+<!-- ใน Tailwind CSS v4: รวม utility classes ตรงๆ -->
+<button class="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-full cursor-pointer">
+  เข้าสู่ระบบ
+</button>
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ External CSS
+- สำหรับการออกแบบสไตล์ส่วนใหญ่ของเว็บไซต์
+- เพื่อให้เบราว์เซอร์สามารถทำ HTTP Caching ไฟล์ `.css` ได้ ทำให้การเปิดหน้าถัดไปโหลดเร็วขึ้นทันที
+
+### ไม่ควรใช้ Inline Styles
+- ห้ามใช้ inline style สำหรับการจัดเลย์เอาต์หลัก เพราะไม่สามารถเขียน Media Queries (`@media`) หรือ Pseudo-classes (`:hover`) ใน inline style ได้
+- ใช้ inline style เฉพาะเมื่อมีค่าที่เป็น Dynamic Value จริงๆ จาก JavaScript เช่น พิกัดตำแหน่งจากการลากวาง หรือความกว้าง Progress Bar `style={{ width: `${percent}%` }}`
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: Flash of Unstyled Content (FOUC) คืออะไร และการวางแท็ก `<link rel="stylesheet">` ไว้ใน `<head>` ช่วยป้องกันปัญหานี้ได้อย่างไร?
+**แนวทางคำตอบ**: FOUC คือปรากฏการณ์ที่หน้าเว็บถูกแสดงผลออกมาเป็นตัวหนังสือและโครงสร้างดิบที่ไม่มีการตกแต่งชั่วครู่หนึ่ง ก่อนที่ไฟล์ CSS จะโหลดเสร็จแล้วหน้าจอจึงกระตุกเปลี่ยนเป็นรูปแบบที่สวยงาม
+การวางแท็ก `<link rel="stylesheet">` ไว้ในแท็ก `<head>` เป็นการบอกให้เบราว์เซอร์บล็อกการวาดหน้าจอ (Render-blocking) ไว้ก่อน จนกว่าการดาวน์โหลดและประมวลผล CSSOM จะเสร็จสิ้นสมบูรณ์ ทำให้เมื่อเบราว์เซอร์เริ่มวาดหน้าจอในครั้งแรก (First Paint) ผู้ใช้จะเห็นหน้าจอที่ตกแต่งเสร็จสมบูรณ์ทันทีโดยไม่เกิด FOUC
+
+### Q2: ทำไมการใช้ Inline Style จึงถือเป็นข้อปฏิบัติที่ไม่แนะนำ (Bad Practice) ในระบบขนาดใหญ่?
+**แนวทางคำตอบ**: 
+1. **Specificity สูงเกินไป**: Inline Style มีคะแนนความสำคัญสูงมาก ทำให้ไม่สามารถเขียนคลาส CSS ปกติมาเขียนทับได้ (เว้นแต่จะใช้ `!important`)
+2. **ไม่รองรับฟีเจอร์สำคัญของ CSS**: ไม่สามารถเขียน Media Queries สำหรับ Responsive Design, ไม่สามารถใช้ Pseudo-classes (`:hover`, `:focus`), และไม่รองรับ Keyframe Animations
+3. **สูญเสียการ Caching**: โค้ดสไตล์จะติดไปกับเอกสาร HTML ทุกครั้ง เพิ่มขนาด HTML Payload โดยไม่สามารถถูกเบราว์เซอร์แยกแคชได้

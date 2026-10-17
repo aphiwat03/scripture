@@ -1,0 +1,132 @@
+---
+title: Flexbox Layout
+category: Frontend
+parentTitle: CSS
+version: CSS3 / Modern CSS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**Flexbox (Flexible Box Layout)** คือระบบจัดเลย์เอาต์แบบ **1 มิติ (One-Dimensional)** ที่ถูกสร้างขึ้นมาเพื่อแก้ปัญหาความทุกข์ทรมานในการจัดตำแหน่งในอดีต (เช่น การจัดกึ่งกลางแนวตั้ง หรือการกระจายระยะห่างระหว่างปุ่ม)
+
+หัวใจสำคัญคือแนวคิด **2 แกน (Two Axes)**:
+- **Main Axis (แกนหลัก)**: วิ่งตามทิศทางของ `flex-direction` (ค่าเริ่มต้นคือแนวนอน `row`) ควบคุมการกระจายพื้นที่ด้วย **`justify-content`**
+- **Cross Axis (แกนรอง)**: วิ่งตั้งฉากกับแกนหลัก ควบคุมการจัดแนวระนาบด้วย **`align-items`**
+- **`gap`**: ระยะห่างระหว่างลูกๆ โดยไม่ต้องคอยเขียน `margin-right` แล้วตามไปแก้ตัวสุดท้ายด้วย `:last-child`
+- **`flex: grow shrink basis`**: สัดส่วนการขยาย (`flex-grow`), การหด (`flex-shrink`), และขนาดตั้งต้น (`flex-basis`)
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ทำไม `truncate` (ข้อความตัด ...) ในลูก Flex ถึงไม่ยอมตัดคำ แต่ดันทะลุกรอบ?
+นี่คือหนึ่งในบั๊กที่พบมากที่สุดในการสร้าง Navbar หรือการ์ด!
+- โดยปกติใน Flexbox ลูกทุกตัวจะมีค่าเริ่มต้นคือ **`min-width: auto;`**
+- หมายความว่า กล่องลูกจะไม่ยอมหดตัวให้เล็กกว่า "ขนาดของเนื้อหาข้างใน (Content Size)" ดังนั้น แม้จะใส่ `overflow: hidden; text-overflow: ellipsis;` ข้อความยาวๆ ก็จะไม่ยอมตัดคำ และจะดันขอบ Flex ให้พัง
+- **วิธีแก้**: ต้องใส่ **`min-width: 0;`** (หรือใน Tailwind คือคลาส `min-w-0`) บนกล่องลูก เพื่อบอก Flexbox ว่า *"อนุญาตให้กล่องนี้หดตัวจนเล็กกว่าเนื้อหาได้"*
+
+---
+
+## 3. ตัวอย่างโค้ด (Modern CSS)
+
+### ตัวอย่างที่ 1: การจัดกึ่งกลางหน้าจอแบบสมบูรณ์ (The Ultimate Centering)
+
+```css filename="center.css"
+.login-container {
+  min-height: 100dvh;
+  display: flex;
+  justify-content: center; /* กึ่งกลางแกนหลัก (แนวนอน) */
+  align-items: center;     /* กึ่งกลางแกนรอง (แนวตั้ง) */
+  padding: 16px;
+}
+```
+
+### ตัวอย่างที่ 2: โครงสร้าง Navbar แบบสากล (Logo ซ้าย, Search กลาง, Profile ขวา)
+
+```css filename="navbar.css"
+.navbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 60px;
+  padding: 0 24px;
+  gap: 16px;
+  background-color: #ffffff;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.navbar-brand {
+  flex-shrink: 0; /* โลโก้ห้ามโดนบีบหดเด็ดขาด */
+}
+
+.navbar-search {
+  flex-grow: 1;   /* ช่องค้นหายืดหยุ่นกินพื้นที่ว่างที่เหลือตรงกลาง */
+  max-width: 480px;
+  min-width: 0;   /* ป้องกันเนื้อหาดันขอบ */
+}
+
+.navbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0; /* ปุ่มโปรไฟล์ห้ามหด */
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ใช้ `margin-right` เว้นระยะห่างใน Flex
+
+```css
+/* ผิด: วิธีโบราณ ต้องมาคอยเขียน :last-child ปลด margin ตัวสุดท้ายทิ้ง */
+.btn-group {
+  display: flex;
+}
+.btn-group button {
+  margin-right: 12px;
+}
+.btn-group button:last-child {
+  margin-right: 0;
+}
+```
+
+### ✅ โค้ดที่ถูกต้อง: ใช้คุณสมบัติ `gap`
+
+```css
+/* ถูกต้อง: สั้น กระชับ เบราว์เซอร์เว้นระยะห่างเฉพาะ "ระหว่างกลาง" ให้อัตโนมัติ */
+.btn-group {
+  display: flex;
+  gap: 12px;
+}
+```
+
+---
+
+## 5. เทียบกับ Tailwind CSS v4
+
+| Modern Flexbox CSS | Tailwind CSS v4 Utility |
+| :--- | :--- |
+| `display: flex;` | `flex` |
+| `flex-direction: column;` | `flex-col` |
+| `align-items: center;` | `items-center` |
+| `justify-content: space-between;` | `justify-between` |
+| `gap: 16px;` | `gap-4` |
+| `flex-grow: 1; flex-shrink: 1; flex-basis: 0%;` | `flex-1` |
+| `flex-shrink: 0;` | `shrink-0` |
+| `min-width: 0;` | `min-w-0` |
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ชวร์ธแฮนด์ `flex: 1` ย่อมาจากอะไร และต่างจาก `flex: auto` อย่างไร?
+**แนวทางคำตอบ**:
+- `flex: 1` ย่อมาจาก `flex-grow: 1; flex-shrink: 1; flex-basis: 0%;` หมายความว่าเบราว์เซอร์จะไม่นำขนาดเนื้อหาเดิมมาคำนวณตั้งต้น ทุกกล่องที่มี `flex: 1` จะเริ่มนับจาก 0 และแบ่งพื้นที่ว่างที่เหลือในคอนเทนเนอร์เท่าๆ กันอย่างสมบูรณ์แบบ
+- `flex: auto` ย่อมาจาก `flex-grow: 1; flex-shrink: 1; flex-basis: auto;` หมายความว่าเบราว์เซอร์จะคำนวณพื้นที่เริ่มต้นตามขนาดเนื้อหาจริงของแต่ละกล่องก่อน แล้วจึงนำพื้นที่ว่างที่เหลือมาเฉลี่ยแบ่งต่อ ทำให้กล่องที่มีเนื้อหาเยอะกว่าจะได้ขนาดสุดท้ายที่ใหญ่กว่า
+
+### Q2: ทำไมข้อความที่ใส่ `text-overflow: ellipsis` ภายใน Flex Item ถึงไม่ยอมขึ้นจุดไข่ปลา (...) และแก้ไขอย่างไร?
+**แนวทางคำตอบ**: เพราะค่าเริ่มต้นของ Flex Item คือ `min-width: auto;` ซึ่งบังคับให้ความกว้างขั้นต่ำของกล่องต้องไม่เล็กกว่าขนาดของข้อความด้านใน ทำให้กล่องไม่ยอมหดตัวและดันคอนเทนเนอร์ล้นออกไป 
+วิธีแก้ไขคือการเติม **`min-width: 0;`** (หรือคลาส `min-w-0` ใน Tailwind) ให้กับ Flex Item ตัวนั้น เพื่อเขียนทับค่าเริ่มต้นและอนุญาตให้กล่องสามารถหดตัวแคบลงกว่าข้อความได้ ส่งผลให้ `overflow: hidden` และ `text-overflow: ellipsis` ทำงานตัดคำได้อย่างถูกต้อง

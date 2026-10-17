@@ -1,0 +1,325 @@
+---
+title: Sonner Setup & Core API
+category: Frontend
+parentTitle: Toast Notify
+version: Sonner & React Toastify (Next.js 16)
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**Sonner** เป็นไลบรารีระบบแจ้งเตือน (Toast Notification) ที่ออกแบบมาเพื่อตอบโจทย์สถาปัตยกรรมเว็บสมัยใหม่ โดยยึดหลักการสำคัญคือ **"ติดตั้งจุดเดียว เรียกใช้ได้จากทุกที่" (Single Toaster, Global Trigger)**
+
+ใน **Next.js 16 (App Router)** ซึ่งใช้สถาปัตยกรรมแบบ Server Components โดยค่าเริ่มต้น การนำเข้าคอมโพเนนต์ที่ต้องเข้าถึง Window API หรือ DOM Events เช่น `<Toaster />` จะต้องทำความเข้าใจการแบ่งขอบเขต (Client Boundary) เป็นอย่างดี เพื่อให้แน่ใจว่าระบบสามารถเรนเดอร์ร่วมกับระบบจัดการธีม (`next-themes`) และรองรับ Hydration ได้อย่างราบรื่น
+
+```
+Next.js 16 App Router Architecture:
+app/layout.tsx (Server Component)
+  ├── <html>
+  │     <body>
+  │       <ThemeProvider> (Client Component)
+  │         {children} (Server/Client Pages)
+  │         <Toaster /> (Client Boundary - ฟัง Event และ Mount Portal)
+  │       </ThemeProvider>
+  │     </body>
+```
+
+### จุดเด่นของ Sonner Core API
+- **ฟังก์ชันพร้อมใช้ครบทุกประเภท**: มี Method เฉพาะสำหรับทุกสถานะ ทั้งปกติ (`toast`), สำเร็จ (`toast.success`), ล้มเหลว (`toast.error`), ข้อมูลทั่วไป (`toast.info`), แจ้งเตือนระวัง (`toast.warning`), และกำลังโหลด (`toast.loading`)
+- **การปรับแต่งสีสันที่ทรงพลัง**: รองรับ `richColors` เพื่อแยกประเภทสถานะด้วยสีที่สดใส มีมาตรฐาน และอ่านง่าย
+- **การควบคุมปุ่มปิดและตำแหน่ง**: รองรับ `closeButton` เพื่อให้ผู้ใช้สามารถคลิกปิดได้ด้วยตนเอง และสามารถกำหนดจุดลอยตัวได้ถึง 6 ทิศทางบนหน้าจอ
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. สถาปัตยกรรม Event Bus ระดับ Global
+เบื้องหลังของ Sonner คือการทำงานร่วมกันระหว่าง **State Store Observer** และ **Portal Container**:
+- เมื่อมีการเรียกฟังก์ชัน `toast.success('...')` จากไฟล์ใดก็ตาม Sonner จะสร้าง Toast Object ภายใน Memory และยิงสัญญาณแจ้งเตือนไปยัง Subscriber List
+- คอมโพเนนต์ `<Toaster />` ที่ถูก Mount ไว้อยู่ใน Root Layout จะรับรู้การเปลี่ยนแปลง และทำการ Sync รายการ Toast ไปเรนเดอร์ใน DOM จริงผ่าน `ReactDOM.createPortal` ไปยังชั้นบนสุดของเอกสาร
+- กระบวนการนี้ทำให้คุณสามารถเรียก `toast()` ได้จากทุกที่ แม้กระทั่งในฟังก์ชัน Utility ที่ไม่ใช่ React Component เช่น ใน Axios Interceptor หรือ TanStack Query Mutation Callbacks
+
+### 2. กลไกการคำนวณตำแหน่ง (Positioning Engine)
+Sonner รองรับการวางตำแหน่งทั้งหมด 6 รูปแบบ:
+- ด้านบน: `top-left`, `top-center`, `top-right`
+- ด้านล่าง: `bottom-left`, `bottom-center`, `bottom-right`
+
+เมื่อระบุ `position` Sonner จะคำนวณทิศทางการคลี่ตัวของการ์ด:
+- หากอยู่ด้านล่าง (`bottom-*`): การ์ดใหม่จะดันขึ้นมาด้านบน และการ์ดเก่าจะซ้อนอยู่ด้านล่าง
+- หากอยู่ด้านบน (`top-*`): การ์ดใหม่จะไหลลงมาด้านล่าง และการ์ดเก่าจะซ้อนอยู่ด้านบน
+
+### 3. พารามิเตอร์แกนหลักของ Toaster และ Toast
+- **`richColors`**: หากเปิดใช้งาน (`richColors={true}`) ตัว Toaster จะใส่สีพื้นหลังและสีตัวอักษรตามประเภท เช่น สีเขียวสำหรับ Success, สีแดงสำหรับ Error, สีเหลืองสำหรับ Warning และสีน้ำเงินสำหรับ Info
+- **`closeButton`**: แสดงปุ่มกากบาทเล็กๆ มุมการ์ด เพื่อให้ผู้ใช้ใช้เมาส์หรือ Keyboard Tab เข้าไปคลิกปิดได้
+- **`duration`**: กำหนดอายุการแสดงผลของการ์ดเป็นหน่วยมิลลิวินาที (ค่าเริ่มต้นคือ 4000ms หรือ 4 วินาที) หากระบุเป็น `Infinity` การ์ดจะค้างอยู่จนกว่าจะมีการคลิกปิด
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่างที่ 1: การติดตั้ง Toaster ใน Root Layout ของ Next.js 16 ร่วมกับ ThemeProvider
+
+ตัวอย่างนี้แสดงการตั้งค่าที่ถูกต้องในโครงสร้าง Next.js 16 App Router โดยสร้าง Toaster Provider เพื่อรองรับ Dark/Light Mode จาก `next-themes`
+
+```tsx filename="src/components/providers/ToastProvider.tsx"
+"use client";
+
+import { Toaster as SonnerToaster } from "sonner";
+import { useTheme } from "next-themes";
+
+export function ToastProvider() {
+  const { theme = "system" } = useTheme();
+
+  return (
+    <SonnerToaster
+      theme={theme as "light" | "dark" | "system"}
+      position="top-right"
+      richColors
+      closeButton
+      duration={4000}
+      className="toaster group"
+      toastOptions={{
+        style: {
+          fontFamily: "var(--font-sans, inherit)",
+        },
+      }}
+    />
+  );
+}
+```
+
+```tsx filename="src/app/layout.tsx"
+import type { Metadata } from "next";
+import { ThemeProvider } from "@/components/providers/ThemeProvider";
+import { ToastProvider } from "@/components/providers/ToastProvider";
+import "@/styles/globals.css";
+
+export const metadata: Metadata = {
+  title: "ระบบจัดการร้านค้า - Store Admin Console",
+  description: "Next.js 16 Production Management Console",
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="th" suppressHydrationWarning>
+      <body className="min-h-screen bg-background font-sans text-foreground antialiased">
+        <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+          {children}
+          {/* ติดตั้ง ToastProvider ไว้ที่ระดับ Root เพียงจุดเดียว */}
+          <ToastProvider />
+        </ThemeProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: คอมโพเนนต์จัดการคลังสินค้า เรียกใช้ Core API ครบทุกสถานะ
+
+ตัวอย่างนี้สาธิตการเรียกใช้ `toast()`, `toast.success()`, `toast.error()`, `toast.info()`, `toast.warning()`, และ `toast.loading()` ในสถานการณ์จริงของระบบจัดการคลังสินค้า
+
+```tsx filename="src/components/inventory/ProductInventoryCard.tsx"
+"use client";
+
+import * as React from "react";
+import { toast } from "sonner";
+import { 
+  PackageCheck, 
+  AlertTriangle, 
+  XCircle, 
+  RefreshCw, 
+  Info, 
+  Copy 
+} from "lucide-react";
+
+interface ProductProps {
+  id: string;
+  sku: string;
+  name: string;
+  stockCount: number;
+}
+
+export function ProductInventoryCard({ id, sku, name, stockCount }: ProductProps) {
+  const [stock, setStock] = React.useState(stockCount);
+
+  // 1. toast() ธรรมดา: คัดลอกรหัส SKU ลงคลิปบอร์ด
+  async function handleCopySku() {
+    await navigator.clipboard.writeText(sku);
+    toast("คัดลอกรหัสสินค้าเรียบร้อย", {
+      description: `SKU: ${sku} ถูกบันทึกลงคลิปบอร์ดแล้ว`,
+      icon: <Copy className="w-4 h-4 text-muted-foreground" />,
+      duration: 3000,
+    });
+  }
+
+  // 2. toast.info(): แจ้งข้อมูลความรู้เกี่ยวกับสินค้า
+  function handleViewGuidelines() {
+    toast.info("ข้อกำหนดการจัดเก็บสินค้า", {
+      description: "สินค้านี้ต้องเก็บไว้ในอุณหภูมิต่ำกว่า 25 องศาเซลเซียส",
+      duration: 5000,
+    });
+  }
+
+  // 3. toast.warning(): เตือนเมื่อสต็อกใกล้หมด
+  function handleCheckLowStock() {
+    if (stock <= 5) {
+      toast.warning("ระดับสต็อกเข้าสู่ขั้นวิกฤต", {
+        description: `สินค้า "${name}" เหลือเพียง ${stock} ชิ้นในคลัง`,
+        duration: 6000,
+      });
+    } else {
+      toast.info("สถานะสต็อกปกติ", {
+        description: `ปัจจุบันมีสินค้าพร้อมจำหน่าย ${stock} ชิ้น`,
+      });
+    }
+  }
+
+  // 4. toast.loading() และ toast.dismiss(): จำลองการซิงค์สต็อกกับระบบ ERP
+  async function handleSyncErp() {
+    const toastId = toast.loading("กำลังเชื่อมต่อระบบ ERP กลาง...", {
+      description: "กำลังส่งข้อมูลการเบิกจ่ายล่าสุด",
+    });
+
+    try {
+      // จำลอง API Call 2 วินาที
+      await new Promise((resolve, reject) => {
+        setTimeout(() => {
+          if (stock > 0) resolve(true);
+          else reject(new Error("คลังปลายทางปฏิเสธการเชื่อมต่อ"));
+        }, 2000);
+      });
+
+      // ปลด Loading Toast และแจ้งผลสำเร็จ
+      toast.dismiss(toastId);
+      toast.success("ซิงค์สต็อกสำเร็จ", {
+        description: `อัปเดตข้อมูลสินค้า #${sku} ไปยัง ERP แล้ว`,
+      });
+    } catch (err) {
+      toast.dismiss(toastId);
+      // 5. toast.error(): แจ้งเตือนข้อผิดพลาด
+      toast.error("การซิงค์ข้อมูลล้มเหลว", {
+        description: (err as Error).message,
+      });
+    }
+  }
+
+  return (
+    <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
+      <div className="flex items-start justify-between">
+        <div>
+          <span className="text-xs font-mono font-medium text-muted-foreground">
+            SKU: {sku}
+          </span>
+          <h4 className="text-lg font-bold text-card-foreground mt-1">{name}</h4>
+        </div>
+        <button
+          type="button"
+          onClick={handleCopySku}
+          className="rounded-lg border border-input p-2 text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+          title="คัดลอกรหัส SKU"
+        >
+          <Copy className="w-4 h-4" />
+        </button>
+      </div>
+
+      <div className="mt-4 flex items-center gap-2">
+        <span className="text-sm text-muted-foreground">จำนวนคงเหลือ:</span>
+        <span className="text-base font-semibold text-foreground">{stock} ชิ้น</span>
+      </div>
+
+      <div className="mt-6 flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={handleCheckLowStock}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-secondary px-3 py-1.5 text-xs font-medium text-secondary-foreground hover:bg-secondary/80"
+        >
+          <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
+          ตรวจสอบสต็อก
+        </button>
+
+        <button
+          type="button"
+          onClick={handleViewGuidelines}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-secondary px-3 py-1.5 text-xs font-medium text-secondary-foreground hover:bg-secondary/80"
+        >
+          <Info className="w-3.5 h-3.5 text-blue-500" />
+          ข้อกำหนดจัดเก็บ
+        </button>
+
+        <button
+          type="button"
+          onClick={handleSyncErp}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+        >
+          <RefreshCw className="w-3.5 h-3.5" />
+          ซิงค์ ERP
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีอื่น (Sonner Core vs Native Browser Alerts vs Radix UI Toast)
+
+| หัวข้อการเปรียบเทียบ | Sonner Core API | Browser Native (`window.alert`) | Radix UI Primitive Toast |
+| :--- | :--- | :--- | :--- |
+| **สไตล์และความทันสมัย** | **สวยงามระดับ Production** มีแอนิเมชัน 3D | เชย เป็นกล่องข้อความสีเทาของระบบปฏิบัติการ | ไม่มีสไตล์มาให้ (Headless แท้) ต้องเขียน CSS เองทั้งหมด |
+| **การบล็อกการทำงาน (Thread Blocking)** | ไม่บล็อก ผู้ใช้เลื่อนหน้าจอทำงานต่อได้ | **บล็อก JavaScript Main Thread ทันที** | ไม่บล็อก |
+| **การปรับแต่ง (Customization)** | สูงมาก รองรับ Tailwind, ไอคอน, และธีม | ปรับแต่งไม่ได้เลยแม้กระทั่งฟอนต์ | ยืดหยุ่นสูงสุดแต่ต้องเขียน Boilerplate หลายร้อยบรรทัด |
+| **ความสะดวกในการเรียกใช้** | **เรียกได้จากทุกที่** (`toast.success(...)`) | เรียกได้ทันที (`alert(...)`) | **ยุ่งยาก** ต้องผ่าน Context Provider และ Hook ใน React Component |
+| **Bundle Size & Overhead** | ~4.1 KB เบามาก | 0 KB (มีในเบราว์เซอร์) | ~10 KB + ต้องเขียนคอมโพเนนต์ห่อหุ้มเอง |
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practices)
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **ใส่ `<Toaster />` ซ้ำในทุกๆ Page หรือ Component ย่อย**<br/>เช่น ใส่ใน `app/dashboard/page.tsx` และ `app/settings/page.tsx`<br/>*ผลลัพธ์:* Toast จะเด้งซ้อนกันสองครั้งและตำแหน่งเพี้ยน | **ติดตั้ง `<Toaster />` เพียงจุดเดียวใน Root Layout (`app/layout.tsx`)**<br/>จากนั้นสามารถเรียก `toast()` ได้จากคอมโพเนนต์ย่อยทั่วทั้งแอปพลิเคชัน |
+| **เรียกใช้ `toast()` ตอนทำ Server-Side Rendering ใน RSC**<br/>เช่น ใส่ `toast()` ในฟังก์ชันหลักของ `async function Page()` บนเซิร์ฟเวอร์<br/>*ผลลัพธ์:* เกิด Runtime Error เพราะเซิร์ฟเวอร์ไม่มี Window/DOM Object | **เรียกใช้ `toast()` เฉพาะใน Client Component, Event Handler, หรือ Client Hooks**<br/>หากต้องการแจ้งผลจาก Server Action ให้ส่งค่ากลับมาแล้วยิง Toast ฝั่ง Client |
+| **ลืมเปิด `richColors` ในขณะที่ต้องการแยกประเภทความสำเร็จและข้อผิดพลาด**<br/>ทำให้ Toast ทุกอันมีพื้นหลังสีขาว/ดำเหมือนกันทั้งหมด ผู้ใช้แยกไม่ออก | **ตั้งค่า `richColors` บน `<Toaster richColors />`**<br/>เพื่อเปิดใช้งานชุดสี Semantic มาตรฐาน (เขียว, แดง, เหลือง, ฟ้า) |
+| **ตั้ง `duration` สั้นเกินไป เช่น 1000ms (1 วินาที)**<br/>ผู้ใช้ไม่สามารถอ่านเนื้อหาภาษาไทยและคำอธิบายจบได้ทันก่อนที่มันจะเลือนหายไป | **กำหนดระยะเวลาอย่างน้อย 3000ms - 4000ms สำหรับข้อความทั่วไป**<br/>และ 6000ms ขึ้นไปสำหรับข้อความแจ้งเตือนที่มี Description หรือปุ่ม Action |
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Core API ของ Sonner เมื่อ:
+- **ต้องการส่งสัญญาณตอบรับฉับพลัน**: เช่น เมื่อผู้ใช้กดปุ่มบันทึก, กดไลก์, กดคัดลอกข้อความ
+- **ต้องการแจ้งผลลัพธ์จาก Hook หรือ Mutation**: เช่น ใน callback `onSuccess` หรือ `onError` ของ TanStack Query
+- **ต้องการระบบแจ้งเตือนที่ติดตั้งง่าย รวดเร็ว และไม่ต้องเขียนสไตล์ชีตเพิ่ม**
+- **โปรเจกต์ต้องการระบบ Dark Mode อัตโนมัติ**: ที่ผสานเข้ากับ `next-themes` ได้อย่างไร้รอยต่อ
+
+### ไม่ควรใช้เมื่อ:
+- **เหตุการณ์ที่ต้องการให้ผู้ใช้หยุดคิดและเลือกระหว่างสองทางเลือก**: เช่น "คุณแน่ใจหรือไม่ที่จะลบฐานข้อมูลนี้?" (กรณีนี้ต้องใช้ AlertDialog)
+- **ข้อมูลผิดพลาดที่เจาะจงเฉพาะ Input ใด Input หนึ่ง**: เช่น รหัสผ่านไม่ตรงกัน (ควรแสดง Inline ใต้ช่องกรอกรหัสผ่าน)
+- **ข้อความประกาศฉุกเฉินระดับระบบ**: เช่น "ระบบจะปิดปรับปรุงในอีก 5 นาที" (ควรใช้ Sticky Top Banner)
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: เหตุใดเราจึงสามารถเรียกใช้ `toast.success()` ได้จากภายในฟังก์ชัน JavaScript ทั่วไป เช่น Axios Interceptor หรือไฟล์ Helper Utility โดยไม่จำเป็นต้องอยู่ใน React Component หรือพึ่งพา React Hook?
+**แนวทางตอบแบบ Senior Developer:**
+"ที่สามารถทำได้เพราะสถาปัตยกรรมภายในของ Sonner ถูกออกแบบโดยใช้ **Singleton Observer Pattern (Event Bus)**:
+- ตัวฟังก์ชัน `toast()` ไม่ได้ขึ้นตรงกับ React Component Lifecycle แต่เป็น Pure JavaScript Function ที่ทำหน้าที่เพียงแค่ดันข้อมูล Payload เข้าสู่ State Store ภายนอก (External Store)
+- ในขณะเดียวกัน คอมโพเนนต์ `<Toaster />` ที่ถูก Mount ไว้อยู่ใน React Tree จะทำหน้าที่เป็น Subscriber ที่คอยดักฟังการเปลี่ยนแปลงของ State Store ตัวนั้นผ่าน `useSyncExternalStore` (หรือ Subscription Listener) เมื่อมีข้อมูลใหม่เข้ามา Toaster จึงสั่งให้ตัวมันเอง Re-render เพื่อนำข้อมูลนั้นไปเรนเดอร์ใน DOM จริง
+- รูปแบบสถาปัตยกรรมนี้มีประโยชน์มหาศาล เพราะช่วยให้เราสามารถส่งข้อความแจ้งเตือนความผิดพลาดระดับ Global จาก Network Layer (เช่น ดักจับ HTTP 401 Unauthorized ใน API Interceptor) ได้ทันที โดยไม่ต้องส่ง Callback Props ทะลวงผ่านคอมโพเนนต์หลายชั้น"
+
+---
+
+### Q2: ใน Next.js 16 App Router หากต้องการให้ Toaster รองรับทั้ง Dark Theme และ Light Theme อย่างไร้รอยต่อโดยไม่เกิดข้อผิดพลาด Hydration Mismatch มีเทคนิคการเขียนอย่างไร?
+**แนวทางตอบแบบ Senior Developer:**
+"ปัญหา Hydration Mismatch มักเกิดจากการที่ Server พยายาม Render สีของ Toaster โดยไม่รู้ว่าใน LocalStorage ของ Client ตั้งธีมเป็นอะไร เทคนิคการแก้ปัญหาอย่างถูกต้องมีดังนี้:
+1. **ใช้ `next-themes` พร้อม `suppressHydrationWarning`**: ติดตั้ง `suppressHydrationWarning` บนแท็ก `<html>` เพื่อป้องกันคำเตือนเรื่อง class/attribute mismatch
+2. **แยก Toaster ออกเป็น Client Component Wrapper**: สร้างไฟล์ เช่น `ToastProvider.tsx` พร้อมกำกับ `'use client'` ที่หัวไฟล์ ภายในใช้ Hook `useTheme()` ดึงค่า `theme` ที่กำลังแอ็กทีฟมาส่งต่อให้กับพร็อพ `theme` ของ `<SonnerToaster />`
+3. **กำหนด `theme="system"` เป็นค่าเริ่มต้น**: และส่งค่า `attribute="class"` ให้กับ ThemeProvider เพื่อให้ Tailwind CSS ใช้คลาส `.dark` สลับตัวแปรสี CSS Variables ส่งผลให้ Toaster เปลี่ยนแปลงสีตามธีมระบบได้อัตโนมัติทั้งตอน Mount และตอนที่ผู้ใช้คลิกสลับธีม"

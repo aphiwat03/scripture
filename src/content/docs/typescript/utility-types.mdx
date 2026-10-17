@@ -1,0 +1,78 @@
+---
+title: Utility Types
+category: Frontend
+parentTitle: TypeScript
+version: v5.6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+แทนที่จะต้องนิยาม Type ใหม่ตั้งแต่ศูนย์ทุกครั้งที่มีการดัดแปลงข้อมูลเล็กๆ น้อยๆ TypeScript เตรียม **Utility Types** สำเร็จรูปมาให้ใช้ ซึ่งเปรียบเสมือน "เครื่องมือช่างสารพัดประโยชน์" ในการแปลงร่าง ดัดแปลง ตัดออก หรือหยิบเฉพาะฟิลด์ที่ต้องการจาก Type ต้นฉบับ
+
+---
+
+## 2. รวม Utility Types ยอดนิยมและตัวอย่างการใช้งาน
+
+| Utility Type | ความหมายและการแปลงสภาพ |
+| :--- | :--- |
+| `Partial<T>` | เปลี่ยน **ทุกฟิลด์** ให้เป็น Optional (`?`) เหมาะกับหน้า Update/Edit DTO |
+| `Required<T>` | บังคับให้ **ทุกฟิลด์** ต้องมีค่า (ถอด `?` ออกทั้งหมด) |
+| `Pick<T, Keys>` | **หยิบเฉพาะ** บางฟิลด์ที่ระบุออกมาสร้าง Type ใหม่ |
+| `Omit<T, Keys>` | **ตัดเฉพาะ** บางฟิลด์ที่ไม่ต้องการทิ้งไป |
+| `Record<Keys, Type>` | สร้าง Object ที่มี Key และ Value ตามชนิดที่กำหนด (เช่น Dictionary) |
+| `Readonly<T>` | ล็อกให้ทุกฟิลด์ไม่สามารถแก้ไขค่าได้ |
+| `ReturnType<T>` | สกัด Type ของผลลัพธ์ที่ฟังก์ชันส่งกลับมา |
+| `Awaited<T>` | ดึงค่าที่อยู่ใน Promise หรือ Async Function ออกมา |
+| `NonNullable<T>` | กรองค่า `null` และ `undefined` ทิ้งไปจาก Type |
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript)
+
+```typescript
+// Type ต้นฉบับ
+interface UserAccount {
+  id: string;
+  email: string;
+  passwordHash: string;
+  avatarUrl?: string;
+  role: 'ADMIN' | 'CUSTOMER';
+  createdAt: Date;
+}
+
+// 1. Partial: สำหรับฟังก์ชันอัปเดตโปรไฟล์ (ส่งเฉพาะฟิลด์ที่ต้องการแก้)
+type UpdateUserProfileInput = Partial<Pick<UserAccount, 'email' | 'avatarUrl'>>;
+
+// 2. Omit: สำหรับส่งข้อมูลผู้ใช้ให้หน้าบ้าน (ตัดรหัสผ่าน passwordHash ทิ้งเด็ดขาด)
+export type SafeUser = Omit<UserAccount, 'passwordHash'>;
+
+// 3. Record: พจนานุกรมรหัสสินค้า -> รายละเอียดสินค้า
+type ProductCatalog = Record<string, { title: string; price: number }>;
+
+const catalog: ProductCatalog = {
+  'SKU-001': { title: 'Mouse', price: 890 },
+};
+
+// 4. ReturnType & Awaited: สกัดชนิดข้อมูลของ Promise ที่ Return ออกมาจาก API
+async function fetchServerSettings() {
+  return { maintenanceMode: false, maxUploadMb: 25 };
+}
+
+// ได้ Type { maintenanceMode: boolean; maxUploadMb: number }
+type ServerSettings = Awaited<ReturnType<typeof fetchServerSettings>>;
+```
+
+---
+
+## 4. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- *ควรใช้*: เมื่อต้องการสร้าง DTO หรือ View Model จาก Entity ต้นฉบับ เช่น ใช้ `Omit` ตัดฟิลด์ที่ไม่ต้องการแสดง หรือใช้ `Pick` เลือกฟิลด์สำหรับฟอร์ม
+- *ไม่ควรใช้*: ซ้อน Utility Types ลึกเกินไป 4-5 ชั้น (เช่น `Partial<Omit<Pick<...>>>`) จนอ่านไม่ออก ให้แยกประกาศเป็น Type ย่อยทีละชั้น
+
+---
+
+## 5. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: `Pick` กับ `Omit` แตกต่างกันอย่างไร และควรเลือกใช้อันไหนเมื่อต้องการความปลอดภัยของข้อมูล?
+**แนวทางคำตอบ**: `Pick` เลือกเฉพาะฟิลด์ที่ระบุ ส่วน `Omit` ตัดฟิลด์ที่ระบุทิ้ง เมื่อคำนึงถึงความปลอดภัยของข้อมูล (เช่น การส่ง Data ข้ามไปยัง Client) แนะนำให้ใช้ **`Pick`** มากกว่า เพราะหากในอนาคตมีคนเพิ่มฟิลด์ลับ (เช่น `ssn` หรือ `secretKey`) ลงใน Interface ต้นฉบับ `Pick` จะไม่หลุดนำฟิลด์ใหม่นั้นส่งออกไปโดยอัตโนมัติ ต่างจาก `Omit` ที่อาจหลุดข้อมูลรั่วไหลได้

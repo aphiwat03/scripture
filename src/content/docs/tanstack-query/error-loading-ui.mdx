@@ -1,0 +1,248 @@
+---
+title: Error & Loading UI
+category: Frontend
+parentTitle: TanStack Query v5
+version: TanStack Query v5.x
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การสร้างประสบการณ์การใช้งาน (UX) ที่ลื่นไหลและทนทานต่อข้อผิดพลาด (Resilient) เป็นหัวใจสำคัญของโปรดักชันแอปพลิเคชัน ใน **TanStack Query v5** ร่วมกับ **React 19** มีเครื่องมือระดับสูงในการจัดการทั้งสถานะกำลังโหลด (Loading) และข้อผิดพลาด (Error):
+
+1. **Exponential Backoff Retry**: มีระบบลองใหม่เมื่อเกิดความผิดพลาดทางเครือข่าย โดยหน่วงเวลาทวีคูณอัตโนมัติ (เช่น 1 วินาที, 2 วินาที, 4 วินาที)
+2. **`throwOnError` (เดิมคือ `useErrorBoundary` ใน v4)**: ส่งต่อ Error ไปยัง React Error Boundary เพื่อแสดงหน้าแจ้งเตือนแบบรวมศูนย์
+3. **`useSuspenseQuery`**: รองรับสถาปัตยกรรม React 19 Suspense อย่างเป็นทางการ โดยคอมโพเนนต์จะ Suspend ตัวเองและส่งต่อภาระ Loading ไปให้ `<Suspense fallback={<Skeleton />}>` ทำให้ตัวแปร `data` จะไม่มีทางเป็น `undefined` อีกต่อไป
+4. **Toast Notifications (Sonner)**: แจ้งเตือนข้อผิดพลาดชั่วคราวบนมุมหน้าจอโดยไม่ขัดจังหวะการทำงานหลักของผู้ใช้
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. สูตรการคำนวณ Exponential Backoff Retry
+
+โดยค่าเริ่มต้น TanStack Query จะทำการ Retry สูงสุด 3 ครั้งเมื่อเกิด Error โดยใช้สูตรคำนวณหน่วงเวลา:
+$$\text{delay} = \min(1000 \times 2^{\text{failureCount}}, 30000)$$
+
+อย่างไรก็ตาม **เราต้องไม่ Retry กับ HTTP Error ฝั่ง Client (4xx)**:
+- `401 Unauthorized`: ผู้ใช้ไม่มีสิทธิ์ หรือ Token หมดอายุ การยิงซ้ำอีก 3 รอบมีแต่จะเพิ่มภาระเซิร์ฟเวอร์
+- `404 Not Found`: ไม่พบข้อมูลในระบบ ยิงซ้ำอย่างไรก็ไม่เจอ
+- **ควร Retry เฉพาะ**: Network Offline หรือ `500 / 502 / 503 Internal Server Error` เท่านั้น
+
+### 2. การทำงานของ `useSuspenseQuery`
+
+```
+[Component Render]
+   │
+   ├─► useSuspenseQuery ตรวจพบว่ายังไม่มีแคช
+   │      │
+   │      └─► ขว้าง (throw) Promise ออกไปให้ React จัดการ!
+   │             │
+   │             ▼
+   │      [React Suspense Boundary] ดักจับ Promise ได้
+   │             │
+   │             └─► สลับไปเรนเดอร์ <SkeletonReview /> ทันที
+   │
+[เมื่อ Network ดึงข้อมูลเสร็จ]
+   │
+   └─► React สั่ง Re-render คอมโพเนนต์ตัวจริง
+          │
+          └─► data: Review[] (รับประกัน 100% ว่าไม่ใช่ undefined!)
+```
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+ระบบรีวิวสินค้า (`ProductReviewsSection.tsx`) ที่ใช้งานร่วมกับ React 19 Suspense, Error Boundary, และ Sonner Toast:
+
+```tsx filename="src/features/reviews/components/ProductReviewsSection.tsx"
+'use client';
+
+import React, { Suspense } from 'react';
+import { useSuspenseQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
+
+interface Review {
+  id: string;
+  author: string;
+  rating: number;
+  comment: string;
+  createdAt: string;
+}
+
+// 1. ฟังก์ชัน API สำหรับดึงรีวิวสินค้า
+async function fetchProductReviews(productId: string): Promise<Review[]> {
+  const res = await fetch(`/api/products/${productId}/reviews`);
+  if (!res.ok) {
+    throw new Error(res.status === 404 ? 'ยังไม่มีรีวิวสำหรับสินค้านี้' : 'โหลดรีวิวไม่สำเร็จ');
+  }
+  return res.json();
+}
+
+// 2. คอมโพเนนต์แสดงผลรายการรีวิว (ใช้ useSuspenseQuery)
+function ReviewList({ productId }: { productId: string }) {
+  // data ได้รับการการันตีว่าเป็น Review[] แน่นอน ไม่ต้องเช็ค if (isPending)
+  const { data: reviews } = useSuspenseQuery({
+    queryKey: ['products', 'reviews', productId],
+    queryFn: () => fetchProductReviews(productId),
+    staleTime: 60 * 1000,
+    retry: (failureCount, error) => {
+      // ไม่ Retry หากเป็นข้อผิดพลาดที่เกิดจาก 404 หรือ 401
+      if (error.message.includes('404') || error.message.includes('401')) {
+        return false;
+      }
+      return failureCount < 2;
+    },
+  });
+
+  if (reviews.length === 0) {
+    return <p className="text-sm text-gray-500 py-4">ยังไม่มีใครแสดงความคิดเห็น เป็นคนแรกที่รีวิวสินค้านี้!</p>;
+  }
+
+  return (
+    <div className="space-y-4 divide-y">
+      {reviews.map((rev) => (
+        <div key={rev.id} className="pt-4 first:pt-0">
+          <div className="flex items-center justify-between">
+            <span className="font-semibold text-sm text-gray-800">{rev.author}</span>
+            <span className="text-amber-500 text-xs">{'★'.repeat(rev.rating)}</span>
+          </div>
+          <p className="text-sm text-gray-600 mt-1">{rev.comment}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// 3. Skeleton Loading Component
+function ReviewSkeleton() {
+  return (
+    <div className="space-y-4 animate-pulse">
+      {[1, 2, 3].map((i) => (
+        <div key={i} className="h-16 bg-gray-100 rounded-lg p-3 space-y-2">
+          <div className="h-4 bg-gray-200 rounded w-1/4" />
+          <div className="h-3 bg-gray-200 rounded w-3/4" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// 4. Main Section ห่อด้วย Suspense
+export function ProductReviewsSection({ productId }: { productId: string }) {
+  const queryClient = useQueryClient();
+
+  // Mutation เพิ่มรีวิวสินค้า
+  const addReviewMutation = useMutation({
+    mutationFn: async (newComment: string) => {
+      const res = await fetch(`/api/products/${productId}/reviews`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ comment: newComment, rating: 5 }),
+      });
+      if (!res.ok) throw new Error('ส่งรีวิวไม่สำเร็จ กรุณาลองใหม่');
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['products', 'reviews', productId] });
+      toast.success('ขอบคุณสำหรับการรีวิวสินค้า!');
+    },
+    onError: (err) => {
+      toast.error(err.message);
+    },
+  });
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+      <div className="flex justify-between items-center mb-6">
+        <h3 className="text-lg font-bold text-gray-900">ความคิดเห็นจากผู้ซื้อ</h3>
+        <button
+          onClick={() => addReviewMutation.mutate('สินค้าคุณภาพดีมาก คุ้มค่า!')}
+          disabled={addReviewMutation.isPending}
+          className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+        >
+          {addReviewMutation.isPending ? 'กำลังส่ง...' : 'เขียนรีวิว'}
+        </button>
+      </div>
+
+      {/* ห่อด้วย React 19 Suspense */}
+      <Suspense fallback={<ReviewSkeleton />}>
+        <ReviewList productId={productId} />
+      </Suspense>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม (useEffect vs TanStack Query)
+
+| ฟังก์ชัน | วิธีเดิม (เขียนด้วย `useState`) | TanStack Query v5 |
+| :--- | :--- | :--- |
+| **Retry Strategy** | หากล้มเหลวคือหยุดทันที ผู้ใช้ต้องกด F5 รีเฟรชทั้งหน้า | Exponential Backoff Retry อัตโนมัติในเบื้องหลัง |
+| **การจัดการ Loading** | เช็ค `if (loading) return <Spinner />` แทรกกระจายตัวในทุกคอมโพเนนต์ | ใช้ React Suspense ตัดโค้ด Loading ออกจาก Component เนื้อหา |
+| **Error Propagation** | ข้อผิดพลาดหลุดออกไปทำลายหน้าจอทั้งหมด (White Screen) | ดักจับผ่าน `throwOnError` ร่วมกับ React Error Boundary เฉพาะจุด |
+| **Type Narrowing** | `data` มักเป็น `T | undefined` ต้องใส่ Optional Chaining `data?.` ตลอดเวลา | เมื่อใช้ `useSuspenseQuery` ตัวแปร `data` มี Type เป็น `T` เสมอ |
+
+---
+
+## 5. ผิด vs ถูก
+
+### แบบที่ผิด ❌: ปล่อยให้ Query สั่ง Retry ซ้ำๆ กับรหัสข้อผิดพลาด 401 หรือ 404
+
+```tsx
+// ❌ ผิด: ตั้ง retry: 3 กับทุกกรณี ทำให้เมื่อสินค้าไม่มีจริง (404)
+// เบราว์เซอร์จะยิงย้ำๆ ไปอีก 3 ครั้ง ทำให้ผู้ใช้ต้องรอนานกว่าจะเห็นข้อความว่าไม่พบสินค้า
+const { data } = useQuery({
+  queryKey: ['product', id],
+  queryFn: () => fetchProduct(id),
+  retry: 3, // ❌ ยิงซ้ำอย่างไร 404 ก็ไม่กลายเป็น 200
+});
+```
+
+### แบบที่ถูก ✅: ปรับแต่ง Retry ฟังก์ชันเพื่อกรองเฉพาะ Network หรือ 5xx Errors
+
+```tsx
+// ✅ ถูกต้อง: ปฏิเสธการ retry ทันทีหากเป็น Error ฝั่ง Client
+const { data } = useQuery({
+  queryKey: ['product', id],
+  queryFn: () => fetchProduct(id),
+  retry: (failureCount, error) => {
+    // ถ้าเป็น 404 หรือ 401 ให้หยุดทันที
+    if (error instanceof ApiError && (error.status === 404 || error.status === 401)) {
+      return false;
+    }
+    // กรณีเน็ตหลุดหรือเซิร์ฟเวอร์ตอบ 500 ให้ลองใหม่ 2 ครั้ง
+    return failureCount < 2;
+  },
+});
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ `useSuspenseQuery` เมื่อ:
+- แอปเขียนบน React 19 หรือ Next.js App Router ที่มีการออกแบบ Skeleton UI ชัดเจนผ่าน `<Suspense>`
+- ต้องการ Clean Code โดยไม่ต้องเขียน `if (isPending) return <Skeleton />` ใน Component ย่อย
+
+### ควรใช้ `useQuery` แบบปกติ (`isPending`) เมื่อ:
+- ต้องการควบคุม UI สถานะ Loading ในระดับละเอียดเฉพาะบรรทัด
+- อยู่ในบริบทที่ไม่ต้องการให้ Component Suspend ทั้งบล็อก เช่น ในแถบค้นหาแบบ Popover
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมจึงควรหลีกเลี่ยงการเปิด `retry: true` สำหรับ HTTP Status เช่น 401 (Unauthorized) หรือ 404 (Not Found)?
+**แนวทางตอบ**:
+เพราะข้อผิดพลาดในกลุ่ม HTTP 4xx เป็น **Client Errors (ข้อผิดพลาดเชิงสิทธิ์หรือข้อมูลไม่มีอยู่จริง)** การสั่ง Retry อีกกี่ครั้ง ผลลัพธ์ก็ยังคงเป็น 401 หรือ 404 เหมือนเดิม การปล่อยให้ระบบ Retry จะส่งผลเสีย 3 ด้าน:
+1. **UX ช้าลง**: ผู้ใช้ต้องรอเวลาการ Retry จนครบ (อาจนานถึง 5-10 วินาที) แทนที่จะเห็นข้อความแจ้งเตือนทันที
+2. **เปลืองแบนด์วิดท์**: ยิง Network Request ที่ไร้ประโยชน์ซ้ำซ้อน
+3. **โหลดเซิร์ฟเวอร์เกินจำเป็น**: หากมีผู้ใช้จำนวนมากพบหน้า 404 พร้อมกัน เซิร์ฟเวอร์จะถูกกระหน่ำยิงคำขอเพิ่มขึ้นถึง 3-4 เท่าตัว
+
+### Q2: `useSuspenseQuery` ใน TanStack Query v5 ให้ประโยชน์ด้าน Type Safety เหนือกว่า `useQuery` ธรรมดาอย่างไร?
+**แนวทางตอบ**:
+ใน `useQuery` ธรรมดา ตัวแปร `data` จะมี TypeScript Type เป็น `TData | undefined` เสมอ เพราะในจังหวะเรนเดอร์แรกสุดข้อมูลอาจยังมาไม่ถึง ทำให้นักพัฒนาต้องเขียนโค้ดตรวจสอบ `if (!data) return ...` หรือใส่ `data?.` ตลอดเวลา แต่เมื่อเปลี่ยนมาใช้ `useSuspenseQuery` ตัวคอมโพเนนต์จะไม่มีวันเรนเดอร์สำเร็จหากข้อมูลยังโหลดไม่เสร็จ (เพราะจะถูก Suspend ส่งต่อไปยัง Suspense Boundary) ดังนั้น TypeScript จึงสามารถ Narrow Type ของ `data` ให้เป็น **`TData` (Non-nullable)** ได้อย่างแม่นยำ 100% โดยไม่ต้องเขียน Guard ให้รกโค้ด

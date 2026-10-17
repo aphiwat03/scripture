@@ -1,0 +1,141 @@
+---
+title: Narrowing
+category: Frontend
+parentTitle: TypeScript
+version: v5.6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+เมื่อตัวแปรมี Type เริ่มต้นที่กว้าง (เช่น `string | number` หรือ Union ของ Object หลายแบบ) TypeScript จะไม่อนุญาตให้เราเรียกใช้ฟังก์ชันเฉพาะทางของ Type นั้นๆ ได้ทันที
+
+**Type Narrowing** คือกระบวนการที่ TypeScript วิเคราะห์โครงสร้างการควบคุมของโค้ด (Control Flow Analysis) เช่น คำสั่ง `if`, `switch`, หรือ `typeof` แล้วค่อยๆ "บีบให้ Type แคบลงเรื่อยๆ" ภายในบล็อกเงื่อนไขนั้นๆ เพื่อความปลอดภัย 100%
+
+---
+
+## 2. เครื่องมือหลักในการทำ Narrowing
+
+1. **`typeof` guard**: ตรวจสอบ Primitive (`string`, `number`, `boolean`, `symbol`, `undefined`)
+2. **`instanceof` guard**: ตรวจสอบว่าอินสแตนซ์เกิดจาก Class ใด (เช่น `Date`, `Error`, `CustomClass`)
+3. **`in` operator**: ตรวจสอบว่า Property ชื่อนั้นมีอยู่ใน Object หรือไม่
+4. **Discriminated Union**: ใช้ฟิลด์ร่วมที่เป็น Literal (เช่น `type` หรือ `status`) เป็นตัวแยกประเภท (แนะนำมากที่สุด!)
+5. **Custom Type Guard (`value is Type`)**: ฟังก์ชันที่เขียนขึ้นเองเพื่อยืนยัน Type
+6. **Exhaustive Check ด้วย `never`**: ตรวจสอบว่าเราจัดการเคสใน switch/if ครบถ้วนแล้วหรือไม่
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: `typeof`, `instanceof`, และ Custom Type Guard (`is`)
+
+```typescript
+// 1. typeof และ instanceof
+function formatInput(val: string | number | Date): string {
+  if (typeof val === 'number') {
+    return val.toFixed(2); // TS รู้ว่าเป็น number
+  }
+  if (val instanceof Date) {
+    return val.toISOString(); // TS รู้ว่าเป็น Date
+  }
+  return val.trim(); // TS รู้ว่าเหลือเพียง string แน่นอน
+}
+
+// 2. Custom Type Guard (is)
+interface ApiSuccessResponse<T> {
+  success: true;
+  data: T;
+}
+
+interface ApiErrorResponse {
+  success: false;
+  errorMessage: string;
+}
+
+type ApiResponse<T> = ApiSuccessResponse<T> | ApiErrorResponse;
+
+// ฟังก์ชันยืนยัน Type ด้วย `res is ApiSuccessResponse<T>`
+function isSuccessResponse<T>(res: ApiResponse<T>): res is ApiSuccessResponse<T> {
+  return res.success === true;
+}
+
+function handleResponse(res: ApiResponse<string[]>) {
+  if (isSuccessResponse(res)) {
+    console.log(res.data.length); // ปลอดภัย: TS รู้จัก res.data ทันที
+  } else {
+    console.error(res.errorMessage); // TS รู้ว่าต้องเป็น ApiErrorResponse แน่นอน
+  }
+}
+```
+
+### ตัวอย่างที่ 2: Discriminated Union และ Exhaustive Checking ด้วย `never`
+
+```typescript
+interface EmailNotification {
+  channel: 'EMAIL';
+  recipientEmail: string;
+}
+
+interface SmsNotification {
+  channel: 'SMS';
+  phoneNumber: string;
+}
+
+interface PushNotification {
+  channel: 'PUSH';
+  deviceToken: string;
+}
+
+type NotificationPayload = EmailNotification | SmsNotification | PushNotification;
+
+function sendNotification(payload: NotificationPayload) {
+  switch (payload.channel) {
+    case 'EMAIL':
+      console.log(`ส่งอีเมลไปที่: ${payload.recipientEmail}`);
+      break;
+    case 'SMS':
+      console.log(`ส่ง SMS ไปที่: ${payload.phoneNumber}`);
+      break;
+    case 'PUSH':
+      console.log(`ส่ง Push ไปที่: ${payload.deviceToken}`);
+      break;
+    default: {
+      // Exhaustive Checking: ถ้าอนาคตมีใครเพิ่ม Channel ใหม่แล้วลืมใส่ case ใน switch
+      // บรรทัดนี้จะแจ้ง Compile Error ทันที!
+      const _exhaustiveCheck: never = payload;
+      throw new Error(`Unhandled channel: ${_exhaustiveCheck}`);
+    }
+  }
+}
+```
+
+---
+
+## 4. ผิด vs ถูก (Common Mistakes)
+
+### กรณีที่ 1: การใช้ `typeof` ตรวจสอบ `null`
+```typescript
+// ❌ ผิด: ใน JavaScript typeof null คืนค่า 'object'!
+function processValue(val: object | null) {
+  if (typeof val === 'object') {
+    val.toString(); // 💥 อาจแครชตอนรันถ้า val เป็น null!
+  }
+}
+
+// ✅ ถูก: ตรวจสอบ null ชัดเจนก่อน
+function processValue(val: object | null) {
+  if (val !== null) {
+    val.toString(); // ปลอดภัย
+  }
+}
+```
+
+---
+
+## 5. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: Discriminated Union (Tagged Union) คืออะไร และทำไมถึงเป็น Best Practice ใน TypeScript?
+**แนวทางคำตอบ**: คือรูปแบบการรวมกลุ่มของ Object Types หลายตัวเข้าด้วยกัน โดยทุก Object จะมี Property พิเศษร่วมกัน 1 ฟิลด์ที่เป็น Literal Type คงที่ (เช่น `kind`, `type`, หรือ `status`) เพื่อทำหน้าที่เป็น "ป้ายชื่อ (Discriminant)" ช่วยให้ TypeScript สามารถทำ Narrowing ในคำสั่ง `if` หรือ `switch` ได้อย่างแม่นยำและอ่านง่ายที่สุด
+
+### Q2: Exhaustive Checking ด้วย Type `never` ช่วยป้องกันบั๊กได้อย่างไร?
+**แนวทางคำตอบ**: ช่วยเปลี่ยนข้อผิดพลาดตอนรันไทม์ให้กลายเป็นข้อผิดพลาดตอนคอมไพล์ไทม์ (Compile Error) หากวันหนึ่งมีนักพัฒนาเพิ่ม Union Type ชนิดใหม่เข้ามา แต่ลืมเขียน `case` ดักจับในฟังก์ชัน ตัวแปรในบล็อก `default` จะไม่สามารถถูกกำหนดค่าให้เป็น `never` ได้ ส่งผลให้โค้ดบิลด์ไม่ผ่านทันที

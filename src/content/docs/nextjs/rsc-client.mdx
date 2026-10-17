@@ -1,0 +1,91 @@
+---
+title: RSC vs Client
+category: Frontend
+parentTitle: Next.js 16
+version: v16.4
+updatedAt: 2026-10-17
+---
+
+## 1. คืออะไร / ใช้ทำไม
+
+**React Server Components (RSC)** คือคอมโพเนนต์เริ่มต้นใน Next.js 16 ที่ประมวลผลบนเซิร์ฟเวอร์เท่านั้นและส่งเฉพาะโครงร่างผลลัพธ์ไปยังเบราว์เซอร์ ช่วยลดขนาดไฟล์ JavaScript และรักษาความปลอดภัยของโค้ด ส่วน **Client Components** (`'use client'`) คือคอมโพเนนต์ที่ส่ง JavaScript ไปยังเบราว์เซอร์เพื่อรองรับการมีปฏิสัมพันธ์กับผู้ใช้ (Interactivity)
+
+การเข้าใจความแตกต่างระหว่างสองสิ่งนี้เป็นหัวใจสำคัญที่สุดในการสร้างเว็บด้วย Next.js App Router เพื่อให้ได้ทั้งความเร็วระดับสูงสุดและประสบการณ์การใช้งานที่ราบรื่น
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### การผสมผสานระหว่าง Server และ Client Components
+
+```tsx filename="src/app/products/page.tsx"
+// 1. Server Component (Default) - รันบน Server 100% ปลอดภัยและรวดเร็ว
+import ProductCartButton from '@/components/ProductCartButton';
+
+interface Product {
+  id: string;
+  name: string;
+  price: number;
+}
+
+export default async function ProductsPage() {
+  // ดึงข้อมูลได้โดยตรง ไม่ต้องสร้าง API ตัวกลาง
+  const res = await fetch('https://api.example.com/products');
+  const products: Product[] = await res.json();
+
+  return (
+    <div className="space-y-4 max-w-xl mx-auto py-8">
+      <h1 className="text-2xl font-bold">รายการสินค้า</h1>
+      {products.map((p) => (
+        <div key={p.id} className="flex items-center justify-between p-4 border rounded-xl">
+          <span>{p.name} - ฿{p.price.toLocaleString()}</span>
+          {/* ส่งเฉพาะปุ่มที่มีการโต้ตอบไปทำงานต่อที่ Client */}
+          <ProductCartButton productId={p.id} />
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+```tsx filename="src/components/ProductCartButton.tsx"
+'use client'; // 2. Client Component - ระบุเมื่อต้องการใช้ State หรือ Event
+
+import { useState } from 'react';
+
+export default function ProductCartButton({ productId }: { productId: string }) {
+  const [added, setAdded] = useState(false);
+
+  return (
+    <button
+      type="button"
+      onClick={() => setAdded(true)}
+      className="px-3 py-1.5 bg-blue-600 text-white text-xs font-semibold rounded-lg"
+    >
+      {added ? '✓ เพิ่มลงตะกร้าแล้ว' : 'เพิ่มลงตะกร้า'}
+    </button>
+  );
+}
+```
+
+## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- **Server Components (RSC)**:
+  - *ควรใช้*: เป็นค่าเริ่มต้นเสมอ สำหรับการดึงข้อมูล (Data Fetching), การเชื่อมต่อฐานข้อมูลโดยตรง, การอ่าน Secret Keys, และหน้าที่ต้องการ SEO สูง
+  - *ไม่ควรใช้*: เมื่อต้องใช้ React State (`useState`), Lifecycle (`useEffect`), ผูก Event Listener (`onClick`), หรือเข้าถึง Browser APIs (`localStorage`, `window`)
+- **Client Components (`'use client'`)**:
+  - *ควรใช้*: เฉพาะคอมโพเนนต์ปลายกิ่ง (Leaf Nodes) ที่ต้องการ Interactive UI เช่น ปุ่มกด, กล่องค้นหา, Dropdown, Modal, หรือ Form
+  - *ไม่ควรใช้*: ครอบทั้งหน้า `page.tsx` หรือ `layout.tsx` เพราะจะทำให้สูญเสียประโยชน์ของ Server Components ทั้งหมด
+
+## 4. ข้อควรระวัง
+
+<Callout type="warning" title="ข้อมูลที่ส่งผ่าน Props ต้องเป็น Serializable">
+Props ที่ส่งจาก Server Component ลงไปยัง Client Component ต้องสามารถแปลงเป็น JSON ได้ ห้ามส่งฟังก์ชัน คลาสอินสแตนซ์ หรือ Symbol ข้ามไปโดยตรง (ยกเว้น Server Actions)
+</Callout>
+
+<Callout type="tip" title="ผลัก 'use client' ไปไว้ที่ปลายกิ่ง (Leaf Nodes)">
+แทนที่จะใส่ `'use client'` ที่หน้าหลัก ให้คงหน้าหลักไว้เป็น Server Component แล้วดึงเฉพาะชิ้นส่วนเล็กๆ ที่ต้องกดปุ่มออกมาเป็น Client Component แยกไฟล์ จะช่วยให้หน้าเว็บโหลดเร็วที่สุด
+</Callout>
+
+## 5. แหล่งอ้างอิงทางการ
+
+- [Next.js Server and Client Components](https://nextjs.org/docs/app/building-your-application/rendering/server-components)
+- [Composition Patterns](https://nextjs.org/docs/app/building-your-application/rendering/composition-patterns)

@@ -1,0 +1,115 @@
+---
+title: Interface vs Type
+category: Frontend
+parentTitle: TypeScript
+version: v5.6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ทั้ง **`interface`** และ **`type` (Type Alias)** ใช้สำหรับนิยามรูปร่างของ Object ใน TypeScript เพื่อให้การเขียนโค้ดมีพิมพ์เขียวที่ชัดเจน แต่ถูกออกแบบมาด้วยปรัชญาที่ต่างกันเล็กน้อย:
+
+- **`interface`**: เปรียบเสมือน "สัญญาว่าจ้าง (Contract)" ในโลก OOP ที่เปิดกว้างให้อัปเดตเงื่อนไขเพิ่มเติมได้ (Declaration Merging) และเหมาะกับการสร้างพิมพ์เขียวสำหรับ Object/Class
+- **`type`**: เปรียบเสมือน "นามแฝง (Nickname)" สำหรับตั้งชื่อให้กับโครงสร้าง Type ใดๆ ก็ได้ ไม่ว่าจะเป็น Object, Union, Tuple, หรือ Primitive
+
+---
+
+## 2. ตารางเปรียบเทียบความแตกต่างเชิงลึก
+
+| คุณสมบัติ | `interface` | `type` Alias |
+| :--- | :--- | :--- |
+| **การนิยาม Primitives / Unions** | ทำไม่ได้ (รับได้เฉพาะ Object shape) | ทำได้ (`type ID = string \| number;`) |
+| **การสืบทอดคุณสมบัติ (Extends)** | ใช้คีย์เวิร์ด `extends` | ใช้ Intersection (`&`) |
+| **Declaration Merging (ประกาศซ้ำชื่อเดิม)** | **ทำได้** (จะรวมฟิลด์เข้าด้วยกันอัตโนมัติ) | **ทำไม่ได้** (แจ้ง Error ชื่อซ้ำทันที) |
+| **ประสิทธิภาพการ Compile (tsc)** | เร็วกว่าเล็กน้อยใน Object ขนาดใหญ่ | มีความยืดหยุ่นสูงกว่า |
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: การใช้งาน Interface พร้อม `extends` และ Declaration Merging
+
+```typescript
+// 1. กำหนดโครงสร้างผู้ใช้พื้นฐาน
+export interface BaseUser {
+  id: string;
+  email: string;
+}
+
+// 2. ขยายความสามารถด้วย extends
+export interface AdminUser extends BaseUser {
+  role: 'SUPERADMIN' | 'SUPPORT';
+  permissions: string[];
+}
+
+// 3. Declaration Merging: หากประกาศชื่อเดิมซ้ำในไลบรารี ฟิลด์จะถูกผสานเข้าด้วยกัน
+export interface BaseUser {
+  createdAt?: Date; // BaseUser จะมี id, email, และ createdAt โดยอัตโนมัติ!
+}
+```
+
+### ตัวอย่างที่ 2: ความยืดหยุ่นของ Type Alias (Unions, Tuples, Mapped Types)
+
+```typescript
+// 1. สร้าง Union Type (interface ทำไม่ได้!)
+export type PaymentMethod = 'CREDIT_CARD' | 'PROMPTPAY' | 'TRUE_MONEY';
+
+// 2. สร้าง Tuple Type (interface ทำไม่ได้!)
+export type GeoPoint = [latitude: number, longitude: number];
+
+// 3. Intersection Type รวมหลายโครงสร้าง
+export type Timestamps = {
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type CustomerAccount = BaseUser & Timestamps & {
+  tier: 'SILVER' | 'GOLD' | 'PLATINUM';
+};
+```
+
+---
+
+## 4. ผิด vs ถูก (Common Mistakes)
+
+### กรณีที่ 1: Declaration Merging โดยไม่ตั้งใจใน `interface`
+```typescript
+// ❌ เผลอตั้งชื่อ interface ซ้ำในสองไฟล์ที่ไม่มี namespace อาจทำให้ Type บวมและเกิดบั๊ก
+interface Config {
+  apiUrl: string;
+}
+// ที่อื่นในโปรเจกต์:
+interface Config {
+  timeout: number;
+}
+// ตัวแปรที่ใช้ Config จะถูกบังคับให้ต้องส่งทั้ง apiUrl และ timeout!
+
+// ✅ ถูก: หากไม่ต้องการให้ใครมาขยายฟิลด์โดยพลการ ให้ใช้ type Alias
+type AppConfig = {
+  apiUrl: string;
+  timeout: number;
+};
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- **ใช้ `interface` เมื่อ**:
+  - สร้าง Public API หรือ Library เพื่อเปิดโอกาสให้ผู้ใช้นำไปทำ Declaration Merging ต่อยอดได้
+  - นิยามโครงสร้างสำหรับ Class นำไป `implements` ใน NestJS
+- **ใช้ `type` เมื่อ**:
+  - ต้องการสร้าง Union Types (เช่น `'PENDING' | 'PAID'`)
+  - ต้องการสร้าง Tuple, Function Types หรือใช้ Mapped/Conditional Types ขั้นสูง
+  - นิยาม Props ใน React Component (ทีมส่วนใหญ่ในปัจจุบันนิยมใช้ `type` เพื่อความกระชับ)
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: Declaration Merging ใน TypeScript คืออะไร และมีประโยชน์อย่างไร?
+**แนวทางคำตอบ**: คือความสามารถของ `interface` ที่เมื่อมีการประกาศ interface ชื่อเดียวกันซ้ำกันมากกว่าหนึ่งครั้ง TypeScript จะรวมฟิลด์ทั้งหมดเข้าด้วยกัน ประโยชน์หลักคือใช้สำหรับทำ **Module Augmentation** เช่น การเพิ่มฟิลด์ `user` เข้าไปใน `Express.Request` ของไลบรารีภายนอกโดยไม่ต้องแก้ไขซอร์สโค้ดเดิม
+
+### Q2: ในโปรเจกต์ใหม่ ควรเลือกใช้ `interface` หรือ `type` เป็นค่าเริ่มต้น?
+**แนวทางคำตอบ**: สามารถใช้ได้ทั้งคู่ตามข้อตกลงของทีม (Consistency สำคัญที่สุด) แต่แนวปฏิบัติสากลแนะนำให้ใช้ `interface` สำหรับการออกแบบ Class/Object สัญญาบริการ และใช้ `type` สำหรับ Union, Primitive wrappers, และ Utility types

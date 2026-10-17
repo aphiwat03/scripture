@@ -1,0 +1,210 @@
+---
+title: Performance Tuning
+category: Frontend
+parentTitle: TanStack Query v5
+version: TanStack Query v5.x
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การปรับปรุงประสิทธิภาพ (Performance Tuning) ของแอปพลิเคชันที่ใช้ **TanStack Query v5** มี 3 เสาหลักสำคัญที่ช่วยลดการ Re-render ที่ไม่จำเป็น และประหยัดพลังงานประมวลผลของเบราว์เซอร์:
+
+1. **Data Transformation ด้วย `select`**:
+   - ดึงเฉพาะ "เศษเสี้ยวของข้อมูล (Slice)" ที่คอมโพเนนต์นั้นสนใจจริงๆ
+   - คอมโพเนนต์จะ Re-render **เฉพาะเมื่อผลลัพธ์ของ `select` เปลี่ยนแปลงเท่านั้น** แม้ว่าข้อมูลส่วนอื่นในแคชจะถูกอัปเดตก็ตาม
+2. **Structural Sharing (การคงค่า Reference ของข้อมูลเดิม)**:
+   - อัลกอริทึมภายในของ TanStack Query ที่ทำการเปรียบเทียบข้อมูลใหม่กับข้อมูลเก่าในระดับลึก (Deep Comparison) หากโครงสร้างย่อยตัวใดไม่มีการเปลี่ยน มันจะนำ Memory Reference ตัวเดิมมาใช้ซ้ำ ทำให้ `React.memo` หรือ Hook อย่าง `useMemo` ไม่หลุดการแคช
+3. **การตั้งค่า `staleTime` เชิงกลยุทธ์**:
+   - ป้องกันการส่งคำขอทางเครือข่ายซ้ำซ้อนเมื่อเปิดหลายคอมโพเนนต์พร้อมกัน
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. กลไกการทำงานของ `select` ในการป้องกัน Re-render
+
+```
+[API ตอบกลับข้อมูลตะกร้าสินค้าใหม่]
+{
+  id: "cart-001",
+  updatedAt: "10:00:05", // เปลี่ยนแปลง!
+  items: [ { id: "p1", name: "Shirt" } ] // เหมือนเดิม
+}
+         │
+         ▼
+[QueryCache บันทึกข้อมูลก้อนเต็มลงหน่วยความจำ]
+         │
+         ├───► Component A: useQuery({ select: (cart) => cart.items.length })
+         │        │
+         │        ├─► ผลลัพธ์ select รอบก่อน = 1
+         │        ├─► ผลลัพธ์ select รอบใหม่ = 1
+         │        └─► Object.is(1, 1) === true  ====► [ข้ามการ Re-render ทันที!]
+         │
+         └───► Component B: useQuery({ select: (cart) => cart.updatedAt })
+                  │
+                  └─► ค่าเปลี่ยน  ====================► [สั่ง Re-render Component B]
+```
+
+### 2. อัลกอริทึม Structural Sharing
+เมื่อได้รับ Response ก้อนใหม่ TanStack Query จะวนลูปตรวจสอบทุก Key:
+- หากค่าข้างในเหมือนเดิมทุกประการ จะเก็บ Object Reference เดิมไว้
+- หากมีเฉพาะฟิลด์ย่อยตัวหนึ่งเปลี่ยน จะสร้าง Reference ใหม่เฉพาะเส้นทางนั้น (Path) และคง Reference ของฟิลด์ย่อยตัวอื่นไว้ตามเดิม
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+ระบบตะกร้าสินค้าและการแสดงผลป้ายแจ้งเตือนยอด (`CartBadge.tsx`) โดยใช้ `select` ป้องกัน Re-render:
+
+```tsx filename="src/features/cart/components/CartBadge.tsx"
+'use client';
+
+import React, { useCallback } from 'react';
+import { useQuery } from '@tanstack/react-query';
+
+interface CartItem {
+  id: string;
+  name: string;
+  price: number;
+}
+
+interface CartResponse {
+  id: string;
+  items: CartItem[];
+  appliedCoupon: string | null;
+  shippingFee: number;
+  lastUpdated: string;
+}
+
+async function fetchCartData(): Promise<CartResponse> {
+  const res = await fetch('/api/cart');
+  if (!res.ok) throw new Error('โหลดตะกร้าไม่สำเร็จ');
+  return res.json();
+}
+
+// 1. Selector Function ที่เป็น Pure และ Stable
+const selectTotalItemsCount = (cart: CartResponse): number => {
+  return cart.items.length;
+};
+
+export function CartBadge() {
+  // 2. ใช้ select เพื่อดึงเฉพาะจำนวนชิ้นสินค้า
+  // แม้ lastUpdated หรือ shippingFee จะเปลี่ยน คอมโพเนนต์นี้จะไม่ Re-render เลย!
+  const { data: itemCount } = useQuery({
+    queryKey: ['cart'],
+    queryFn: fetchCartData,
+    select: selectTotalItemsCount,
+    staleTime: 60 * 1000,
+  });
+
+  return (
+    <div className="relative inline-flex items-center p-2 text-gray-700 hover:text-blue-600">
+      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth="2"
+          d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z"
+        />
+      </svg>
+
+      {itemCount !== undefined && itemCount > 0 && (
+        <span className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-xs font-bold text-white shadow">
+          {itemCount}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// 3. คอมโพเนนต์คำนวณราคารวมพร้อม Selector แบบ Dynamic
+export function CartTotalPrice() {
+  const selectTotalPrice = useCallback((cart: CartResponse): number => {
+    return cart.items.reduce((sum, item) => sum + item.price, 0);
+  }, []);
+
+  const { data: total } = useQuery({
+    queryKey: ['cart'],
+    queryFn: fetchCartData,
+    select: selectTotalPrice,
+    staleTime: 60 * 1000,
+  });
+
+  return (
+    <div className="text-sm font-semibold text-gray-800">
+      ยอดรวม: ฿{(total ?? 0).toLocaleString()}
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม (useEffect vs TanStack Query)
+
+| ปัญหาด้าน Performance | วิธีเดิม (เขียน `useState` รับข้อมูลก้อนเต็ม) | TanStack Query (`select` + Structural Sharing) |
+| :--- | :--- | :--- |
+| **Re-render Propagation** | ข้อมูลก้อนใหญ่เปลี่ยน 1 ฟิลด์ คอมโพเนนต์ลูกทุกตัว Re-render ทั้งแผง | Re-render เฉพาะคอมโพเนนต์ที่ฟิลด์ซึ่งตนเอง Subscribed เปลี่ยน |
+| **Data Transformation** | ต้องเขียน `useMemo` ซ้ำซ้อนในทุกคอมโพเนนต์ | รวมศูนย์การแปลงข้อมูลไว้ที่ตัวเลือก `select` ของ Query |
+| **Memory Reference Breakdown** | การแปลงข้อมูลคืน New Array เสมอ ทำลายแคชของ React | Structural Sharing รักษาสภาพ Reference เดิมของ Sub-object อัตโนมัติ |
+
+---
+
+## 5. ผิด vs ถูก
+
+### แบบที่ผิด ❌: เขียน Inline Function ใน `select` ที่คืนค่า New Array Reference เสมอ
+
+```tsx
+// ❌ ผิด: ส่ง Inline Arrow Function ที่คืน Array ตัวใหม่ (filter คืน Array ใหม่เสมอ)
+// ส่งผลให้ Object.is เปรียบเทียบเป็น false ตลอดเวลา -> Re-render ทุกครั้ง!
+export function BadItemList() {
+  const { data: cheapItems } = useQuery({
+    queryKey: ['products'],
+    queryFn: fetchProducts,
+    // ❌ ข้อผิดพลาด: .filter() สร้าง New Array Reference ในทุกรอบ ทำให้ memo หลุด
+    select: (data) => data.filter((item) => item.price < 500),
+  });
+}
+```
+
+### แบบที่ถูก ✅: ใช้ Stable Function หรือใช้ `useCallback` ครอบ Selector
+
+```tsx
+// ✅ ถูกต้อง: ประกาศ Selector ไว้นอกคอมโพเนนต์เพื่อให้ Reference คงที่ตลอดกาล
+const selectCheapItems = (data: Product[]) => data.filter((item) => item.price < 500);
+
+export function GoodItemList() {
+  const { data: cheapItems } = useQuery({
+    queryKey: ['products'],
+    queryFn: fetchProducts,
+    select: selectCheapItems, // ✅ Reference คงที่ TanStack Query สามารถ memoize ผลลัพธ์ได้
+  });
+}
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ `select` เมื่อ:
+- ข้อมูลที่ API ตอบกลับมามีขนาดใหญ่ แต่คอมโพเนนต์ต้องการใช้เพียง 1-2 ฟิลด์ย่อย
+- มีคอมโพเนนต์ขนาดเล็กจำนวนมากบนหน้าจอที่ฟังข้อมูลจาก Key เดียวกัน (เช่น Badge บนแถบเมนู, ตัวนับจำนวนในตาราง)
+
+### ไม่จำเป็นต้องใช้ `select` เมื่อ:
+- คอมโพเนนต์นั้นจำเป็นต้องแสดงผลข้อมูลเกือบทุกฟิลด์ใน Response อยู่แล้ว
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: Option `select` ใน `useQuery` ช่วยปรับปรุง Performance ของ React อย่างไร และมีเงื่อนไขอย่างไรในการป้องกัน Re-render?
+**แนวทางตอบ**:
+`select` ช่วยทำหน้าที่เป็น **Data Subscriptions Filter**:
+1. ข้อมูลก้อนเต็มจะถูกเก็บลงในแคชส่วนกลางเพียงที่เดียว
+2. คอมโพเนนต์จะ Re-render เฉพาะเมื่อค่าที่ส่งคืนจากฟังก์ชัน `select` มีการเปลี่ยนแปลงเมื่อเปรียบเทียบแบบตื้น (`shallow equality / Object.is`) กับรอบก่อนหน้า
+3. **เงื่อนไขสำคัญ**: ฟังก์ชัน `select` จะต้องมี Reference ที่เสถียร (Stable Reference) โดยต้องประกาศไว้นอก Component หรือครอบด้วย `useCallback` เพื่อไม่ให้สร้างฟังก์ชันใหม่ในทุก Render รอบ
+
+### Q2: Structural Sharing ใน TanStack Query คืออะไร และช่วยลด Re-render ได้อย่างไรเมื่อ API ตอบข้อมูลเดิมกลับมา?
+**แนวทางตอบ**:
+Structural Sharing คือกลไกภายในของ TanStack Query ที่จะเปรียบเทียบโครงสร้าง JSON ใหม่ที่เพิ่งได้รับจาก Network กับข้อมูลแคชเก่าที่มีอยู่ใน RAM หากพบว่าข้อมูลส่วนใดมีค่าเหมือนเดิม มันจะ **คงค่าตัวแปรอ้างอิงเดิม (Same Object Reference)** ของข้อมูลชุดเก่านั้นไว้ แทนที่จะสร้างอ็อบเจกต์ขึ้นมาใหม่ทั้งหมด ประโยชน์คือทำให้คอมโพเนนต์ที่ใช้ `React.memo` หรือ Hook ที่มี Dependency เช่น `useEffect(..., [data.user])` ไม่ถูกกระตุ้นให้ทำงานใหม่โดยไม่จำเป็นเมื่อข้อมูลไม่มีการเปลี่ยนแปลงจริง

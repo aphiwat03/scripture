@@ -1,0 +1,115 @@
+---
+title: Inference
+category: Frontend
+parentTitle: TypeScript
+version: v5.6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+TypeScript มีความฉลาดสูงในการ "สืบหาประเภทข้อมูล (Type Inference)" จากค่าตั้งต้นที่คุณกำหนดให้โดยอัตโนมัติ โดยที่คุณไม่จำเป็นต้องพิมพ์ `: string` หรือ `: number` กำกับไว้ทุกตัวแปร
+
+- **Type Annotation**: คือการที่เราพิมพ์บอกคอมไพเลอร์ด้วยตนเองอย่างชัดแจ้ง เช่น `const taxRate: number = 0.07;`
+- **Type Inference**: คือการที่คอมไพเลอร์ดูจากค่า `0.07` แล้วอนุมานให้เองทันทีว่า `taxRate` เป็น `number`
+- **ปัญหาที่แก้**: การเขียน Type ซ้ำซ้อนโดยไม่จำเป็น (Redundant Typing) ซึ่งทำให้โค้ดรกและดูแลรักษายาก
+
+---
+
+## 2. หลักการเบื้องหลัง (How Inference Works)
+
+เมื่อตัวแปรถูกประกาศพร้อมค่าตั้งต้น TypeScript จะทำการตรวจดูนิพจน์ (Expression) นั้น และกำหนด Type ที่แคบที่สุดที่สมเหตุสมผลให้ เช่น:
+- `let count = 0;` จะได้ Type เป็น `number` (เพราะเป็น `let` มีโอกาสเปลี่ยนค่าเป็นเลขอื่นได้)
+- `const count = 0;` จะได้ Type เป็น `0` (Literal Type เพราะเป็น `const` ไม่สามารถเปลี่ยนเป็นเลขอื่นได้แล้ว)
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: จุดที่ควรปล่อยให้ TypeScript อนุมานเอง (Inference)
+
+```typescript
+// 1. ประกาศตัวแปรพร้อมค่าเริ่มต้น -> ปล่อยให้ TS เดา (Inference)
+const userEmail = 'dev@scripture.app'; // TS รู้ว่าเป็น string
+let loginAttempts = 0;                  // TS รู้ว่าเป็น number
+const isActive = true;                  // TS รู้ว่าเป็น boolean
+
+// 2. Return type ของฟังก์ชันที่คำนวณง่ายๆ -> ปล่อยให้ TS เดา
+function calculateVat(price: number) {
+  return price * 0.07; // TS อนุมาน Return Type เป็น number ให้อัตโนมัติ
+}
+
+// 3. Callback ใน Array Methods -> TS อนุมานพารามิเตอร์ p ให้อัตโนมัติ
+const productPrices = [100, 250, 490];
+const formattedPrices = productPrices.map((p) => `฿${p.toFixed(2)}`); // p คือ number
+```
+
+### ตัวอย่างที่ 2: จุดที่จำเป็นต้องระบุ Type ด้วยตนเอง (Annotation)
+
+```typescript
+interface OrderItem {
+  sku: string;
+  quantity: number;
+}
+
+// จุดที่ 1: ประกาศตัวแปรเปล่าไว้ก่อน แล้วค่อยกำหนดค่าทีหลัง
+let pendingOrder: OrderItem; // ถ้าไม่ระบุ Type จะกลายเป็น any!
+
+// จุดที่ 2: พารามิเตอร์ของฟังก์ชัน (Function Parameters ต้องระบุ Type เสมอ)
+function processOrder(orderId: string, items: OrderItem[]): boolean {
+  return items.length > 0;
+}
+
+// จุดที่ 3: อาเรย์เริ่มต้นที่เป็นอาเรย์ว่าง
+const selectedSkus: string[] = []; // ถ้าไม่ใส่ : string[] จะได้ never[] หรือ any[]
+```
+
+---
+
+## 4. ผิด vs ถูก (Common Mistakes)
+
+### กรณีที่ 1: การเขียน Type กำกับซ้ำซ้อนในจุดที่ชัดเจนอยู่แล้ว
+```typescript
+// ❌ ผิด: เขียนรกเกินไปโดยไม่ได้ประโยชน์เพิ่มขึ้น
+const username: string = 'john_doe';
+const isComplete: boolean = false;
+const scores: number[] = [10, 20, 30];
+
+// ✅ ถูก: ปล่อยให้ TypeScript ทำงานแทนคุณ โค้ดอ่านง่ายและกระชับ
+const username = 'john_doe';
+const isComplete = false;
+const scores = [10, 20, 30];
+```
+
+### กรณีที่ 2: ละเลยการระบุ Type ในฟังก์ชันที่ซับซ้อน
+```typescript
+// ❌ ผิด: ฟังก์ชันซับซ้อนที่มีเงื่อนไขหลายจุด ถ้าไม่ระบุ Return Type อาจเผลอ return ผิดชนิด
+function getUserDiscount(isVip: boolean) {
+  if (isVip) return 0.2;
+  return 'No Discount'; // Return type กลายร่างเป็น number | string โดยไม่ตั้งใจ!
+}
+
+// ✅ ถูก: บังคับ Return Type สัญญา (Contract) ที่ชัดเจน
+function getUserDiscount(isVip: boolean): number {
+  if (isVip) return 0.2;
+  return 0; // ถ้าเผลอ return string คอมไพเลอร์จะดักจับทันที
+}
+```
+*Compiler Error*: `Type 'string' is not assignable to type 'number'.`
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- *ปล่อยให้ Inference*: เมื่อกำหนดค่า Primitive, สร้าง Object Literals ทันที หรือใช้ Array higher-order functions (`map`, `filter`)
+- *ระบุ Annotation*:
+  - พารามิเตอร์ของฟังก์ชันทุกตัว (Function Parameters)
+  - Return Type ของ Public APIs / Exported Functions
+  - ตัวแปรที่มีการประกาศไว้ก่อนแต่ยังไม่กำหนดค่าในทันที
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไม TypeScript จึงบังคับให้ระบุ Type ในพารามิเตอร์ของฟังก์ชัน แต่ไม่บังคับที่ Return Type?
+**แนวทางคำตอบ**: เพราะพารามิเตอร์คือทางเข้าของข้อมูล (Input) ซึ่งคอมไพเลอร์ไม่สามารถล่วงรู้ได้ว่าใครจะส่งอะไรเข้ามา จึงต้องระบุสัญญา Type ให้ชัดเจน ส่วน Return Type คอมไพเลอร์สามารถวิเคราะห์จากการคืนค่าของคำสั่ง `return` ภายในฟังก์ชันได้โดยตรง จึงอนุมานให้เองได้

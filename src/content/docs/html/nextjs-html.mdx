@@ -1,0 +1,178 @@
+---
+title: HTML in Next.js
+category: Frontend
+parentTitle: HTML5
+version: Next.js 16 & App Router
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+Next.js (App Router) ไม่ได้ปฏิเสธ HTML แต่ตรงกันข้าม มันนำ HTML มายกระดับเป็น **"High-performance Primitives"** ที่ช่วยแก้ปัญหาเรื่องความเร็วและ SEO ระดับ Production
+
+สิ่งที่ Next.js จัดเตรียมมาให้ทดแทน HTML ดั้งเดิม:
+- **`next/image` แทน `<img>`**: แปลงไฟล์เป็น AVIF/WebP อัตโนมัติ, สร้าง responsive `srcset`, ป้องกัน Layout Shift (CLS), และทำ Lazy loading อัตโนมัติ
+- **`next/link` แทน `<a>`**: เปลี่ยนการโหลดหน้าใหม่ (Hard Reload) ให้เป็นการเปลี่ยนหน้าแบบ **Instant Client-side SPA (Soft Navigation)** พร้อมเทคโนโลยี Prefetching
+- **Metadata API แทน `<meta>` ใน `<head>`**: จัดการ SEO, Open Graph, และ Favicons ผ่าน Object TypeScript บน Server Components
+- **HTML Nesting Rules**: การปฏิบัติตามกฎของ HTML5 เพื่อป้องกันข้อผิดพลาดคลาสสิกอย่าง **Hydration Error**
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ทำไม HTML ซ้อนกันผิดกฎ ถึงทำให้เกิด "Hydration Error"?
+ใน Next.js ขั้นตอน SSR จะเรนเดอร์ React Components ออกมาเป็นก้อนข้อความ HTML ส่งไปให้เบราว์เซอร์ แต่เมื่อเบราว์เซอร์เริ่ม Parse HTML:
+- กฎของ HTML5 ระบุว่า **แท็ก `<p>` ห้ามมี Block Element อย่าง `<div>` ซ้อนอยู่ข้างใน**
+- หากเราเขียน `<p><div>ข้อความ</div></p>` ตัว Browser HTML Parser จะทำการ **"ซ่อมแซม DOM อัตโนมัติ (DOM Auto-Correction)"** โดยบังคับปิดแท็ก `<p>` ทันที:
+  ```html
+  <!-- สิ่งที่เบราว์เซอร์สร้างจริงใน DOM: -->
+  <p></p>
+  <div>ข้อความ</div>
+  <p></p>
+  ```
+- เมื่อ JavaScript ของ React ดาวน์โหลดมาถึงและเริ่มกระบวนการ **Hydration (จับคู่ Virtual DOM กับ DOM จริง)** React จะพบว่าโครงสร้างต้นไม้ไม่ตรงกัน และจะฟ้อง Error สีแดงทันที:
+  > **Error: Hydration failed because the initial UI does not match what was rendered on the server.**
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่างที่ 1: การใช้ `next/image`, `next/link` และ Metadata API ใน Next.js 16
+
+```tsx filename="app/products/[id]/page.tsx"
+import React from 'react';
+import type { Metadata } from 'next';
+import Image from 'next/image';
+import Link from 'next/link';
+
+// 1. Next.js Metadata API: สร้าง <title> และ <meta> บน Server ให้โดยอัตโนมัติ
+export async function generateMetadata({ params }: { params: Promise<{ id: string }> }): Promise<Metadata> {
+  const { id } = await params;
+  return {
+    title: `สินค้า #${id} — Scripture Store`,
+    description: 'สั่งซื้ออุปกรณ์วิศวกรรมไอทีคุณภาพสูงพร้อมส่งด่วน',
+    openGraph: {
+      title: `สินค้า #${id}`,
+      images: ['/images/og-product.jpg'],
+    },
+  };
+}
+
+export default async function ProductPage() {
+  return (
+    <article className="max-w-2xl mx-auto p-6 space-y-6">
+      {/* 2. next/image: ป้องกัน CLS อัตโนมัติ และแปลงเป็น AVIF/WebP */}
+      <div className="relative aspect-video rounded-xl overflow-hidden bg-gray-100">
+        <Image
+          src="/images/mechanical-keyboard.jpg"
+          alt="คีย์บอร์ดกลไกไร้สายปุ่มกดสีเทาเข้ม"
+          fill
+          priority // บอกว่าเป็นรูป LCP ของหน้านี้ โหลดทันทีไม่ต้อง lazy
+          sizes="(max-width: 768px) 100vw, 672px"
+          className="object-cover"
+        />
+      </div>
+
+      <h1 className="text-2xl font-bold">คีย์บอร์ดกลไกไร้สาย Pro Max</h1>
+
+      {/* 3. next/link: เปลี่ยนหน้าแบบ SPA รวดเร็ว ไม่มีการรีเฟรชหน้าทั้งจอ */}
+      <Link 
+        href="/checkout"
+        className="inline-block px-6 py-3 rounded-full bg-blue-600 text-white font-medium hover:bg-blue-700 transition"
+      >
+        ดำเนินการสั่งซื้อทันที
+      </Link>
+    </article>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: เปรียบเทียบ โค้ดที่เกิด Hydration Error vs โค้ดที่ถูกต้อง
+
+#### ❌ โค้ดที่เกิด Hydration Error: `<p>` ซ้อน `<div>`
+```tsx
+export function BadComponent() {
+  return (
+    <p>
+      ข้อความนำ
+      {/* 💥 พังทันทีใน Runtime: HTML5 ไม่อนุญาตให้ <div> อยู่ใน <p> */}
+      <div className="alert-badge">คำเตือนพิเศษ</div>
+    </p>
+  );
+}
+```
+
+#### ✅ โค้ดที่ถูกต้อง: ใช้ `<div>` หรือ `<span>` ให้ถูกหมวด
+```tsx
+export function GoodComponent() {
+  return (
+    // ถูกต้อง: เปลี่ยนตัวนอกเป็น <div> หรือเปลี่ยนตัวในเป็น <span>
+    <div className="text-paragraph">
+      <p>ข้อความนำ</p>
+      <span className="alert-badge">คำเตือนพิเศษ</span>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ใช้ `<a>` ใน Next.js ทำให้หน้าเว็บรีเฟรชทั้งจอ
+
+```tsx
+// ผิด: ใช้ <a> แทน next/link ทำให้เบราว์เซอร์ทำ Hard Reload เสียสถานะ State ทั้งหมด
+import React from 'react';
+
+export function Navigation() {
+  return (
+    <nav>
+      <a href="/docs/typescript">ไปที่บทเรียน TypeScript</a>
+    </nav>
+  );
+}
+```
+
+### ✅ โค้ดที่ถูกต้อง: ใช้ `Link` จาก `next/link`
+
+```tsx
+// ถูกต้อง: นำทางแบบ Instant SPA นุ่มนวล ไม่กระตุก
+import Link from 'next/link';
+
+export function Navigation() {
+  return (
+    <nav>
+      <Link href="/docs/typescript">ไปที่บทเรียน TypeScript</Link>
+    </nav>
+  );
+}
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ใน Next.js
+- ใช้ `Link` จาก `next/link` สำหรับการเชื่อมโยงภายในเว็บไซต์เดียวกันเสมอ
+- ใช้ `Image` จาก `next/image` สำหรับรูปภาพทั่วไปในระบบ เพื่อประหยัด Bandwidth และเพิ่มคะแนน Google Core Web Vitals
+- จัดการ `<head>` ผ่าน `export const metadata` หรือ `generateMetadata` ใน Server Components
+
+### กรณีที่ยังใช้ HTML ดั้งเดิมได้
+- ลิงก์ออกไปยังเว็บไซต์ภายนอก (External Link เช่น `https://github.com`) สามารถใช้แท็ก `<a>` ปกติได้
+- ไอคอน SVG กราฟิกขนาดจิ๋ว (ขนาดไม่กี่ร้อยไบต์) สามารถเขียนเป็น inline `<svg>` ได้โดยไม่ต้องผ่าน `next/image`
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการใช้แท็ก `<a>` ธรรมดาใน Next.js App Router ถึงส่งผลเสียต่อ User Experience (UX)?
+**แนวทางคำตอบ**: การใช้แท็ก `<a>` แบบดั้งเดิมจะสั่งให้เบราว์เซอร์ตัดการเชื่อมต่อและทำลายต้นไม้ DOM ปัจจุบันทิ้งทั้งหมด เพื่อส่ง HTTP Request ไปดึงเอกสาร HTML หน้าใหม่จากเซิร์ฟเวอร์ (Full Page Hard Refresh) ทำให้เกิดอาการหน้าจอกระพริบ รีเซ็ตตำแหน่ง Scroll ของเมนูด้านข้าง และสูญเสีย Client State ที่บันทึกไว้ 
+ในขณะที่คอมโพเนนต์ `Link` ของ Next.js จะดักจับ Event การคลิก แล้วสลับการทำงานไปใช้ **Soft Navigation (SPA)** โดยดาวน์โหลดเฉพาะ Payload ของ Server Components มาสลับเนื้อหาเฉพาะส่วนที่เปลี่ยนแปลง ทำให้หน้าเว็บเปลี่ยนได้อย่างรวดเร็วทันทีและนุ่มนวล
+
+### Q2: อะไรคือสาเหตุหลักของการเกิด Hydration Error ที่เกี่ยวข้องกับโครงสร้าง HTML ใน Next.js?
+**แนวทางคำตอบ**: สาเหตุหลักเกิดจากการเขียนโครงสร้างแท็ก **ผิดกฎไวยากรณ์ของ HTML5 (Invalid HTML Tag Nesting)** เช่น:
+1. การนำ Block Element (`<div>`, `<p>`, `<table>`) ไปซ้อนอยู่ภายในแท็ก `<p>`
+2. การวางแท็ก `<tr>` ไว้ใน `<table>` โดยไม่มี `<tbody>`
+3. การวางแท็ก `<a>` ซ้อนในแท็ก `<a>`
+เมื่อเกิดเหตุการณ์นี้ HTML Parser ของเบราว์เซอร์จะทำการซ่อมแซมโครงสร้าง DOM ล่วงหน้า ทำให้เมื่อ React นำ Virtual DOM ที่เรนเดอร์จากฝั่งเซิร์ฟเวอร์มาจับคู่กับ DOM จริงในเบราว์เซอร์ โครงสร้างไม่สอดคล้องกันอย่างสมบูรณ์ จึงทำให้เกิด Hydration Error

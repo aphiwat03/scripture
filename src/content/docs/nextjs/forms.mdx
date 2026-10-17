@@ -1,0 +1,110 @@
+---
+title: Forms & Zod
+category: Frontend
+parentTitle: Next.js 16
+version: v16.4
+updatedAt: 2026-10-17
+---
+
+## 1. คืออะไร / ใช้ทำไม
+
+**Forms and Validation** คือการบริหารจัดการข้อมูลฟอร์มและตรวจสอบความถูกต้อง (Validation) ทั้งฝั่งเบราว์เซอร์เพื่อประสบการณ์ผู้ใช้งานที่ดี และฝั่งเซิร์ฟเวอร์เพื่อความปลอดภัย โดยใช้ **React Hook Form** ร่วมกับ Schema ของ **Zod**
+
+ช่วยป้องกันการส่งข้อมูลที่ผิดรูปแบบ ลดภาระการเขียนเงื่อนไขตรวจสอบด้วยตนเอง และแจ้งเตือนข้อผิดพลาดให้ผู้ใช้ทราบทันทีขณะพิมพ์
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### การสร้างฟอร์มพร้อมตรวจสอบด้วย Zod Schema
+
+```tsx filename="src/components/RegisterForm.tsx"
+'use client';
+
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
+
+// กำหนด Schema สำหรับตรวจสอบข้อมูล
+const registerSchema = z.object({
+  email: z.string().email('กรุณาระบุอีเมลที่ถูกต้อง'),
+  password: z.string().min(8, 'รหัสผ่านต้องมีความยาวอย่างน้อย 8 ตัวอักษร'),
+});
+
+type RegisterFormData = z.infer<typeof registerSchema>;
+
+export default function RegisterForm() {
+  const {
+    register,
+    handleSubmit,
+    formState: { errors, isSubmitting },
+  } = useForm<RegisterFormData>({
+    resolver: zodResolver(registerSchema),
+  });
+
+  const onSubmit = async (data: RegisterFormData) => {
+    const res = await fetch('/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+
+    if (!res.ok) alert('เกิดข้อผิดพลาดในการลงทะเบียน');
+  };
+
+  return (
+    <form onSubmit={handleSubmit(onSubmit)} className="space-y-4 max-w-sm mx-auto py-8">
+      <div>
+        <label className="block text-xs font-semibold mb-1">อีเมล</label>
+        <input
+          {...register('email')}
+          placeholder="user@example.com"
+          className="w-full px-3 py-2 border rounded-lg"
+        />
+        {errors.email && (
+          <p className="text-red-500 text-xs mt-1">{errors.email.message}</p>
+        )}
+      </div>
+
+      <div>
+        <label className="block text-xs font-semibold mb-1">รหัสผ่าน</label>
+        <input
+          {...register('password')}
+          type="password"
+          placeholder="••••••••"
+          className="w-full px-3 py-2 border rounded-lg"
+        />
+        {errors.password && (
+          <p className="text-red-500 text-xs mt-1">{errors.password.message}</p>
+        )}
+      </div>
+
+      <button
+        type="submit"
+        disabled={isSubmitting}
+        className="w-full py-2 bg-blue-600 text-white rounded-lg disabled:opacity-50"
+      >
+        {isSubmitting ? 'กำลังบันทึกข้อมูล...' : 'ลงทะเบียน'}
+      </button>
+    </form>
+  );
+}
+```
+
+## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- *ควรใช้*: เมื่อฟอร์มมีความซับซ้อน มีหลายฟิลด์ และต้องการ Real-time Validation แจ้งเตือนข้อผิดพลาดทันทีขณะกรอก
+- *ไม่ควรใช้*: ตรวจสอบเฉพาะฝั่งหน้าบ้านเพียงจุดเดียว ต้องนำ Schema เดียวกันไปตรวจสอบซ้ำบน Server Action หรือ API Route เสมอ
+
+## 4. ข้อควรระวัง
+
+<Callout type="warning" title="อย่าเชื่อถือข้อมูลจากฝั่ง Client">
+ผู้ไม่หวังดีสามารถใช้เครื่องมืออย่าง Postman ยิงข้อมูลข้ามการตรวจสอบของ React Hook Form ได้โดยตรง จึงต้องใช้ Zod `schema.parse(data)` บนเซิร์ฟเวอร์ซ้ำเสมอ
+</Callout>
+
+<Callout type="tip" title="แชร์ Zod Schema ร่วมกัน">
+สร้างไฟล์ `schemas/auth.ts` เพื่อเก็บ Zod Schema เพียงที่เดียว แล้วนำไปใช้ร่วมกันได้ทั้งใน React Hook Form ฝั่ง Client และใน Server Action ฝั่ง Server
+</Callout>
+
+## 5. แหล่งอ้างอิงทางการ
+
+- [React Hook Form Documentation](https://react-hook-form.com)
+- [Zod TypeScript-first Schema Validation](https://zod.dev)

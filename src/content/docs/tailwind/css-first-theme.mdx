@@ -1,0 +1,207 @@
+---
+title: CSS-first Configuration & @theme
+category: Frontend
+parentTitle: Tailwind CSS v4
+version: Tailwind v4.0 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การเปลี่ยนแปลงที่ยิ่งใหญ่ที่สุดใน **Tailwind CSS v4** คือการเปลี่ยนผ่านจาก **JS-centric configuration (`tailwind.config.js`)** สู่ **CSS-First Architecture**
+
+ในอดีต (v1 - v3) การปรับแต่ง Tailwind ต้องทำผ่านไฟล์ JavaScript ซึ่งสร้างความแปลกแยก:
+- นักพัฒนาต้องสลับไปมาระหว่างโค้ด CSS กับออบเจกต์ JS
+- ตัวแปรใน JS ต้องถูกแปลงกลับไปกลับมาเป็น CSS Custom Properties
+- เครื่องมือ CSS tooling (เช่น Stylelint หรือ CSS Language Server) ตรวจสอบไฟล์ config JS ได้ยาก
+
+Tailwind v4 แก้ปัญหานี้โดยนิยาม Directives มาตรฐานชุดใหม่ใน CSS ทั้งหมด:
+1. **`@theme`**: กำหนด Design Tokens (ชุดสี, ฟอนต์, สเกลระยะ, เบรกพอยต์)
+2. **`@utility`**: สร้าง Utility Class เฉพาะทางตัวใหม่ ซึ่งรองรับ Variant ทั้งหมด (`hover:`, `md:`, `dark:`) อัตโนมัติ
+3. **`@custom-variant`**: นิยาม Variant เงื่อนไขพิเศษ
+4. **`@source`**: ระบุไดเรกทอรีเพิ่มเติมให้ Oxide Engine สแกน (เช่น Shared UI Packages ใน Monorepo)
+5. **`@plugin`**: โหลดปลั๊กอินอย่างเป็นทางการ เช่น Typography Plugin ผ่าน CSS
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### กลไกการคอมไพล์ของ CSS Directives ใน Oxide Engine
+1. **Directives AST Transformation**:
+   Oxide Engine สแกนไฟล์ CSS หลัก และแปลง Directive แต่ละตัวเข้าสู่โครงสร้าง Modern Cascade Layers:
+   - `@theme` -> ถูกแปลงเป็น CSS Variables ในเลเยอร์ `:root` โดยอัตโนมัติ เช่น `--color-brand: ...;`
+   - `@utility content-auto` -> แปลงเป็น Atomic Utility พร้อมลงทะเบียนใน Internal Variant Matrix เพื่อให้สามารถผสมคำเช่น `hover:content-auto` หรือ `lg:content-auto` ได้ทันที
+2. **`@theme` vs `@theme inline`**:
+   - `@theme`: แทนที่หรือขยายค่าเริ่มต้น และสร้าง Static Variables
+   - `@theme inline`: ใช้เมื่อค่าใน Theme ต้องอ้างอิงกับ CSS Variables แบบ Dynamic ที่คำนวณใน runtime
+3. **Monorepo Scanning ด้วย `@source`**:
+   ใน Next.js Monorepo (เช่น Turborepo) Oxide ไม่จำเป็นต้องพึ่งคอนฟิก JS ซับซ้อน เพียงแค่ประกาศ `@source "../packages/ui/src";` เอนจินจะเพิ่ม Watcher สแกนไฟล์ในแพ็กเกจย่อยทันที
+
+---
+
+## 3. ตัวอย่างโค้ด (Tailwind v4 & TSX)
+
+### ตัวอย่างที่ 1: การกำหนด Design Tokens และ Custom Utility ใน `globals.css`
+
+```css filename="src/app/globals.css"
+@import "tailwindcss";
+
+/* 1. ประกาศ Theme Tokens ระดับระบบ */
+@theme {
+  --font-brand: var(--font-inter), system-ui, sans-serif;
+  
+  /* เพิ่มสีแบรนด์และเฉดสีใหม่ */
+  --color-corporate-primary: oklch(0.48 0.24 275);
+  --color-corporate-surface: oklch(0.98 0.01 275);
+  
+  /* ปรับแต่ง Breakpoint พิเศษ */
+  --breakpoint-3xl: 1920px;
+}
+
+/* 2. สร้าง Custom Utility ที่รองรับ variants (hover:, dark:, etc.) */
+@utility glass-card {
+  background-color: rgb(255 255 255 / 0.7);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgb(255 255 255 / 0.2);
+}
+
+@utility text-glow {
+  text-shadow: 0 0 12px oklch(0.7 0.2 275 / 0.5);
+}
+
+/* 3. นิยาม Custom Variant สำหรับอุปกรณ์หน้าจอสัมผัส (Touch Device) */
+@custom-variant touch (@media (pointer: coarse));
+
+/* 4. สแกนคอมโพเนนต์จาก Shared UI Module */
+@source "../../packages/ui-components";
+```
+
+### ตัวอย่างที่ 2: คอมโพเนนต์ที่นำ Theme และ Custom Utility ไปใช้งานจริง (EnterprisePortalCard)
+
+```tsx filename="src/components/EnterprisePortalCard.tsx"
+import { ArrowUpRight, ShieldCheck, Cpu } from "lucide-react";
+
+export function EnterprisePortalCard() {
+  return (
+    <div className="w-full max-w-lg p-6">
+      {/* ใช้งาน Custom Utility `glass-card` ร่วมกับ `hover:` และ `dark:` variant */}
+      <div className="glass-card group relative overflow-hidden rounded-3xl p-8 shadow-xl transition-all duration-300 hover:-translate-y-1 hover:shadow-2xl dark:bg-neutral-900/70 dark:border-neutral-800">
+        
+        {/* แสงเรืองด้านหลัง */}
+        <div className="pointer-events-none absolute -right-10 -top-10 size-40 rounded-full bg-corporate-primary/20 blur-3xl transition-all duration-500 group-hover:scale-125" />
+
+        <div className="flex items-center justify-between">
+          <div className="flex size-12 items-center justify-center rounded-2xl bg-corporate-primary text-white shadow-md">
+            <Cpu className="size-6" />
+          </div>
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+            <ShieldCheck className="size-3.5" /> โทเค็นพร้อมใช้งาน
+          </span>
+        </div>
+
+        {/* เรียกใช้สีแบรนด์ --color-corporate-primary และฟอนต์ --font-brand */}
+        <div className="mt-6">
+          <h3 className="font-brand text-xl font-bold tracking-tight text-neutral-900 dark:text-white">
+            คลาวด์คลัสเตอร์ระดับองค์กร
+          </h3>
+          <p className="mt-2 text-xs leading-relaxed text-neutral-600 dark:text-neutral-400">
+            ระบบโครงสร้างพื้นฐานที่ขับเคลื่อนด้วยหน่วยประมวลผลความเร็วสูง รองรับการสเกลแบบอัตโนมัติ 99.99% SLA
+          </p>
+        </div>
+
+        <div className="mt-8 flex items-center justify-between border-t border-neutral-200/60 pt-5 dark:border-neutral-800">
+          <div className="flex flex-col">
+            <span className="text-[11px] font-medium text-neutral-400 uppercase tracking-wider">
+              ค่าความหน่วงเฉลี่ย
+            </span>
+            <span className="text-lg font-bold text-neutral-900 dark:text-white">
+              1.2 มิลลิวินาที
+            </span>
+          </div>
+
+          <button
+            type="button"
+            className="flex items-center gap-1.5 rounded-xl bg-corporate-primary px-4 py-2.5 text-xs font-semibold text-white shadow-sm transition hover:opacity-90 active:scale-95 touch:py-3.5"
+          >
+            <span>เข้าสู่ระบบจัดการ</span>
+            <ArrowUpRight className="size-3.5" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับ CSS ปกติ
+
+| งาน | Tailwind v3 (JS Config) | Tailwind v4 (CSS-first) |
+| :--- | :--- | :--- |
+| **การเพิ่มเฉดสี** | `tailwind.config.js` -> `theme.extend.colors` | `@theme { --color-brand: ...; }` ใน CSS |
+| **การสร้าง Custom Utility** | เขียนผ่าน JS Plugin `addUtilities({ ... })` | `@utility my-util { ... }` ใน CSS |
+| **การสร้าง Custom Variant** | เขียนผ่าน JS Plugin `addVariant('touch', ...)` | `@custom-variant touch (@media ...);` ใน CSS |
+| **การสแกนพาธ Monorepo** | ระบุพาธในอาร์เรย์ `content: [...]` ในไฟล์ JS | `@source "../packages/ui";` ใน CSS |
+
+---
+
+## 5. ผิด vs ถูก
+
+### จุดที่ 1: การสร้าง Custom Utility แบบ CSS Class ดั้งเดิมแล้วนำไปใช้กับ Variant
+```css
+/* ❌ ผิด: เขียนคลาสธรรมดาใน CSS ทำให้ไม่สามารถใช้ hover:glass-card หรือ md:glass-card ได้ */
+.glass-card {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(10px);
+}
+
+/* ✅ ถูก: ประกาศด้วย @utility เพื่อเปิดให้คอมไพเลอร์สร้าง Variants ทุกตัวให้โดยอัตโนมัติ */
+@utility glass-card {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(10px);
+}
+```
+*เหตุผล*: เมื่อประกาศด้วย `@utility` ตัว Oxide Engine จะจัดคลาสนี้เข้าสู่สารบบ Atomic Classes ทำให้เราสามารถเขียน `hover:glass-card`, `dark:glass-card`, หรือ `sm:glass-card` ในมาร์กอัปได้ทันที
+
+### จุดที่ 2: พยายามสร้าง `tailwind.config.js` เพื่อขยาย Theme ใน Tailwind v4
+```javascript
+// ❌ ผิด: ฝืนใช้วิธี v3 ในโปรเจกต์ Next.js 16
+module.exports = {
+  theme: {
+    extend: {
+      colors: { corporate: "#4f46e5" },
+    },
+  },
+};
+
+// ✅ ถูก: ประกาศใน @theme ใน globals.css
+@theme {
+  --color-corporate: #4f46e5;
+}
+```
+*เหตุผล*: สถาปัตยกรรม v4 ตัด Dependency ของการอ่านไฟล์คอนฟิก JS ทิ้งทั้งหมดเพื่อประสิทธิภาพความเร็วระดับ Rust Native
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้
+- ใช้ `@theme` เพื่อสร้าง Single Source of Truth สำหรับ Design Tokens ของโปรเจกต์
+- ใช้ `@utility` เมื่อต้องการสร้างชุดสไตล์สำเร็จรูปที่ยังคงต้องการคุณสมบัติ Variant (`hover:`, `dark:`)
+- ใช้ `@source` เมื่อโปรเจกต์เป็น Monorepo หรือมีการแชร์โค้ดข้ามโฟลเดอร์
+
+### ไม่ควรใช้
+- ไม่ควรใช้ `@utility` พร่ำเพรื่อเพื่อเลียนแบบ BEM หรือสร้าง Component ขนาดใหญ่ (เช่น `@utility product-card { ... }`) ควรสกัดเป็น React Component แทนตามหลัก Utility-First
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: อะไรคือความได้เปรียบของการใช้ `@utility` ใน Tailwind v4 เมื่อเทียบกับการเขียนคลาส CSS แบบธรรมดา?
+**แนวทางคำตอบ**: 
+หากเราเขียนคลาส CSS แบบธรรมดา เช่น `.badge { ... }` เราจะไม่สามารถใช้งานร่วมกับ Variants ของ Tailwind ได้ เช่น `hover:badge` หรือ `md:badge` เว้นแต่เราจะเขียน CSS media query และ pseudo-class เพิ่มเองทั้งหมด แต่เมื่อใช้ `@utility badge { ... }` ใน Tailwind v4 ตัว Oxide Engine จะลงทะเบียนคลาสนั้นเข้าสู่ Core Pipeline ทำให้สามารถใช้งานร่วมกับ Responsive Breakpoints, Dark Mode, Pseudo-classes และ State ต่างๆ ได้ทันทีโดยอัตโนมัติ
+
+### Q2: ในสถาปัตยกรรม CSS-First ของ Tailwind v4 Directive `@theme` เชื่อมโยงกับ CSS Custom Properties อย่างไร?
+**แนวทางคำตอบ**: 
+`@theme` ใน Tailwind v4 ทำงานสอดคล้องกับมาตรฐาน Web Standards โดยตรง ทุกตัวแปรที่ประกาศ เช่น `--color-brand: #2563eb;` จะถูกคอมไพล์ลงใน Root Cascade Layer ของเบราว์เซอร์เป็น CSS Custom Property แท้จริง ทำให้นักพัฒนาสามารถเรียกใช้ได้ทั้งในรูปแบบ Tailwind Class (`bg-brand`, `text-brand`) และในรูปแบบ CSS ปกติผ่าน `var(--color-brand)` ได้อย่างไร้รอยต่อ

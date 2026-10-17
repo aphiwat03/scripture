@@ -1,0 +1,211 @@
+---
+title: Next.js 16 + v4 Setup
+category: Frontend
+parentTitle: shadcn/ui
+version: shadcn/ui & Radix UI
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การติดตั้ง shadcn/ui ร่วมกับ **Next.js 16 (App Router)** และ **Tailwind CSS v4** คือจุดเปลี่ยนสำคัญของกระบวนการตั้งค่าโปรเจกต์ (Project Setup) ยุคใหม่:
+- ในอดีต (Tailwind v3) คุณต้องจัดการไฟล์คอนฟิก `tailwind.config.js`, ติดตั้ง `postcss`, และตั้งค่าปลั๊กอิน `tailwindcss-animate` แยกต่างหาก
+- ในยุค **Tailwind CSS v4**: โครงสร้างถูกปรับให้เรียบง่ายและเร็วขึ้นมหาศาลด้วย Engine ภาษา Rust (Oxide) โดยการตั้งค่าทั้งหมดถูกย้ายเข้ามาอยู่ใน `globals.css` ผ่าน `@import "tailwindcss";` และ directive `@theme`
+
+ไฟล์และโฟลเดอร์หลักที่คุณจะพบเมื่อรัน shadcn init:
+1. `components.json` — คอนฟิกหลักที่บอก CLI ว่าไฟล์ต่างๆ ควรถูกวางไว้ที่ไหน และใช้สไตล์แบบใด
+2. `lib/utils.ts` — แหล่งรวม Helper Function สำคัญ โดยเฉพาะฟังก์ชัน `cn()`
+3. `components/ui/` — ไดเรกทอรีปลายทางสำหรับวางคอมโพเนนต์ที่คุณสั่งเพิ่มผ่าน CLI
+4. `tsconfig.json` (Path Alias `@/*`) — ช่วยให้การ Import โค้ดสะอาดตาและไม่ต้องนับ `../../`
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ลำดับขั้นตอนเมื่อรัน `pnpm dlx shadcn@latest init`:
+1. **Detect Environment**: CLI สแกน `package.json` และพบ Next.js 16 + Tailwind CSS v4
+2. **Inspect Path Alias**: ตรวจสอบว่าใน `tsconfig.json` มีการตั้งค่า `"@/*": ["./*"]` หรือ `"@/*": ["./src/*"]` หรือไม่ เพื่อนำไปใส่ใน `components.json`
+3. **Generate Utility File**: สร้างไฟล์ `lib/utils.ts` พร้อมติดตั้ง dependencies:
+   - `clsx`: สำหรับรวมคลาสตามเงื่อนไข (Conditional classes)
+   - `tailwind-merge`: สำหรับตัด Utility classes ของ Tailwind ที่ขัดแย้งกันออก
+4. **Setup CSS Variables**: เติมตัวแปร CSS Color Tokens ใน `app/globals.css` สำหรับทั้งโหมด Light (`:root`) และโหมด Dark (`.dark`)
+
+### คำสั่ง `shadcn add <component>` ทำงานอย่างไร?
+เมื่อคุณสั่ง `pnpm dlx shadcn@latest add button dialog`:
+1. CLI จะส่ง HTTP Request ไปยัง Registry API เพื่อดาวน์โหลดเนื้อหาของ `button.tsx` และ `dialog.tsx`
+2. ทำการตรวจสอบและติดตั้ง NPM Dependencies ที่คอมโพเนนต์นั้นต้องพึ่งพา เช่น `@radix-ui/react-dialog` และ `class-variance-authority`
+3. วางไฟล์ที่แปลง path aliases เรียบร้อยแล้วลงในโฟลเดอร์ `components/ui/` โดยตรง
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### 1. ไฟล์การตั้งค่า `components.json`
+```json filename="components.json"
+{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "default",
+  "rsc": true,
+  "tsx": true,
+  "tailwind": {
+    "config": "",
+    "css": "src/app/globals.css",
+    "baseColor": "neutral",
+    "cssVariables": true,
+    "prefix": ""
+  },
+  "aliases": {
+    "components": "@/components",
+    "utils": "@/lib/utils",
+    "ui": "@/components/ui",
+    "lib": "@/lib",
+    "hooks": "@/hooks"
+  },
+  "iconLibrary": "lucide"
+}
+```
+
+### 2. ไฟล์ `tsconfig.json` (การตั้งค่า Path Alias)
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+```
+
+### 3. ไฟล์ยูทิลิตี้ `lib/utils.ts`
+```typescript filename="src/lib/utils.ts"
+import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
+
+/**
+ * รวมชุดคลาสของ Tailwind CSS และตัดคลาสที่ขัดแย้งกันออกให้อัตโนมัติ
+ */
+export function cn(...inputs: ClassValue[]): string {
+  return twMerge(clsx(inputs));
+}
+```
+
+### 4. ตัวอย่างการทดสอบระบบหลังติดตั้ง: หน้า Welcome Onboarding
+```tsx filename="src/app/page.tsx"
+import Link from "next/link";
+import { Button } from "@/components/ui/button";
+import { ArrowRight, CheckCircle2, ShieldCheck, Sparkles } from "lucide-react";
+
+export default function WelcomePage() {
+  return (
+    <main className="min-h-screen flex flex-col items-center justify-center p-6 bg-background text-foreground">
+      <div className="max-w-2xl w-full border border-border rounded-3xl p-8 bg-card shadow-sm space-y-6">
+        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium bg-primary/10 text-primary">
+          <Sparkles className="w-3.5 h-3.5" />
+          <span>Next.js 16 + Tailwind CSS v4 Ready</span>
+        </div>
+
+        <div className="space-y-2">
+          <h1 className="text-3xl font-bold tracking-tight">
+            ระบบเริ่มต้นการทำงาน (System Initialization)
+          </h1>
+          <p className="text-muted-foreground text-sm">
+            การติดตั้ง shadcn/ui สำเร็จแล้ว คุณสามารถเริ่มสร้างหน้าแดชบอร์ดและฟอร์มธุรกิจได้ทันที
+          </p>
+        </div>
+
+        <div className="grid sm:grid-cols-2 gap-4 py-2">
+          <div className="flex items-start gap-3 p-4 rounded-xl border border-border/50 bg-accent/30">
+            <CheckCircle2 className="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" />
+            <div className="text-sm">
+              <span className="font-semibold block">Radix UI Primitives</span>
+              <span className="text-muted-foreground text-xs">
+                รองรับ Accessible WAI-ARIA ในตัว
+              </span>
+            </div>
+          </div>
+          <div className="flex items-start gap-3 p-4 rounded-xl border border-border/50 bg-accent/30">
+            <ShieldCheck className="w-5 h-5 text-blue-500 shrink-0 mt-0.5" />
+            <div className="text-sm">
+              <span className="font-semibold block">TypeScript First</span>
+              <span className="text-muted-foreground text-xs">
+                Type safety 100% สำหรับทุก Components
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between pt-4 border-t border-border">
+          <span className="text-xs text-muted-foreground">
+            ไฟล์คอมโพเนนต์อยู่ที่ <code className="bg-muted px-1.5 py-0.5 rounded">src/components/ui</code>
+          </span>
+          <Button asChild className="gap-2">
+            <Link href="/dashboard">
+              เข้าสู่แดชบอร์ด
+              <ArrowRight className="w-4 h-4" />
+            </Link>
+          </Button>
+        </div>
+      </div>
+    </main>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **สร้างไฟล์ `tailwind.config.js` เพิ่มเติมในโปรเจกต์ Tailwind v4**<br/>แล้วพยายามตั้งค่า color palette แบบ v3 ทำให้คอมไพเลอร์ Rust สับสนและละเลยการตั้งค่า | **ตั้งค่าผ่าน `@theme` และ CSS Variables ใน `globals.css`**<br/>Tailwind v4 เป็น CSS-first configuration ควบคุมทั้งหมดในไฟล์ CSS โดยตรง |
+| **ตั้งค่า Path Alias ใน `components.json` ไม่ตรงกับ `tsconfig.json`**<br/>เช่น ใน tsconfig ใช้ `@/*: ["./src/*"]` แต่ใน components.json ระบุ `@/components` ชี้ไปที่ root ทำให้ CLI วางไฟล์ผิดที่ | **ตรวจสอบและซิงค์ Path Alias ให้ตรงกันเสมอ**<br/>ให้แน่ใจว่าทั้งสองไฟล์อ้างอิงโฟลเดอร์เดียวกันอย่างถูกต้องก่อนรัน `shadcn add` |
+| **แก้ไขโค้ดใน `lib/utils.ts` จนทำลายการทำงานของ `cn()`**<br/>เช่น ลบ `tailwind-merge` ออกเหลือแค่ `clsx` เพื่อประหยัดแพ็กเกจ | **คง `cn()` ไว้ตามมาตรฐาน**<br/>เพราะคอมโพเนนต์ทุกตัวใน shadcn พึ่งพา `twMerge(clsx(inputs))` เพื่อจัดการคลาสขัดแย้ง |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้เมื่อ:
+- **เริ่มต้นโปรเจกต์ใหม่ (Greenfield Project)** ที่ต้องการ Stack ที่ทันสมัยที่สุด: Next.js 16 + React 19 + Tailwind CSS v4
+- **ต้องการโครงสร้างไฟล์ที่ได้มาตรฐานระดับสากล**: โครงสร้างโฟลเดอร์ของ shadcn เป็นที่ยอมรับในหมู่นักพัฒนาทั่วโลก ทำให้ทีมใหม่เข้าใจโครงสร้างได้ทันที
+
+### ไม่ควรใช้เมื่อ:
+- **โปรเจกต์เดิมเป็น Next.js Pages Router แบบเก่า** ที่ไม่ได้ใช้ App Router และยังใช้ Webpack / Babel รุ่นเก่ามากที่เข้ากันไม่ได้กับ ESM tooling ยุคใหม่
+- **โปรเจกต์ที่ห้ามใช้ Tailwind CSS**: หากสถาปัตยกรรมของบริษัทบังคับให้ใช้ Vanilla Extract หรือ CSS Modules เป็นหลัก
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ไฟล์ `components.json` ใน shadcn/ui มีหน้าที่อะไร และ CLI นำข้อมูลในไฟล์นี้ไปประมวลผลอย่างไรเมื่อนักพัฒนารันคำสั่ง `shadcn add`?
+**แนวทางตอบ:**
+`components.json` ทำหน้าที่เป็น **Configuration Manifest** ของ shadcn CLI:
+1. **ระบุตำแหน่งวางไฟล์ (File Paths)**: บันทึกว่าโฟลเดอร์ `ui`, `components`, `utils`, และ `hooks` ตั้งอยู่ที่ตำแหน่งใดในโปรเจกต์ (เช่น มี `src/` นำหน้าหรือไม่)
+2. **ปรับแต่ง Import Statement**: เมื่อ CLI ดาวน์โหลด Source Code ของคอมโพเนนต์มา มันจะแปลงข้อความ Import ตาม `aliases` ใน `components.json` ก่อนจะบันทึกลงดิสก์
+3. **กำหนดคุณสมบัติของโปรเจกต์**: บอก CLI ว่าโปรเจกต์นี้เปิดใช้ React Server Components (`"rsc": true`), ใช้ TypeScript (`"tsx": true`), และใช้ CSS Variables หรือไม่
+
+### Q2: ใน Next.js 16 ร่วมกับ Tailwind CSS v4 มีการเปลี่ยนแปลงโครงสร้างการติดตั้งคอมโพเนนต์อย่างไรเมื่อเทียบกับ Tailwind v3?
+**แนวทางตอบ:**
+1. **ไม่มี `tailwind.config.js`**: ใน Tailwind v4 การตั้งค่าถูกปรับเป็น **CSS-first** ไม่ต้องสร้างไฟล์คอนฟิก JavaScript แยก
+2. **Animation ในตัว**: ใน v3 ต้องลงปลั๊กอิน `tailwindcss-animate` เพิ่ม แต่ใน v4 รองรับ CSS Animations และ Transitions ในระดับ Core แล้ว
+3. **ตัวแปรสีผ่าน `@theme`**: ค่าสี เช่น `--background`, `--primary` ถูกผูกเข้ากับระบบ Utility classes ผ่านคำสั่ง `@theme inline` ภายใน `globals.css` โดยตรง ทำให้โหลดเร็วขึ้นและลดความซับซ้อนของ Build Pipeline

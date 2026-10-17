@@ -1,0 +1,232 @@
+---
+title: Server vs Client State
+category: Frontend
+parentTitle: TanStack Query v5
+version: TanStack Query v5.x
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ในการพัฒนาเว็บแอปพลิเคชันยุคใหม่ด้วย React 19 และ Next.js 16 ความสับสนที่พบบ่อยที่สุดคือการแยกประเภทของ **"State" (สถานะของข้อมูล)** ให้ออกอย่างชัดเจน ข้อมูลในระบบฝั่งหน้าบ้านถูกแบ่งออกเป็น 2 ประเภทหลักที่มีธรรมชาติแตกต่างกันอย่างสิ้นเชิง:
+
+1. **Client State (สถานะฝั่งไคลเอนต์)**:
+   - คือข้อมูลที่ "หน้าบ้านเป็นเจ้าของแต่เพียงผู้เดียว" (Synchronous, Client-Owned)
+   - ไม่มีการบันทึกลงฐานข้อมูลระยะไกล
+   - เข้าถึงและแก้ไขได้ทันทีแบบ Synchronous
+   - ตัวอย่างเช่น: สถานะเปิด/ปิด Modal, Dark Mode Toggle, ฟอร์ม Multi-step ใน Step ที่ 1, เมนู Sidebar ยุบ/ขยาย
+   - เครื่องมือที่เหมาะสม: `useState`, `useReducer`, หรือ Client State Manager เช่น **Zustand**
+
+2. **Server State (สถานะฝั่งเซิร์ฟเวอร์)**:
+   - คือข้อมูลที่ "ฐานข้อมูลบนเซิร์ฟเวอร์เป็นเจ้าของที่แท้จริง" (Asynchronous, Remote-Owned)
+   - ข้อมูลหน้าบ้านเป็นเพียง "ภาพสะท้อนชั่วคราว" (Snapshot / Cache) ณ เวลาที่ดึงมา
+   - มีความเป็นไปได้ตลอดเวลาที่ข้อมูลบนเซิร์ฟเวอร์จะเปลี่ยนไปโดยผู้ใช้อื่น หรือกระบวนการเบื้องหลัง
+   - ต้องใช้ Network I/O (Asynchronous) ในการอ่านและเขียน
+   - ตัวอย่างเช่น: ข้อมูลโปรไฟล์ผู้ใช้ (`UserProfile`), รายการสินค้าในสต็อก (`ProductCatalog`), ยอดเงินในกระเป๋า, สถานะออเดอร์ (`OrderStatus`)
+   - เครื่องมือที่เหมาะสม: **TanStack Query v5**
+
+ความผิดพลาดใหญ่ของนักพัฒนาในอดีตคือการนำ "Server State" ไปยัดเก็บไว้ใน Global Client State Store เช่น Redux หรือ Zustand ทำให้ต้องเขียนโค้ดมหาศาลเพื่อจัดการสถานะ Loading, Error, Cache Invalidation, และการซิงค์ข้อมูลให้ตรงกับเซิร์ฟเวอร์ด้วยตนเอง
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ทำไม `useEffect` + `useState` ถึงพังเมื่อจัดการ Server State?
+
+การใช้แพทเทิร์นคลาสสิก `useEffect(() => { fetch(...) }, [])` ร่วมกับ `useState` เพื่อดึงข้อมูลเซิร์ฟเวอร์ก่อให้เกิดปัญหาเชิงสถาปัตยกรรม 4 ประการ:
+
+```
+[User Action: Search "A"] ---- Request 1 (ช้า 800ms) ---------> [Server]
+[User Action: Search "AB"] --- Request 2 (เร็ว 200ms) -> [Server]
+                                                            |
+Response 2 กลับมาก่อน: แสดงผล "AB" <-------------------------+
+Response 1 กลับมาทีหลัง: ทับข้อมูลกลายเป็น "A" (Race Condition!)
+```
+
+1. **Race Conditions (การแย่งชิงลำดับการประมวลผล)**:
+   หากผู้ใช้พิมพ์ค้นหาสินค้าจาก "iP" เป็น "iPhone" Request แรกอาจใช้เวลา 800ms ส่วน Request หลังใช้เวลาเพียง 200ms หาก Response ของคำขอแรกกลับมาทีหลัง ผลลัพธ์สินค้า "iP" จะถูกนำมาทับ "iPhone" บนหน้าจอ ทำให้ผู้ใช้เห็นผลลัพธ์การค้นหาที่ไม่ถูกต้อง
+2. **No Request Deduplication & No Caching**:
+   หากมีคอมโพเนนต์ 3 ตัวบนหน้าเดียวกัน (เช่น HeaderAvatar, ProfileSidebar, DashboardGreeting) ที่ต้องการข้อมูล `UserProfile` เดียวกัน ทั้งสามตัวจะสั่งยิง API พร้อมกัน 3 รอบโดยไม่จำเป็น ทำให้เซิร์ฟเวอร์ทำงานหนักเกินควร
+3. **Stale Data & No Background Revalidation**:
+   เมื่อผู้ใช้สลับแท็บเบราว์เซอร์ไปทำงานอื่น 30 นาที แล้วสลับกลับมา ข้อมูลสินค้าหรือสต็อกที่แสดงอยู่คือข้อมูลเก่าที่หมดอายุแล้ว `useEffect` ไม่สามารถตรวจจับ Window Focus หรือ Network Reconnect เพื่ออัปเดตข้อมูลอัตโนมัติได้
+4. **Memory Leaks & Unmounted Component Updates**:
+   หากคอมโพเนนต์ถูก Unmount ก่อนที่ Promise จะ Resolve React จะแจ้งเตือนการอัปเดต State บน Unmounted Component หากไม่ได้จัดการ `AbortController` อย่างรัดกุม
+
+TanStack Query แก้ปัญหานี้โดยทำหน้าที่เป็น **Async State Caching Layer** เก็บข้อมูลไว้ที่ส่วนกลาง (QueryCache) มีระบบ Deduplication รวมคำขอที่ซ้ำกัน และมี State Machine สำหรับจัดการสถานะ `fresh`, `stale`, และ `fetching` อย่างแม่นยำ
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+ระบบแสดงโปรไฟล์ผู้ใช้และยอดสินค้าคงเหลือในตะกร้า (`UserProfile` & `CartBadge`):
+
+```tsx filename="src/features/user/components/UserProfileCard.tsx"
+'use client';
+
+import React from 'react';
+import { useQuery } from '@tanstack/react-query';
+
+interface UserProfile {
+  id: string;
+  name: string;
+  email: string;
+  tier: 'silver' | 'gold' | 'platinum';
+  loyaltyPoints: number;
+}
+
+// 1. queryFn: ดึงข้อมูลโปรไฟล์
+async function fetchUserProfile(): Promise<UserProfile> {
+  const res = await fetch('/api/user/profile');
+  if (!res.ok) {
+    throw new Error('ไม่สามารถดึงข้อมูลโปรไฟล์ผู้ใช้ได้');
+  }
+  return res.json();
+}
+
+export function UserProfileCard() {
+  // 2. useQuery: บริหารจัดการ Server State แบบ Declarative
+  const { data: user, isPending, isError, error, isFetching } = useQuery<UserProfile>({
+    queryKey: ['user', 'profile'],
+    queryFn: fetchUserProfile,
+    staleTime: 60 * 1000, // ข้อมูลสดใหม่ 1 นาที ไม่ต้องยิงซ้ำ
+  });
+
+  if (isPending) {
+    return <div className="h-24 w-full animate-pulse rounded-lg bg-gray-200" />;
+  }
+
+  if (isError) {
+    return (
+      <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-600">
+        เกิดข้อผิดพลาด: {error instanceof Error ? error.message : 'Unknown Error'}
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+      {isFetching && (
+        <span className="absolute right-4 top-4 text-xs font-medium text-blue-500 animate-spin">
+          🔄
+        </span>
+      )}
+      <h3 className="text-lg font-semibold text-gray-900">{user.name}</h3>
+      <p className="text-sm text-gray-500">{user.email}</p>
+      <div className="mt-4 flex items-center justify-between">
+        <span className="rounded-full bg-blue-100 px-3 py-1 text-xs font-semibold text-blue-700 uppercase">
+          {user.tier} Member
+        </span>
+        <span className="text-sm font-bold text-emerald-600">
+          แต้มสะสม: {user.loyaltyPoints.toLocaleString()} คะแนน
+        </span>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม (useEffect vs TanStack Query)
+
+| ฟีเจอร์ / ความสามารถ | วิธีเดิม (`useEffect` + `useState`) | TanStack Query v5 |
+| :--- | :--- | :--- |
+| **โค้ดตั้งต้น (Boilerplate)** | 25-40 บรรทัด (ต้องสร้าง `loading`, `error`, `data`) | 4-6 บรรทัด ครบทุกสถานะ |
+| **Race Conditions** | ต้องเขียน `AbortController` หรือ flag ล้าง cleanup เอง | จัดการให้อัตโนมัติ ป้องกัน Response สลับลำดับ |
+| **Request Deduplication** | ไม่มี ถ้า 3 คอมโพเนนต์เรียก จะยิง 3 requests | มี ยิงเพียง 1 request แล้วแชร์ข้อมูลให้ทุกคอมโพเนนต์ |
+| **แคชข้อมูล (Caching)** | ไม่มี ต้องเก็บลง Context หรือ Store ด้วยตนเอง | มีในตัว จัดการ memory lifecycle ด้วย `staleTime` และ `gcTime` |
+| **Background Refresh** | ต้องเขียน Event Listener ดัก window focus เอง | ตรวจจับ Window Focus, Reconnect, และ Route Change อัตโนมัติ |
+| **Retry เมื่อเน็ตหลุด** | ต้องเขียนลูป retry เอง | มี Exponential Backoff Retry ในตัว (ค่าเริ่มต้น retry 3 ครั้ง) |
+
+---
+
+## 5. ผิด vs ถูก
+
+### แบบที่ผิด ❌: นำ Server State ไปเก็บใน Zustand หรือ useState ซ้ำซ้อน
+
+```tsx
+// ❌ ผิดมหันต์: Copy ข้อมูลจาก useQuery ไปเก็บลงใน useState หรือ Zustand Store
+export function BadUserProfile() {
+  const [userState, setUserState] = useState<UserProfile | null>(null);
+  
+  const { data } = useQuery({
+    queryKey: ['user', 'profile'],
+    queryFn: fetchUserProfile,
+  });
+
+  useEffect(() => {
+    if (data) {
+      setUserState(data); // ❌ Anti-pattern: สร้าง Duplicate State ทำให้ข้อมูล Out-of-sync
+    }
+  }, [data]);
+
+  return <div>{userState?.name}</div>;
+}
+```
+
+### แบบที่ถูก ✅: บริโภค `data` จาก `useQuery` โดยตรง และใช้ Zustand เฉพาะ Client State
+
+```tsx
+// ✅ ถูกต้อง: ใช้ data จาก useQuery โดยตรง
+// ส่วน Zustand ให้ใช้เก็บเฉพาะ UI State เช่น สถานะเปิดปิด Modal
+import { create } from 'zustand';
+
+interface UIStore {
+  isEditProfileModalOpen: boolean;
+  openEditModal: () => void;
+  closeEditModal: () => void;
+}
+
+export const useUIStore = create<UIStore>((set) => ({
+  isEditProfileModalOpen: false,
+  openEditModal: () => set({ isEditProfileModalOpen: true }),
+  closeEditModal: () => set({ isEditProfileModalOpen: false }),
+}));
+
+export function GoodUserProfile() {
+  // ดึง Server State จาก TanStack Query
+  const { data: user } = useQuery({
+    queryKey: ['user', 'profile'],
+    queryFn: fetchUserProfile,
+  });
+
+  // ดึง Client State จาก Zustand
+  const { openEditModal } = useUIStore();
+
+  return (
+    <div>
+      <span>{user?.name}</span>
+      <button onClick={openEditModal}>แก้ไขโปรไฟล์</button>
+    </div>
+  );
+}
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ TanStack Query เมื่อ:
+- ข้อมูลได้มาจาก API, Microservices หรือ Database (REST, GraphQL, gRPC-web)
+- ต้องการระบบ Caching, Automatic Background Refetching เมื่อผู้ใช้กลับเข้ามาที่หน้าต่าง
+- หน้าจอต้องการ Polling ข้อมูลเรียลไทม์ (เช่น อัตราแลกเปลี่ยน, ตำแหน่งคนขับพัสดุ)
+- ต้องการจัดการ Infinite Scroll หรือ Pagination ที่ลื่นไหล ไม่กระตุก
+
+### ไม่ควรใช้ TanStack Query เมื่อ:
+- ข้อมูลเป็น Synchronous UI State ที่หน้าบ้านควบคุมเอง เช่น Accordion กางออก/หุบเข้า, ค่าใน Text Input ระหว่างพิมพ์ (ใช้ `useState` หรือ `useReducer`)
+- Global Theme (Dark/Light mode) หรือ Sidebar Toggle (ใช้ **Zustand** หรือ React Context)
+- หน้าที่เป็น Pure Static Content บน Next.js Server Components ที่ไม่มีการโต้ตอบของ Client เลย (ดึงข้อมูลด้วย `fetch` บน Server Component ตรงๆ ได้)
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: Server State แตกต่างจาก Client State อย่างไร และทำไมการนำ Server State ไปเก็บใน Zustand หรือ Redux จึงมักถือเป็น Code Smell?
+**แนวทางตอบ**:
+Server State มีกรรมสิทธิ์อยู่ที่เซิร์ฟเวอร์ ข้อมูลฝั่ง Client เป็นเพียงสำเนาชั่วคราวที่มีโอกาสล้าสมัย (Stale) ตลอดเวลา และต้องเรียกผ่าน Asynchronous Network ขณะที่ Client State เป็น Synchronous ข้อมูลเกิดและจบที่หน้าบ้าน หากเรานำ Server State ไปเก็บใน Zustand/Redux เราจะต้องเขียนโค้ดเองทั้งหมดเพื่อจัดการ Loading, Error, Request Cancellation, Deduplication, และ Cache Invalidation ซึ่งซ้ำซ้อนและเกิดบั๊กได้ง่าย การแยกให้ TanStack Query ดูแล Server State และให้ Zustand ดูแลเฉพาะ Client UI State จึงเป็นสถาปัตยกรรมที่ถูกต้องและยืดหยุ่นที่สุด
+
+### Q2: ปัญหา Race Condition ในการดึงข้อมูลบนหน้าบ้านเกิดขึ้นได้อย่างไร และ TanStack Query มีกลไกภายในอย่างไรในการจัดการปัญหานี้?
+**แนวทางตอบ**:
+Race Condition เกิดขึ้นเมื่อมีคำขอหลายครั้งเกิดขึ้นในเวลาใกล้เคียงกัน (เช่น ผู้ใช้พิมพ์ค้นหา หรือเปลี่ยน Filter ไวๆ) แล้วคำขอที่ส่งไปทีหลังกลับมาถึงก่อนคำขอแรก หากคอมโพเนนต์นำ Response ล่าสุดที่เพิ่งมาถึง (แต่เป็นคำขอเก่า) ไปอัปเดต State ข้อมูลบนหน้าจอจะผิดพลาด TanStack Query จัดการปัญหานี้โดย:
+1. แต่ละ Query Key จะมี State Machine กำกับ หากมีการยิงคำขอใหม่ภายใต้ Key เดิม คำขอเดิมจะถูกมองข้ามหรือยกเลิกผ่าน `AbortController`
+2. ระบบจะยอมรับเฉพาะ Response ที่ผูกกับ Request Instance ล่าสุดเท่านั้นในการเขียนลง QueryCache ทำให้มั่นใจได้ว่าข้อมูลบนจอจะตรงกับสิ่งที่ผู้ใช้เลือกเสมอ

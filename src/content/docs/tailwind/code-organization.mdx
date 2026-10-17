@@ -1,0 +1,233 @@
+---
+title: Code Organization & Best Practices
+category: Frontend
+parentTitle: Tailwind CSS v4
+version: Tailwind v4.0 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+เมื่อโปรเจกต์ขนาดใหญ่มีนักพัฒนาทำงานร่วมกันหลายคน ความเป็นระเบียบของโค้ด (Maintainability) คือหัวใจสำคัญที่จะช่วยให้ทีมพัฒนาได้อย่างต่อเนื่องโดยไม่เกิดหนี้ทางเทคนิค (Technical Debt)
+
+ประเด็นหลัก 3 ประการในการจัดระเบียบโค้ด Tailwind CSS v4:
+1. **Component Extraction เหนือกว่า `@apply`**: การใช้ `@apply` เพื่อยุบคลาสจำนวนมากเข้าไปไว้ใน CSS เป็นการถอยหลังกลับไปสู่ยุค Semantic CSS แบบเดิม การสกัดเป็น React Component คือทางออกที่แท้จริง
+2. **การจัดเรียงลำดับคลาสอัตโนมัติ**: ติดตั้ง `prettier-plugin-tailwindcss` เพื่อให้คลาสถูกเรียงตามลำดับมาตรฐานทางการโดยอัตโนมัติ ป้องกันการขัดแย้งใน Git Diff
+3. **หลีกเลี่ยง Dynamic Class Interpolation**: การตัดต่อสตริง เช่น `text-${color}-500` จะทำให้ **Oxide Engine สแกนไม่พบ** และสไตล์จะไม่ถูกสร้างขึ้นบนหน้าเว็บจริง
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### กลไก Static Scanning ของ Rust Oxide Engine
+1. **How Oxide Extracts Classes**:
+   ตัวสแกนของ Tailwind v4 ทำงานแบบ **Static Text Scanning** บนไฟล์ต้นฉบับ มันไม่ได้รัน JavaScript และไม่เข้าใจตัวแปรใน runtime:
+   - หากไฟล์ของคุณมีข้อความ `bg-blue-600` เป็นคำเดี่ยวๆ Oxide จะพบและสร้าง CSS ทันที
+   - หากไฟล์ของคุณมีเพียง `` `bg-${color}-600` `` Oxide จะมองเห็นคำว่า `bg-` และ `-600` ซึ่งไม่ใช่ Utility Class ที่ถูกต้อง ส่งผลให้ **ไม่มีกฎ CSS ถูกคอมไพล์ออกมาเลย!**
+2. **The Danger of `@apply`**:
+   การเขียน `@apply` บ่อยครั้งทำให้ขนาดไฟล์ CSS บวมขึ้น เพราะเบราว์เซอร์ไม่สามารถ Re-use Atomic Classes ได้อีกต่อไป และยังสร้างความสับสนเรื่อง Specificity ลำดับเลเยอร์
+3. **Official Canonical Sorting**:
+   `prettier-plugin-tailwindcss` จัดเรียงคลาสตามลำดับโครงสร้างของ CSS Box Model:
+   - Layout (`flex`, `grid`, `absolute`) -> Box Model (`p-*`, `m-*`, `w-*`, `h-*`) -> Typography (`text-*`, `font-*`) -> Visuals (`bg-*`, `border-*`, `shadow-*`) -> Modifiers (`hover:`, `focus:`, `md:`)
+
+---
+
+## 3. ตัวอย่างโค้ด (Tailwind v4 & TSX)
+
+### ตัวอย่างที่ 1: การตั้งค่า Prettier และการทำ Safe Color Mapping
+
+```json filename=".prettierrc"
+{
+  "semi": true,
+  "singleQuote": false,
+  "tabWidth": 2,
+  "trailingComma": "es5",
+  "plugins": ["prettier-plugin-tailwindcss"]
+}
+```
+
+```tsx filename="src/components/SafeStatusAlert.tsx"
+import { AlertCircle, CheckCircle2, Info, AlertTriangle } from "lucide-react";
+
+type AlertType = "info" | "success" | "warning" | "error";
+
+interface AlertProps {
+  type: AlertType;
+  title: string;
+  description: string;
+}
+
+// ⚠️ Best Practice: ใช้ Record Map ที่มีชื่อคลาสเต็มๆ เสมอ เพื่อให้ Oxide Scanner ค้นพบ
+const alertStyleMap: Record<
+  AlertType,
+  {
+    container: string;
+    iconColor: string;
+    icon: typeof Info;
+  }
+> = {
+  info: {
+    container: "border-sky-200 bg-sky-50/60 text-sky-900 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-200",
+    iconColor: "text-sky-600 dark:text-sky-400",
+    icon: Info,
+  },
+  success: {
+    container: "border-emerald-200 bg-emerald-50/60 text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200",
+    iconColor: "text-emerald-600 dark:text-emerald-400",
+    icon: CheckCircle2,
+  },
+  warning: {
+    container: "border-amber-200 bg-amber-50/60 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200",
+    iconColor: "text-amber-600 dark:text-amber-400",
+    icon: AlertTriangle,
+  },
+  error: {
+    container: "border-rose-200 bg-rose-50/60 text-rose-900 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-200",
+    iconColor: "text-rose-600 dark:text-rose-400",
+    icon: AlertCircle,
+  },
+};
+
+export function SafeStatusAlert({ type, title, description }: AlertProps) {
+  const config = alertStyleMap[type];
+  const Icon = config.icon;
+
+  return (
+    <div
+      role="alert"
+      className={`flex items-start gap-3.5 rounded-2xl border p-4 shadow-2xs transition-all ${config.container}`}
+    >
+      <Icon className={`size-5 shrink-0 ${config.iconColor}`} />
+      <div className="min-w-0 flex-1">
+        <h4 className="text-sm font-bold">{title}</h4>
+        <p className="mt-0.5 text-xs opacity-90 leading-relaxed">
+          {description}
+        </p>
+      </div>
+    </div>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: สกัดเป็น React Component แทนการสร้าง Semantic Class ด้วย `@apply`
+
+```tsx filename="src/components/FeatureSummaryCard.tsx"
+import { LucideIcon, ArrowRight } from "lucide-react";
+
+interface FeatureCardProps {
+  icon: LucideIcon;
+  title: string;
+  description: string;
+  href: string;
+}
+
+// ✅ แนวทางที่ถูกต้อง: แยกโครงสร้างและสไตล์รวมไว้ใน React Component
+export function FeatureSummaryCard({
+  icon: Icon,
+  title,
+  description,
+  href,
+}: FeatureCardProps) {
+  return (
+    <div className="group relative flex flex-col justify-between rounded-3xl border border-neutral-200 bg-white p-6 shadow-sm transition-all duration-300 hover:-translate-y-1 hover:shadow-xl dark:border-neutral-800 dark:bg-neutral-900">
+      <div>
+        <div className="flex size-12 items-center justify-center rounded-2xl bg-indigo-50 text-indigo-600 transition-colors duration-300 group-hover:bg-indigo-600 group-hover:text-white dark:bg-indigo-950/60 dark:text-indigo-400">
+          <Icon className="size-6" />
+        </div>
+        <h3 className="mt-5 text-base font-bold text-neutral-900 dark:text-white">
+          {title}
+        </h3>
+        <p className="mt-2 text-xs leading-relaxed text-neutral-500 dark:text-neutral-400">
+          {description}
+        </p>
+      </div>
+
+      <div className="mt-6 pt-4 border-t border-neutral-100 dark:border-neutral-800">
+        <a
+          href={href}
+          className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-600 dark:text-indigo-400"
+        >
+          เรียนรู้เพิ่มเติม
+          <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-1" />
+        </a>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับ CSS ปกติ
+
+| วิธีการจัดการสไตล์ | ความสามารถในการนำกลับมาใช้ใหม่ | ขนาดไฟล์ CSS ปลายทาง | ปัญหา Specificity |
+| :--- | :--- | :--- | :--- |
+| **เขียนด้วย `@apply` ในไฟล์ CSS** | สับสน ต้องเปิดดูสองไฟล์ | **โตขึ้นเรื่อยๆ** ตามจำนวนคลาสที่สร้าง | เสี่ยงเกิดปัญหาลำดับคลาสทับซ้อน |
+| **สกัดเป็น React Component** | สูงสุด ผ่าน Props และ JSX | **คงที่เล็กจิ๋ว** ใช้ Atomic Classes ซ้ำ | **ไม่มีปัญหาเลย** คลาสมีความสำคัญเท่ากัน |
+| **Traditional Semantic BEM** | ต่ำ แก้จุดหนึ่งกระทบจุดอื่น | โตแบบไม่สิ้นสุด (Append-only) | สูงมากเมื่อโปรเจกต์ใหญ่ขึ้น |
+
+---
+
+## 5. ผิด vs ถูก
+
+### จุดที่ 1: การใช้ Dynamic Template String ตัดต่อชื่อคลาส Tailwind
+```tsx
+// ❌ ผิด: Oxide Engine ไม่เข้าใจตัวแปร ${color} ใน runtime ทำให้สไตล์ไม่ปรากฏบน Production!
+function Badge({ color, text }: { color: "red" | "green"; text: string }) {
+  return <span className={`bg-${color}-500 text-white`}>{text}</span>;
+}
+
+// ✅ ถูก: เขียนชื่อคลาสเต็ม หรือใช้ Lookup Table เสมอ
+const colorClasses = {
+  red: "bg-red-500",
+  green: "bg-green-500",
+};
+
+function Badge({ color, text }: { color: "red" | "green"; text: string }) {
+  return <span className={`${colorClasses[color]} text-white`}>{text}</span>;
+}
+```
+*เหตุผล*: Static Scanner จะตรวจจับเฉพาะคำเต็มที่ปรากฏในไฟล์ source code เท่านั้น
+
+### จุดที่ 2: ใช้ `@apply` เพื่อแก้ปัญหา "Class ยาวรกตา"
+```css
+/* ❌ ผิด: ฝืนใช้ @apply สไตล์เดิม ทำให้สูญเสียแก่นแท้ของ Utility-First */
+.my-custom-button {
+  @apply inline-flex items-center justify-center px-4 py-2 bg-blue-600 text-white rounded-lg shadow-md hover:bg-blue-700 focus:outline-none transition;
+}
+
+/* ✅ ถูก: ห่อเป็น React Component <Button> และใส่คลาสใน JSX */
+export function Button({ children, ...props }) {
+  return (
+    <button className="inline-flex items-center justify-center px-4 py-2 bg-blue-600 text-white rounded-lg shadow-md hover:bg-blue-700 focus:outline-none transition" {...props}>
+      {children}
+    </button>
+  );
+}
+```
+*เหตุผล*: การสกัด Component ใน React ทำให้เราได้ทั้งการจัดกลุ่ม HTML, Logic, Accessibility และ Styling ไว้ในที่เดียวกันอย่างสมบูรณ์ (Colocation)
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้
+- ติดตั้ง `prettier-plugin-tailwindcss` ในทุกโปรเจกต์ตั้งแต่วันแรก
+- ใช้ Record Mapping ใน TypeScript สำหรับการเลือกสีหรือขนาดแบบพลวัต
+- แยก Reusable UI Component เป็นไฟล์ย่อยเมื่อพบว่ามีการใช้ชุดคลาสซ้ำกันเกิน 2-3 จุด
+
+### ไม่ควรใช้
+- หลีกเลี่ยง `@apply` ให้ได้มากที่สุด ยกเว้นกรณีจำเป็นจริงๆ เช่น การเขียน CSS รีเซ็ตเฉพาะจุดให้กับปลั๊กอิน Markdown Third-party
+- ห้ามตัดต่อสตริงชื่อคลาสด้วยตัวแปรเด็ดขาด
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการเขียน Dynamic Class แบบ `` className={`bg-${color}-500`} `` ถึงทำงานได้ในโหมด Development บางครั้ง แต่กลับพังอย่างสิ้นเชิงบน Production Build?
+**แนวทางคำตอบ**: 
+ในระหว่างรัน Dev Mode หากมีหน้าอื่นในโปรเจกต์บังเอิญเคยพิมพ์คำว่า `bg-red-500` ไว้อยู่แล้ว ตัว Tailwind Compiler ก็จะเคยสร้างคลาสนั้นเก็บไว้ในแคช ทำให้ดูเหมือนว่าโค้ดทำงานได้ แต่เมื่อถึงขั้นตอนการทำ **Production Build** ตัวสแกนจะเริ่มต้นสแกนไฟล์ทั้งหมดใหม่ตั้งแต่ต้นแบบ Clean Slate และเนื่องจากมันมองเห็นเพียงคำว่า `` `bg-${color}-500` `` ซึ่งไม่ใช่คลาสที่สมบูรณ์ คลาส `bg-red-500` จึงไม่ถูกสร้างลงใน Production CSS Bundle ส่งผลให้หน้าเว็บไม่มีสไตล์ วิธีแก้คือการใช้ Object Map ที่บรรจุชื่อคลาสแบบเต็มเสมอ
+
+### Q2: ทำไมทีมผู้สร้าง Tailwind จึงไม่แนะนำให้ใช้ `@apply` ในการสร้างระบบดีไซน์บนเฟรมเวิร์กอย่าง React หรือ Next.js?
+**แนวทางคำตอบ**: 
+เพราะใน Component-based Architecture (เช่น React/Next.js) เรามีเครื่องมือในการทำ Abstraction ที่ทรงพลังอยู่แล้วคือ **React Component** การหันไปใช้ `@apply` จะทำให้เราต้องคิดชื่อคลาสใหม่ (กลับไปสู่ปัญหาเดิมของ BEM), เพิ่มขนาดไฟล์ CSS โดยไม่จำเป็น, สูญเสียความยืดหยุ่นในการปรับแต่งด้วย Responsive/State Variants และทำให้ทีมต้องสลับไฟล์ไปมาระหว่าง JSX กับ CSS โดยไม่เกิดประโยชน์ใดๆ

@@ -1,0 +1,124 @@
+---
+title: Box Model
+category: Frontend
+parentTitle: CSS
+version: CSS3 / Modern CSS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ทุก Element ในหน้าเว็บ ไม่ว่าจะเป็นข้อความ รูปภาพ หรือปุ่มกด ล้วนถูกเบราว์เซอร์มองเป็น **"กล่องสี่เหลี่ยม (Box Model)"** เสมอ
+
+กล่องประกอบด้วย 4 ชั้นเรียงจากในออกนอก:
+1. **Content**: พื้นที่เนื้อหาจริง (ข้อความ, รูปภาพ)
+2. **Padding**: ระยะห่างภายใน ระหว่างเนื้อหากับเส้นขอบ (อยู่ในกล่อง รับสีพื้นหลัง)
+3. **Border**: เส้นขอบล้อมรอบกล่อง
+4. **Margin**: ระยะห่างภายนอก ระหว่างกล่องนี้กับกล่องข้างเคียง (อยู่นอกกล่อง โปร่งใสเสมอ)
+
+และหัวใจที่สำคัญที่สุดของกล่องคือ: **`box-sizing: border-box`**
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. ทำไมต้อง `box-sizing: border-box` เสมอ?
+- **`content-box` (ค่าดั้งเดิมของเบราว์เซอร์)**: เมื่อเราสั่ง `width: 200px; padding: 20px; border: 5px solid;`
+  ความกว้างรวมจริงจะกลายเป็น `200 + 40 + 10 = 250px`! (กล่องจะบวมออกเรื่อยๆ ทำให้คำนวณ Layout ยากมาก)
+- **`border-box` (มาตรฐานสากลสมัยใหม่)**: เมื่อสั่ง `width: 200px` เบราว์เซอร์จะบีบ Content ข้างในลง เพื่อให้ **ขนาดรวมของกล่องทั้งหมดเท่ากับ 200px พอดีเป๊ะ**
+
+### 2. ปรากฏการณ์ Margin Collapse (การยุบรวมขอบ)
+เมื่อกล่อง Block 2 กล่องวางต่อกันในแนวตั้ง:
+- กล่องบนมี `margin-bottom: 30px`
+- กล่องล่างมี `margin-top: 20px`
+- **ระยะห่างจริงจะไม่ใช่ 50px แต่จะยุบรวมกันเหลือแค่ 30px** (ยึดค่าที่มากกว่า)! 
+*(หมายเหตุ: Margin Collapse จะเกิดขึ้นเฉพาะในแนวตั้งของ Block Flow ปกติเท่านั้น จะไม่เกิดขึ้นใน Flexbox หรือ CSS Grid)*
+
+---
+
+## 3. ตัวอย่างโค้ด (CSS)
+
+### ตัวอย่างที่ 1: การทำ CSS Reset สำหรับ Box Model ทุก Element
+
+```css filename="reset.css"
+/* กฎเหล็กข้อแรกของทุกโปรเจกต์เว็บสมัยใหม่ */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+```
+
+### ตัวอย่างที่ 2: การจัดการ Box Model ในการ์ดสินค้า E-Commerce
+
+```css filename="product-card.css"
+.product-card {
+  box-sizing: border-box;
+  width: 320px;
+  /* Padding ภายใน: ตัวหนังสือไม่ชนขอบ */
+  padding: 20px;
+  background-color: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  /* Margin ภายนอก: เว้นระยะห่างจากการ์ดใบอื่น */
+  margin: 16px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ไม่ใช้ `border-box` ทำให้ `width: 100%` ล้นขอบจอ
+
+```css
+/* ผิด: กล่องกว้าง 100% + padding 16px ซ้ายขวา = 100% + 32px ทำให้เกิดแถบเลื่อนแนวนอน (Horizontal Scrollbar) */
+.input-field {
+  width: 100%;
+  padding: 12px 16px;
+  border: 1px solid #cbd5e1;
+}
+```
+
+### ✅ โค้ดที่ถูกต้อง: บังคับ `border-box` เสมอ
+
+```css
+/* ถูกต้อง: ขนาดรวมจะไม่เกิน 100% ของคอนเทนเนอร์ */
+.input-field {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 12px 16px;
+  border: 1px solid #cbd5e1;
+}
+```
+
+---
+
+## 5. เทียบกับ Tailwind CSS v4
+
+ใน Tailwind CSS v4 มีการใส่ `box-sizing: border-box` ให้กับทุก Element ใน Preflight Reset เป็นค่าเริ่มต้นอยู่แล้ว:
+
+| CSS Property | Tailwind CSS v4 Utility |
+| :--- | :--- |
+| `box-sizing: border-box;` | `box-border` (เปิดเป็นค่าเริ่มต้น) |
+| `padding: 16px;` | `p-4` |
+| `padding-left: 12px; padding-right: 12px;` | `px-3` |
+| `margin-top: 24px;` | `mt-6` |
+| `margin-left: auto; margin-right: auto;` | `mx-auto` (จัดกึ่งกลางแนวนอน) |
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: อะไรคือความแตกต่างระหว่าง `box-sizing: content-box` และ `box-sizing: border-box`?
+**แนวทางคำตอบ**:
+- `content-box`: ค่า `width` และ `height` ที่ระบุจะคำนวณเฉพาะพื้นที่ของเนื้อหาข้างในเท่านั้น หากมีการเติม `padding` หรือ `border` ขนาดรวมของ Element บนหน้าจอจะขยายใหญ่ขึ้นเรื่อยๆ
+- `border-box`: ค่า `width` และ `height` ที่ระบุจะนับรวม `padding` และ `border` เข้าไปด้วย ทำให้ขนาดรวมของ Element บนหน้าจอมีขนาดคงที่ตรงกับค่าที่กำหนดไว้เสมอ ช่วยให้การจัดเลย์เอาต์และการคำนวณเปอร์เซ็นต์ความกว้างไม่ล้นจอ
+
+### Q2: Margin Collapse คืออะไร และเราสามารถป้องกันไม่ให้ Margin ยุบรวมกันได้อย่างไร?
+**แนวทางคำตอบ**: Margin Collapse คือพฤติกรรมที่ Margin ด้านบนและล่างของ Block Elements สองตัวที่อยู่ติดกันยุบรวมเป็น Margin ก้อนเดียวโดยยึดค่าที่มากที่สุดแทนที่จะนำมาบวกกัน 
+วิธีป้องกันหรือยกเลิกพฤติกรรมนี้:
+1. เปลี่ยน Container ให้เป็น **Flexbox (`display: flex`)** หรือ **CSS Grid (`display: grid`)** ซึ่งจะไม่มี Margin Collapse
+2. ใช้พร็อพเพอร์ตี้ **`gap`** แทนการใช้ `margin`
+3. คั่นระหว่างกล่องด้วย `padding` หรือ `border` เล็กน้อย

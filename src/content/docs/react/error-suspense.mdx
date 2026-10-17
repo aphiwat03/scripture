@@ -1,0 +1,66 @@
+---
+title: Error & Suspense
+category: Frontend
+parentTitle: React 19
+version: v19.0
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+- **Suspense**: เปรียบเหมือน "ม่านกั้น" ที่บอก React ว่าหากชิ้นส่วนข้างในกำลังรอข้อมูลอะซิงโครนัสอยู่ ให้ดึงม่าน (Fallback UI เช่น Skeleton) มาปิดไว้ก่อน เมื่อข้อมูลพร้อมจึงเปิดม่านออก
+- **Error Boundaries**: เปรียบเหมือน "ถุงลมนิรภัย" ที่คอยดักจับข้อผิดพลาดระหว่างการ Render หากส่วนย่อยเกิดแครช (เช่น ข้อมูล `undefined`) ถุงลมจะทำงานเฉพาะส่วนนั้น เพื่อไม่ให้ทั้งหน้าเว็บดับวูบเป็นหน้าขาว (Blank Screen)
+
+---
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### การใช้งาน Suspense ร่วมกับการดึงข้อมูลแบบสตรีมมิ่ง
+
+```tsx filename="components/DashboardView.tsx"
+import React, { Suspense } from 'react';
+
+// จำลองคอมโพเนนต์ที่ดึงข้อมูลช้า
+async function SlowRevenueChart() {
+  const res = await fetch('https://api.example.com/revenue', { cache: 'no-store' });
+  const data = await res.json();
+  return <div className="h-48 bg-elevated border p-4 rounded-xl">ยอดขาย: ฿{data.total}</div>;
+}
+
+export function DashboardView() {
+  return (
+    <div className="space-y-4 max-w-xl mx-auto py-8">
+      <h1 className="text-2xl font-bold">แดชบอร์ดสรุปผล</h1>
+
+      {/* หุ้มส่วนที่ทำงานช้าด้วย Suspense */}
+      <Suspense
+        fallback={
+          <div className="h-48 bg-subtle animate-pulse rounded-xl flex items-center justify-center text-xs text-muted">
+            กำลังโหลดชาร์ตข้อมูล...
+          </div>
+        }
+      >
+        <SlowRevenueChart />
+      </Suspense>
+    </div>
+  );
+}
+```
+
+---
+
+## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- **Suspense**: ใช้เมื่อต้องการทำ Streaming SSR หรือการโหลด Component แบบ Code-splitting ด้วย `React.lazy`
+- **Error Boundary**: ใช้ครอบตามจุดสำคัญ เช่น กล่องคอมเมนต์, วิดเจ็ตแดชบอร์ด, หน้าฟอร์มชำระเงิน เพื่อป้องกันข้อผิดพลาดลุกลาม
+
+---
+
+## 4. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: Error Boundary ดักจับข้อผิดพลาดประเภทใดไม่ได้บ้าง?
+**แนวทางคำตอบ**: Error Boundary **ไม่สามารถ** ดักจับ Error ใน 4 กรณีนี้:
+1. Event Handlers (เช่น ข้อผิดพลาดในฟังก์ชัน `onClick`)
+2. Asynchronous Code (เช่น ใน `setTimeout` หรือ `requestAnimationFrame`)
+3. Server-Side Rendering (ต้องใช้ error.tsx ใน Next.js แทน)
+4. ข้อผิดพลาดที่เกิดขึ้นภายในตัว Error Boundary เอง

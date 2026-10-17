@@ -1,0 +1,320 @@
+---
+title: React Toastify Core Setup
+category: Frontend
+parentTitle: Toast Notify
+version: Sonner & React Toastify (Next.js 16)
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**React Toastify** เป็นหนึ่งในไลบรารีระบบแจ้งเตือนที่ได้รับความนิยมสูงสุดและมีประวัติการใช้งานยาวนานที่สุดในระบบนิเวศของ React ด้วยยอดดาวน์โหลดหลายล้านครั้งต่อสัปดาห์ จุดแข็งที่โดดเด่นของ React Toastify คือ **ความครบเครื่อง (Feature-complete)** ความเสถียรที่ผ่านการทดสอบมาอย่างโชกโชน (Battle-tested) และแถบเวลาแสดงความคืบหน้า (Progress Bar) ที่ช่วยให้ผู้ใช้รับรู้ได้อย่างแม่นยำว่าข้อความจะปิดตัวลงเมื่อใด
+
+อย่างไรก็ดี เมื่อนำมาใช้งานในยุคของ **Next.js 16 (App Router)** และ **React 19** มีข้อกำหนดสำคัญ 2 ประการที่นักพัฒนาต้องให้ความใส่ใจเป็นพิเศษ:
+1. **การจำกัดขอบเขต Client Component (`'use client'`)**: ตัว `<ToastContainer />` อาศัย Window APIs และ DOM Event Listeners จึงไม่สามารถเรนเดอร์ใน Server Component ได้โดยตรง
+2. **การนำเข้าสไตล์ชีต (CSS Import)**: React Toastify แยกโครงสร้างการจัดวางและการตกแต่งสีไว้ในไฟล์ CSS ภายนอก (`react-toastify/dist/ReactToastify.css`) หากไม่มีการนำเข้าไฟล์นี้ Toast จะแสดงผลเป็นตัวอักษรดิบซ้อนทับกันอย่างไม่ถูกต้อง
+
+```
+โครงสร้างการติดตั้งใน Next.js 16 App Router:
+app/layout.tsx (Server Component)
+  ├── import 'react-toastify/dist/ReactToastify.css';  <-- นำเข้า CSS Global
+  └── <body>
+        {children}
+        <ToastContainerWrapper />  <-- ห่อหุ้มด้วย 'use client'
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. สถาปัตยกรรม EventManager & Container Registry
+React Toastify ทำงานผ่านโมเดล **Pub/Sub Event Bus** ภายในที่ชื่อว่า `eventManager`:
+- เมื่อคอมโพเนนต์ `<ToastContainer />` ถูก Mount ลงใน DOM มันจะลงทะเบียนตัวเองเข้ากับ `eventManager` พร้อมระบุ `containerId` (หากมี)
+- เมื่อคุณเรียกใช้ `toast.success('ข้อความ')` ตัวฟังก์ชัน `toast` จะยิง Event พร้อมแนบ Configuration Payload ไปยัง `eventManager`
+- Container ที่ตรงกับเงื่อนไขจะรับข้อมูลไปจัดสรรคิว (Queue Management), สั่งเริ่มนับเวลาถอยหลัง (Timer Engine) และขยายพื้นที่ DOM แสดงผล
+
+### 2. Core API Methods และพารามิเตอร์หลัก
+React Toastify มี Method แยกตามสถานะความหมาย (Semantic Status):
+- `toast.success(content, options)`: แจ้งผลสำเร็จ (ไอคอนเครื่องหมายถูก)
+- `toast.error(content, options)`: แจ้งข้อผิดพลาด (ไอคอนกากบาท)
+- `toast.info(content, options)`: แจ้งข้อมูลทั่วไป (ไอคอนตัว i)
+- `toast.warn(content, options)`: แจ้งเตือนข้อควรระวัง (ไอคอนเครื่องหมายตกใจ)
+- `toast.loading(content, options)`: แสดงสถานะกำลังประมวลผล
+
+### 3. อ็อปชันสำคัญของ `<ToastContainer />`
+- **`position`**: พิกัดบนหน้าจอ เช่น `"top-right"`, `"top-center"`, `"top-left"`, `"bottom-right"`, `"bottom-center"`, `"bottom-left"`
+- **`autoClose`**: ระยะเวลานับถอยหลังเป็นมิลลิวินาที (ค่าเริ่มต้นคือ `5000ms`) หรือกำหนดเป็น `false` เพื่อไม่ให้ปิดอัตโนมัติ
+- **`theme`**: โหมดสีสันของ Toast ได้แก่ `'light'`, `'dark'`, หรือ `'colored'` (พื้นหลังเปลี่ยนสีสดตามสถานะ)
+- **`hideProgressBar`**: ปิดแถบเวลานับถอยหลังด้านล่างหากต้องการความสะอาดตา
+- **`pauseOnHover`**: หยุดนับเวลาชั่วคราวเมื่อผู้ใช้นำเมาส์ไปชี้ เพื่อให้อ่านข้อความทัน
+- **`closeOnClick`**: สั่งปิดการ์ดทันทีเมื่อผู้ใช้คลิกลงบนพื้นที่ใดก็ได้ของ Toast
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่างที่ 1: การสร้าง Client Component Wrapper และติดตั้งใน Next.js 16 Root Layout
+
+ตัวอย่างนี้แสดงวิธีการติดตั้ง React Toastify ใน Next.js 16 App Router อย่างถูกต้อง ปราศจาก Hydration Mismatch และผสานเข้ากับโหมดสีของระบบ
+
+```tsx filename="src/components/providers/ToastifyContainer.tsx"
+"use client";
+
+import { ToastContainer } from "react-toastify";
+import "react-toastify/dist/ReactToastify.css";
+
+export function ToastifyContainer() {
+  return (
+    <ToastContainer
+      position="top-right"
+      autoClose={4500}
+      hideProgressBar={false}
+      newestOnTop
+      closeOnClick
+      rtl={false}
+      pauseOnFocusLoss
+      draggable
+      pauseOnHover
+      theme="light"
+      toastClassName="font-sans text-sm rounded-xl shadow-lg border border-slate-100"
+    />
+  );
+}
+```
+
+```tsx filename="src/app/layout.tsx"
+import type { Metadata } from "next";
+import { ToastifyContainer } from "@/components/providers/ToastifyContainer";
+import "@/styles/globals.css";
+
+export const metadata: Metadata = {
+  title: "ระบบบริหารจัดการคำสั่งซื้อ - Enterprise Logistics",
+  description: "Next.js 16 Production Logistics System",
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="th">
+      <body className="min-h-screen bg-slate-50 text-slate-900 antialiased">
+        {children}
+        {/* ติดตั้ง Container ผ่าน Client Component Wrapper */}
+        <ToastifyContainer />
+      </body>
+    </html>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: ระบบจัดการคำสั่งซื้อ (Order Management Console) เรียกใช้ Core API และ Options ครบถ้วน
+
+ตัวอย่างนี้จำลองการใช้งานในระบบจัดการคำสั่งซื้ออีคอมเมิร์ซ แสดงการส่ง `toast.success`, `toast.error`, `toast.warn`, `toast.info` พร้อมการปรับแต่ง Transitions, Progress Bar และ Dismiss Queue
+
+```tsx filename="src/components/orders/OrderActionToolbar.tsx"
+"use client";
+
+import * as React from "react";
+import { toast, Slide, Bounce } from "react-toastify";
+import { 
+  PackageCheck, 
+  Truck, 
+  Ban, 
+  FileSpreadsheet, 
+  Trash2 
+} from "lucide-react";
+
+interface OrderToolbarProps {
+  orderNumber: string;
+  customerName: string;
+  totalAmount: number;
+}
+
+export function OrderActionToolbar({
+  orderNumber,
+  customerName,
+  totalAmount,
+}: OrderToolbarProps) {
+  // 1. toast.success พร้อม Transition แบบ Slide
+  function handleConfirmShipment() {
+    toast.success(`คำสั่งซื้อ #${orderNumber} ส่งต่อให้ขนส่งแล้ว`, {
+      transition: Slide,
+      autoClose: 4000,
+      icon: <Truck className="w-5 h-5 text-emerald-500" />,
+    });
+  }
+
+  // 2. toast.warn: แจ้งเตือนยอดเงินสูงผิดปกติ
+  function handleVerifyHighValue() {
+    if (totalAmount > 50000) {
+      toast.warn("ยอดสั่งซื้อสูงกว่า ฿50,000", {
+        autoClose: 6000,
+        pauseOnHover: true,
+      });
+    } else {
+      toast.info("ยอดสั่งซื้ออยู่ในเกณฑ์ปกติ");
+    }
+  }
+
+  // 3. toast.error พร้อม Transition แบบ Bounce และ theme: colored
+  function handleCancelOrder() {
+    toast.error(`ยกเลิกคำสั่งซื้อ #${orderNumber} ของคุณ ${customerName} แล้ว`, {
+      transition: Bounce,
+      theme: "colored", // แถบสีแดงสดทั้งการ์ด
+      autoClose: 5000,
+      icon: <Ban className="w-5 h-5" />,
+    });
+  }
+
+  // 4. toast.loading และ toast.update: สร้างรายงาน Excel
+  async function handleExportExcel() {
+    const toastId = toast.loading("กำลังประมวลผลไฟล์รายงาน Excel...");
+
+    setTimeout(() => {
+      // อัปเดตการ์ดเดิมจาก Loading เป็น Success
+      toast.update(toastId, {
+        render: `สร้างรายงาน #${orderNumber}.xlsx สำเร็จ!`,
+        type: "success",
+        isLoading: false,
+        autoClose: 4000,
+        closeOnClick: true,
+      });
+    }, 2000);
+  }
+
+  // 5. toast.dismiss(): สั่งล้างคิว Toast ทั้งหมดบนหน้าจอ
+  function handleClearAllAlerts() {
+    toast.dismiss();
+  }
+
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 pb-4">
+        <div>
+          <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+            ใบสั่งซื้อ
+          </span>
+          <h3 className="text-lg font-bold text-slate-800">#{orderNumber}</h3>
+        </div>
+        <div className="text-right">
+          <span className="text-xs text-slate-500">ยอดรวมทั้งสิ้น</span>
+          <p className="text-lg font-extrabold text-blue-600">
+            ฿{totalAmount.toLocaleString()}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={handleConfirmShipment}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-700 transition-colors"
+        >
+          <PackageCheck className="w-4 h-4" />
+          ส่งมอบสินค้า
+        </button>
+
+        <button
+          type="button"
+          onClick={handleVerifyHighValue}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors"
+        >
+          ตรวจสอบยอด
+        </button>
+
+        <button
+          type="button"
+          onClick={handleExportExcel}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors"
+        >
+          <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+          ส่งออก Excel
+        </button>
+
+        <button
+          type="button"
+          onClick={handleCancelOrder}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-rose-50 px-3.5 py-2 text-xs font-semibold text-rose-600 hover:bg-rose-100 transition-colors ml-auto"
+        >
+          <Ban className="w-4 h-4" />
+          ยกเลิกออเดอร์
+        </button>
+
+        <button
+          type="button"
+          onClick={handleClearAllAlerts}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 p-2 text-xs text-slate-400 hover:text-slate-600"
+          title="ล้างการแจ้งเตือนทั้งหมดบนจอ"
+        >
+          <Trash2 className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีอื่น (React Toastify vs Sonner vs Browser Native)
+
+| มิติการเปรียบเทียบ | React Toastify | Sonner | Browser Native (`alert`) |
+| :--- | :--- | :--- | :--- |
+| **แถบเวลานับถอยหลัง (Progress Bar)** | **มีให้ในตัวแบบสมบูรณ์** ปรับสีและทิศทางได้ | ไม่มี (เน้นความเรียบง่ายมินิมอล) | ไม่มี |
+| **รูปแบบแอนิเมชัน** | Slide, Bounce, Zoom, Flip (กำหนดแยกชิ้นได้) | Spring & 3D Stacking ตามหลักฟิสิกส์ | ไม่มีแอนิเมชัน |
+| **ความต้องการไฟล์ CSS** | **ต้องนำเข้าไฟล์ `.css` ภายนอกเสมอ** | ไม่ต้องนำเข้า CSS ภายนอก | ไม่ต้อง |
+| **ขนาด Bundle Size** | ~16-20 KB + ~5 KB CSS | **~4.1 KB** เบาบางมาก | 0 KB |
+| **การรองรับ Dark/Light Mode** | มีโหมดสำเร็จรูป (`light`, `dark`, `colored`) | ผูกเข้ากับ Tailwind CSS และ `next-themes` ได้ดีกว่า | ปรับตาม OS เท่านั้น |
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practices)
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **นำเข้า `<ToastContainer />` โดยตรงใน `app/layout.tsx` ที่เป็น Server Component**<br/>โดยไม่ได้ใส่ `'use client'`<br/>*ผลลัพธ์:* เกิด Next.js Build Error แจ้งว่าไม่สามารถรันคอมโพเนนต์ที่เข้าถึง DOM บนเซิร์ฟเวอร์ได้ | **สร้าง Client Component Wrapper เสมอ**<br/>เช่น สร้าง `ToastifyContainer.tsx` พร้อม `'use client'` แล้วค่อยนำไปใส่ใน `app/layout.tsx` |
+| **ลืม `import 'react-toastify/dist/ReactToastify.css';`**<br/>ทำให้ Toast กลายเป็นกล่องข้อความธรรมดาลอยค้างอยู่ด้านล่างหน้าจอ ไม่มีการ์ดหรือสี | **นำเข้าไฟล์ CSS ที่ระดับ Root Layout หรือ Client Provider ทันที** |
+| **เปิด `pauseOnFocusLoss={true}` ในระบบที่มีการเปิดหลายหน้าต่างพร้อมกัน**<br/>ผู้ใช้สลับหน้าจอไปมาแล้ว Toast ค้างไม่ยอมปิดอัตโนมัติ สร้างความรำคาญ | **ปิด `pauseOnFocusLoss={false}` สำหรับแอปแดชบอร์ด**<br/>เพื่อให้ Toast ปิดตัวลงตามเวลาที่กำหนดแม้ผู้ใช้จะสลับแท็บ |
+| **ใช้ `theme="colored"` บนหน้าเว็บที่มี Dark Mode สลับซับซ้อน**<br/>ทำให้สีแดงหรือเขียวตัดกับพื้นหลังของหน้าเว็บจนแสบตาหรืออ่านยาก (Bad Contrast Ratio) | **ใช้ `theme="light"` หรือ `theme="dark"` ให้สอดคล้องกับธีมของระบบ** |
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ React Toastify เมื่อ:
+- **ต้องการให้ผู้ใช้มองเห็นระยะเวลาที่เหลือก่อนการ์ดจะปิดอย่างชัดเจน**: ผ่านแถบ Progress Bar
+- **ระบบเดิม (Legacy System) พัฒนาบน React Toastify อยู่แล้ว**: การคงไลบรารีเดิมไว้ช่วยประหยัดเวลาในการทดสอบระบบซ้ำ
+- **ต้องการ Animation หลากหลายแบบต่อประเภทเหตุการณ์**: เช่น ใช้ Bounce กับ Error และใช้ Slide กับ Success
+- **ต้องการระบบ Multi-Container**: แสดงการแจ้งเตือนหลายจุดบนหน้าจอเดียวกันอย่างอิสระ
+
+### ไม่ควรใช้เมื่อ:
+- **เริ่มโปรเจกต์ใหม่ด้วย Next.js 16 + shadcn/ui**: ในบริบทนี้ Sonner เป็นตัวเลือกที่เข้ากันได้ดีกว่ามาก
+- **โปรเจกต์ที่เข้มงวดเรื่อง Bundle Size Budget**: ต้องการตัดขนาด JavaScript ที่ไม่จำเป็นออก
+- **ต้องการประสบการณ์การ์ดซ้อน 3D ที่ขยายตัวเมื่อแตะสัมผัสบนมือถือ**
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: เมื่อนำ `react-toastify` มาใช้งานใน Next.js 16 App Router ทำไมจึงเกิดข้อผิดพลาดหากเราใส่ `<ToastContainer />` ลงใน `app/layout.tsx` โดยตรง และต้องออกแบบสถาปัตยกรรมอย่างไรเพื่อแก้ไขปัญหานี้?
+**แนวทางตอบแบบ Senior Developer:**
+"สาเหตุเกิดจากสถาปัตยกรรมพื้นฐานของ Next.js App Router:
+- ใน Next.js 16 ไฟล์ `app/layout.tsx` เป็น **React Server Component (RSC)** โดยค่าเริ่มต้น ซึ่งจะถูกประมวลผลบน Node.js Server ก่อนส่ง HTML ไปยังเบราว์เซอร์
+- คอมโพเนนต์ `<ToastContainer />` ของ `react-toastify` มีการเรียกใช้ Browser APIs ภายใน เช่น `window`, `document`, และ Event Listeners ซึ่งไม่มีอยู่ใน Server Environment ทำให้เกิดข้อผิดพลาด Runtime Error ทันที
+- **แนวทางแก้ไขที่ได้มาตรฐาน**: เราจะใช้รูปแบบ **Client Boundary Wrapper Pattern** โดยสร้างคอมโพเนนต์แยกต่างหาก เช่น `ToastifyContainer.tsx` และใส่ Directive `'use client'` ไว้ที่บรรทัดบนสุด จากนั้นจึงนำ Wrapper นี้ไปวางใน `app/layout.tsx` วิธีนี้จะทำให้ Server รู้ว่าจุดนี้คือ Client Boundary และจะรอไป Hydrate บนเบราว์เซอร์อย่างถูกต้อง ปลอดภัย และไม่กระทบต่อประสิทธิภาพการสตรีมหน้าเว็บของ RSC"
+
+---
+
+### Q2: ใน `react-toastify` อ็อปชัน `theme="colored"` แตกต่างจาก `theme="light"` / `theme="dark"` อย่างไร และมีผลกระทบต่อ Accessibility (WCAG Color Contrast) อย่างไร?
+**แนวทางตอบแบบ Senior Developer:**
+"ความแตกต่างเชิงเทคนิคและผลกระทบต่อการเข้าถึง (a11y):
+- **กลไกการแสดงผล**:
+  - ในโหมด `light` หรือ `dark`: ตัวการ์ดจะมีพื้นหลังเป็นสีขาวหรือสีเข้มตามลำดับ และแสดงสีสถานะผ่านไอคอนและแถบ Progress Bar ขนาดเล็กเท่านั้น
+  - ในโหมด `colored`: สีพื้นหลังของการ์ดทั้งใบจะเปลี่ยนไปตามประเภท เช่น พื้นหลังสีแดงทึบสำหรับ Error หรือสีเขียวสดสำหรับ Success
+- **ผลกระทบต่อ WCAG 2.1 AA/AAA Compliance**:
+  - เมื่อใช้ `theme="colored"` ตัวอักษรสีขาวที่วางอยู่บนพื้นหลังสีส้มสด (Warning) หรือสีฟ้า (Info) มักมีค่าอัตราส่วนความคมชัดของสี (Contrast Ratio) ต่ำกว่าเกณฑ์มาตรฐาน `4.5:1` ทำให้ผู้มีปัญหาด้านสายตาหรือตาบอดสีอ่านข้อความได้ยากลำบากมาก
+  - ดังนั้น ในระบบระดับ Production ที่ต้องผ่านการตรวจ Accessible Audit เราจึงควรหลีกเลี่ยง `theme="colored"` หรือต้องเขียน Custom CSS เข้าไปปรับระดับความสว่างและความมืด (Luminance) ของสีพื้นหลังให้ผ่านมาตรฐานความคมชัดของ WCAG เสมอ"

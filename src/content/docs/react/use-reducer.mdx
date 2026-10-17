@@ -1,0 +1,136 @@
+---
+title: useReducer
+category: Frontend
+parentTitle: React 19
+version: v19.0
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+เมื่อคอมโพเนนต์มี State หลายตัวที่ต้องอัปเดตพร้อมกัน หรือมีเงื่อนไขการเปลี่ยนแปลงที่ซับซ้อนตามประเภทเหตุการณ์ (Action) การใช้ `useState` หลายๆ ตัวจะทำให้โค้ดกระจัดกระจายและเกิดบั๊กได้ง่าย
+
+**`useReducer`** นำเอาสถาปัตยกรรม **Redux/Elm Architecture** มาใช้ โดยแยก "สิ่งที่จะทำ (Action)" ออกจาก "วิธีคำนวณผลลัพธ์ (Reducer Function)" เปรียบเสมือนพนักงานส่งออเดอร์ในร้านอาหาร: คุณส่งกระดาษจดออเดอร์ (Action) เข้าครัว จากนั้นพ่อครัว (Reducer) จะเป็นผู้จัดเตรียมจานอาหารชุดใหม่ (New State) ให้ตามสูตร
+
+---
+
+## 2. หลักการทำงานเบื้องหลัง (Under the Hood)
+
+Reducer ต้องเป็น **Pure Function** เสมอ:
+`reducer(currentState, action) => newState`
+- ห้ามมี Side Effect (ห้ามยิง API, ห้ามเรียก `Date.now()`, ห้ามสุ่ม `Math.random()`)
+- เมื่อเรียก `dispatch(action)` React จะส่ง State ปัจจุบันและ Action ก้อนนั้นไปยัง Reducer เพื่อคำนวณ State ถัดไปและกระตุ้นการ Re-render
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างการออกแบบ State ของระบบ Multi-step Task ด้วย TypeScript Discriminated Unions
+
+```tsx filename="components/TaskManager.tsx"
+'use client';
+
+import React, { useReducer } from 'react';
+
+// 1. กำหนดโครงสร้าง State
+interface Task {
+  id: string;
+  title: string;
+  completed: boolean;
+}
+
+interface TaskState {
+  tasks: Task[];
+  filter: 'ALL' | 'ACTIVE' | 'COMPLETED';
+}
+
+// 2. กำหนด Action Types แบบ Type-safe (Discriminated Union)
+type TaskAction =
+  | { type: 'ADD_TASK'; payload: { title: string } }
+  | { type: 'TOGGLE_TASK'; payload: { id: string } }
+  | { type: 'DELETE_TASK'; payload: { id: string } }
+  | { type: 'SET_FILTER'; payload: { filter: 'ALL' | 'ACTIVE' | 'COMPLETED' } };
+
+// 3. Pure Reducer Function
+function taskReducer(state: TaskState, action: TaskAction): TaskState {
+  switch (action.type) {
+    case 'ADD_TASK':
+      return {
+        ...state,
+        tasks: [
+          ...state.tasks,
+          { id: crypto.randomUUID(), title: action.payload.title, completed: false },
+        ],
+      };
+    case 'TOGGLE_TASK':
+      return {
+        ...state,
+        tasks: state.tasks.map((t) =>
+          t.id === action.payload.id ? { ...t, completed: !t.completed } : t
+        ),
+      };
+    case 'DELETE_TASK':
+      return {
+        ...state,
+        tasks: state.tasks.filter((t) => t.id !== action.payload.id),
+      };
+    case 'SET_FILTER':
+      return { ...state, filter: action.payload.filter };
+    default:
+      return state;
+  }
+}
+
+export function TaskManager() {
+  const [state, dispatch] = useReducer(taskReducer, {
+    tasks: [],
+    filter: 'ALL',
+  });
+
+  return (
+    <div className="p-4 border rounded-xl max-w-md space-y-4">
+      <h3 className="font-bold">ระบบจัดการงาน (useReducer)</h3>
+      <div className="flex gap-2">
+        <button
+          onClick={() => dispatch({ type: 'ADD_TASK', payload: { title: 'เขียนเทสระบบ' } })}
+          className="px-3 py-1 bg-accent text-white rounded text-xs"
+        >
+          + เพิ่มงานใหม่
+        </button>
+      </div>
+      <ul className="divide-y text-sm">
+        {state.tasks.map((task) => (
+          <li key={task.id} className="py-2 flex justify-between">
+            <span className={task.completed ? 'line-through text-muted' : ''}>
+              {task.title}
+            </span>
+            <button
+              onClick={() => dispatch({ type: 'TOGGLE_TASK', payload: { id: task.id } })}
+              className="text-xs text-blue-500"
+            >
+              สลับสถานะ
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- *ควรใช้*:
+  - เมื่อ State เป็น Object ซับซ้อน มีความสัมพันธ์เกี่ยวเนื่องกันหลายฟิลด์
+  - เมื่อการเปลี่ยนแปลง State ถัดไปขึ้นอยู่กับประวัติ State ปัจจุบันหลายขั้นตอน
+  - เพื่อให้สามารถเขียน Unit Test ทดสอบ Logic การคำนวณ State ได้โดยไม่ต้อง Render Component
+- *ไม่ควรใช้*: กับข้อมูลค่าเดี่ยวแบบง่ายๆ เช่น สลับ boolean เปิด/ปิด Modal (`useState(false)` เพียงพอแล้ว)
+
+---
+
+## 5. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: Reducer Function ใน `useReducer` มีข้อบังคับสำคัญอะไรบ้าง?
+**แนวทางคำตอบ**: ต้องเป็น **Pure Function** 100% คือ ให้ Input เดิม ต้องคืน Output เดิมเสมอ ห้ามแก้ไข State เดิมตรงๆ (ต้องคืน State ก้อนใหม่แบบ Immutable) และห้ามมี Side Effects เช่น การยิง API หรือการเปลี่ยนตัวแปร Global ภายในฟังก์ชัน

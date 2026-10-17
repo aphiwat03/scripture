@@ -1,0 +1,107 @@
+---
+title: Unions & Literals
+category: Frontend
+parentTitle: TypeScript
+version: v5.6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+- **Union Types (`|`)**: เปรียบเสมือนคำว่า **"หรือ"** ในตรรกศาสตร์ (อย่างใดอย่างหนึ่ง) เช่น ค่านี้เป็นได้ทั้ง `string` หรือ `number`
+- **Intersection Types (`&`)**: เปรียบเสมือนคำว่า **"และ"** เป็นการนำคุณสมบัติของ Object 2 ตัวมาฟิวชันรวมร่างเข้าด้วยกัน
+- **Literal Types**: การล็อกค่าให้เป็น "ค่าคงที่เฉพาะเจาะจง" แทนที่จะเป็น Primitive กว้างๆ เช่น แทนที่จะบอกว่าเป็น `string` ทั่วไป เราล็อกให้เป็นเฉพาะ `'PENDING' | 'SUCCESS' | 'FAILED'`
+
+---
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: Union และ Literal Types ในการจัดการสถานะคำสั่งซื้อ
+
+```typescript
+// 1. Literal Types จำกัดสถานะการชำระเงิน
+export type PaymentStatus = 'UNPAID' | 'PROCESSING' | 'COMPLETED' | 'REFUNDED';
+
+// 2. Union ของ ID ที่รองรับทั้ง UUID string หรือ Auto-increment number
+export type EntityId = string | number;
+
+export interface Invoice {
+  id: EntityId;
+  status: PaymentStatus;
+  amount: number;
+}
+
+const orderInvoice: Invoice = {
+  id: 'inv-98421',
+  status: 'COMPLETED', // TS จะตรวจจับและแนะนำ autocomplete ให้ทันที
+  amount: 1500,
+};
+```
+
+### ตัวอย่างที่ 2: Intersection Types รวมร่างโครงสร้างข้อมูล
+
+```typescript
+// โครงสร้างสำหรับ Audit Log
+interface Auditable {
+  createdAt: Date;
+  updatedAt: Date;
+  createdBy: string;
+}
+
+// ข้อมูลสินค้า
+interface ProductData {
+  sku: string;
+  name: string;
+  price: number;
+}
+
+// นำมารวมร่างกันด้วย Intersection (&)
+export type DatabaseProduct = ProductData & Auditable;
+
+const productInDb: DatabaseProduct = {
+  sku: 'MACBOOK-M3',
+  name: 'MacBook Pro 14"',
+  price: 59900,
+  createdAt: new Date(),
+  updatedAt: new Date(),
+  createdBy: 'admin_usr_01',
+};
+```
+
+---
+
+## 3. ผิด vs ถูก (Common Mistakes)
+
+### กรณีที่ 1: การพยายามเข้าถึงฟิลด์ที่ไม่ได้มีร่วมกันใน Union โดยไม่ Narrowing
+```typescript
+type Circle = { kind: 'circle'; radius: number };
+type Square = { kind: 'square'; sideLength: number };
+type Shape = Circle | Square;
+
+// ❌ ผิด: เข้าถึง radius ตรงๆ โดยไม่ได้เช็คก่อนว่าเป็น Circle หรือไม่
+function getArea(shape: Shape) {
+  return Math.PI * shape.radius ** 2; // TS Error: Property 'radius' does not exist on type 'Square'.
+}
+
+// ✅ ถูก: ตรวจสอบ kind ก่อน (Discriminated Union)
+function getArea(shape: Shape) {
+  if (shape.kind === 'circle') {
+    return Math.PI * shape.radius ** 2; // TS ทราบแล้วว่านี่คือ Circle แน่นอน
+  }
+  return shape.sideLength ** 2;
+}
+```
+
+---
+
+## 4. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- *ควรใช้ Union of Literals*: แทน Enum เสมอเพื่อกำหนดสถานะ (Status), บทบาท (Role), หรือชนิดการชำระเงิน (Payment Type)
+- *ควรใช้ Intersection*: เมื่อต้องการ Reuse โครงสร้างข้อมูลที่ใช้ร่วมกันในฐานข้อมูล เช่น `Entity & Timestamps & SoftDelete`
+
+---
+
+## 5. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: `A | B` กับ `A & B` ต่างกันอย่างไรเมื่อนำมาใช้กับ Object Types?
+**แนวทางคำตอบ**: `A | B` (Union) หมายถึง Object นั้นมีโครงสร้างตรงตาม A หรือตรงตาม B (สามารถเข้าถึงได้เฉพาะฟิลด์ที่มี **ร่วมกัน (Common Properties)** เท่านั้น จนกว่าจะทำ Narrowing) ส่วน `A & B` (Intersection) หมายถึง Object นั้นต้องมีฟิลด์ของ **ทั้ง A และ B ครบถ้วนทุกฟิลด์**

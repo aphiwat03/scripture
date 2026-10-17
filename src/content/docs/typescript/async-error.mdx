@@ -1,0 +1,101 @@
+---
+title: Async & Result
+category: Frontend
+parentTitle: TypeScript
+version: v5.6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การทำงานแบบ Asynchronous ผ่าน `Promise` เป็นหัวใจของ JavaScript แต่ปัญหาใหญ่คือ **ในบล็อก `catch (error)` ค่า error จะเป็น `unknown` เสมอ** เพราะใน JavaScript เราสามารถโยนอะไรออกมาก็ได้ (`throw 'บางอย่าง'` หรือ `throw 404`)
+
+TypeScript ช่วยให้เราสามารถระบุ Type ของ Promise ขาออกได้อย่างแม่นยำด้วย `Promise<T>` และแนะนำให้ใช้ **Result Pattern** (แทนการโยน `try/catch` แบบกระจัดกระจาย) เพื่อบังคับให้ผู้เรียกใช้ต้องรับมือกับกรณี Error อย่างปลอดภัย
+
+---
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: การจัดการ `error: unknown` ในบล็อก catch อย่างถูกต้อง
+
+```typescript
+async function fetchUserProfile(userId: string): Promise<{ id: string; name: string }> {
+  try {
+    const res = await fetch(`https://api.example.com/users/${userId}`);
+    if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
+    return await res.json();
+  } catch (error: unknown) { // TypeScript บังคับให้เป็น unknown เพื่อความปลอดภัย
+    // ❌ ห้าม error.message ตรงๆ!
+    // ✅ ต้องทำ Narrowing ผ่าน instanceof Error
+    if (error instanceof Error) {
+      console.error('รายละเอียดข้อผิดพลาด:', error.message);
+      throw error;
+    }
+    // กรณีมีคน throw ค่าแปลกปลอมออกมา
+    throw new Error(`เกิดข้อผิดพลาดที่ไม่รู้จัก: ${String(error)}`);
+  }
+}
+```
+
+### ตัวอย่างที่ 2: Safe Result Pattern (ทางเลือกที่สะอาดกว่า try/catch)
+
+```typescript
+// นิยาม Result Pattern สไตล์ Rust / Go
+export type Result<T, E = Error> =
+  | { ok: true; data: T }
+  | { ok: false; error: E };
+
+export async function safeFetchOrder(orderId: string): Promise<Result<{ id: string; amount: number }>> {
+  try {
+    const res = await fetch(`/api/orders/${orderId}`);
+    if (!res.ok) {
+      return { ok: false, error: new Error('ไม่พบคำสั่งซื้อนี้ในระบบ') };
+    }
+    const data = await res.json();
+    return { ok: true, data };
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error('Network error');
+    return { ok: false, error };
+  }
+}
+
+// การเรียกใช้งาน: Discriminated Union บังคับให้ตรวจ ok เสมอ!
+async function displayOrder() {
+  const result = await safeFetchOrder('ord-123');
+  if (result.ok) {
+    console.log('ยอดชำระ:', result.data.amount); // TS รู้จัก result.data
+  } else {
+    console.error('ล้มเหลว:', result.error.message); // TS รู้จัก result.error
+  }
+}
+```
+
+---
+
+## 3. ผิด vs ถูก (Common Mistakes)
+
+### กรณีที่ 1: การ Type Promise ใน try/catch ที่หลอกตัวเอง
+```typescript
+// ❌ ผิด: TypeScript ไม่อนุญาตให้ระบุ Type ใน catch (catch (e: MyError) ทำไม่ได้!)
+try {
+  doSomething();
+} catch (error: any) { // หลีกเลี่ยง any ใน catch
+  console.log(error.response.data); // อาจแครชทันทีถ้า error ไม่ได้มาจาก axios!
+}
+
+// ✅ ถูก: ใช้ unknown ร่วมกับ Type Narrowing
+try {
+  doSomething();
+} catch (error: unknown) {
+  if (isAxiosError(error)) {
+    console.log(error.response?.data);
+  }
+}
+```
+
+---
+
+## 4. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมใน TypeScript (ตั้งแต่ v4.0 ขึ้นไปและเปิด `useUnknownInCatchVariables`) ตัวแปรใน `catch` จึงถูกกำหนดให้เป็น `unknown` แทน `any`?
+**แนวทางคำตอบ**: เพราะใน JavaScript ทุกสิ่งสามารถถูก `throw` ออกมาได้ ไม่ว่าจะเป็น Error object, string, number หรือแม้แต่ `undefined` การให้เป็น `any` จะทำให้นักพัฒนาเผลอเรียก `error.message` จนเกิด Runtime Exception ซ้ำซ้อน การบังคับให้เป็น `unknown` จะทำให้เราต้องเขียน Type Check ยืนยันก่อนใช้งานเสมอ

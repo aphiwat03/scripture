@@ -1,0 +1,62 @@
+---
+title: Pitfalls & Q&A
+category: Frontend
+parentTitle: React 19
+version: v19.0
+updatedAt: 2026-10-17
+---
+
+## 1. ข้อผิดพลาดที่พบบ่อย (Anti-Patterns in React)
+
+### 1. ลืม Clean up ใน `useEffect`
+- **ปัญหา**: การเปิด WebSocket, Timer หรือ Event Listener ทิ้งไว้โดยไม่ return ฟังก์ชันยกเลิก ทำให้เกิด Memory Leak และฟังก์ชันยังคงทำงานค้างในหน่วยความจำ
+- **วิธีแก้**: คืนค่าฟังก์ชัน Cleanup เสมอ เช่น `return () => window.removeEventListener(...)`
+
+### 2. นำ Props ไปก็อปปี้ใส่ State โดยตรง
+- **ปัญหา**: `const [name, setName] = useState(props.name);` เมื่อ `props.name` จากข้างนอกเปลี่ยน State ตัวนี้จะไม่เปลี่ยนตาม เพราะ `useState` รับค่าเริ่มต้นเพียงรอบแรกครั้งเดียว
+- **วิธีแก้**: ใช้ `props.name` ในการ Render โดยตรง หรือใช้ `key={props.name}` บนคอมโพเนนต์หากต้องการสั่งรีเซ็ต State ใหม่ทั้งหมด
+
+### 3. Mutate State ใน Object หรือ Array
+- **ปัญหา**: ใช้ `array.push()` หรือแก้ `object.field = 'new'` โดยตรง ทำให้ React ไม่ตรวจจับการเปลี่ยนแปลงและไม่ยอม Re-render
+- **วิธีแก้**: ใช้ Spread Operator `[...array, newItem]` หรือ `{ ...object, field: 'new' }` เสมอ
+
+---
+
+## 2. รวมคำถามสัมภาษณ์งานระดับ Core Interview
+
+### Q1: Virtual DOM ใน React คืออะไร และทำงานอย่างไร?
+**แนวทางคำตอบ**: Virtual DOM คือโครงสร้างข้อมูลแบบ JavaScript Object ในหน่วยความจำที่จำลองหน้าตาของ Real DOM เมื่อ State เปลี่ยนแปลง React จะสร้าง Virtual DOM ต้นใหม่ขึ้นมา แล้วนำไปเปรียบเทียบกับต้นเดิมผ่านอัลกอริทึม **Diffing / Reconciliation** จากนั้นจึงส่งคำสั่งอัปเดตไปยัง Real DOM เฉพาะโหนดที่มีการเปลี่ยนแปลงจริงเท่านั้น ทำให้การวาดหน้าจอมีประสิทธิภาพสูง
+
+### Q2: React 19 แตกต่างจาก React 18 อย่างไรบ้าง?
+**แนวทางคำตอบ**: React 19 นำเสนอ **Actions Support** เต็มรูปแบบ มี Hooks ใหม่อย่าง `useActionState` และ `useFormStatus` สำหรับจัดการสถานะฟอร์มและ Loading อัตโนมัติ, เพิ่ม `useOptimistic` สำหรับการอัปเดต UI ล่วงหน้า, เพิ่ม `use()` API ที่สามารถอ่านค่าจาก Promise และ Context ในเงื่อนไขได้, และรวม React Compiler ที่ช่วยทำ Memoization ให้อัตโนมัติโดยไม่ต้องเขียน `useMemo` หรือ `useCallback` เอง
+
+---
+
+## 3. ลำดับการเรียนรู้ React 19 ที่แนะนำ (Recommended Learning Path)
+
+1. **ระดับที่ 1: รากฐาน (Foundation)**
+   - ทำความเข้าใจ JSX, Functional Components, การส่งผ่านข้อมูลด้วย Props
+   - การแสดงผลแบบมีเงื่อนไข (Conditional Rendering) และการ Render รายการด้วย `key`
+2. **ระดับที่ 2: วงจรชีวิตและการจัดการสถานะ (State & Effects)**
+   - เข้าใจวงจร Trigger -> Render -> Commit และหลักการ Immutable State
+   - ใช้งาน `useState` และ `useEffect` อย่างถูกต้อง (รู้ว่าเมื่อไหร่ที่ไม่ควรใช้ Effect)
+3. **ระดับที่ 3: สถาปัตยกรรมระดับกลาง (Intermediate Architecture)**
+   - การใช้ `useReducer` ออกแบบ State ซับซ้อน
+   - การสกัด Logic ออกเป็น Custom Hooks นำกลับมาใช้ซ้ำ
+   - จัดการ State ระดับแอปพลิเคชันด้วย `useContext` และ `Zustand`
+4. **ระดับที่ 4: ประสิทธิภาพและฟีเจอร์ระดับสูง (Advanced & Performance)**
+   - การใช้ `useMemo`, `useCallback`, และ `useRef` อย่างเหมาะสม
+   - การทำ Code Splitting ด้วย `React.lazy` และ `Suspense`
+   - การใช้งานฟีเจอร์ใหม่ใน React 19 (`useActionState`, `useOptimistic`, `use()`)
+
+---
+
+## 4. Checklist สรุปความพร้อม React 19 ก่อนเริ่มงานจริง
+
+- [ ] **Pure Functions**: คอมโพเนนต์เป็น Pure Function (ให้ Props เดิม ต้องได้ผลลัพธ์ JSX เดิมเสมอ)
+- [ ] **Key Identity**: มีการระบุ `key` ที่เป็น Unique ID ทุกครั้งที่มีการ `map()`
+- [ ] **State Immutability**: อัปเดต Object และ Array ด้วยการสร้างก้อนใหม่เสมอ (ห้ามใช้ `push`, `splice`)
+- [ ] **Clean Effects**: ทุก `useEffect` ที่มี Subscription หรือ Event Listener มีฟังก์ชัน Cleanup เสมอ
+- [ ] **No Premature Optimization**: ไม่ใส่ `useCallback` หรือ `useMemo` ในฟังก์ชันทั่วไปโดยไม่มีหลักฐานด้าน Performance
+- [ ] **Type-Safe**: กำหนด Types/Interfaces สำหรับ Props และ State ครบถ้วนด้วย TypeScript
+- [ ] **Modern APIs**: นำฟีเจอร์ของ React 19 เช่น `useActionState` มาใช้แทนการเขียน `isLoading` ซ้ำซ้อน

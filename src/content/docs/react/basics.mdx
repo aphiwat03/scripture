@@ -1,0 +1,162 @@
+---
+title: JSX & Props
+category: Frontend
+parentTitle: React 19
+version: v19.0
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**JSX (JavaScript XML)** คือไวยากรณ์เสริมที่ช่วยให้นักพัฒนาเขียนโค้ดหน้าตาคล้าย HTML ให้อยู่ร่วมกับตรรกะของ JavaScript ได้อย่างกลมกลืน เปรียบเสมือน "พิมพ์เขียว" ที่บอกว่า UI ควรมีหน้าตาอย่างไร ส่วน **Components** เปรียบเสมือนก้อนเลโก้ที่แยกชิ้นส่วนของหน้าจอออกมาเป็นหน่วยอิสระ และ **Props (Properties)** คือกล่องพัสดุที่คอมโพเนนต์แม่ส่งข้อมูลลงไปให้คอมโพเนนต์ลูกใช้งาน
+
+การมี JSX และ Props ช่วยแก้ปัญหาการเขียน DOM Manipulation แบบดั้งเดิมใน JavaScript (`document.createElement`, `innerHTML`) ที่จัดการยาก เปราะบางต่อบั๊ก และไม่สามารถนำโค้ดกลับมาใช้ซ้ำได้อย่างเป็นระบบ
+
+---
+
+## 2. หลักการทำงานเบื้องหลัง (Under the Hood)
+
+เบราว์เซอร์ไม่เข้าใจ JSX โดยตรง ก่อนที่โค้ดจะรันได้ Babel หรือ SWC/Turbopack จะแปลงแท็ก JSX ไปเป็นฟังก์ชัน `jsx()` หรือ `React.createElement()`:
+
+```tsx
+// โค้ด JSX ที่เราเขียน
+<button className="btn" onClick={handleClick}>กดฉัน</button>
+
+// สิ่งที่ถูกคอมไพล์จริงในเบราว์เซอร์
+import { jsx as _jsx } from 'react/jsx-runtime';
+_jsx('button', { className: 'btn', onClick: handleClick, children: 'กดฉัน' });
+```
+
+ผลลัพธ์ของฟังก์ชันนี้คือ **JavaScript Object ธรรมดา (React Element)** ที่ระบุ `type`, `props`, และ `children` ซึ่ง React จะนำไปเรียงต่อกันเป็นต้นไม้ที่เรียกว่า **Virtual DOM** เพื่อเตรียมส่งต่อไปยังกระบวนการคำนวณส่วนต่าง (Reconciliation)
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: การสร้าง Component และส่งผ่าน Props อย่างปลอดภัย
+
+```tsx filename="components/UserCard.tsx"
+import React from 'react';
+
+// 1. กำหนด Interface ของ Props ด้วย TypeScript
+interface UserCardProps {
+  name: string;
+  role: 'ADMIN' | 'USER' | 'GUEST';
+  isOnline?: boolean; // Optional prop
+  children?: React.ReactNode; // รองรับเนื้อหาลูกที่ส่งมาครอบข้างใน
+}
+
+// 2. Functional Component พร้อม Destructuring Props
+export function UserCard({ name, role, isOnline = false, children }: UserCardProps) {
+  return (
+    <div className="p-4 border border-hairline rounded-2xl bg-elevated shadow-xs">
+      <div className="flex items-center justify-between">
+        <h3 className="font-semibold text-ink">{name}</h3>
+        {/* Conditional Rendering ด้วย Ternary Operator */}
+        <span className={`text-xs px-2 py-0.5 rounded-full ${
+          isOnline ? 'bg-emerald-500/10 text-emerald-500' : 'bg-subtle text-muted'
+        }`}>
+          {isOnline ? 'ออนไลน์' : 'ออฟไลน์'}
+        </span>
+      </div>
+      <p className="text-xs text-muted mt-1">ตำแหน่ง: {role}</p>
+      {/* แสดง children ถ้ามีการส่งเข้ามา */}
+      {children && <div className="mt-3 pt-3 border-t border-hairline">{children}</div>}
+    </div>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: การ Render รายการอาเรย์ด้วย `map()` พร้อม `key` ที่ถูกต้อง
+
+```tsx filename="components/ProductList.tsx"
+import React from 'react';
+
+interface Product {
+  id: string; // แนะนำให้ใช้ Unique ID ที่คงที่เสมอ
+  title: string;
+  price: number;
+  inStock: boolean;
+}
+
+interface ProductListProps {
+  products: Product[];
+}
+
+export function ProductList({ products }: ProductListProps) {
+  // Conditional Rendering แบบ Early Return เมื่อไม่มีข้อมูล
+  if (products.length === 0) {
+    return <p className="text-muted text-sm py-4">ไม่มีรายการสินค้าในขณะนี้</p>;
+  }
+
+  return (
+    <ul className="divide-y divide-hairline">
+      {products.map((item) => (
+        // สำคัญ: ใส่ key บนอิลิเมนต์นอกสุดของ map เสมอ
+        <li key={item.id} className="py-3 flex items-center justify-between">
+          <div>
+            <p className="font-medium text-sm text-ink">{item.title}</p>
+            <p className="text-xs text-muted">฿{item.price.toLocaleString()}</p>
+          </div>
+          {/* Conditional Rendering ด้วย Logical AND (&&) */}
+          {item.inStock && (
+            <span className="text-xs text-blue-500 font-medium">พร้อมส่ง</span>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก (Common Mistakes)
+
+### กรณีที่ 1: การใช้ Index ของ Array มาเป็น `key`
+```tsx
+// ❌ ผิด: ใช้ index เป็น key เมื่อรายการมีการสลับที่ ลบ หรือแทรก
+{todos.map((todo, index) => (
+  <TodoItem key={index} todo={todo} />
+))}
+
+// ✅ ถูก: ใช้ Unique ID ที่ผูกติดกับตัวข้อมูลจริง
+{todos.map((todo) => (
+  <TodoItem key={todo.id} todo={todo} />
+))}
+```
+*เหตุผล*: เมื่อมีการลบหรือแทรกข้อมูลตรงกลาง อาเรย์ Index จะเลื่อนตำแหน่ง ทำให้ React เข้าใจผิดว่าคอมโพเนนต์เดิมคือคอมโพเนนต์ใหม่ ส่งผลให้สถานะภายใน (เช่น Input text) สลับรายการและเกิดบั๊กการแสดงผล
+
+### กรณีที่ 2: การใช้ `&&` กับตัวเลข `0` ใน Conditional Rendering
+```tsx
+// ❌ ผิด: เมื่อ messages.length เป็น 0 หน้าจอจะพิมพ์เลข "0" ออกมาแทนที่จะเป็นความว่างเปล่า!
+<div>
+  {messages.length && <MessageBadge count={messages.length} />}
+</div>
+
+// ✅ ถูก: แปลงเป็น Boolean แท้ๆ เสมอ
+<div>
+  {messages.length > 0 && <MessageBadge count={messages.length} />}
+</div>
+```
+*เหตุผล*: JavaScript จะประเมินค่า `0 && ...` เป็นตัวเลข `0` ซึ่ง React จะสั่ง Render เลข `0` ลงใน DOM จริง
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- **Props**:
+  - *ควรใช้*: ส่งข้อมูลที่ไหลจากบนลงล่าง และส่ง Callback ฟังก์ชันกลับขึ้นมา
+  - *ไม่ควรใช้*: ส่งข้อมูล Props ทะลุผ่านหลายสิบชั้นโดยที่คอมโพเนนต์ตรงกลางไม่ได้ใช้ (Props Drilling) ให้พิจารณาใช้ Context หรือ State Management แทน
+- **Fragments (`<>...</>`)**:
+  - *ควรใช้*: รวมกลุ่มหลายอิลิเมนต์โดยไม่สร้างแท็ก `<div>` ห่อหุ้มเปล่าๆ ให้รก DOM
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไม React จึงบังคับให้ใส่ `key` เมื่อ render รายการใน Loop?
+**แนวทางคำตอบ**: React ใช้ `key` เป็นตัวระบุเอกลักษณ์คงที่ (Stable Identity) ของแต่ละ Node ระหว่างรอบการ Render เพื่อให้ Reconciliation Algorithm ทราบอย่างแม่นยำว่าไอเทมตัวไหนถูกเพิ่ม ลบ หรือย้ายตำแหน่ง หากไม่มี key ตัว React จะต้องทำลายและสร้าง DOM ใหม่ทั้งหมดแทนที่จะอัปเดตเฉพาะจุด
+
+### Q2: Props กับ State แตกต่างกันอย่างไร?
+**แนวทางคำตอบ**: `props` คือข้อมูลภายนอกที่ส่งเข้ามาในคอมโพเนนต์และมีสถานะเป็น Read-only (ห้ามแก้ไขโดยตรง) ส่วน `state` คือข้อมูลภายในที่คอมโพเนนต์นั้นๆ เป็นเจ้าของ สามารถเปลี่ยนแปลงค่าได้ผ่านฟังก์ชัน setter ซึ่งจะกระตุ้นให้เกิดการ Re-render ใหม่

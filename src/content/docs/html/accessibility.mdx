@@ -1,0 +1,145 @@
+---
+title: Accessibility
+category: Frontend
+parentTitle: HTML5
+version: HTML Living Standard
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**Web Accessibility (a11y)** คือหลักการออกแบบและพัฒนาเว็บไซต์เพื่อให้ **"ทุกคนเข้าถึงและใช้งานได้"** รวมถึงผู้พิการทางสายตา ทางการได้ยิน ทางการเคลื่อนไหว หรือผู้ใช้ทั่วไปในสถานการณ์พิเศษ (เช่น ผู้ที่แขนหักต้องใช้มือเดียว หรือหน้าจอเปียกน้ำ)
+
+กฎเหล็กข้อแรกของ ARIA (Accessible Rich Internet Applications):
+> **"The First Rule of ARIA: No ARIA is better than Bad ARIA."**
+> (หากสามารถใช้ Native HTML5 Tags ปกติได้ ให้ใช้ Native Tags เสมอ อย่าสร้าง Element เองแล้วเอา ARIA มาแปะทับ)
+
+หัวใจของ a11y ใน HTML:
+- **Label คู่กับ Input เสมอ**: เพื่อสร้าง Accessible Name
+- **Alt Text ที่มีความหมาย**: เพื่อให้ผู้ใช้ที่มองไม่เห็นภาพเข้าใจสาระ
+- **Focus Indicator**: ห้ามปิดเส้นประโฟกัสคีย์บอร์ดเด็ดขาด
+- **Keyboard Operability**: ทุกปุ่มและลิงก์ต้องกดด้วยแป้น Tab / Enter / Spacebar ได้
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. The Accessibility Tree
+เบราว์เซอร์ไม่ได้ส่ง DOM Tree ให้ Screen Reader โดยตรง แต่จะแปลง DOM Tree ควบคู่กับ CSSOM ออกมาเป็น **Accessibility Tree (a11y Tree)** ซึ่งประกอบด้วย 4 ข้อมูลสำคัญ:
+- **Role**: บทบาท (เช่น `button`, `link`, `checkbox`, `heading`)
+- **Name (Accessible Name)**: ชื่อเรียกที่โปรแกรมจะอ่านออกเสียง (คำนวณจากข้อความภายใน, `aria-label`, หรือ `<label>`)
+- **Value**: ค่าปัจจุบัน (เช่น ค่าในช่อง input)
+- **State**: สถานะ (เช่น `checked`, `expanded`, `disabled`, `focused`)
+
+### 2. ผลกระทบของการใส่ `outline: none` ใน CSS
+ผู้ใช้ที่พิการทางการเคลื่อนไหวหรือใช้คีย์บอร์ดเพียงอย่างเดียว (Power Users) ต้องอาศัย **Focus Ring (เส้นกรอบสีน้ำเงิน/ฟ้า)** เพื่อรู้ว่าปัจจุบันตนเองกำลังอยู่ ณ ตำแหน่งใดของหน้าจอ การใส่ `outline: none` โดยไม่มีทางเลือกอื่นมาทดแทน จะทำให้ผู้ใช้มองไม่เห็นตำแหน่งโฟกัสและไม่สามารถใช้งานเว็บไซต์ได้อีกต่อไป
+
+---
+
+## 3. ตัวอย่างโค้ด (HTML5)
+
+### ตัวอย่างที่ 1: ปุ่มที่มีเฉพาะไอคอน (Icon-only Button) พร้อม Accessible Name
+
+```html filename="icon-button.html"
+<!-- ถูกต้อง: ปุ่มมีเฉพาะไอคอน SVG จึงต้องใส่ aria-label เพื่อให้ Screen Reader อ่านออกเสียงได้ -->
+<button 
+  type="button" 
+  class="btn-icon" 
+  aria-label="ลบสินค้านี้ออกจากตะกร้า"
+  title="ลบสินค้านี้ออกจากตะกร้า"
+>
+  <!-- ซ่อน SVG ออกจาก Screen Reader เพื่อไม่ให้อ่านโค้ด SVG ไร้ความหมาย -->
+  <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+    <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+  </svg>
+</button>
+```
+
+### ตัวอย่างที่ 2: การทำ Accessible Accordion หรือ Dropdown Menu
+
+```html filename="accordion.html"
+<div class="faq-item">
+  <!-- aria-expanded บอกสถานะว่าเปิดหรือปิดอยู่, aria-controls บอก ID ของเนื้อหาที่ควบคุม -->
+  <h3>
+    <button 
+      type="button" 
+      aria-expanded="false" 
+      aria-controls="faq-answer-1"
+      id="faq-btn-1"
+      onclick="toggleFaq(this)"
+    >
+      นโยบายการรับประกันสินค้าครอบคลุมอะไรบ้าง?
+    </button>
+  </h3>
+
+  <div 
+    id="faq-answer-1" 
+    role="region" 
+    aria-labelledby="faq-btn-1" 
+    hidden
+  >
+    <p>สินค้ารับประกันศูนย์ไทย 2 ปีเต็ม ครอบคลุมความเสียหายจากระบบไฟฟ้าและแบตเตอรี่...</p>
+  </div>
+</div>
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ใช้ `<div>` ทำปุ่ม และตัด Focus Outline ทิ้ง
+
+```html
+<!-- ผิด: 1. ใช้ <div> ทำปุ่ม ผู้ใช้คีย์บอร์ดไม่สามารถกด Tab หรือ Enter ได้
+         2. outline: none ทำให้ผู้ใช้มองไม่เห็นว่ากำลังโฟกัสอยู่ตรงไหน -->
+<style>
+  .fake-button { outline: none; cursor: pointer; }
+</style>
+
+<div class="fake-button" onclick="checkout()">
+  ชำระเงิน
+</div>
+```
+
+### ✅ โค้ดที่ถูกต้อง: ใช้ Native `<button>` พร้อม Focus Ring ที่สวยงาม
+
+```html
+<style>
+  /* ทำ Focus Ring สไตล์ Apple สวยงามและเข้าถึงได้ */
+  .btn-accessible:focus-visible {
+    outline: 2px solid #0071e3;
+    outline-offset: 2px;
+  }
+</style>
+
+<!-- ถูกต้อง: <button> มีการรองรับ Keyboard, Enter, Space และ Focus ในตัว 100% -->
+<button type="button" class="btn-accessible" onclick="checkout()">
+  ชำระเงิน
+</button>
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรทำ
+- ใช้ Semantic HTML ก่อนเสมอ (เช่น ใช้ `<button>` แทน `<div role="button">`)
+- ไอคอนที่ไม่มีข้อความกำกับ ต้องใส่ `aria-label` เสมอ
+- ตรวจสอบความเข้มของสี (Color Contrast Ratio) ระหว่างตัวอักษรและพื้นหลังให้ได้อย่างน้อย 4.5:1 ตามเกณฑ์ WCAG AA
+
+### ไม่ควรทำ
+- **ห้ามใส่ `outline: none` ใน CSS เด็ดขาด**: เว้นแต่จะกำหนดสไตล์ใน `:focus-visible` ชดเชยให้อย่างชัดเจน
+- **ห้ามใส่ ARIA ซ้ำซ้อนโดยไม่จำเป็น**: เช่น `<button role="button">` เพราะตัวมันมี Role เป็นปุ่มอยู่แล้ว
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: "The First Rule of ARIA" คืออะไร และเพราะเหตุใดจึงมีกฎนี้?
+**แนวทางคำตอบ**: กฎข้อแรกของ ARIA ระบุว่า *"หากสามารถใช้ Native HTML Element หรือ Attribute ที่มีฟังก์ชันการทำงานตรงความต้องการอยู่แล้ว อย่าใช้ ARIA"* 
+เหตุผลเพราะ Native HTML Tags (เช่น `<button>`, `<input>`, `<details>`, `<select>`) มีความสามารถในตัวทั้ง Keyboard Navigation, Focus Management, Event Handling และการส่งค่าเข้า Accessibility Tree ที่สมบูรณ์แบบอยู่แล้ว การสร้าง Custom Element จาก `<div>` แล้วแปะ `role="button"` มักจะขาดกลไกที่สำคัญ (เช่น ลืมดักจับปุ่ม Enter/Spacebar) ซึ่งทำให้เกิดบั๊กต่อผู้พิการ
+
+### Q2: แอตทริบิวต์ `aria-label` กับ `aria-labelledby` แตกต่างกันอย่างไร?
+**แนวทางคำตอบ**:
+- `aria-label`: รับค่าเป็น **ข้อความสตริง (Text String)** ตรงๆ เพื่อตั้งชื่อให้กับ Element นั้น เหมาะสำหรับปุ่มที่มีเฉพาะไอคอน เช่น `<button aria-label="ค้นหา">🔍</button>`
+- `aria-labelledby`: รับค่าเป็น **ID ของ Element อื่น** ในหน้าเว็บ เพื่อดึงข้อความจาก Element นั้นมาใช้เป็นชื่อ เหมาะสำหรับกรณีที่มีข้อความหัวข้ออยู่แล้ว เช่น Modal Dialog ที่ดึงชื่อมาจากแท็ก `<h3>` ผ่าน ID

@@ -1,0 +1,239 @@
+---
+title: Typography & Thai Fonts
+category: Frontend
+parentTitle: Tailwind CSS v4
+version: Tailwind v4.0 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ระบบ **Typography** มีบทบาทชี้นำลำดับชั้นการอ่าน (Visual Hierarchy) ของผู้ใช้ โดยเฉพาะใน **บริบทภาษาไทย** ซึ่งมีลักษณะเฉพาะตัว เช่น วรรณยุกต์ 2 ชั้น (ไม้เอก ไม้โท ร่วมกับสระบน เช่น สระอิ สระอี) และสระล่าง (สระอุ สระอู)
+
+ปัญหาคลาสสิกที่นักพัฒนาเว็บภาษาไทยมักพบ:
+- **วรรณยุกต์ขาด/แหว่ง (Clipping)**: เกิดจากการตั้งค่า `leading` (Line Height) แคบเกินไป หรือใช้ `overflow-hidden` ชิดขอบ
+- **ตัวอักษรซ้อนกัน (Kerning/Tracking)**: การใช้ `tracking-tighter` มักทำให้สระภาษาไทยชนกันจนอ่านไม่ออก
+- **ฟอนต์โหลดช้า/กระตุก (FOUT)**: การดึงฟอนต์ผ่าน CDN โดยไม่ optimize
+
+ใน Tailwind CSS v4 ร่วมกับ Next.js 16 เราสามารถกำหนดฟอนต์ เช่น **Sarabun** หรือ **Prompt** ผ่าน `@theme` directive ใน CSS ได้โดยตรง เชื่อมโยงกับ `next/font/google` เพื่อ Zero Layout Shift
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### กลไก `@theme` Font Definition และ Line Clamp ใน v4
+1. **Font Token Binding**: ใน Tailwind v4 คุณสามารถผูกตัวแปรฟอนต์ผ่าน `@theme`:
+   ```css
+   @theme {
+     --font-sans: var(--font-sarabun), system-ui, sans-serif;
+     --font-display: var(--font-prompt), sans-serif;
+   }
+   ```
+   Oxide Engine จะแปลงค่านี้เป็น Utility `font-sans` และ `font-display` อัตโนมัติ โดยไม่ต้องเขียนผ่านคอนฟิก JS
+2. **Native Line Clamp**: ตั้งแต่ v3.3 และสมบูรณ์แบบใน v4 ฟังก์ชัน `line-clamp-*` ไม่ต้องพึ่งพาปลั๊กอินภายนอกอีกต่อไป โดยคอมไพล์เป็น:
+   ```css
+   overflow: hidden;
+   display: -webkit-box;
+   -webkit-box-orient: vertical;
+   -webkit-line-clamp: 2;
+   ```
+3. **Thai Vertical Metrics**: ตัวอักษรไทยต้องการระยะความสูงบรรทัด (Line-height) อย่างน้อย `1.6 - 1.75` เท่าของขนาดตัวหนังสือ เพื่อไม่ให้สระบนและล่างชนกับบรรทัดก่อนหน้า
+
+---
+
+## 3. ตัวอย่างโค้ด (Tailwind v4 & TSX)
+
+### ตัวอย่างที่ 1: การติดตั้งฟอนต์ Sarabun ใน Next.js 16 + Tailwind v4
+
+```tsx filename="src/app/layout.tsx"
+import type { Metadata } from "next";
+import { Sarabun, Inter } from "next/font/google";
+import "./globals.css";
+
+// กำหนด Google Fonts พร้อม CSS Variable
+const sarabun = Sarabun({
+  subsets: ["thai", "latin"],
+  weight: ["300", "400", "500", "600", "700"],
+  variable: "--font-sarabun",
+  display: "swap",
+});
+
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-inter",
+  display: "swap",
+});
+
+export const metadata: Metadata = {
+  title: "ระบบจัดการคลังบทความภาษาไทย",
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="th" className={`${sarabun.variable} ${inter.variable}`}>
+      <body className="font-sans antialiased text-neutral-800 dark:text-neutral-200">
+        {children}
+      </body>
+    </html>
+  );
+}
+```
+
+```css filename="src/app/globals.css"
+@import "tailwindcss";
+
+@theme {
+  /* ผูกฟอนต์หลักภาษาไทยเข้ากับคลาส font-sans */
+  --font-sans: var(--font-sarabun), var(--font-inter), system-ui, -apple-system, sans-serif;
+}
+```
+
+### ตัวอย่างที่ 2: การ์ดบทความข่าวสารภาษาไทย (ThaiArticleCard)
+
+```tsx filename="src/components/ThaiArticleCard.tsx"
+import Image from "next/image";
+import { Calendar, Clock, Eye } from "lucide-react";
+
+interface ThaiArticleProps {
+  category: string;
+  title: string;
+  summary: string;
+  author: string;
+  publishedAt: string;
+  readTime: string;
+  imageUrl: string;
+}
+
+export function ThaiArticleCard({
+  category,
+  title,
+  summary,
+  author,
+  publishedAt,
+  readTime,
+  imageUrl,
+}: ThaiArticleProps) {
+  return (
+    <article className="group flex flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-xs transition-all duration-300 hover:-translate-y-1 hover:shadow-lg dark:border-neutral-800 dark:bg-neutral-900">
+      <div className="relative aspect-video w-full overflow-hidden bg-neutral-100 dark:bg-neutral-800">
+        <Image
+          src={imageUrl}
+          alt={title}
+          fill
+          className="object-cover transition-transform duration-500 group-hover:scale-105"
+          sizes="(max-width: 768px) 100vw, 384px"
+        />
+        <span className="absolute left-3 top-3 rounded-md bg-neutral-900/80 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur-md">
+          {category}
+        </span>
+      </div>
+
+      <div className="flex flex-1 flex-col p-5">
+        <div className="flex items-center gap-3 text-xs text-neutral-500 dark:text-neutral-400">
+          <span className="flex items-center gap-1">
+            <Calendar className="size-3.5" />
+            {publishedAt}
+          </span>
+          <span>•</span>
+          <span className="flex items-center gap-1">
+            <Clock className="size-3.5" />
+            {readTime}
+          </span>
+        </div>
+
+        {/* หัวข้อ: ใช้ leading-snug หรือ leading-normal และ line-clamp-2 */}
+        <h3 className="mt-3 text-lg font-bold leading-snug text-neutral-900 transition-colors group-hover:text-indigo-600 dark:text-white dark:group-hover:text-indigo-400 line-clamp-2">
+          {title}
+        </h3>
+
+        {/* เนื้อหาย่อ: ใช้ leading-relaxed (1.625) สำหรับภาษาไทย ป้องกันสระชนกัน และตัดที่ 3 บรรทัด */}
+        <p className="mt-2 text-sm leading-relaxed text-neutral-600 dark:text-neutral-400 line-clamp-3">
+          {summary}
+        </p>
+
+        <div className="mt-auto flex items-center justify-between border-t border-neutral-100 pt-4 dark:border-neutral-800">
+          <span className="text-xs font-medium text-neutral-700 dark:text-neutral-300">
+            โดย {author}
+          </span>
+          <span className="flex items-center gap-1 text-xs text-indigo-600 font-semibold dark:text-indigo-400">
+            อ่านต่อ <span className="transition-transform group-hover:translate-x-1">→</span>
+          </span>
+        </div>
+      </div>
+    </article>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับ CSS ปกติ
+
+| Tailwind Utility | Native CSS Property | หมายเหตุสำหรับภาษาไทย |
+| :--- | :--- | :--- |
+| `text-sm` | `font-size: 0.875rem; line-height: 1.25rem;` | ขนาดมาตรฐานสำหรับบอดี้ขนาดเล็ก |
+| `leading-relaxed` | `line-height: 1.625;` | **แนะนำเป็นค่ามาตรฐานสำหรับภาษาไทย** |
+| `leading-none` | `line-height: 1;` | **ห้ามใช้กับภาษาไทย** วรรณยุกต์จะแหว่ง |
+| `line-clamp-2` | `-webkit-line-clamp: 2; overflow: hidden; display: -webkit-box;` | ตัดข้อความอัตโนมัติพร้อมเติม `...` |
+| `font-semibold` | `font-weight: 600;` | น้ำหนักตัวหนาปานกลาง อ่านง่ายในจอ Retina |
+
+---
+
+## 5. ผิด vs ถูก
+
+### จุดที่ 1: การใช้ `tracking-tighter` หรือ `tracking-tight` กับฟอนต์ไทย
+```tsx
+// ❌ ผิด: อักษรภาษาไทยและสระวรรณยุกต์จะซ้อนเกยกันจนอ่านไม่ออก
+<h2 className="text-xl font-bold tracking-tight">
+  ยินดีต้อนรับสู่ระบบบริหารจัดการบุคลากร
+</h2>
+
+// ✅ ถูก: ใช้ tracking-normal หรือละเว้นคลาส tracking สำหรับฟอนต์ไทย
+<h2 className="text-xl font-bold tracking-normal leading-snug">
+  ยินดีต้อนรับสู่ระบบบริหารจัดการบุคลากร
+</h2>
+```
+*เหตุผล*: ตัวอักษรละติน (อังกฤษ) มีการเว้นช่องไฟตามรูปร่างอักษร แต่ภาษาไทยมีระบบสระบนล่างที่ต้องการช่องว่างตามธรรมชาติ การบีบ letter spacing ด้วย `tracking-tight` จะทำให้ไม้เอก ไม้โท ซ้อนทับพยัญชนะ
+
+### จุดที่ 2: การใช้ `leading-none` ในหัวข้อภาษาไทย
+```tsx
+// ❌ ผิด: สระอุ สระอู หรือ ไม้โท ไม้เอก จะถูกตัดขอบบนและล่างจนแหว่ง
+<h1 className="text-3xl font-extrabold leading-none">
+  เรียนรู้การพัฒนาเว็บสมัยใหม่
+</h1>
+
+// ✅ ถูก: ใช้ leading-tight หรือ leading-snug เป็นอย่างต่ำสำหรับภาษาไทย
+<h1 className="text-3xl font-extrabold leading-tight">
+  เรียนรู้การพัฒนาเว็บสมัยใหม่
+</h1>
+```
+*เหตุผล*: ฟอนต์ภาษาไทยมีความสูงของ ascender และ descender มากกว่าภาษาอังกฤษ การใช้ line-height เท่ากับ 1 (`leading-none`) จะตัดพื้นที่แสดงผลของสระชั้นที่สอง
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้
+- กำหนด `leading-relaxed` (1.625) หรือ `leading-loose` กับย่อหน้าภาษาไทยที่เป็นเนื้อหายาว
+- ใช้ `line-clamp-2` หรือ `line-clamp-3` บนการ์ดรายการ เพื่อควบคุมความสูงของการ์ดให้เรียบเท่ากันสม่ำเสมอ
+- ใช้ `@theme` กำหนดฟอนต์ผ่าน Next.js Google Fonts เพื่อประสิทธิภาพการโหลดเร็วที่สุด
+
+### ไม่ควรใช้
+- หลีกเลี่ยง `tracking-tight` และ `tracking-tighter` กับข้อความภาษาไทยทุกกรณี
+- ไม่ควรใช้ `leading-none` กับเนื้อหาภาษาไทย เว้นแต่เป็นตัวเลขอารบิกเดี่ยวๆ (เช่น Counter ตัวเลขขนาดใหญ่)
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการแสดงผล Typography ภาษาไทยใน Tailwind จึงมักพบปัญหาวรรณยุกต์ถูกตัดขอบ และมีวิธีแก้ไขอย่างไร?
+**แนวทางคำตอบ**: 
+สาเหตุหลักเกิดจากการใช้ `leading-none` หรือ `leading-tight` ร่วมกับคอนเทนเนอร์ที่มี `overflow-hidden` เพราะตัวอักษรไทยมีวรรณยุกต์และสระบน-ล่างที่ขยายออกนอก x-height ของตัวอักษรปกติมากกว่าภาษาอังกฤษ วิธีแก้ไขคือการเลือกใช้ `leading-snug` (1.375) สำหรับหัวข้อ หรือ `leading-relaxed` (1.625) สำหรับเนื้อหา และหากจำเป็นต้องใช้ `overflow-hidden` ควรเพิ่ม padding แนวตั้งเล็กน้อย (`py-1`) เพื่อเว้นระยะให้สระชั้นบนสุดไม่ถูกตัดขอบ
+
+### Q2: ใน Tailwind v4 เราสามารถเชื่อมต่อ Google Fonts เช่น Sarabun จาก Next.js 16 เข้าสู่ระบบ `@theme` ได้อย่างไรโดยไม่ต้องพึ่ง `tailwind.config.js`?
+**แนวทางคำตอบ**: 
+ใน Next.js 16 เรานำเข้า `Sarabun` ผ่าน `next/font/google` และตั้งค่าออปชัน `variable: "--font-sarabun"` จากนั้นส่ง variable class เข้าที่แท็ก `<html>` ใน `layout.tsx` แล้วในไฟล์ `globals.css` เราเปิดบล็อก `@theme` และกำหนด `--font-sans: var(--font-sarabun), sans-serif;` คอมไพเลอร์ Tailwind v4 Oxide จะนำตัวแปรนี้ไปสร้าง Utility `font-sans` ให้อัตโนมัติโดยสมบูรณ์

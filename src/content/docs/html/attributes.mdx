@@ -1,0 +1,153 @@
+---
+title: Attributes
+category: Frontend
+parentTitle: HTML5
+version: HTML Living Standard
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**Attributes (แอตทริบิวต์)** คือตัวแปรเสริมที่ระบุไว้ในแท็กเปิด เพื่อกำหนดพฤติกรรม หน้าตา หรือสถานะพิเศษให้แก่ HTML Element
+
+แอตทริบิวต์ที่พบบ่อยและมีความสำคัญอย่างยิ่ง:
+- **`id` vs `class`**: `id` ต้องเป็นหนึ่งเดียวในหน้า (Unique Identifier) ส่วน `class` สามารถนำกลับมาใช้ซ้ำได้กับหลายองค์ประกอบ
+- **`data-*`**: แอตทริบิวต์สำหรับเก็บข้อมูลจำเพาะ (Custom Data Attributes) เพื่อให้ JavaScript ดึงไปใช้งานผ่าน `element.dataset`
+- **`disabled` vs `readonly`**: 
+  - `disabled`: ปิดการใช้งาน สีจาง คลิกไม่ได้ และ **"ไม่ถูกส่งค่าไปกับฟอร์ม"**
+  - `readonly`: อ่านได้อย่างเดียว ห้ามแก้ไข โฟกัสได้ และ **"ยังคงส่งค่าไปกับฟอร์มตามปกติ"**
+- **`hidden`**: ซ่อน element ออกจากหน้าจอ (เทียบเท่า `display: none` ใน CSS)
+- **`tabindex`**: ควบคุมลำดับการกดปุ่ม Tab ของคีย์บอร์ด (`0` = เข้าคิวตามปกติ, `-1` = โฟกัสได้ด้วย JS เท่านั้น)
+- **`autocomplete`**: ช่วยระบบ Browser Password Manager เติมข้อมูลอัตโนมัติ
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. ความแตกต่างลึกซึ้ง: `disabled` vs `readonly`
+เมื่อผู้ใช้กด Submit ฟอร์ม:
+- **`disabled` Element**: เบราว์เซอร์จะเพิกเฉย ไม่นำเข้าสู่กระบวนการ Form Data Serialization
+- **`readonly` Element**: เบราว์เซอร์ยังคงแพ็กคู่ `name=value` ส่งไปยังเซิร์ฟเวอร์ตามปกติ เหมาะสำหรับฟิลด์ที่ต้องการแสดงให้ผู้ใช้ดูแต่ห้ามแก้ เช่น รหัสคำสั่งซื้อ หรืออีเมลที่ผูกไว้กับระบบ
+
+### 2. กฎเหล็กของ `tabindex`
+- `tabindex="0"`: นำ element ที่ปกติโฟกัสไม่ได้ (เช่น `<div>` พิเศษ หรือ Custom Component) เข้ามาอยู่ในลำดับการกด Tab ตามตำแหน่งจริงใน DOM
+- `tabindex="-1"`: ดึง element ออกจากลำดับการกด Tab แต่ยังสามารถสั่งโฟกัสผ่านโค้ด JavaScript ได้ (`element.focus()`) เช่น ตอนเปิด Modal
+- **`tabindex="1"` ขึ้นไป (Positive Number)**: **Anti-pattern อันตราย!** จะทำลายลำดับการกด Tab ตามธรรมชาติของผู้ใช้
+
+---
+
+## 3. ตัวอย่างโค้ด (HTML5)
+
+### ตัวอย่างที่ 1: การใช้ `data-*`, `disabled`, `readonly` ในหน้าจัดการโปรไฟล์
+
+```html filename="profile-editor.html"
+<form action="/api/profile" method="POST">
+  <!-- 1. id สำหรับองค์ประกอบเดียว และ readonly สำหรับข้อมูลที่ห้ามเปลี่ยน -->
+  <div class="field">
+    <label for="account-id">รหัสบัญชีผู้ใช้ (แก้ไขไม่ได้)</label>
+    <input 
+      type="text" 
+      id="account-id" 
+      name="accountId" 
+      value="ACC-998821" 
+      readonly
+    >
+  </div>
+
+  <!-- 2. data-* attributes สำหรับเก็บข้อมูลให้ JavaScript ใช้งาน -->
+  <div 
+    class="subscription-badge" 
+    data-plan="pro" 
+    data-billing-cycle="annual"
+    data-expiry-date="2027-01-01"
+  >
+    <span>แพ็กเกจปัจจุบัน: Pro Annual</span>
+  </div>
+
+  <!-- 3. disabled ปิดปุ่มไว้จนกว่าจะมีการเปลี่ยนแปลงข้อมูล -->
+  <div class="actions">
+    <button type="submit" id="save-btn" disabled>
+      บันทึกการเปลี่ยนแปลง
+    </button>
+  </div>
+</form>
+
+<script>
+  // ดึงค่าจาก data-* ผ่าน dataset API ใน JavaScript
+  const badge = document.querySelector('.subscription-badge');
+  console.log(`รอบการเรียกเก็บเงิน: ${badge.dataset.billingCycle}`); // "annual"
+</script>
+```
+
+### ตัวอย่างที่ 2: การใช้ `autocomplete` และ `tabindex` อย่างมืออาชีพ
+
+```html filename="payment-checkout.html"
+<div class="checkout-card">
+  <!-- 1. autocomplete ที่ระบุชัดเจนตามมาตรฐาน WHATWG -->
+  <label for="cc-num">หมายเลขบัตรเครดิต</label>
+  <input 
+    type="text" 
+    id="cc-num" 
+    name="cardNumber" 
+    autocomplete="cc-number" 
+    inputmode="numeric"
+  >
+
+  <!-- 2. tabindex="-1" บน Modal เพื่อให้ JS ย้าย Focus มาที่นี่เมื่อเปิดกล่องข้อความ -->
+  <div 
+    id="terms-modal" 
+    class="modal" 
+    tabindex="-1" 
+    role="dialog" 
+    aria-labelledby="modal-title" 
+    hidden
+  >
+    <h3 id="modal-title">ข้อกำหนดการชำระเงิน</h3>
+    <p>การทำรายการไม่สามารถขอคืนเงินได้...</p>
+    <button type="button" onclick="closeModal()">รับทราบ</button>
+  </div>
+</div>
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ใช้ `tabindex` เป็นตัวเลขบวก และใช้ `disabled` เมื่อยังต้องการส่งค่า
+
+```html
+<!-- ผิด: 1. ใส่ tabindex เป็นตัวเลขบวก ทำให้ลำดับการกดแท็บของหน้าเว็บกระโดดมั่วซั่ว
+         2. ใส่ disabled แต่คาดหวังว่าค่า userId จะถูกส่งไป Backend ตอน submit -->
+<input type="text" name="userId" value="1234" disabled tabindex="5">
+```
+
+### ✅ โค้ดที่ถูกต้อง: ใช้ `readonly` เมื่อต้องการส่งค่า และปล่อย Tab ตามธรรมชาติ
+
+```html
+<!-- ถูกต้อง: ใช้ readonly เพื่อส่งค่าไปเซิร์ฟเวอร์ และไม่ใส่ตัวเลขบวกใน tabindex -->
+<input type="text" name="userId" value="1234" readonly>
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรทำ
+- ใช้ `autocomplete` ให้ครบถ้วนในช่องอย่างเช่น `email`, `current-password`, `new-password`, `name`, `tel` เพื่อเพิ่ม Conversion Rate
+- ใช้ `data-*` เมื่อต้องการแนบ Metadata ของ Business Logic เล็กๆ น้อยๆ ไว้กับ DOM Element
+
+### ไม่ควรทำ
+- **ห้ามใช้ค่า `tabindex` มากกว่า 0 โดยเด็ดขาด**: ให้เรียงลำดับ DOM ใน HTML ให้ถูกต้องตามธรรมชาติแทน
+- **ห้ามมี `id` ซ้ำกันในหน้าเดียวกัน**: เพราะจะทำให้ `document.getElementById` ทำงานผิดพลาด และการผูก `<label>` พังทลาย
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ความแตกต่างระหว่างแอตทริบิวต์ `disabled` และ `readonly` คืออะไร?
+**แนวทางคำตอบ**:
+- `disabled`: ช่องข้อมูลจะถูกปิดการทำงาน ไม่สามารถคลิก พิมพ์ หรือโฟกัสได้ สีจะจางลง และ **ข้อมูลในช่องนี้จะไม่ถูกส่ง (Omitted)** ไปกับ HTTP Request ตอน Submit ฟอร์ม
+- `readonly`: ช่องข้อมูลจะไม่สามารถแก้ไขได้ แต่ยังสามารถคลิก ไฮไลต์ข้อความ และกด Tab เข้ามาโฟกัสได้ และ **ข้อมูลจะยังคงถูกส่ง (Included)** ไปกับ HTTP Request ตอน Submit ฟอร์มตามปกติ
+
+### Q2: ทำไมจึงมีคำแนะนำว่า "ห้ามใช้ `tabindex` ที่มีค่าเป็นตัวเลขบวก (`tabindex > 0`)"?
+**แนวทางคำตอบ**: เพราะการใส่ตัวเลขบวก เช่น `tabindex="1"`, `tabindex="2"` จะเป็นการบังคับเบราว์เซอร์ให้ลัดคิวการโฟกัสข้ามลำดับธรรมชาติของโครงสร้าง DOM ซึ่งมักนำไปสู่ปัญหาการกระโดดข้ามตำแหน่งไปมาอย่างไร้ทิศทาง ทำให้ผู้ใช้ที่สั่งการผ่านคีย์บอร์ดหรือผู้ใช้ Screen Reader สับสนอย่างมาก แนวทางที่ถูกต้องคือการจัดวางลำดับ Element ใน HTML ให้ถูกต้องตามลำดับสายตาตั้งแต่แรก และใช้เพียง `tabindex="0"` หรือ `tabindex="-1"` เท่านั้น

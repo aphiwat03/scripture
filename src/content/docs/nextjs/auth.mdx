@@ -1,0 +1,87 @@
+---
+title: Authentication
+category: Frontend
+parentTitle: Next.js 16
+version: v16.4
+updatedAt: 2026-10-17
+---
+
+## 1. คืออะไร / ใช้ทำไม
+
+**Authentication** ใน Next.js 16 คือระบบตรวจสอบและยืนยันตัวตนผู้ใช้ โดยเก็บ JWT Token ไว้ใน **HttpOnly Cookie** เพื่อความปลอดภัยจากการถูกขโมยผ่านช่องโหว่ XSS และใช้ **`middleware.ts`** สกัดกั้นผู้ที่ยังไม่ได้ยืนยันตัวตนก่อนเข้าสู่หน้าสำคัญ
+
+ช่วยให้การจัดการ Session มีความปลอดภัยระดับมาตรฐานอุตสาหกรรม และคัดกรองสิทธิ์ได้อย่างรวดเร็วตั้งแต่ด่านหน้าของเซิร์ฟเวอร์
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### การเขียน Middleware ป้องกันเส้นทาง (Route Protection)
+
+```typescript filename="src/middleware.ts"
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
+
+export function middleware(request: NextRequest) {
+  const token = request.cookies.get('auth_token')?.value;
+  const { pathname } = request.nextUrl;
+
+  const isProtectedPath = pathname.startsWith('/dashboard') || pathname.startsWith('/admin');
+  const isAuthPath = pathname.startsWith('/login') || pathname.startsWith('/register');
+
+  // หากไม่มี Token แล้วพยายามเข้าหน้าที่ต้องล็อกอิน ให้ Redirect ไปหน้า Login
+  if (isProtectedPath && !token) {
+    const loginUrl = new URL('/login', request.url);
+    loginUrl.searchParams.set('redirect', pathname);
+    return NextResponse.redirect(loginUrl);
+  }
+
+  // หากล็อกอินอยู่แล้วแต่พยายามเข้าหน้า Login ให้ส่งไปหน้า Dashboard
+  if (isAuthPath && token) {
+    return NextResponse.redirect(new URL('/dashboard', request.url));
+  }
+
+  return NextResponse.next();
+}
+
+export const config = {
+  matcher: ['/dashboard/:path*', '/admin/:path*', '/login', '/register'],
+};
+```
+
+### การตั้งค่าและอ่าน Cookie ใน Next.js 16
+
+```typescript filename="src/app/actions/auth.ts"
+import { cookies } from 'next/headers';
+
+export async function setAuthTokenCookie(jwtToken: string) {
+  'use server';
+  const cookieStore = await cookies(); // ใน Next.js 16 ต้อง await cookies()
+
+  cookieStore.set('auth_token', jwtToken, {
+    httpOnly: true, // ป้องกัน JavaScript บนเบราว์เซอร์เข้าถึง (ป้องกัน XSS)
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    path: '/',
+    maxAge: 60 * 60 * 24 * 7, // มีอายุ 7 วัน
+  });
+}
+```
+
+## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- *HttpOnly Cookie*: ควรใช้เก็บ Session Token เสมอ / *ห้ามเก็บ* ใน `localStorage` เพราะจะถูกขโมยได้ง่ายเมื่อเกิดช่องโหว่ XSS
+- *Middleware*: ใช้สำหรับกรองเส้นทางและ Redirect เบื้องต้น / *ไม่ควรเขียน* การเชื่อมต่อฐานข้อมูลโดยตรงใน Middleware เพราะรันบน Edge Runtime ที่มีขีดจำกัดเรื่อง Connection
+
+## 4. ข้อควรระวัง
+
+<Callout type="warning" title="cookies() ใน Next.js 16 เป็น Async">
+อย่าลืมใส่ `await cookies()` เสมอเมื่อต้องการอ่านหรือเขียน Cookie ใน Server Components หรือ Server Actions
+</Callout>
+
+<Callout type="note" title="อย่า Validate JWT เต็มรูปแบบใน Middleware ทุก Request">
+หากระบบมีผู้ใช้หนาแน่น ควร Verify Signature แบบรวดเร็ว หรือตรวจสอบเฉพาะการมีอยู่ของ Token ใน Middleware แล้วปล่อยให้การเช็คสิทธิ์ลึกๆ เป็นหน้าที่ของ Backend API หรือ Server Component
+</Callout>
+
+## 5. แหล่งอ้างอิงทางการ
+
+- [Next.js Authentication Guide](https://nextjs.org/docs/app/building-your-application/authentication)
+- [Next.js Middleware](https://nextjs.org/docs/app/building-your-application/routing/middleware)

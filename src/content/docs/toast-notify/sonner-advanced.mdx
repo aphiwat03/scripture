@@ -1,0 +1,359 @@
+---
+title: Sonner Promises & Actions
+category: Frontend
+parentTitle: Toast Notify
+version: Sonner & React Toastify (Next.js 16)
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+เมื่อระบบเว็บมีความซับซ้อนเพิ่มขึ้น การแจ้งเตือนไม่ได้เป็นเพียงแค่ "ข้อความนิ่งๆ ที่เด้งขึ้นมาบอกสถานะ" อีกต่อไป แต่กลายเป็น **Interactive Micro-Interaction** ที่เชื่อมโยงเข้ากับวงจรชีวิตของข้อมูลอะซิงโครนัส (Asynchronous Lifecycle) และให้โอกาสผู้ใช้ในการโต้ตอบกลับทันที
+
+ฟีเจอร์ขั้นสูงของ **Sonner** ถูกออกแบบมาเพื่อยกระดับประสบการณ์ผู้ใช้ใน 3 มิติหลัก:
+1. **วงจรชีวิตอัตโนมัติด้วย `toast.promise`**: แก้ปัญหาการแจ้งเตือนกระพริบ หรือการเกิด Toast หลายตัวทับซ้อนกันระหว่างเรียก API โดย Sonner จะแปลง Promise ตัวเดียวให้เป็นลำดับขั้นตอน Loading -> Success หรือ Error ในการ์ดใบเดิมอย่างนุ่มนวล
+2. **การย้อนกลับการกระทำ (Reversible Actions & Undo)**: มอบปุ่ม Action และ Cancel ในการ์ด เช่น การลบข้อมูลแบบ Soft Delete พร้อมตัวเลือก "เลิกทำ (Undo)" ซึ่งช่วยลดความจำเป็นในการเปิด Confirmation Modal ที่น่ารำคาญ
+3. **การปรับแต่งระดับไร้ขีดจำกัด (`toast.custom`)**: รองรับการส่ง Custom React Component เข้าไปเรนเดอร์ได้อย่างอิสระ พร้อมทั้งควบคุมพฤติกรรมการซ้อนการ์ด (`visibleToasts`) และการขยายตัวเมื่อนำเมาส์ชี้ (`expand={true}`)
+
+```
+วงจรชีวิตของ toast.promise:
+  [ เรียกใช้ API (Pending) ] ────> แสดงสถานะ Loading (ไอคอนหมุน)
+              │
+              ├─── กรณี Promise สำเร็จ (Fulfilled) ──> สลับเป็นการ์ด Success (เครื่องหมายถูก)
+              │
+              └─── กรณี Promise ล้มเหลว (Rejected)  ──> สลับเป็นการ์ด Error (เครื่องหมายกากบาท)
+  * ทั้งหมดเกิดขึ้นภายในการ์ดใบเดิม (Same DOM Node Mutation) ไม่กระตุก ไม่ Re-mount
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. กลไกการทำงานภายในของ `toast.promise`
+เมื่อคุณส่งคำสั่ง `toast.promise(promise, { loading, success, error })`:
+- Sonner จะสร้าง Toast ชั่วคราวขึ้นมาพร้อมกำหนด ID ภายใน และเซ็ตสถานะเป็น `type: 'loading'`
+- Sonner จะผูก Handler `.then()` และ `.catch()` เข้ากับ Promise ที่ส่งเข้ามา:
+  - เมื่อ Promise สำเร็จ (Resolve): ฟังก์ชัน callback ของ `success` จะถูกเรียก โดยสามารถรับข้อมูล Data ที่ Resolve กลับมานำไปประกอบข้อความแบบไดนามิกได้
+  - เมื่อ Promise ล้มเหลว (Reject): ฟังก์ชัน callback ของ `error` จะถูกเรียก โดยรับ Exception Object มาแยกแยะข้อความแจ้งเตือนที่ชัดเจน
+- **Single Node State Transition**: ตัวคอมโพเนนต์จะทำเพียงแค่ Update State ภายใน และสั่งเปลี่ยน CSS Class จาก Loading Spinner เป็น Success Icon ผ่าน CSS Transition โดยไม่มีการ Unmount Element ออกจาก DOM Tree ช่วยให้แอนิเมชันมีความต่อเนื่องไร้รอยต่อ
+
+### 2. โครงสร้างการซ้อนการ์ด 3 มิติ และ `visibleToasts`
+- พร็อพ `visibleToasts` (ค่าเริ่มต้นคือ 3) ควบคุมจำนวนการ์ดสูงสุดที่มองเห็นได้ใน Stack:
+  - การ์ดลำดับที่ 1 (ล่าสุด): ขนาด `scale(1)` ตำแหน่งล่างสุดหรือบนสุดตามทิศทาง
+  - การ์ดลำดับที่ 2: ขนาด `scale(0.95)` ลอยเหลื่อมอยู่เบื้องหลัง
+  - การ์ดลำดับที่ 3: ขนาด `scale(0.90)` ลอยจมลึกเข้าไปอีกชั้น
+  - การ์ดลำดับที่ 4 เป็นต้นไป: ถูกซ่อนด้วย `opacity: 0` จนกว่าการ์ดใบหน้าจะถูก Dismiss
+- **พฤติกรรม `expand={true}` on Hover**: เมื่อผู้ใช้นำเมาส์ไปชี้ที่ Toaster กลไกภายในจะสลับสถานะเป็น Expanded State และปลด CSS Transform ซ้อน ให้การ์ดทุกใบคลี่ออกเป็นคอลัมน์ให้อ่านได้ครบทุกตัว
+
+### 3. การรองรับภาษาไทยและการปรับระยะบรรทัด (Typography & Line Height)
+ตัวอักษรภาษาไทยมีโครงสร้างสระและวรรณยุกต์ 4 ระดับ (สระบน, วรรณยุกต์, พยัญชนะ, สระล่าง):
+- หากกล่อง Toast ถูกกำหนดความสูงคงที่ (`height` แบบตายตัว) สระบนหรือสระล่างจะถูกตัดทอน (Clipping)
+- การออกแบบที่ดีต้องปล่อยให้ Toast มีความสูงแบบ Dynamic (`min-height` แทน `height`) ควบคู่กับ `leading-relaxed` (Line-height ประมาณ 1.5 - 1.6) เพื่อให้อ่านข้อความภาษาไทยได้อย่างสบายตา
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่างที่ 1: ระบบอัปโหลดไฟล์ขนาดใหญ่แบบ Interactive พร้อม Progress Bar ด้วย `toast.custom`
+
+ตัวอย่างนี้สาธิตการใช้ `toast.custom` ในการเรนเดอร์ React Component อิสระเพื่อแสดงสถานะการอัปโหลดวิดีโอพร้อม Progress Bar แบบเรียลไทม์ และปุ่มกดยกเลิกการอัปโหลด
+
+```tsx filename="src/components/media/VideoUploader.tsx"
+"use client";
+
+import * as React from "react";
+import { toast } from "sonner";
+import { UploadCloud, X, CheckCircle2, Film } from "lucide-react";
+
+interface UploadProgressToastProps {
+  toastId: string | number;
+  fileName: string;
+  progress: number;
+  onCancel: () => void;
+}
+
+function UploadProgressToast({
+  toastId,
+  fileName,
+  progress,
+  onCancel,
+}: UploadProgressToastProps) {
+  return (
+    <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-4 shadow-xl">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/10 text-primary">
+            <Film className="w-5 h-5" />
+          </div>
+          <div>
+            <h5 className="text-sm font-semibold text-card-foreground line-clamp-1">
+              {fileName}
+            </h5>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {progress < 100 ? `กำลังอัปโหลด... ${progress}%` : "ประมวลผลเสร็จสิ้น"}
+            </p>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => {
+            onCancel();
+            toast.dismiss(toastId);
+          }}
+          className="rounded-lg p-1 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+          title="ยกเลิกการอัปโหลด"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* แถบ Progress Bar แบบไดนามิก */}
+      <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-secondary">
+        <div
+          className="h-full bg-primary transition-all duration-300 ease-out"
+          style={{ width: `${progress}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+export function VideoUploader() {
+  const [isUploading, setIsUploading] = React.useState(false);
+  const abortControllerRef = React.useRef<AbortController | null>(null);
+
+  function simulateFileUpload(file: File) {
+    setIsUploading(true);
+    abortControllerRef.current = new AbortController();
+
+    let currentProgress = 0;
+    const toastId = "video-upload-toast";
+
+    const interval = setInterval(() => {
+      currentProgress += 20;
+
+      if (currentProgress <= 100) {
+        // อัปเดตเนื้อหา Custom Component ภายในการ์ดเดิมโดยอ้างอิงจาก toastId
+        toast.custom(
+          (t) => (
+            <UploadProgressToast
+              toastId={t}
+              fileName={file.name}
+              progress={currentProgress}
+              onCancel={() => {
+                clearInterval(interval);
+                setIsUploading(false);
+                toast.info("ยกเลิกการอัปโหลดแล้ว", { duration: 3000 });
+              }}
+            />
+          ),
+          { id: toastId, duration: Infinity }
+        );
+      }
+
+      if (currentProgress >= 100) {
+        clearInterval(interval);
+        setIsUploading(false);
+        // เมื่อเสร็จแล้ว ปิด Custom Toast แล้วแสดง Success Toast
+        setTimeout(() => {
+          toast.dismiss(toastId);
+          toast.success("อัปโหลดวิดีโอเรียบร้อยแล้ว", {
+            description: `ไฟล์ ${file.name} พร้อมใช้งานในระบบสตรีมมิง`,
+            duration: 4000,
+          });
+        }, 500);
+      }
+    }, 600);
+  }
+
+  return (
+    <div className="rounded-2xl border-2 border-dashed border-border p-8 text-center bg-card/50">
+      <UploadCloud className="mx-auto h-12 w-12 text-muted-foreground" />
+      <h3 className="mt-2 text-base font-semibold text-foreground">
+        อัปโหลดวิดีโอบทเรียน
+      </h3>
+      <p className="mt-1 text-sm text-muted-foreground">
+        รองรับไฟล์ MP4, MOV ขนาดไม่เกิน 500MB
+      </p>
+
+      <label className="mt-4 inline-flex cursor-pointer items-center justify-center rounded-xl bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors">
+        <span>เลือกไฟล์จากเครื่อง</span>
+        <input
+          type="file"
+          accept="video/*"
+          className="hidden"
+          disabled={isUploading}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) simulateFileUpload(file);
+          }}
+        />
+      </label>
+    </div>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: ระบบจัดการบทความ (Soft Delete with Undo Pattern) ด้วย `toast.promise` และ `action`
+
+ตัวอย่างนี้จำลองการลบบทความแบบย้อนกลับได้ (Soft Delete) โดยเมื่อผู้ใช้กดลบ ระบบจะแสดง Toast พร้อมปุ่ม **"เลิกทำ (Undo)"** หากผู้ใช้ไม่กดยกเลิกภายใน 8 วินาที ระบบจะส่งคำขอยืนยันการลบถาวรไปยังเซิร์ฟเวอร์
+
+```tsx filename="src/components/articles/ArticleActionMenu.tsx"
+"use client";
+
+import * as React from "react";
+import { toast } from "sonner";
+import { Trash2, Edit3, RotateCcw } from "lucide-react";
+
+interface ArticleProps {
+  articleId: string;
+  articleTitle: string;
+  onRefresh: () => void;
+}
+
+export function ArticleActionMenu({
+  articleId,
+  articleTitle,
+  onRefresh,
+}: ArticleProps) {
+  const [isDeleting, setIsDeleting] = React.useState(false);
+  const undoTimeoutRef = React.useRef<NodeJS.Timeout | null>(null);
+
+  // จำลอง API Call สำหรับ Hard Delete หลังจากหมดเวลา Undo
+  async function executePermanentDelete(id: string): Promise<{ success: boolean }> {
+    const res = await fetch(`/api/articles/${id}`, { method: "DELETE" });
+    if (!res.ok) throw new Error("ไม่สามารถลบข้อมูลจากฐานข้อมูลได้");
+    return res.json();
+  }
+
+  // จำลอง API Call กู้คืนข้อมูล (Undo)
+  async function executeRestore(id: string): Promise<void> {
+    await fetch(`/api/articles/${id}/restore`, { method: "POST" });
+  }
+
+  function handleDeleteWithUndo() {
+    setIsDeleting(true);
+
+    // 1. ซ่อนจาก UI ชั่วคราว (Optimistic Delete)
+    toast.success(`ย้าย "${articleTitle}" ไปที่ถังขยะแล้ว`, {
+      description: "บทความจะถูกลบถาวรหากไม่มีการยกเลิกภายใน 8 วินาที",
+      duration: 8000, // ให้เวลาตัดสินใจ 8 วินาที
+      action: {
+        label: "เลิกทำ (Undo)",
+        onClick: async () => {
+          // หากผู้ใช้กด Undo: ยกเลิกการลบถาวร
+          if (undoTimeoutRef.current) {
+            clearTimeout(undoTimeoutRef.current);
+            undoTimeoutRef.current = null;
+          }
+
+          setIsDeleting(false);
+          await executeRestore(articleId);
+
+          toast.info("กู้คืนบทความเรียบร้อย", {
+            description: `บทความ "${articleTitle}" กลับคืนสู่สถานะเผยแพร่`,
+            duration: 3000,
+          });
+          onRefresh();
+        },
+      },
+      cancel: {
+        label: "ปิด",
+        onClick: () => {
+          // ผู้ใช้กดยืนยันปิดทันที
+        },
+      },
+    });
+
+    // 2. ตั้งเวลานับถอยหลัง 8 วินาทีเพื่อส่งคำขอลบจริงไปยัง Server
+    undoTimeoutRef.current = setTimeout(async () => {
+      try {
+        await executePermanentDelete(articleId);
+        setIsDeleting(false);
+        onRefresh();
+      } catch (err) {
+        setIsDeleting(false);
+        toast.error("การลบข้อมูลถาวรล้มเหลว", {
+          description: (err as Error).message,
+        });
+      }
+    }, 8000);
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        disabled={isDeleting}
+        onClick={handleDeleteWithUndo}
+        className="inline-flex items-center gap-1.5 rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-1.5 text-xs font-semibold text-destructive hover:bg-destructive/20 disabled:opacity-50 transition-colors"
+      >
+        <Trash2 className="w-3.5 h-3.5" />
+        ลบบทความ
+      </button>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีอื่น (`toast.promise` vs Manual try/catch/finally toast)
+
+| หัวข้อการเปรียบเทียบ | `toast.promise` (วิธีสมัยใหม่) | Manual `toast.loading` + `try/catch` |
+| :--- | :--- | :--- |
+| **ความเรียบง่ายของโค้ด** | **สูงมาก** บรรทัดเดียวจบ รองรับครบ 3 สถานะ | ยาว รก ต้องสร้างตัวแปรเก็บ `toastId` และสั่ง `toast.dismiss` |
+| **DOM Element Lifecycle** | **สลับสถานะบนการ์ดใบเดิม** ไม่เกิดการกระตุกหรือ Re-render ทับ | มักเกิดปัญหา Toast Loading ค้างลอย หรือ Toast สำเร็จเด้งเบิ้ลขึ้นมาอีกใบ |
+| **การจัดการ Dynamic Message** | ส่ง Callback Function เพื่ออ่านผลลัพธ์ Data หรือ Error ได้โดยตรง | ต้องเขียน `try { ... } catch (e) { ... }` เองในทุกจุด |
+| **การผูก Action Buttons** | กำหนดในคอนฟิกของ `toast.promise` ได้ทันที | ต้องนำคอนฟิกไปหยอดใน `toast.success` เอง |
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practices)
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **ตั้งเวลาของ Toast ที่มีปุ่ม Action ไว้สั้นเกินไป**<br/>เช่น ให้ Toast ที่มีปุ่ม "เลิกทำ (Undo)" แสดงเพียง 2 วินาที<br/>*ผลลัพธ์:* ผู้ใช้ยังไม่ทันอ่านจบหรือเลื่อนเมาส์ไปแตะ Toast ก็หายวับไปแล้ว | **กำหนด `duration` อย่างน้อย 8,000ms ถึง 10,000ms (8-10 วินาที)**<br/>เมื่อมีการ์ดที่มีปุ่ม Action เพื่อให้ผู้ใช้มีเวลาตัดสินใจอย่างเพียงพอ |
+| **ฮาร์ดโค้ดความสูงของการ์ด Toast (`h-12` หรือ `height: 48px`)**<br/>ทำให้สระภาษาไทยด้านบน (เช่น ไม้โท, สระอี) หรือสระด้านล่าง (สระอู) ถูกขอบกล่องตัดแหว่ง | **ใช้ `min-h-[3rem]` และปล่อยให้กล่องขยายตามความยาวข้อความอัตโนมัติ**<br/>พร้อมกำหนดระยะห่างบรรทัด `leading-relaxed` |
+| **ลืมใส่ `role="status"` หรือ `aria-live` เมื่อใช้งาน `toast.custom`**<br/>ทำให้ผู้ใช้ที่พึ่งพา Screen Reader ไม่รับรู้เลยว่ามีการ์ดแจ้งเตือนโผล่ขึ้นมา | **ใส่ Semantic Accessibility ใน Custom Component เสมอ**<br/>หรือใช้ Container มาตรฐานที่ Sonner เตรียมไว้ให้ |
+| **สร้าง Promise ซ้อน Promise โดยไม่คืนค่า (Missing Return)**<br/>ทำให้ `toast.promise` นึกว่าทำงานเสร็จแล้วทั้งที่ API จริงยังโหลดไม่เสร็จ | **Return ค่า Promise อ็อบเจกต์ออกมาให้ `toast.promise` เสมอ** |
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ฟีเจอร์ขั้นสูงของ Sonner เมื่อ:
+- **การทำ Async Data Mutation ที่ใช้เวลานานเกิน 500ms**: เช่น การนำเข้าไฟล์ CSV ขนาดใหญ่, การชำระเงินผ่าน Payment Gateway, การแปลงไฟล์
+- **การออกแบบฟีเจอร์ Soft Delete หรือ Archive**: ที่ต้องการให้ผู้ใช้รู้สึกปลอดภัยและสามารถกดยกเลิก (Undo) ได้ทันที
+- **การแจ้งเตือนที่ต้องการ UI เฉพาะตัว**: เช่น มีรูป Avatar ของผู้ส่งข้อความ หรือมี Progress Bar สำหรับอัปโหลดข้อมูล
+- **ต้องการควบคุมจำนวนการ์ดบนหน้าจอ**: ด้วยการตั้งค่า `visibleToasts={3}` เพื่อไม่ให้รกพื้นที่สายตา
+
+### ไม่ควรใช้เมื่อ:
+- **การกระทำที่เป็น Hard Delete แบบถาวรและย้อนกลับไม่ได้เลย**: กรณีนี้ควรใช้ `AlertDialog` เพื่อขอการยืนยันแบบมีสติ
+- **การแจ้งเตือนสั้นๆ ทั่วไปที่ไม่ต้องรอ API**: ควรใช้ `toast.success()` ธรรมดาเพื่อความกระชับของโค้ด
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ในเชิง User Experience ทำไม "Soft Delete + Toast with Undo Action" จึงได้รับการยอมรับว่ามี Conversion Rate และความพึงพอใจของผู้ใช้ดีกว่า "AlertDialog Confirmation"?
+**แนวทางตอบแบบ Senior Developer:**
+"ในมุมมองของ UX และ Cognitive Psychology:
+1. **ลดแรงเสียดทาน (Eliminating Friction)**: การใช้ Confirmation Dialog แบบดั้งเดิมจะบังคับให้ผู้ใช้ต้องหยุดชะงัก (Context Switch) ทุกครั้งที่ต้องการจัดระเบียบข้อมูล หากผู้ใช้ต้องการลบเอกสาร 10 รายการ พวกเขาต้องกดปุ่มยืนยันถึง 20 ครั้ง ซึ่งสร้างความหงุดหงิดอย่างมาก
+2. **รักษาความต่อเนื่องในการทำงาน (Optimistic Flow)**: รูปแบบ Soft Delete + Undo อนุญาตให้ผู้ใช้ทำงานต่อไปได้ทันทีโดยไม่ต้องรอ (Optimistic update) ระบบจะซ่อนข้อมูลนั้นออกไปจากหน้าจอทันควัน และให้ทางเลือกในการกู้คืนผ่าน Toast ซึ่งผู้ใช้จะรู้สึกว่าระบบทำงานรวดเร็วทันใจ
+3. **Safety Net ที่ไม่เกะกะ**: ผู้ใช้ยังคงได้รับความปลอดภัยเท่าเดิม เพราะหากเผลอกดผิด ก็ยังมีปุ่ม Undo ลอยอยู่ให้กดแก้ไขได้ภายใน 8-10 วินาที จึงเป็นการผสานระหว่างความเร็ว (Speed) และความปลอดภัย (Safety) ได้อย่างสมดุลที่สุด"
+
+---
+
+### Q2: หาก Promise ใน `toast.promise` ถูก Reject ด้วย Error Object ที่มีโครงสร้างเฉพาะจาก Backend (เช่น AxiosError หรือ RFC 7807 Problem Details) เราจะเขียนไวยากรณ์สกัดข้อความภาษาไทยที่อ่านเข้าใจง่ายได้อย่างไร?
+**แนวทางตอบแบบ Senior Developer:**
+"ฟังก์ชัน `error` ในพารามิเตอร์ตัวที่สองของ `toast.promise` รองรับทั้ง String และ Callback Function ที่รับพารามิเตอร์ `(err: unknown) => string`:
+- เราสามารถเขียน Type Guard หรือ Helper Function ขึ้นมาเพื่อแกะโครงสร้างข้อมูลของ Error เช่น ตรวจสอบว่าเป็น `AxiosError` หรือ `Fetch API Error`
+- จากนั้นตรวจสอบ `status code`:
+  - หากเป็น `401 / 403`: คืนค่าภาษาไทยว่า `'เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่'`
+  - หากเป็น `409 Conflict`: คืนค่าว่า `'มีข้อมูลนี้อยู่ในระบบแล้ว'`
+  - หาก Backend ส่ง `err.response.data.message` มาอย่างถูกต้อง ก็สามารถนำข้อความนั้นมาแสดงผลได้ทันที
+- วิธีนี้ทำให้โค้ดฝั่งหน้าบ้านมีความเป็นมืออาชีพ ผู้ใช้ไม่เห็นข้อความเทคนิคแปลกๆ อย่าง `[object Object]` หรือ `Network Error (0x800)` แต่ได้รับคำแนะนำที่นำไปปฏิบัติได้จริง (Actionable Error Message)"

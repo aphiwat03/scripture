@@ -1,0 +1,220 @@
+---
+title: Pitfalls & Q&A
+category: Frontend
+parentTitle: TanStack Query v5
+version: TanStack Query v5.x
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+แม้ว่า **TanStack Query v5** จะเป็นไลบรารีที่ทรงพลังอย่างยิ่ง แต่หากนำไปใช้งานด้วยกรอบความคิดแบบเดิม (Imperative Mindset) มักจะนำไปสู่อาการผิดปกติ (Bugs) ที่พบบ่อยที่สุดในโปรเจกต์ระดับองค์กร
+
+5 ข้อผิดพลาดและ Anti-patterns ยอดฮิตที่ต้องระวัง:
+1. **คัดลอก `data` จาก `useQuery` ไปเก็บใน `useState`**: สร้างสถานะซ้ำซ้อนจนเกิดสภาวะ "Split-Brain State" ข้อมูลหน้าจอกับแคชไม่ตรงกัน
+2. **ลืมใส่ตัวแปร Dependency ลงใน `queryKey`**: ผู้ใช้กดเปลี่ยนตัวกรอง (Filter) หรือหน้า (Page) แต่ข้อมูลบนจอไม่ยอมโหลดใหม่
+3. **ส่ง Unstable Reference ลงใน `queryKey`**: ส่ง Object ใหม่หรือเรียก `new Date()` ใน Key ทำให้เกิด Infinite Fetch Loop ทำลาย Performance
+4. **เรียก `mutateAsync` โดยไม่ครอบ `try/catch`**: ปล่อย Unhandled Promise Rejection จนแอปพลิเคชันพัง
+5. **สั่ง Invalidate แคชกว้างเกินไป**: เรียก `queryClient.invalidateQueries()` เปล่าๆ โดยไม่ระบุ Key ส่งผลให้ทุก Query ทั้งแอปยิง Network พร้อมกัน
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ทำไมการใส่ `data` ลงใน `useState` จึงเป็นหายนะ?
+
+```
+[Server Background Revalidation]
+   │
+   ├─► TanStack Query ได้ข้อมูลสินค้าใหม่: { price: 1200 }
+   │      │
+   │      └─► อัปเดตลงใน QueryCache เรียบร้อย!
+   │
+[หน้าจอคอมโพเนนต์]
+   │
+   ├─► คอมโพเนนต์อ่านค่าจาก: const [item, setItem] = useState(data)
+   │      │
+   │      └─► item ยังคงเป็นค่าเดิมตอน Mount แรกเริ่ม: { price: 900 }
+   │
+   ▼
+[ผลลัพธ์: ผู้ใช้เห็นราคาผิด 900 บาท! ระบบ Background Sync กลายเป็นหมัน!]
+```
+
+เมื่อใช้ `useState` คอมโพเนนต์จะตัดขาดการสื่อสารแบบ Real-time กับแคชส่วนกลางทันที ทำให้ฟีเจอร์อย่าง `refetchOnWindowFocus` หรือ Cache Invalidation ไร้ความหมาย
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+ตัวอย่างข้อผิดพลาดจริงและการแก้ไขในระบบแค็ตตาล็อกสินค้าและการแก้ไขโปรไฟล์:
+
+### ตัวอย่างที่ 1: การจัดการฟอร์มแก้ไขข้อมูลสินค้า
+
+```tsx filename="src/features/products/components/EditProductForm.tsx"
+'use client';
+
+import React from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+
+interface Product {
+  id: string;
+  name: string;
+  price: number;
+}
+
+// ❌ แบบที่ผิด: ซิงค์ data ไปใส่ useState
+// ทำให้ถ้าผู้ใช้อื่นเปลี่ยนราคาในเซิร์ฟเวอร์ หน้าจอนี้จะไม่ยอมอัปเดตตาม
+export function BadEditProduct({ id }: { id: string }) {
+  const { data } = useQuery<Product>({
+    queryKey: ['product', id],
+    queryFn: () => fetch(`/api/products/${id}`).then((r) => r.json()),
+  });
+
+  // ❌ Anti-pattern: Duplicate State
+  const [name, setName] = React.useState('');
+  React.useEffect(() => {
+    if (data) setName(data.name);
+  }, [data]);
+
+  return <input value={name} onChange={(e) => setName(e.target.value)} />;
+}
+
+// ✅ แบบที่ถูก: ใช้ defaultValue หรือ Controlled Form Library (เช่น React Hook Form)
+export function GoodEditProduct({ id }: { id: string }) {
+  const queryClient = useQueryClient();
+
+  const { data: product, isPending } = useQuery<Product>({
+    queryKey: ['products', 'detail', id],
+    queryFn: () => fetch(`/api/products/${id}`).then((r) => r.json()),
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: (updated: Partial<Product>) =>
+      fetch(`/api/products/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(updated),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['products', 'detail', id] });
+    },
+  });
+
+  if (isPending) return <div>กำลังโหลด...</div>;
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        const form = e.currentTarget;
+        const newName = (form.elements.namedItem('name') as HTMLInputElement).value;
+        updateMutation.mutate({ name: newName });
+      }}
+      className="space-y-4"
+    >
+      <div>
+        <label className="text-sm font-medium">ชื่อสินค้า</label>
+        {/* ใช้ key={product.id} หรือ defaultValue เพื่อให้ฟอร์มแสดงข้อมูลล่าสุด */}
+        <input
+          name="name"
+          defaultValue={product?.name}
+          className="block w-full border p-2 rounded"
+        />
+      </div>
+      <button
+        type="submit"
+        disabled={updateMutation.isPending}
+        className="bg-blue-600 text-white px-4 py-2 rounded"
+      >
+        {updateMutation.isPending ? 'กำลังบันทึก...' : 'บันทึก'}
+      </button>
+    </form>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: ปัญหา Infinite Loop จาก Unstable Key
+
+```tsx
+// ❌ ผิด: ส่ง Inline Object ที่ไม่มีโครงสร้างคงที่ หรือเรียกฟังก์ชันที่ให้ค่าใหม่ทุก Render
+export function BadInfiniteLoop({ category }: { category: string }) {
+  const { data } = useQuery({
+    // ❌ Date.now() หรือ new Date() จะทำให้ Key เปลี่ยนทุกๆ เสี้ยววินาที!
+    // ส่งผลให้คอมโพเนนต์ยิง API ซ้ำวนลูปตลอดเวลาจนเบราว์เซอร์ค้าง
+    queryKey: ['products', category, { timestamp: Date.now() }],
+    queryFn: fetchProducts,
+  });
+}
+
+// ✅ ถูก: ใช้เฉพาะตัวแปรที่มีผลต่อข้อมูลจริง (Primitive & Deterministic)
+export function GoodStableQuery({ category }: { category: string }) {
+  const { data } = useQuery({
+    queryKey: ['products', 'by-category', category],
+    queryFn: fetchProducts,
+  });
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม (useEffect vs TanStack Query)
+
+| ด้านความคิด | วิธีคิดแบบเดิม (Imperative) | วิธีคิดแบบ TanStack Query (Declarative) |
+| :--- | :--- | :--- |
+| **มุมมองต่อข้อมูล** | "ฉันต้องสั่งให้โหลด แล้วเอาของมาเก็บในกระเป๋าของฉัน (`useState`)" | "ข้อมูลอยู่ในแคชส่วนกลางเสมอ คอมโพเนนต์เป็นเพียงหน้าต่างมองเข้าไป" |
+| **การอัปเดตข้อมูล** | สั่งฟังก์ชัน `fetchData()` ตรงๆ จากปุ่มกด (Manual Trigger) | สั่ง Invalidate แคช แล้วปล่อยให้ State Machine ตัดสินใจดึงใหม่เอง |
+| **การแชร์ข้อมูล** | ส่ง Props ต่อกันหลายชั้น หรือเก็บลงใน Redux/Zustand ทั้งก้อน | ทุกคอมโพเนนต์เรียกใช้ Query Key เดียวกันเพื่อแบ่งปันแคชแบบ 0ms |
+
+---
+
+## 5. ผิด vs ถูก
+
+| ลำดับ | การกระทำที่ผิด (Wrong ❌) | การกระทำที่ถูกต้อง (Right ✅) | เหตุผล |
+| :---: | :--- | :--- | :--- |
+| 1 | Copy `data` เข้า `useState` | บริโภค `data` จาก `useQuery` ตรงๆ | ป้องกันสภาวะ Split-Brain และคงประสิทธิภาพของ Background Sync |
+| 2 | ลืมใส่ Filter/Page ใน `queryKey` | ใส่ Dependencies ครบใน Array | เพื่อให้แคชแยกส่วนกัน และ Re-fetch ทันทีที่ Filter หรือ Page เปลี่ยน |
+| 3 | `fetch` ไม่ตรวจ `res.ok` | โยน Error เสมอเมื่อ `!res.ok` | ป้องกันไม่ให้ HTTP 4xx/5xx ถูกมองว่าเป็นคำขอที่สำเร็จ |
+| 4 | ใช้ `keepPreviousData: true` (v4) | ใช้ `placeholderData: keepPreviousData` | ป้องกันไม่ให้หน้าจอกระพริบเป็น Skeleton ระหว่างสลับหน้า |
+| 5 | Optimistic Update ไม่เรียก `cancelQueries` | ต้อง `await cancelQueries` ก่อนเสมอ | ป้องกัน Outgoing Request เก่ามาเขียนทับข้อมูล Optimistic |
+| 6 | เปิด `retry: 3` ใน Unit Test | ตั้งค่า `queries: { retry: false }` | ป้องกันปัญหา Test Runner ติด Timeout จาก Exponential Backoff |
+| 7 | Logout โดยไม่ล้างแคช | เรียก `queryClient.clear()` ทันที | ป้องกันข้อมูลส่วนบุคคลรั่วไหลไปยังผู้ใช้คนถัดไปในเบราว์เซอร์เดียวกัน |
+| 8 | ฮาร์ดโค้ด Key สตริงกระจายทุกไฟล์ | ใช้ Query Key Factory รวมศูนย์ | ป้องกันการพิมพ์ตกหล่น (Typo) และช่วยให้ Invalidate แคชได้ตรงจุด |
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+```
+[คุณมีข้อมูลที่ต้องการจัดการบน Next.js 16]
+   │
+   ├─── เป็นข้อมูลที่มาจาก Server / Database หรือไม่?
+   │       │
+   │       ├─── [ไม่ใช่: เป็น UI Toggle, Modal, Theme, Sidebar]
+   │       │       └──► ใช้ React useState หรือ Zustand
+   │       │
+   │       └─── [ใช่: มาจาก API / ฐานข้อมูล]
+   │               │
+   │               ├─── หน้านี้เป็น Static Read-only มีแค่ SEO ไม่มีการคลิกโต้ตอบ?
+   │               │       └──► ใช้ Native Server Component fetch()
+   │               │
+   │               └─── ต้องการ Caching, Background Refresh, หรือ Optimistic Update?
+   │                       └──► ใช้ TanStack Query v5 (Prefetch + HydrationBoundary)
+```
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: อธิบายเหตุผลว่าทำไมการคัดลอก `data` จาก `useQuery` ไปใส่ใน `useState` จึงถือเป็น Anti-pattern ที่อันตรายที่สุดใน TanStack Query?
+**แนวทางตอบ**:
+เพราะมันขัดต่อหลักการ **Single Source of Truth**:
+1. เมื่อเรานำข้อมูลไปใส่ใน `useState` จะเกิดสำเนาข้อมูลขึ้นมา 2 ชุดทันที คือใน `QueryCache` ของ TanStack Query และใน React Local State ของคอมโพเนนต์
+2. เมื่อระบบเกิดการ Revalidation เบื้องหลัง (เช่น ผู้ใช้สลับแท็บกลับมา หรือมี Invalidation จากการกดปุ่มของคอมโพเนนต์อื่น) ข้อมูลใน `QueryCache` จะได้รับการอัปเดตเป็นของใหม่ล่าสุด แต่ `useState` จะยังคงจำค่าเดิมตอน Mount ส่งผลให้ผู้ใช้มองเห็นข้อมูลเก่าที่ล้าสมัย (Stale Data)
+3. หากจำเป็นต้องแก้ไขข้อมูลในฟอร์ม ควรใช้ `defaultValue` ร่วมกับ Uncontrolled Components หรือ React Hook Form แทนการทำ Mirror State ด้วย `useEffect`
+
+### Q2: หากหน้าเว็บเกิดอาการ Query Refetch วนลูปไม่สิ้นสุด (Infinite Loop) และ Network Tab มี Request ยิงรัวๆ สาเหตุส่วนใหญ่เกิดจากอะไร และมีแนวทางแก้ไขอย่างไร?
+**แนวทางตอบ**:
+สาเหตุหลักเกิดจาก **Unstable Query Key**:
+- TanStack Query จะทำการเปรียบเทียบ Query Key ในทุกๆ รอบการ Render ของ React
+- หากเราใส่ค่าที่ไม่เสถียร (Unstable Reference) ลงใน Query Key เช่น การสร้าง Object Literal แบบลอยๆ ที่มีค่าไม่คงที่, การใส่ `new Date()` หรือ `Date.now()`, หรือการส่งฟังก์ชัน Callback ที่ไม่มี `useCallback` ครอบ
+- ในทุกๆ รอบที่ Render ตัว TanStack Query จะตรวจพบว่า Key เปลี่ยนไปเสมอ จึงสั่งยกเลิกคำขอเดิมและยิงคำขอใหม่วนลูปไม่สิ้นสุด
+- **วิธีแก้ไข**: ตรวจสอบ Query Key ให้ประกอบด้วยเฉพาะค่า Primitive (สตริง, ตัวเลข, บูลีน) หรือ Object ที่มีโครงสร้างแน่นอน และดึงมาจากตัวแปร State ที่มั่นคงเท่านั้น

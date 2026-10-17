@@ -1,0 +1,163 @@
+---
+title: useEffect
+category: Frontend
+parentTitle: React 19
+version: v19.0
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**`useEffect`** คือทางหนีทีไล่ (Escape Hatch) ที่เปิดโอกาสให้คอมโพเนนต์ของคุณสื่อสารหรือซิงโครไนซ์ข้อมูลกับ **ระบบภายนอก (External Systems)** ที่ไม่ได้อยู่ภายใต้การควบคุมของวงจรชีวิต React เช่น การเชื่อมต่อ WebSocket, การผูก Event กับ `window`, หรือการอ่าน/เขียน LocalStorage
+
+เปรียบเสมือนการจ้างช่างภายนอกมาติดตั้งอุปกรณ์หลังจากที่สร้างบ้านเสร็จเรียบร้อยแล้ว (รันหลังจากที่ React อัปเดต DOM เสร็จสิ้น)
+
+---
+
+## 2. หลักการทำงานเบื้องหลัง (Under the Hood)
+
+`useEffect` จะไม่ขัดขวางกระบวนการวาดหน้าจอ (Non-blocking):
+
+1. React ทำการคำนวณ Render และ Commit การเปลี่ยนแปลงลง Real DOM
+2. เบราว์เซอร์ทำการ Paint ภาพขึ้นบนหน้าจอให้ผู้ใช้เห็นทันที
+3. React จึงค่อยเรียกใช้ฟังก์ชันที่ระบุไว้ใน `useEffect`
+4. **Cleanup Function**: หากคอมโพเนนต์จะ Unmount หรือในรอบ Render ถัดไปก่อนที่ Effect ตัวใหม่จะรัน React จะสั่งรันฟังก์ชัน Cleanup ของ Effect รอบก่อนหน้าเพื่อคืนทรัพยากรเสมอ
+
+### ความหมายของ Dependency Array `[]`
+- **ไม่ใส่เลย**: รันทุกครั้งหลังจบรอบ Render (ระวัง Loop นรก!)
+- **ใส่ `[]` เปล่า**: รันเพียงครั้งเดียวเมื่อ Mount และ Cleanup ตอน Unmount
+- **ใส่ `[dep1, dep2]`**: รันครั้งแรก และจะรันซ้ำเฉพาะเมื่อ `dep1` หรือ `dep2` เปลี่ยนค่าไปจากรอบก่อนหน้า (เช็คด้วย `Object.is`)
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: การผูก Event Listener ของ Browser พร้อม Cleanup Function
+
+```tsx filename="components/WindowResizeTracker.tsx"
+'use client';
+
+import React, { useState, useEffect } from 'react';
+
+export function WindowResizeTracker() {
+  const [windowWidth, setWindowWidth] = useState<number>(0);
+
+  useEffect(() => {
+    // 1. ตรวจสอบว่าอยู่บนเบราว์เซอร์
+    setWindowWidth(window.innerWidth);
+
+    const handleResize = () => {
+      setWindowWidth(window.innerWidth);
+    };
+
+    // 2. ซิงค์กับระบบภายนอก (ผูก event)
+    window.addEventListener('resize', handleResize);
+
+    // 3. สำคัญที่สุด: Cleanup Function เพื่อป้องกัน Memory Leak
+    return () => {
+      window.removeEventListener('resize', handleResize);
+    };
+  }, []); // รันครั้งเดียวเมื่อ mount
+
+  return (
+    <div className="p-3 bg-subtle rounded-xl text-xs font-mono">
+      ขนาดความกว้างหน้าจอ: {windowWidth}px
+    </div>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: การซิงโครไนซ์กับ External API พร้อม AbortController
+
+```tsx filename="components/UserStatusSync.tsx"
+'use client';
+
+import React, { useState, useEffect } from 'react';
+
+export function UserStatusSync({ userId }: { userId: string }) {
+  const [status, setStatus] = useState<string>('กำลังเชื่อมต่อ...');
+
+  useEffect(() => {
+    // ใช้ AbortController ป้องกัน Race Condition
+    const controller = new AbortController();
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch(`https://api.example.com/users/${userId}/status`, {
+          signal: controller.signal,
+        });
+        const data = await res.json();
+        setStatus(data.status);
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name !== 'AbortError') {
+          setStatus('เกิดข้อผิดพลาด');
+        }
+      }
+    }
+
+    fetchStatus();
+
+    // ถ้ายูสเซอร์เปลี่ยน userId ก่อน fetch เสร็จ ให้ยกเลิกคำขอเดิมทันที
+    return () => {
+      controller.abort();
+    };
+  }, [userId]); // ทำงานใหม่ทุกครั้งที่ userId เปลี่ยน
+
+  return <p className="text-sm">สถานะ: {status}</p>;
+}
+```
+
+---
+
+## 4. ผิด vs ถูก (Common Mistakes)
+
+### กรณีที่ 1: ใช้ `useEffect` เพื่อแปลงข้อมูลที่คำนวณได้ทันที
+```tsx
+// ❌ ผิด: ใช้ Effect คำนวณค่าซ้ำซ้อน ทำให้เกิด Render เพิ่มอีก 1 รอบโดยเปล่าประโยชน์!
+const [items, setItems] = useState<Item[]>([]);
+const [total, setTotal] = useState<number>(0);
+
+useEffect(() => {
+  setTotal(items.reduce((sum, item) => sum + item.price, 0));
+}, [items]);
+
+// ✅ ถูก: คำนวณระหว่างขั้นตอนการ Render ได้เลย ไม่ต้องมี State และ Effect!
+const [items, setItems] = useState<Item[]>([]);
+const total = items.reduce((sum, item) => sum + item.price, 0);
+```
+
+### กรณีที่ 2: ลืมใส่ Cleanup Function ใน Timer หรือ Subscription
+```tsx
+// ❌ ผิด: ไม่เคลียร์ interval ทำให้ interval ทำงานค้างแม้คอมโพเนนต์จะปิดไปแล้ว (Memory Leak)
+useEffect(() => {
+  setInterval(() => console.log('tick'), 1000);
+}, []);
+
+// ✅ ถูก: คืนค่าฟังก์ชัน clearInterval เสมอ
+useEffect(() => {
+  const timer = setInterval(() => console.log('tick'), 1000);
+  return () => clearInterval(timer);
+}, []);
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- *ควรใช้*: ซิงค์กับไลบรารีภายนอกที่ไม่มี React Wrapper (เช่น Leaflet Map, Chart.js), เชื่อมต่อ WebSocket, ตรวจจับการกดปุ่มคีย์บอร์ด Global (`window.addEventListener`)
+- *ไม่ควรใช้*:
+  - จัดการข้อมูลเมื่อผู้ใช้คลิกปุ่ม (ให้ใส่ใน `onClick` Event Handler โดยตรง)
+  - คำนวณข้อมูลจาก Props
+  - รีเซ็ตฟอร์ม (ใช้ `key` บน Component เพื่อสั่งรีเซ็ตใหม่ทั้งตัวจะคลีนกว่า)
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมใน React Strict Mode (Dev) ฟังก์ชันใน `useEffect` ถึงถูกเรียก 2 ครั้งเสมอ?
+**แนวทางคำตอบ**: React จำลองการ Mount -> Unmount -> Remount อีกครั้ง เพื่อทดสอบว่าฟังก์ชัน Cleanup ของคุณทำงานถูกต้องและคืนทรัพยากร (Dispose) ได้ครบถ้วนหรือไม่ หากโค้ดเขียนถูกต้อง เช่น มีการยกเลิก Event Listener หรือ Abort Request การรัน 2 ครั้งจะไม่ส่งผลเสียใดๆ ต่อผู้ใช้
+
+### Q2: Cleanup Function ใน `useEffect` ทำงานตอนไหนบ้าง?
+**แนวทางคำตอบ**: ทำงาน 2 จังหวะ:
+1. ก่อนที่ Effect ตัวเดิมจะถูกรันซ้ำในรอบ Render ถัดไป (เพื่อล้างผลของรอบก่อนหน้า)
+2. เมื่อคอมโพเนนต์กำลังจะถูกถอดออกจากหน้าจอ (Unmount)

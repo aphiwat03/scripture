@@ -1,0 +1,112 @@
+---
+title: Performance & a11y
+category: Frontend
+parentTitle: CSS
+version: CSS3 / Modern CSS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+วิศวกรซอฟต์แวร์ระดับ Senior ไม่ได้วัดความเก่งที่การเขียน CSS ให้เว็บแสดงผลได้เท่านั้น แต่วัดที่:
+1. **Performance**: หน้าเว็บต้องลื่นไหลที่ 60/120 FPS ไม่กินแบตเตอรี่ และไม่กระตุกเวลาเลื่อนหน้าจอ
+2. **Accessibility (a11y)**: ทุกคนต้องสามารถมองเห็น ชัดเจน และนำทางผ่านคีย์บอร์ดได้ตามเกณฑ์ **WCAG (Web Content Accessibility Guidelines)**
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. Reflow (Layout) vs Repaint (Paint)
+- **Reflow (Layout)**: การคำนวณตำแหน่งและขนาดทางเรขาคณิตของ Element ทั้งหมดในหน้าจอ (กินพลังงาน CPU สูงที่สุด ช้าที่สุด) เกิดขึ้นเมื่อเปลี่ยน `width`, `height`, `margin`, `padding`, `display`, `font-size`
+- **Repaint (Paint)**: การทาสีพิกเซลลงบนหน้าจอใหม่โดยที่ขนาดกล่องเท่าเดิม เกิดขึ้นเมื่อเปลี่ยน `color`, `background-color`, `visibility`, `box-shadow`
+- **Composite (GPU Acceleration)**: การขยับ Layer ที่วาดเสร็จแล้วผ่านการ์ดจอ **(เร็วที่สุด ลื่นไหลที่สุด)** เกิดขึ้นเมื่อใช้ **`transform`** และ **`opacity`** เท่านั้น
+
+### 2. เกณฑ์สีและตัวอักษรของ WCAG 2.1
+- **Color Contrast Ratio**:
+  - ข้อความปกติ: อัตราส่วนความต่างสีต้องไม่ต่ำกว่า **4.5:1**
+  - ข้อความขนาดใหญ่ (18pt ขึ้นไป หรือ 14pt หนา): ต้องไม่ต่ำกว่า **3:1**
+- **ขนาดตัวอักษรขั้นต่ำบนมือถือ**: ควรอยู่ที่ **16px (1rem)** สำหรับช่อง Input เพื่อป้องกันไม่ให้ iOS Safari ซูมหน้าจออัตโนมัติเมื่อแตะพิมพ์
+
+---
+
+## 3. ตัวอย่างโค้ด (CSS)
+
+### ตัวอย่างที่ 1: การใช้ `:focus-visible` เพื่อประสบการณ์ทั้งเมาส์และคีย์บอร์ด
+
+```css filename="focus.css"
+/* ลบเส้นกรอบสีน้ำเงินเมื่อคลิกด้วยเมาส์ แต่คงเส้นกรอบไว้เมื่อกด Tab ด้วยคีย์บอร์ด */
+button:focus {
+  outline: none; /* ห้ามใส่เดี่ยวๆ */
+}
+
+/* 🌟 พระเอกตัวจริง: แสดง Focus Ring ชัดเจนเฉพาะเมื่อใช้งานผ่านคีย์บอร์ด! */
+button:focus-visible {
+  outline: 2px solid #0071e3;
+  outline-offset: 2px;
+}
+```
+
+### ตัวอย่างที่ 2: คลาส Screen-reader Only (`.sr-only`) ที่ถูกต้อง 100%
+
+```css filename="a11y-utilities.css"
+/* ซ่อนเนื้อหาออกจากสายตา แต่ Screen Reader ยังอ่านได้ปกติ */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ใช้ `display: none` ซ่อน Label หรือคำอธิบายไอคอน
+
+```html
+<!-- ผิด: display: none จะตัด Element ออกจาก Accessibility Tree ทำให้ Screen Reader อ่านไม่ออกด้วย! -->
+<button>
+  <svg>...</svg>
+  <span style="display: none;">ลบรายการ</span>
+</button>
+```
+
+### ✅ โค้ดที่ถูกต้อง: ใช้เทคนิค `.sr-only`
+
+```html
+<!-- ถูกต้อง: มองไม่เห็นบนจอ แต่ผู้พิการได้ยินเสียงอ่านตามปกติ -->
+<button type="button">
+  <svg aria-hidden="true">...</svg>
+  <span class="sr-only">ลบรายการนี้</span>
+</button>
+```
+
+---
+
+## 5. เทียบกับ Tailwind CSS v4
+
+| Performance & a11y CSS | Tailwind CSS v4 Utility |
+| :--- | :--- |
+| Focus ring for keyboard | `focus-visible:ring-2 focus-visible:ring-blue-500` |
+| Screen reader only | `sr-only` |
+| Undo screen reader only | `not-sr-only` |
+| Force GPU Layer | `transform-gpu` |
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: อะไรคือความแตกต่างระหว่าง `:focus` และ `:focus-visible` ใน CSS?
+**แนวทางคำตอบ**:
+- `:focus` จะทำงานทุกครั้งที่ Element ได้รับโฟกัส **ไม่ว่าจะเกิดจากการคลิกเมาส์ การแตะนิ้ว หรือการกดปุ่ม Tab บนคีย์บอร์ด** ซึ่งผู้ใช้เมาส์ส่วนใหญ่มักรู้สึกรำคาญที่มีกรอบสีฟ้าโผล่ขึ้นมาตอนคลิกปุ่ม
+- `:focus-visible` เป็นฟีเจอร์อัจฉริยะที่จะแสดงสไตล์โฟกัส **เฉพาะเมื่อเบราว์เซอร์ตรวจพบว่าผู้ใช้นำทางด้วยคีย์บอร์ดเท่านั้น** (เช่น การกด Tab) และจะไม่แสดงกรอบเมื่อคลิกด้วยเมาส์ปกติ ช่วยให้เว็บมีความสวยงามสะอาดตาสำหรับผู้ใช้เมาส์ และยังคงรักษาเกณฑ์ Accessibility อย่างสมบูรณ์สำหรับผู้ใช้คีย์บอร์ด
+
+### Q2: ในขั้นตอนการเรนเดอร์ของเบราว์เซอร์ ทำไมการเกิด Reflow จึงมีผลกระทบต่อ Performance มากกว่า Repaint?
+**แนวทางคำตอบ**: เพราะ **Reflow (Layout)** เป็นการคำนวณตำแหน่ง ขนาด และความสัมพันธ์เชิงเรขาคณิตของ Element ทั้งหมดในหน้าจอ เมื่อ Element ตัวหนึ่งเปลี่ยนขนาด มันอาจส่งผลกระทบต่อเนื่องเป็นลูกโซ่ (Cascading Effect) ไปดันให้ Element ข้างเคียงและตัวแม่ต้องขยับตำแหน่งตามไปด้วย ซึ่งประมวลผลบน Main Thread ของ CPU และหลังจาก Reflow เสร็จ เบราว์เซอร์ยังต้องสั่งรัน Repaint ซ้ำอีกรอบเสมอ 
+ในขณะที่ **Repaint (Paint)** เปลี่ยนเฉพาะพิกเซลสีโดยที่ตำแหน่งของกล่องไม่มีการขยับ จึงมีต้นทุนการประมวลผลที่ต่ำกว่า Reflow อย่างมาก

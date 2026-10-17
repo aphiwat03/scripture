@@ -1,0 +1,86 @@
+---
+title: Routing (App Router)
+category: Frontend
+parentTitle: Next.js 16
+version: v16.4
+updatedAt: 2026-10-17
+---
+
+## 1. คืออะไร / ใช้ทำไม
+
+**App Router Routing** คือระบบกำหนดเส้นทางผ่านโครงสร้างโฟลเดอร์ภายในไดเรกทอรี `src/app/` โดยใช้ไฟล์พิเศษ (เช่น `layout.tsx`, `page.tsx`, `route.ts`) เพื่อสร้างโครงร่างหน้าเว็บ จัดการพารามิเตอร์ URL และแบ่งหมวดหมู่เส้นทางได้อย่างเป็นสัดส่วน
+
+ระบบนี้ช่วยลดการเขียนโค้ดตั้งค่า Route ซ้ำซ้อน รองรับ Nested Layouts ที่คงสถานะไว้เมื่อเปลี่ยนหน้าย่อย และรองรับ Dynamic Routing ที่มีความปลอดภัยสูงด้วย TypeScript
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### การรับค่า Dynamic Route ใน Next.js 16
+
+ใน Next.js 16 พร็อพ `params` และ `searchParams` ในคอมโพเนนต์หน้าเว็บเป็น **Promise** เสมอ ต้องใช้ `await` ก่อนนำมาใช้งาน:
+
+```tsx filename="src/app/blog/[slug]/page.tsx"
+import { notFound } from 'next/navigation';
+
+interface BlogPostPageProps {
+  params: Promise<{ slug: string }>;
+  searchParams: Promise<{ tab?: string }>;
+}
+
+export default async function BlogPostPage({
+  params,
+  searchParams,
+}: BlogPostPageProps) {
+  // ใน Next.js 16 ต้อง await params และ searchParams เสมอ
+  const { slug } = await params;
+  const { tab } = await searchParams;
+
+  if (slug === 'forbidden') {
+    notFound();
+  }
+
+  return (
+    <article className="max-w-2xl mx-auto py-8">
+      <h1 className="text-3xl font-bold">บทความ: {slug}</h1>
+      <p className="text-muted mt-2">แท็บปัจจุบัน: {tab ?? 'overview'}</p>
+    </article>
+  );
+}
+```
+
+### โครงสร้าง Route Groups และ Nested Layout
+
+```
+src/app/
+├── (marketing)/           # วงเล็บจะไม่ปรากฏในเส้นทาง URL
+│   ├── layout.tsx         # Layout เฉพาะหน้าฝั่งการตลาด
+│   └── about/page.tsx     # เข้าถึงผ่าน URL: /about
+└── (dashboard)/
+    ├── layout.tsx         # Layout เฉพาะแดชบอร์ดที่มี Sidebar
+    └── settings/page.tsx  # เข้าถึงผ่าน URL: /settings
+```
+
+## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- **`layout.tsx`**:
+  - *ควรใช้*: เมื่อต้องการส่วนแสดงผลร่วมกัน (เช่น Navbar, Sidebar, Footer) โดย State และ DOM ของ Layout จะไม่ถูกโหลดใหม่เมื่อเปลี่ยนหน้าย่อย
+  - *ไม่ควรใช้*: ดึงข้อมูลที่เจาะจงเฉพาะหน้าลูกแต่ละหน้า
+- **Route Groups `(name)`**:
+  - *ควรใช้*: จัดกลุ่มโค้ดภายในโปรเจกต์ หรือแยก Root Layout หลายชุด (เช่น ฝั่ง User กับ Admin) โดยไม่ต้องการให้ชื่อโฟลเดอร์โผล่ใน URL
+  - *ไม่ควรใช้*: สร้างเส้นทางใหม่
+- **Dynamic Routes `[slug]`**:
+  - *ควรใช้*: กับหน้ารายละเอียดที่ URL มีค่าเปลี่ยนไปตาม ID หรือ Slug เช่น `/products/prod-123`
+
+## 4. ข้อควรระวัง
+
+<Callout type="warning" title="params และ searchParams เป็น Promise">
+ใน Next.js 16 การเข้าถึง `params.slug` โดยตรงโดยไม่เขียน `await params` จะทำให้เกิดข้อผิดพลาดในการทำงานและ TypeScript Type Error ทันที
+</Callout>
+
+<Callout type="tip" title="ใช้ generateStaticParams() เมื่อเป็น Static">
+หากต้องการให้หน้า Dynamic Route ถูกสร้างเป็น HTML ล่วงหน้าตอน Build (SSG) ให้ export ฟังก์ชัน `generateStaticParams()` เพื่อความเร็วสูงสุดและประหยัดทรัพยากรเซิร์ฟเวอร์
+</Callout>
+
+## 5. แหล่งอ้างอิงทางการ
+
+- [Next.js App Router Routing Documentation](https://nextjs.org/docs/app/building-your-application/routing)
+- [Defining Routes and Pages](https://nextjs.org/docs/app/building-your-application/routing/pages-and-layouts)

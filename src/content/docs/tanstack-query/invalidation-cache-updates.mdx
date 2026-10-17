@@ -1,0 +1,261 @@
+---
+title: Cache Invalidation
+category: Frontend
+parentTitle: TanStack Query v5
+version: TanStack Query v5.x
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+เมื่อผู้ใช้ทำ Mutation เช่น เพิ่มสินค้าลงตะกร้า, แก้ไขจำนวน หรือลบรายการสินค้า ข้อมูลบนหน้าจอจะต้องสะท้อนความเปลี่ยนแปลงนั้นทันที ใน TanStack Query v5 มี 2 กลยุทธ์หลักในการซิงค์ข้อมูลแคชหลังการแก้ไข:
+
+1. **`invalidateQueries` (การสั่งให้แคชล้าสมัยเพื่อดึงใหม่)**:
+   - เป็นวิธีที่ **ปลอดภัยที่สุดและแนะนำเป็นค่าเริ่มต้น (Default Recommendation)**
+   - สั่งให้ TanStack Query ตราหน้าว่าข้อมูลในแคชตัวนั้นเป็น `stale` (หมดอายุ) และสั่งยิง Network Request เพื่อดึงข้อมูลสดใหม่ล่าสุดจากเซิร์ฟเวอร์มาแทนที่ทันที
+   - มั่นใจได้ 100% ว่าข้อมูลบนหน้าจอจะตรงกับฐานข้อมูลจริงของเซิร์ฟเวอร์
+2. **`setQueryData` (การเขียนข้อมูลทับลงในแคชโดยตรง)**:
+   - เป็นการอัปเดตข้อมูลลงใน Memory Cache โดยตรงแบบ Synchronous
+   - **ไม่เกิด Network Request เพิ่มเติมแม้แต่คำขอเดียว**
+   - เหมาะอย่างยิ่งเมื่อ API ตอบกลับมาเป็น Object ที่อัปเดตแล้ว (เช่น Mutation ตอบกลับ `CartItem` ตัวใหม่ที่มีจำนวนและราคารวมคำนวณมาให้แล้ว)
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### กลไกการทำงานของ `invalidateQueries`
+
+```
+[เรียกใช้ queryClient.invalidateQueries({ queryKey: ['cart'] })]
+   │
+   ├─► 1. ค้นหาทุก Query ใน QueryCache ที่ตรงกับ Key ['cart']
+   │
+   ├─► 2. ปรับ flag สถานะ: query.state.isStale = true
+   │
+   ├─► 3. ตรวจสอบการใช้งานของคอมโพเนนต์:
+   │      │
+   │      ├─── [ถ้าคอมโพเนนต์กำลังแสดงอยู่บนจอ (Active)]
+   │      │       └──► ยิง Background Refetch ทันที! (ผู้ใช้ไม่เห็นจอขาว)
+   │      │
+   │      └─── [ถ้าไม่มีคอมโพเนนต์ใดเปิดอยู่ (Inactive)]
+   │              └──► ปล่อยทิ้งไว้เป็น stale และจะ Refetch อัตโนมัติเมื่อถูก Mount ในอนาคต
+```
+
+### กลไกการทำงานของ `setQueryData`
+`setQueryData` จะเข้าไปเขียนทับโครงสร้างใน QueryCache ทันที และทำการแจ้งเตือน (Notify) คอมโพเนนต์ทุกตัวที่ Subscribed อยู่กับ Key นั้นให้ Re-render ข้อมูลใหม่ทันทีใน Frame เดียวกัน
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+ระบบตะกร้าสินค้า (`CartDrawer.tsx`) แสดงการใช้ทั้ง `setQueryData` เพื่อความรวดเร็ว และ `invalidateQueries` เพื่อความถูกต้องสมบูรณ์:
+
+```tsx filename="src/features/cart/components/CartDrawer.tsx"
+'use client';
+
+import React from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+
+export interface CartItem {
+  id: string;
+  productId: string;
+  name: string;
+  price: number;
+  quantity: number;
+}
+
+export interface CartSummary {
+  items: CartItem[];
+  totalPrice: number;
+  itemCount: number;
+}
+
+// 1. ดึงข้อมูลตะกร้า
+async function fetchCart(): Promise<CartSummary> {
+  const res = await fetch('/api/cart');
+  if (!res.ok) throw new Error('โหลดตะกร้าสินค้าไม่สำเร็จ');
+  return res.json();
+}
+
+// 2. อัปเดตจำนวนสินค้า
+async function updateQuantityApi({
+  itemId,
+  quantity,
+}: {
+  itemId: string;
+  quantity: number;
+}): Promise<CartItem> {
+  const res = await fetch(`/api/cart/items/${itemId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ quantity }),
+  });
+  if (!res.ok) throw new Error('ปรับปรุงจำนวนสินค้าไม่สำเร็จ');
+  return res.json();
+}
+
+export function CartDrawer() {
+  const queryClient = useQueryClient();
+
+  const { data: cart, isPending } = useQuery<CartSummary>({
+    queryKey: ['cart'],
+    queryFn: fetchCart,
+    staleTime: 60 * 1000,
+  });
+
+  // 3. Mutation จัดการแก้ไขจำนวนสินค้า
+  const updateQuantityMutation = useMutation({
+    mutationFn: updateQuantityApi,
+    onSuccess: (updatedItem) => {
+      // วิธีที่ 1: setQueryData เพื่ออัปเดตหน้าจอทันทีโดยไม่ต้องยิงดึงตะกร้าใหม่ทั้งแผง
+      queryClient.setQueryData<CartSummary>(['cart'], (oldCart) => {
+        if (!oldCart) return undefined;
+
+        const newItems = oldCart.items.map((item) =>
+          item.id === updatedItem.id ? updatedItem : item
+        );
+
+        return {
+          ...oldCart,
+          items: newItems,
+          totalPrice: newItems.reduce((acc, curr) => acc + curr.price * curr.quantity, 0),
+          itemCount: newItems.reduce((acc, curr) => acc + curr.quantity, 0),
+        };
+      });
+
+      // วิธีที่ 2: Invalidate สต็อกสินค้าของสินค้านั้น เพื่อให้หน้ารายการสินค้าดึงสต็อกคงเหลือล่าสุด
+      queryClient.invalidateQueries({
+        queryKey: ['products', 'stock', updatedItem.productId],
+      });
+    },
+    onError: () => {
+      // หากเกิดข้อผิดพลาด ให้ดึงข้อมูลตะกร้าจริงจากเซิร์ฟเวอร์มาล้างแคชทันที
+      queryClient.invalidateQueries({ queryKey: ['cart'] });
+    },
+  });
+
+  if (isPending) return <div className="p-4 text-center">กำลังโหลดตะกร้า...</div>;
+
+  return (
+    <div className="w-80 border-l bg-white p-6 shadow-xl flex flex-col h-full">
+      <h2 className="text-xl font-bold text-gray-900 border-b pb-4">
+        ตะกร้าสินค้า ({cart?.itemCount || 0})
+      </h2>
+
+      <div className="flex-1 overflow-y-auto divide-y mt-4">
+        {cart?.items.map((item) => (
+          <div key={item.id} className="py-4 flex justify-between items-center">
+            <div>
+              <p className="font-semibold text-sm">{item.name}</p>
+              <p className="text-xs text-gray-500">฿{item.price.toLocaleString()} / ชิ้น</p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                disabled={item.quantity <= 1 || updateQuantityMutation.isPending}
+                onClick={() =>
+                  updateQuantityMutation.mutate({ itemId: item.id, quantity: item.quantity - 1 })
+                }
+                className="w-7 h-7 rounded border bg-gray-50 flex items-center justify-center hover:bg-gray-100 disabled:opacity-50"
+              >
+                -
+              </button>
+              <span className="text-sm font-bold w-6 text-center">{item.quantity}</span>
+              <button
+                disabled={updateQuantityMutation.isPending}
+                onClick={() =>
+                  updateQuantityMutation.mutate({ itemId: item.id, quantity: item.quantity + 1 })
+                }
+                className="w-7 h-7 rounded border bg-gray-50 flex items-center justify-center hover:bg-gray-100 disabled:opacity-50"
+              >
+                +
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="border-t pt-4 mt-auto">
+        <div className="flex justify-between font-bold text-lg mb-4">
+          <span>ยอดรวมทั้งสิ้น:</span>
+          <span className="text-blue-600">฿{cart?.totalPrice.toLocaleString()}</span>
+        </div>
+        <button className="w-full bg-blue-600 text-white py-2 rounded-lg font-semibold hover:bg-blue-700">
+          ดำเนินการชำระเงิน
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม (useEffect vs TanStack Query)
+
+| กลไก | วิธีเดิม (React State ทั่วไป) | TanStack Query v5 |
+| :--- | :--- | :--- |
+| **การส่งสัญญาณอัปเดตข้ามหน้า** | ต้องส่ง Callback ผ่าน Props ลึกๆ (Prop Drilling) หรือพึ่ง Event Emitter | เรียก `queryClient.invalidateQueries` จากที่ใดก็ได้ในแอป |
+| **ความเสี่ยงข้อมูลค้าง** | หากผู้ใช้เปิดหน้าต่างอื่น ข้อมูลจะไม่ซิงค์จนกว่าจะรีเฟรชหน้าเว็บ | Invalidation จะสั่ง Revalidate ทุกคอมโพเนนต์ที่ Active ทันที |
+| **ภาระ Network** | มักสั่ง `window.location.reload()` หรือดึงใหม่ทั้งหมดทั้งแอป | เจาะจง Invalidate เฉพาะ Node หรือ Subtree ของแคชที่ได้รับผลกระทบ |
+
+---
+
+## 5. ผิด vs ถูก
+
+### แบบที่ผิด ❌: Mutate ตัวแปร `oldData` โดยตรงใน `setQueryData`
+
+```tsx
+// ❌ ผิดมหันต์: แก้ไข Object เก่าโดยตรง (Direct Mutation)
+// React และ TanStack Query จะตรวจจับการเปลี่ยนแปลงไม่เจอ เพราะ Memory Reference ไม่เปลี่ยน!
+queryClient.setQueryData<CartSummary>(['cart'], (old) => {
+  if (!old) return old;
+  old.items[0].quantity = 99; // ❌ ทำลาย Immutability คอมโพเนนต์จะไม่ Re-render!
+  return old;
+});
+```
+
+### แบบที่ถูก ✅: คืนค่า Immutable Copy ชุดใหม่เสมอ
+
+```tsx
+// ✅ ถูกต้อง: กระจาย (Spread) Array และ Object ชุดใหม่เพื่อสร้าง New Reference
+queryClient.setQueryData<CartSummary>(['cart'], (old) => {
+  if (!old) return old;
+  return {
+    ...old,
+    items: old.items.map((item, idx) =>
+      idx === 0 ? { ...item, quantity: 99 } : item
+    ),
+  };
+});
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ `invalidateQueries` เมื่อ:
+- การกระทำของ Mutation ส่งผลต่อการคำนวณที่ซับซ้อนบนเซิร์ฟเวอร์ (เช่น การใช้คูปองส่วนลด, การคิดภาษี VAT, การตัดแต้มสะสม)
+- API ตอบกลับมาเพียงสถานะ `{ success: true }` โดยไม่มีข้อมูลก้อนใหม่แนบมาด้วย
+- ต้องการความชัวร์ 100% ว่าหน้าจอจะตรงกับฐานข้อมูลจริง
+
+### ควรใช้ `setQueryData` เมื่อ:
+- การแก้ไขข้อมูลแบบง่ายๆ ที่หน้าบ้านทราบผลลัพธ์แน่นอน (เช่น การกดเปลี่ยนชื่อสินค้า หรือสลับสถานะ toggle เล็กๆ)
+- ต้องการให้หน้าจอแสดงผลไวในเสี้ยววินาทีโดยไม่ต้องรอ Network Roundtrip อีกรอบ
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: เปรียบเทียบข้อดีและข้อเสียระหว่าง `invalidateQueries` กับ `setQueryData` ในการจัดการแคชหลังทำ Mutation?
+**แนวทางตอบ**:
+- **`invalidateQueries`**:
+  - *ข้อดี*: ปลอดภัยสูงสุด ข้อมูลจะถูกดึงใหม่จากฐานข้อมูลจริง หมดปัญหาตรรกะหน้าบ้านกับหลังบ้านคำนวณไม่ตรงกัน
+  - *ข้อเสีย*: ต้องเสีย Network I/O เพิ่มอีก 1 รอบ และอาจมีจังหวะโหลดสั้นๆ
+- **`setQueryData`**:
+  - *ข้อดี*: รวดเร็วทันใจ ไม่มี Network Latency เลย หน้าจออัปเดตแบบ Synchronous ทันที
+  - *ข้อเสีย*: หน้าบ้านต้องแบกรับภาระในการเขียนฟังก์ชันคำนวณและจำลองโครงสร้างข้อมูลให้ตรงกับที่เซิร์ฟเวอร์ตอบกลับมา หากโครงสร้างผิดพลาด แคชจะพังทันที
+
+### Q2: ฟังก์ชัน `updater` ใน `queryClient.setQueryData` ต้องรักษาความเป็น Immutability อย่างไร และทำไมจึงห้ามแก้ไข `oldData` โดยตรง?
+**แนวทางตอบ**:
+TanStack Query และ React ใช้หลักการ **Shallow Comparison (Object.is)** ในการตรวจสอบว่าข้อมูลเปลี่ยนแปลงหรือไม่ หากเราแก้ไขข้อมูลแบบ In-place Mutation เช่น `oldData.name = 'New Name'` ตำแหน่งหน่วยความจำ (Reference Pointer) ของอ็อบเจกต์จะยังคงเป็นตัวเดิม ทำให้ทั้ง QueryCache และ React คิดว่าข้อมูลไม่มีการเปลี่ยนแปลง ส่งผลให้ UI ไม่ทำการ Re-render หน้าจอ ดังนั้นเราจึงต้องสร้างอ็อบเจกต์หรืออาร์เรย์ใหม่เสมอผ่าน Spread Operator (`...`) หรือ Array Methods ที่คืนค่าชุดใหม่ เช่น `.map()`, `.filter()`

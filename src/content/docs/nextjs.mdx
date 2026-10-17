@@ -1,0 +1,73 @@
+---
+title: Next.js 16 (App Router)
+category: Frontend
+version: v16.4
+updatedAt: 2026-10-17
+---
+
+## 1. ภาพรวมของ Next.js 16 (Overview)
+
+**Next.js 16** คือ Full-Stack Web Framework ชั้นนำสำหรับ React ที่ออกแบบมาเพื่อพัฒนาเว็บแอปพลิเคชันระดับ Production ด้วยความเร็ว ความปลอดภัย และประสิทธิภาพ SEO สูงสุด โดยพัฒนาขึ้นบนสถาปัตยกรรม **App Router** และทำงานร่วมกับ **React 19** อย่างเต็มรูปแบบ
+
+ในยุคของ React แบบดั้งเดิม (Client-Side Rendering) โค้ดทั้งหมดจะถูกส่งไปประมวลผลที่เบราว์เซอร์ของผู้ใช้ ทำให้หน้าเว็บโหลดช้าในครั้งแรกและส่งผลต่อคะแนน Core Web Vitals Next.js 16 เข้ามาแก้ปัญหานี้ด้วยแนวคิด **Server-first Architecture** โดยให้เซิร์ฟเวอร์เป็นผู้ประมวลผลหลัก ส่งเฉพาะผลลัพธ์ HTML และชิ้นส่วน JavaScript ที่จำเป็นไปยังหน้าบ้าน ช่วยลดขนาด Bundle Size ได้มากกว่า 60%
+
+<InteractiveFlowDiagram variant="request" title="ภาพรวมสถาปัตยกรรม Next.js 16 (Client ➔ Next.js App Router ➔ Backend / Database)" subtitle="แสดงบทบาทของ Next.js 16 ในฐานะด่านหน้าและเซิร์ฟเวอร์เรนเดอร์ ที่เชื่อมโยงระหว่างเบราว์เซอร์กับระบบหลังบ้าน" />
+
+---
+
+## 2. เสาหลักของสถาปัตยกรรมใน Next.js 16
+
+สถาปัตยกรรมของ Next.js 16 ประกอบด้วย 4 เสาหลักสำคัญ:
+
+| เสาหลัก (Core Pillars) | จุดเด่นและหน้าที่สำคัญ |
+| --- | --- |
+| **Server Components (RSC)** | คอมโพเนนต์เริ่มต้นที่ประมวลผลบนเซิร์ฟเวอร์ ไม่ส่ง JS ไปหน้าบ้าน เข้าถึงฐานข้อมูลและอ่านไฟล์ได้โดยตรง |
+| **App Router Routing** | ระบบกำหนดเส้นทางผ่านโฟลเดอร์ใน `src/app/` รองรับ Nested Layouts ที่ไม่รีโหลดหน้าแม่ และ Dynamic Routes |
+| **Server Actions & Mutations** | จัดการบันทึกข้อมูลและส่งฟอร์มผ่านฟังก์ชัน `'use server'` โดยไม่ต้องเขียน API Controller เพิ่มเติม |
+| **Streaming & Suspense** | แบ่งย่อย HTML ทยอยส่งไปแสดงผลที่หน้าจอทันที ไม่ต้องรอให้ข้อมูลทั้งหน้าดึงเสร็จพร้อมกัน |
+
+---
+
+## 3. สารบัญหัวข้อการเรียนรู้เชิงลึก (Learning Directory)
+
+เนื้อหาการใช้งาน Next.js 16 ถูกแยกออกเป็นหัวข้อย่อยแบบเจาะลึก 13 หัวข้อ คุณสามารถเลือกอ่านตามลำดับการพัฒนาจริงได้ดังนี้:
+
+| หัวข้อย่อย | เรื่องที่ครอบคลุม | ลิงก์เข้าสู่บทเรียน |
+| :--- | :--- | :--- |
+| **SSR** | การเรนเดอร์ฝั่งเซิร์ฟเวอร์, Streaming SSR, การเปรียบเทียบ Dynamic vs Static | [เปิดอ่าน SSR](/docs/nextjs/ssr) |
+| **Routing** | โครงสร้าง App Router, `layout.tsx`, `page.tsx`, Async `params`, Route Groups | [เปิดอ่าน Routing](/docs/nextjs/routing) |
+| **RSC vs Client** | ความแตกต่างและการตัดสินใจเลือกใช้ Server Components vs `'use client'` | [เปิดอ่าน RSC vs Client](/docs/nextjs/rsc-client) |
+| **Data Fetching** | ควบคุม Caching ด้วย `fetch()`, `no-store` (Default), `revalidate` (ISR) | [เปิดอ่าน Data Fetching](/docs/nextjs/data-fetching) |
+| **Server Actions** | การ Mutate ข้อมูลด้วย `'use server'`, `revalidatePath()`, เปรียบเทียบกับ API Routes | [เปิดอ่าน Server Actions](/docs/nextjs/server-actions) |
+| **Forms & Zod** | การเชื่อมโยง React Hook Form กับ Zod Schema ตรวจสอบความถูกต้องทั้งสองฝั่ง | [เปิดอ่าน Forms & Zod](/docs/nextjs/forms) |
+| **Authentication** | ระบบ Session ผ่าน HttpOnly Cookies, JWT Token, การเขียน `middleware.ts` ป้องกันหน้า | [เปิดอ่าน Authentication](/docs/nextjs/auth) |
+| **Database & API** | เชื่อมต่อ PostgreSQL ผ่าน Prisma Singleton และการยิงเชื่อมต่อ NestJS Backend | [เปิดอ่าน Database & API](/docs/nextjs/database) |
+| **Env Variables** | การแยกความปลอดภัยระหว่าง Server Secrets กับตัวแปรสาธารณะ `NEXT_PUBLIC_` | [เปิดอ่าน Env Variables](/docs/nextjs/env) |
+| **Error & Loading** | การทำ Skeleton ด้วย `loading.tsx`, ดักจับข้อผิดพลาดด้วย `error.tsx` และ `not-found.tsx` | [เปิดอ่าน Error & Loading](/docs/nextjs/error-handling) |
+| **Optimization** | การใช้ `next/image` ลดขนาดภาพ, `next/font` ขจัด CLS, และ Metadata API ทำ SEO | [เปิดอ่าน Optimization](/docs/nextjs/optimization) |
+| **Deployment** | การบิลด์แบบ Standalone Output, การเขียน Dockerfile Multi-stage, การขึ้น Vercel | [เปิดอ่าน Deployment](/docs/nextjs/deployment) |
+| **Pitfalls & Q&A** | จุดผิดพลาดที่พบบ่อย (Missing await, Hydration) และแนวคำตอบสัมภาษณ์งาน | [เปิดอ่าน Pitfalls & Q&A](/docs/nextjs/pitfalls) |
+
+---
+
+## 4. ไฮไลต์การเปลี่ยนแปลงสำคัญใน Next.js 16
+
+<Callout type="note" title="Asynchronous Request APIs">
+ใน Next.js 16 ข้อมูลที่ผูกกับคำขอ (Request) เช่น `params`, `searchParams`, `cookies()`, และ `headers()` ถูกเปลี่ยนเป็นแบบ Asynchronous ทั้งหมด ต้องเติม `await` หน้าตัวแปรเหล่านี้เสมอ
+</Callout>
+
+<Callout type="tip" title="Uncached by Default ใน fetch()">
+คำสั่ง `fetch()` จะมีค่าเริ่มต้นเป็น `cache: 'no-store'` (ไม่แคช) เพื่อให้ได้ข้อมูลสดใหม่เสมอ หากต้องการแคชผลลัพธ์เพื่อประสิทธิภาพ ให้ระบุ `cache: 'force-cache'` หรือ `next: { revalidate: N }` อย่างชัดเจน
+</Callout>
+
+<Callout type="warning" title="Turbopack เป็น Bundler เริ่มต้น">
+Next.js 16 ขับเคลื่อนด้วย Turbopack ที่เร็วกว่า Webpack สูงสุดถึง 10 เท่า หากมี Custom Webpack Plugins เดิมในโปรเจกต์ ควรตรวจสอบความเข้ากันได้ก่อนอัปเกรด
+</Callout>
+
+---
+
+## 5. แหล่งอ้างอิงทางการ (Official Documentation)
+
+- [Next.js Documentation (Official)](https://nextjs.org/docs) — เอกสารและคู่มือการใช้งานหลักอย่างเป็นทางการ
+- [Next.js 16 Release Notes](https://nextjs.org/blog) — สรุปรายการอัปเดตและฟีเจอร์ใหม่
+- [React 19 Official Documentation](https://react.dev) — คู่มือสถาปัตยกรรม React Server Components

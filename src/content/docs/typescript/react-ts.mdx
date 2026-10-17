@@ -1,0 +1,142 @@
+---
+title: TS in React
+category: Frontend
+parentTitle: TypeScript
+version: v5.6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การนำ TypeScript มาใช้งานร่วมกับ React 19 ช่วยป้องกันข้อผิดพลาดที่พบบ่อย เช่น ลืมส่ง Required Props, ส่งชนิดข้อมูลผิด, หรือเรียกชื่อ Event Handler ไม่ตรงกับเบราว์เซอร์
+
+ในหัวข้อนี้รวบรวมรูปแบบการ Type สำหรับเครื่องมือสำคัญใน React: Props, `children`, Events, `useState`, `useRef`, และ Generic Components
+
+---
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: Props, `React.ReactNode`, และ Event Handlers
+
+```tsx filename="components/CustomInputButton.tsx"
+'use client';
+
+import React, { useState, ChangeEvent, FormEvent, MouseEvent } from 'react';
+
+interface CustomInputButtonProps {
+  label: string;
+  placeholder?: string;
+  // ใช้ React.ReactNode เสมอสำหรับเนื้อหาลูกที่สามารถ render ได้ (JSX, string, number, null)
+  icon?: React.ReactNode;
+  onSubmitValue: (val: string) => void;
+}
+
+export function CustomInputButton({
+  label,
+  placeholder,
+  icon,
+  onSubmitValue,
+}: CustomInputButtonProps) {
+  const [text, setText] = useState<string>(''); // Type useState ชัดเจน
+
+  // Type สำหรับ input onChange: ChangeEvent<HTMLInputElement>
+  const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
+    setText(e.target.value);
+  };
+
+  // Type สำหรับ form onSubmit: FormEvent<HTMLFormElement>
+  const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    onSubmitValue(text);
+  };
+
+  // Type สำหรับ button onClick: MouseEvent<HTMLButtonElement>
+  const handleClear = (e: MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
+    setText('');
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="flex gap-2 items-center">
+      {icon}
+      <input
+        type="text"
+        value={text}
+        onChange={handleChange}
+        placeholder={placeholder}
+        className="border p-2 rounded"
+      />
+      <button type="submit">ส่ง {label}</button>
+      <button type="button" onClick={handleClear}>ล้าง</button>
+    </form>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: Generic Component สำหรับตารางข้อมูลที่นำกลับมาใช้ซ้ำได้
+
+```tsx filename="components/GenericTable.tsx"
+import React from 'react';
+
+// ประกาศ Generic Component ด้วย <T,>
+interface GenericTableProps<T> {
+  data: T[];
+  renderRow: (item: T, index: number) => React.ReactNode;
+  keyExtractor: (item: T) => string;
+}
+
+export function GenericTable<T>({
+  data,
+  renderRow,
+  keyExtractor,
+}: GenericTableProps<T>) {
+  return (
+    <table className="w-full border-collapse">
+      <tbody>
+        {data.map((item, index) => (
+          <tr key={keyExtractor(item)}>
+            <td>{renderRow(item, index)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+// การเรียกใช้งาน: TS จะ Infer ชนิดข้อมูลของ item ให้อัตโนมัติตาม Array ที่ส่งเข้ามา!
+const products = [{ id: 'p1', name: 'Keyboard' }, { id: 'p2', name: 'Mouse' }];
+
+export function ProductCatalog() {
+  return (
+    <GenericTable
+      data={products}
+      keyExtractor={(item) => item.id}
+      renderRow={(item) => <span>{item.name}</span>} // item คือ { id: string; name: string }
+    />
+  );
+}
+```
+
+---
+
+## 3. ผิด vs ถูก (Common Mistakes)
+
+### กรณีที่ 1: การใช้ `React.FC` แบบดั้งเดิม
+```tsx
+// ❌ ไม่แนะนำ: React.FC มีข้อจำกัดเรื่อง Generics และเคยมี implicit children
+const MyButton: React.FC<Props> = ({ title }) => <button>{title}</button>;
+
+// ✅ ถูก: ประกาศเป็น Function Component ธรรมดาพร้อม Type ของ Props ตรงๆ
+export function MyButton({ title }: Props) {
+  return <button>{title}</button>;
+}
+```
+
+---
+
+## 4. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: `React.ReactNode` กับ `React.ReactElement` กับ `JSX.Element` แตกต่างกันอย่างไร?
+**แนวทางคำตอบ**:
+- `React.ReactNode`: เป็น Type ที่กว้างที่สุด ครอบคลุมทุกสิ่งที่สามารถ Render บนหน้าจอได้ (JSX element, string, number, boolean, null, undefined, หรือ array ของสิ่งเหล่านี้) แนะนำให้ใช้สำหรับ `children`
+- `React.ReactElement` / `JSX.Element`: หมายถึงเฉพาะ **Object ของ React Element แท้ๆ** (ไม่รวม string, number หรือ boolean)

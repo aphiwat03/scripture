@@ -1,0 +1,822 @@
+---
+title: Migrations
+category: DATABASE
+version: PostgreSQL 16 + Prisma Migrate
+updatedAt: 2026-10-17
+---
+
+# Migrations
+
+การเปลี่ยนแปลงโครงสร้างฐานข้อมูล (Database Schema Evolution) ในระบบระดับ Production ไม่สามารถทำได้ด้วยการเปิดโปรแกรม GUI แล้วคลิกแก้ไขคอลัมน์ตามใจชอบ เอกสารฉบับนี้เจาะลึกสถาปัตยกรรมและกระบวนการจัดการ **Database Migrations** ด้วย **Prisma Migrate** บน **PostgreSQL 16** สำหรับระบบร้านค้าเนื้อพรีเมียม **Smart Butcher Marketplace** ครอบคลุมตั้งแต่กลไกการทำงานภายใน การกู้คืนเมื่อ Migration พัง เทคนิค Zero-Downtime Schema Evolution การทำงานร่วมกันเป็นทีมผ่าน CI/CD ไปจนถึงการทำ Idempotent Database Seeding
+
+| หัวข้อในหน้านี้ | สาระสำคัญ |
+| :--- | :--- |
+| **1. ทำไมต้องใช้ Database Migration แทนการแก้ไขฐานข้อมูลโดยตรง** | ปัญหา Schema Drift, การทำ Version Control โครงสร้างตาราง และ Audit Trail |
+| **2. กลไก Prisma Migrate (migrate dev, migrate deploy, migrate reset และ db push)** | การทำงานของตาราง `_prisma_migrations`, Shadow Database และความต่างของแต่ละคำสั่ง |
+| **3. การตรวจสอบไฟล์ SQL ที่สร้างขึ้นและการกู้คืนเมื่อ Migration ล้มเหลว** | การใช้ `--create-only`, การอ่าน DDL Locks และการใช้ `prisma migrate resolve` |
+| **4. เทคนิค Zero-Downtime Schema Evolution (เปลี่ยนโครงสร้างโดยข้อมูลไม่สูญหาย)** | รูปแบบ Expand-and-Contract Pattern และการย้ายข้อมูลด้วย `INSERT ... SELECT` |
+| **5. การบริหารจัดการ Migration ข้ามสภาพแวดล้อม (Dev/Staging/Prod) และการทำงานเป็นทีม** | การจัดการกิ่ง Git ขัดแย้งกัน และไปป์ไลน์อัตโนมัติบน GitHub Actions |
+| **6. Seeding: การเตรียมข้อมูลตั้งต้นแบบ Idempotent แยกตามสภาพแวดล้อม** | การใช้ `upsert` และ `createMany({ skipDuplicates: true })` แยกตาม `NODE_ENV` |
+
+<Callout type="tip" title="กฎเหล็กของวิศวกรฐานข้อมูลระดับ Production">
+โค้ดแอปพลิเคชันสามารถย้อนกลับ (Rollback) ด้วยการสลับ Container Image ได้ภายในไม่กี่วินาที แต่ฐานข้อมูลที่มีข้อมูลคำสั่งซื้อจริงของลูกค้าไม่สามารถย้อนกลับแบบไร้ร่องรอยได้ง่ายๆ ทุกการรัน Migration จึงต้องถูกออกแบบให้เดินหน้าได้อย่างปลอดภัย (Forward-Only Safe) และผ่านการตรวจสอบไฟล์ SQL ดิบด้วยสายตาทุกครั้ง
+</Callout>
+
+---
+
+## 1. ทำไมต้องใช้ Database Migration แทนการแก้ไขฐานข้อมูลโดยตรง
+
+### แนวคิด (Concept)
+ลองจินตนาการถึงครัวตัดแต่งเนื้อของ **Smart Butcher Marketplace** ที่มีเชฟหลายกะทำงานร่วมกัน หากหัวหน้าเชฟกะเช้าแอบย้ายตำแหน่งตู้บ่มเนื้อ Dry-Aged และเปลี่ยนป้ายรหัสช่องเก็บเนื้อโดยไม่จดบันทึกและไม่แจ้งใคร เมื่อเชฟกะดึกเข้ามาทำงานย่อมหยิบเนื้อผิดเกรดส่งให้ลูกค้า
+
+การเข้าไปแก้ไขฐานข้อมูลโดยตรงผ่านเครื่องมือ GUI (เช่น pgAdmin, DBeaver หรือ Supabase Table Editor) บนเครื่อง Staging หรือ Production ก่อให้เกิดปัญหาร้ายแรงที่เรียกว่า **Schema Drift** คือสภาวะที่โครงสร้างจริงในฐานข้อมูลไม่ตรงกับโค้ดใน Git Repository ส่งผลให้:
+- โค้ดที่รันผ่านบนเครื่องนักพัฒนา (Local) พังทันทีเมื่อนำขึ้น Production เพราะขาดคอลัมน์หรือ Constraint ไม่ตรงกัน
+- ไม่สามารถตรวจสอบย้อนหลัง (Audit Trail) ได้ว่าใครเป็นคนลบคอลัมน์ หรือเปลี่ยนชนิดข้อมูลเมื่อไหร่และเพราะเหตุใด
+- ไม่สามารถจำลองสภาพแวดล้อมใหม่ (Reproducibility) สำหรับการรัน Automated Testing หรือการกู้คืนระบบได้
+
+การใช้ **Database Migration** คือการนำแนวคิด **Infrastructure as Code (IaC)** มาใช้กับโครงสร้างฐานข้อมูล โดยบันทึกทุกการเปลี่ยนแปลงเป็นไฟล์สคริปต์ SQL ที่มีลำดับเวลาชัดเจนและจัดเก็บอยู่ในระบบ Git ร่วมกับซอร์สโค้ดของแอปพลิเคชัน
+
+### หลักการเบื้องหลัง (Under the Hood)
+เมื่อใช้ระบบ State-based ร่วมกับ Versioned Migration อย่าง Prisma Migrate ระบบจะทำงานผ่านองค์ประกอบหลัก 3 ส่วน:
+1. **Declarative Schema (`schema.prisma`):** ไฟล์ต้นทางที่ระบุว่าโครงสร้างสุดท้ายที่ต้องการ (Desired State) ของตาราง `users`, `categories`, `products`, `orders`, `order_items`, และ `payments` มีหน้าตาอย่างไร
+2. **Migration History Directory (`prisma/migrations/`):** โฟลเดอร์ที่เก็บโฟลเดอร์ย่อยเรียงตามประทับเวลา (Timestamp) เช่น `20261017013000_add_dry_aged_days_to_products/migration.sql` ซึ่งเป็นไฟล์ DDL (Data Definition Language) มาตรฐานของ PostgreSQL 16
+3. **Transactional DDL Execution:** จุดเด่นที่สุดของ PostgreSQL 16 (ที่เหนือกว่า MySQL หรือ Oracle) คือ **คำสั่ง DDL แทบทั้งหมดสามารถรันอยู่ภายใต้ Transaction (`BEGIN ... COMMIT`) ได้** หากไฟล์ Migration มีคำสั่ง 5 คำสั่ง แล้วคำสั่งที่ 4 ล้มเหลว PostgreSQL จะทำการ Rollback คำสั่งที่ 1-3 กลับคืนให้โดยอัตโนมัติ (ยกเว้นคำสั่งพิเศษบางตัว เช่น `CREATE INDEX CONCURRENTLY`)
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: โครงสร้าง Declarative Schema ตั้งต้นของระบบ Smart Butcher
+แทนที่จะเขียนคำสั่งสร้างตารางกระจัดกระจาย เราประกาศโครงสร้างทั้งหมดไว้ในไฟล์ `schema.prisma` เพียงจุดเดียวเพื่อให้ทุกคนในทีมเห็นภาพเดียวกัน:
+
+```prisma filename="prisma/schema.prisma"
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  PREPARING_CUT
+  SHIPPING
+  DELIVERED
+  CANCELLED
+}
+
+model Category {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name        String    @unique @db.VarChar(100)
+  slug        String    @unique @db.VarChar(100)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  products    Product[]
+
+  @@map("categories")
+}
+
+model Product {
+  id            String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  categoryId    String      @map("category_id") @db.Uuid
+  sku           String      @unique @db.VarChar(50)
+  name          String      @db.VarChar(200)
+  marblingScore Int         @default(0) @map("marbling_score") @db.SmallInt
+  pricePerKg    Decimal     @map("price_per_kg") @db.Decimal(10, 2)
+  stockWeightGr Int         @default(0) @map("stock_weight_gr")
+  createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  category      Category    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  @@index([categoryId], map: "idx_products_category_id")
+  @@map("products")
+}
+```
+
+#### ตัวอย่างที่ 2: ไฟล์ SQL Migration ที่ถูกบันทึกเข้าสู่ระบบ Version Control
+เมื่อมีการเพิ่มคอลัมน์ระดับการบ่มเนื้อ (`dry_aged_days`) และข้อบังคับ `CHECK` constraint ไฟล์ SQL ที่ถูกสร้างและเก็บใน Git จะเป็นหลักฐานชัดเจนที่สามารถทำ Code Review บน Pull Request ได้:
+
+```sql filename="prisma/migrations/20261017021500_add_dry_aged_spec/migration.sql"
+-- AlterTable: เพิ่มคอลัมน์จำนวนวันบ่มเนื้อ Dry-Aged พร้อมค่าเริ่มต้น 0 วัน (เนื้อสด)
+ALTER TABLE "products"
+ADD COLUMN "dry_aged_days" SMALLINT NOT NULL DEFAULT 0,
+ADD COLUMN "storage_temp_celsius" NUMERIC(4, 1) NOT NULL DEFAULT 1.5;
+
+-- AddConstraint: บังคับในระดับ PostgreSQL Engine ว่าจำนวนวันบ่มต้องไม่ติดลบและไม่เกิน 180 วัน
+ALTER TABLE "products"
+ADD CONSTRAINT "chk_products_dry_aged_days_range"
+CHECK ("dry_aged_days" >= 0 AND "dry_aged_days" <= 180);
+
+-- CreateIndex: สร้าง Partial Index สำหรับค้นหาเฉพาะเนื้อที่ผ่านการบ่ม Dry-Aged
+CREATE INDEX "idx_products_dry_aged_active"
+ON "products" ("dry_aged_days")
+WHERE "dry_aged_days" > 0;
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **วิธีการแก้ไขโครงสร้าง** | เปิด DBeaver หรือ pgAdmin ต่อเข้าฐานข้อมูลจริงแล้วกดเพิ่ม/ลบคอลัมน์ด้วยมือ | แก้ไข `schema.prisma` สร้างไฟล์ Migration ตรวจสอบ SQL และสั่งรันผ่านไปป์ไลน์อัตโนมัติ |
+| **การตรวจสอบความถูกต้อง** | รันคำสั่งแก้ตารางสดๆ โดยไม่มีการทำ Peer Review จากเพื่อนร่วมทีม | เปิด Pull Request ให้ทีมตรวจสอบไฟล์ `migration.sql` ทุกบรรทัดก่อนรวมโค้ดเข้ากิ่งหลัก |
+| **ความสอดคล้องของสภาพแวดล้อม** | โครงสร้างตารางบนเครื่อง Dev, Staging และ Production มีชื่อคอลัมน์และ Index ไม่ตรงกันเลย | ทุกสภาพแวดล้อมรันชุดไฟล์ `migration.sql` ลำดับเดียวกัน 100% |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ:** พัฒนาระบบทุกขนาดตั้งแต่โปรเจกต์เริ่มต้นไปจนถึงระบบ Enterprise ที่มีฐานข้อมูลเกี่ยวข้องกับข้อมูลลูกค้าและธุรกรรมการเงิน
+- **ไม่ควรใช้การแก้ฐานข้อมูลด้วยมือเมื่อ:** ระบบขึ้นสู่ชั้น Staging หรือ Production แล้ว (ยกเว้นกรณีฉุกเฉินระดับวิกฤต เช่น การสั่ง `DROP INDEX CONCURRENTLY` เพื่อแก้ปัญหาดิสก์เต็มหรือ Query Planner เลือก Index ผิด ซึ่งหลังจากแก้ฉุกเฉินแล้วต้องกลับมาซิงค์ไฟล์ Migration ให้ตรงกันทันที)
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ปัญหา Schema Drift คืออะไร และส่งผลเสียต่อการ Deploy ระบบอย่างไร?**
+  - **แนวคำตอบ:** Schema Drift คือสภาวะที่โครงสร้างฐานข้อมูลจริงในสภาพแวดล้อมหนึ่ง (เช่น Production) เบี่ยงเบนไปจากโครงสร้างที่ระบุไว้ในซอร์สโค้ดและไฟล์ Migration มักเกิดจากการมีคนเข้าไปรันคำสั่ง `ALTER TABLE` หรือสร้าง Index ด้วยมือโดยตรง ส่งผลให้เวลา Deploy ฟีเจอร์ใหม่ สคริปต์ Migration อาจพังกลางคันเพราะพบคอลัมน์ซ้ำ หรือโค้ดแอปพลิเคชันเกิด Runtime Error เนื่องจากชนิดข้อมูลไม่ตรงกับที่ทดสอบในชั้น Staging
+- **Q2: ทำไม PostgreSQL จึงมีความปลอดภัยในการรัน Migration สูงกว่าฐานข้อมูลตระกูล MySQL?**
+  - **แนวคำตอบ:** เพราะ PostgreSQL รองรับ **Transactional DDL** คำสั่งเปลี่ยนแปลงโครงสร้างตาราง เช่น `CREATE TABLE`, `ALTER TABLE`, `DROP COLUMN` สามารถทำงานอยู่ภายในบล็อก `BEGIN ... COMMIT` ได้ หากสคริปต์ Migration มีหลายคำสั่งและเกิดข้อผิดพลาดขึ้นระหว่างทาง PostgreSQL จะยกเลิกการเปลี่ยนแปลงทั้งหมดในไฟล์นั้นกลับสู่สภาพเดิมทันที ในขณะที่ MySQL จะทำการ Implicit Commit ทุกครั้งที่เจอคำสั่ง DDL ทำให้ตารางค้างอยู่ในสถานะครึ่งๆ กลางๆ (Partially Applied)
+
+---
+
+## 2. กลไก Prisma Migrate (migrate dev, migrate deploy, migrate reset และ db push)
+
+### แนวคิด (Concept)
+Prisma มีชุดคำสั่งจัดการโครงสร้างฐานข้อมูลหลายตัว ซึ่งถูกออกแบบมาสำหรับ "ช่วงชีวิตของการพัฒนา" ที่แตกต่างกันอย่างสิ้นเชิง หากเปรียบกับร้าน **Smart Butcher Marketplace**:
+- `prisma db push` เปรียบเหมือน **"การจัดวางผังร้านจำลองด้วยกล่องลังกระดาษ"** เพื่อดูพื้นที่คร่าวๆ รวดเร็ว ไม่ต้องจดบันทึกประวัติ แต่ไม่เหมาะกับร้านจริง
+- `prisma migrate dev` เปรียบเหมือน **"การออกแบบพิมพ์เขียวห้องเย็นในห้องทดลอง"** ที่มีการสร้างห้องจำลอง (Shadow Database) มาเทียบกับพิมพ์เขียวเดิม เพื่อออกใบสั่งงานก่อสร้าง (`migration.sql`)
+- `prisma migrate deploy` เปรียบเหมือน **"วิศวกรนำใบสั่งงานก่อสร้างที่อนุมัติแล้วไปสร้างจริงที่สาขา Production"** โดยอ่านเฉพาะใบงานที่ยังไม่เคยทำ ห้ามทุบตึกทิ้งเด็ดขาด
+
+### หลักการเบื้องหลัง (Under the Hood)
+เบื้องหลังการทำงานของ Prisma Migrate อาศัยกลไกสำคัญ 2 ส่วนใน PostgreSQL 16:
+
+1. **ตารางควบคุมสถานะ `_prisma_migrations`:**
+   เมื่อรัน Prisma Migrate ครั้งแรก ระบบจะสร้างตารางชื่อ `_prisma_migrations` ใน Schema `public` โดยมีคอลัมน์สำคัญได้แก่:
+   - `id`: รหัส UUID ของการรัน
+   - `checksum`: ค่าแฮช **SHA-256** ที่คำนวณจากเนื้อหาภายในไฟล์ `migration.sql` เพื่อตรวจจับว่ามีใครแอบแก้ไขไฟล์ Migration ย้อนหลังหรือไม่
+   - `migration_name`: ชื่อโฟลเดอร์ Migration เช่น `20261017010000_init_butcher_schema`
+   - `started_at` และ `finished_at`: เวลาที่เริ่มรันและรันเสร็จสิ้น (หาก `finished_at` เป็น `NULL` และมี `logs` แสดงว่า Migration นั้นพังกลางคัน)
+   - `applied_steps_count`: จำนวนขั้นตอนที่รันสำเร็จ
+
+2. **กลไก Shadow Database (ใช้เฉพาะตอนรัน `migrate dev`):**
+   ในการคำนวณว่านักพัฒนาแก้ไขอะไรไปบ้างใน `schema.prisma` Prisma จะแอบสร้างฐานข้อมูลชั่วคราวขึ้นมาอีกก้อนหนึ่งเรียกว่า **Shadow Database** จากนั้นนำไฟล์ `migration.sql` เก่าทั้งหมดในโฟลเดอร์ `prisma/migrations` ไปรันใส่ Shadow Database เพื่อสร้าง "โครงสร้างปัจจุบันตามประวัติไฟล์" แล้วจึงนำมาเปรียบเทียบ (Diff) กับไฟล์ `schema.prisma` ล่าสุด เพื่อสร้างไฟล์ `migration.sql` ใบใหม่ขึ้นมา ก่อนจะลบหรือล้าง Shadow Database ทิ้ง
+
+#### ตารางเปรียบเทียบคำสั่ง Prisma Schema Management
+
+| คำสั่ง | สร้างไฟล์ `.sql` หรือไม่ | ใช้ Shadow DB หรือไม่ | ความเสี่ยงข้อมูลสูญหาย | สภาพแวดล้อมที่เหมาะสม |
+| :--- | :--- | :--- | :--- | :--- |
+| `npx prisma db push` | ไม่สร้าง | ไม่ใช้ | สูง (อาจเตือนให้ล้างตารางถ้าแก้ชนิดข้อมูลขัดแย้งกัน) | Rapid Prototyping / ทดลองโครงสร้างระยะสั้นบนเครื่องตัวเอง |
+| `npx prisma migrate dev` | สร้างไฟล์ใหม่ | ใช้ | สูง (หากเกิด Drift จะถามเพื่อสั่ง Reset ล้างฐานข้อมูล) | Local Development เท่านั้น |
+| `npx prisma migrate reset` | ไม่สร้าง (รันของเดิมซ้ำ) | ไม่ใช้ | **100% (ทิ้งตารางทั้งหมดแล้วสร้างใหม่ + รัน Seed)** | Local Development / การเตรียมฐานข้อมูลก่อนรัน Integration Test |
+| `npx prisma migrate deploy` | ไม่สร้าง (รันเฉพาะไฟล์ที่มี) | ไม่ใช้ | ต่ำ (รันเฉพาะไฟล์ที่ยังไม่ถูกบันทึกใน `_prisma_migrations`) | **Staging และ Production (CI/CD Pipeline)** |
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: การตั้งค่า Shadow Database URL และคำสั่งใช้งานในแต่ละสภาพแวดล้อม
+เมื่อใช้งานบนสภาพแวดล้อมที่สิทธิ์การสร้างฐานข้อมูลใหม่ถูกจำกัด เราสามารถกำหนด `shadowDatabaseUrl` แยกไว้ใน `schema.prisma` ได้:
+
+```prisma filename="prisma/schema.prisma"
+datasource db {
+  provider          = "postgresql"
+  url               = env("DATABASE_URL")
+  directUrl         = env("DIRECT_URL")
+  shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
+}
+```
+
+```bash filename="terminal_commands.sh"
+# 1. ช่วงทดลองไอเดียใหม่บนเครื่อง Local แบบเร็วๆ (ยังไม่ต้องการสร้างไฟล์ประวัติ)
+npx prisma db push
+
+# 2. เมื่อโครงสร้างนิ่งแล้ว สั่งสร้างไฟล์ Migration บนเครื่อง Local พร้อมตั้งชื่อให้สื่อความหมาย
+npx prisma migrate dev --name add_orders_and_payments_tables
+
+# 3. ล้างข้อมูลเครื่อง Local ทั้งหมดเพื่อเรียง Migration ใหม่ตั้งแต่ไฟล์แรกและรัน Seed อัตโนมัติ
+npx prisma migrate reset
+
+# 4. คำสั่งเดียวที่อนุญาตให้รันบน Staging และ Production ผ่าน CI/CD
+npx prisma migrate deploy
+```
+
+#### ตัวอย่างที่ 2: การตรวจสอบประวัติและ Checksum ในตาราง `_prisma_migrations` ด้วย SQL
+วิศวกรสามารถตรวจสอบสถานะการรัน Migration ใน PostgreSQL 16 ได้โดยตรงผ่านตารางระบบของ Prisma:
+
+```sql filename="inspect_prisma_migrations.sql"
+-- ตรวจสอบประวัติการรัน Migration ล่าสุด 10 รายการในระบบ Smart Butcher
+SELECT
+    migration_name,
+    substring(checksum, 1, 12) AS short_checksum,
+    started_at,
+    finished_at,
+    EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000 AS duration_ms,
+    applied_steps_count,
+    rolled_back_at
+FROM public._prisma_migrations
+ORDER BY started_at DESC
+LIMIT 10;
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **คำสั่งใน CI/CD Production** | ใส่ `npx prisma migrate dev` หรือ `npx prisma db push --accept-data-loss` ในสคริปต์ Production | ใช้ `npx prisma migrate deploy` เท่านั้นในสคริปต์ Deployment สำหรับ Staging และ Production |
+| **การแก้ไขไฟล์ที่รันไปแล้ว** | เข้าไปแก้ไฟล์ `migration.sql` เก่าที่ถูก Push ขึ้น Git และรันบน Staging ไปแล้ว ทำให้ Checksum ไม่ตรงกัน | ห้ามแก้ไขไฟล์ Migration ที่ถูกแชร์เข้ากิ่งหลักแล้ว หากต้องการแก้ไขให้สร้าง Migration ใบใหม่มาทับเสมอ |
+| **การเชื่อมต่อตอนทำ Migration** | รัน `prisma migrate deploy` ผ่าน Connection Pooler (เช่น PgBouncer โหมด Transaction) ทำให้คำสั่งค้าง | กำหนด `directUrl` ใน `schema.prisma` ให้ชี้ตรงไปยัง PostgreSQL Port 5432 สำหรับการรัน Migration เสมอ |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `prisma db push` เมื่อ:** กำลังขึ้นโปรเจกต์วันแรกๆ ที่ตารางเปลี่ยนทุกๆ 5 นาที และยังไม่มีข้อมูลสำคัญใดๆ
+- **ควรใช้ `prisma migrate dev` เมื่อ:** พัฒนาฟีเจอร์บนเครื่อง Local เสร็จเรียบร้อยและต้องการสร้างไฟล์ `.sql` เพื่อเตรียมเปิด Pull Request
+- **ควรใช้ `prisma migrate deploy` เมื่อ:** นำโค้ดขึ้นทดสอบบนเซิร์ฟเวอร์ Staging หรือใช้งานจริงบน Production
+- **ไม่ควรใช้ `migrate dev` หรือ `db push` บน Production เด็ดขาด:** เพราะคำสั่งเหล่านี้ไม่ได้ออกแบบมาเพื่อรักษาข้อมูลเดิมและอาจสั่ง Drop ตารางหรือสร้างฐานข้อมูลจำลองโดยไม่ได้รับอนุญาต
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: Shadow Database ใน Prisma Migrate คืออะไร และทำไม `prisma migrate deploy` ถึงไม่ต้องใช้ Shadow Database?**
+  - **แนวคำตอบ:** Shadow Database คือฐานข้อมูลชั่วคราวที่ `prisma migrate dev` สร้างขึ้นเพื่อรันไฟล์ Migration เก่าทั้งหมด แล้วนำโครงสร้างที่ได้ไปเปรียบเทียบ (Diff) กับไฟล์ `schema.prisma` ปัจจุบันเพื่อตรวจหาความเปลี่ยนแปลงและสร้างไฟล์ `migration.sql` ใบใหม่ ส่วน `prisma migrate deploy` ไม่ต้องใช้ Shadow Database เพราะหน้าที่ของมันไม่ใช่การสร้างไฟล์ใหม่ แต่เป็นการอ่านไฟล์ `migration.sql` ที่มีอยู่แล้วในโฟลเดอร์ไปเทียบกับตาราง `_prisma_migrations` แล้วรันเฉพาะไฟล์ที่ยังไม่เคยรันเท่านั้น
+- **Q2: จะเกิดอะไรขึ้นหากนักพัฒนาแอบเข้าไปแก้ไขอักษรในไฟล์ `migration.sql` เก่าที่เคยรันบนเครื่องเพื่อนร่วมทีมไปแล้ว?**
+  - **แนวคำตอบ:** ค่าแฮช SHA-256 ของไฟล์นั้นจะเปลี่ยนไป ไม่ตรงกับค่า `checksum` ที่บันทึกอยู่ในตาราง `_prisma_migrations` เมื่อเพื่อนร่วมทีมหรือระบบ CI รันคำสั่ง Migration ครั้งถัดไป Prisma จะตรวจพบว่าไฟล์ประวัติถูกดัดแปลง (Modified migration after it has been applied) และจะหยุดการทำงานทันทีเพื่อป้องกันปัญหา Schema ไม่ตรงกัน
+
+---
+
+## 3. การตรวจสอบไฟล์ SQL ที่สร้างขึ้นและการกู้คืนเมื่อ Migration ล้มเหลว
+
+### แนวคิด (Concept)
+เครื่องมือสร้าง Migration อัตโนมัติไม่ได้ฉลาดรู้เจตนาทางธุรกิจของเราทั้งหมด ตัวอย่างเช่น หากเราเปลี่ยนชื่อฟิลด์ใน `schema.prisma` จาก `price` เป็น `pricePerKg` ตัวสร้างอัตโนมัติของ Prisma จะไม่ทราบว่านี่คือการเปลี่ยนชื่อ (Rename) แต่มันจะสร้างคำสั่ง **`DROP COLUMN "price"` แล้วตามด้วย `ADD COLUMN "price_per_kg"`** ซึ่งส่งผลให้ข้อมูลราคาสินค้าเนื้อวากิวทั้งหมดในตารางหายเกลี้ยงทันที!
+
+ดังนั้น กระบวนการระดับมืออาชีพจึงต้องแยกขั้นตอน **"การร่างไฟล์ SQL (`--create-only`)"** ออกจาก **"การสั่งรันจริง"** เพื่อเปิดโอกาสให้วิศวกรเข้ามาตรวจทานและปรับแก้คำสั่ง SQL ให้ปลอดภัยก่อนเสมอ
+
+### หลักการเบื้องหลัง (Under the Hood)
+1. **กลไก `--create-only`:**
+   เมื่อสั่ง `npx prisma migrate dev --create-only --name rename_price_column` Prisma จะคำนวณความต่างผ่าน Shadow Database และเขียนไฟล์ `migration.sql` ลงดิสก์ให้ แต่จะ **ยังไม่รันไฟล์นั้นใส่ฐานข้อมูล Local** นักพัฒนาสามารถเปิดไฟล์ `.sql` นั้นขึ้นมาแก้ไขจาก `DROP + ADD` ให้กลายเป็น `ALTER TABLE "products" RENAME COLUMN "price" TO "price_per_kg";` แล้วจึงค่อยสั่ง `npx prisma migrate dev` อีกครั้งเพื่อรันจริง
+2. **สถานะ Failed Migration และการล็อกของ `_prisma_migrations`:**
+   บน Production เมื่อ `prisma migrate deploy` รันไฟล์ใดไฟล์หนึ่งแล้วเกิด Error (เช่น ข้อมูลเดิมในตารางละเมิด Constraint ใหม่ที่เพิ่งเพิ่มเข้าไป) แถวของ Migration นั้นในตาราง `_prisma_migrations` จะมีค่า `finished_at IS NULL` และ Prisma จะบล็อกไม่ยอมให้รัน Migration ใดๆ ต่อทั้งสิ้นจนกว่าวิศวกรจะเข้าไปจัดการและแจ้งสถานะด้วยคำสั่ง `prisma migrate resolve`
+3. **พฤติกรรม DDL Lock ใน PostgreSQL 16:**
+   - การสั่ง `ADD COLUMN ... DEFAULT <ค่าคงที่>` ใน PostgreSQL 11 ขึ้นไปจนถึง 16 จะทำงานเสร็จในระดับมิลลิวินาที (Metadata-only operation ใน `pg_attribute`) โดยไม่ต้องเขียนทับแถวเก่าทั้งตาราง
+   - แต่การสั่ง `ALTER COLUMN ... TYPE` ที่ต้องแปลงโครงสร้างข้อมูลจะทำการล็อกตารางระดับสูงสุด (`ACCESS EXCLUSIVE LOCK`) และเขียนตารางใหม่ทั้งหมด (Table Rewrite) ซึ่งบล็อกทั้งการอ่าน (`SELECT`) และการเขียน (`INSERT/UPDATE`)
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: การใช้ `--create-only` เพื่อปรับแก้ SQL จากการลบคอลัมน์เป็นการเปลี่ยนชื่อและเพิ่ม Custom SQL
+สมมติว่าเราเปลี่ยนชื่อคอลัมน์ในตาราง `orders` จาก `delivery_note` เป็น `butcher_instruction`:
+
+```bash filename="01_create_only_workflow.sh"
+# ขั้นตอนที่ 1: สั่งสร้างเฉพาะไฟล์ SQL โดยยังไม่รันเข้าฐานข้อมูล
+npx prisma migrate dev --create-only --name rename_delivery_note_to_butcher_instruction
+```
+
+ไฟล์ที่ Prisma สร้างให้อัตโนมัติ (อันตรายเพราะทำข้อมูลหาย):
+```sql filename="prisma/migrations/20261017030000_rename_delivery_note_to_butcher_instruction/migration.sql"
+/*
+  Warnings:
+  - You are about to drop the column `delivery_note` on the `orders` table. All the data in the column will be lost.
+*/
+-- ❌ โค้ดที่สร้างอัตโนมัติ (ห้ามใช้บนตารางที่มีข้อมูลจริง)
+-- ALTER TABLE "orders" DROP COLUMN "delivery_note",
+-- ADD COLUMN "butcher_instruction" TEXT;
+
+-- ✅ โค้ดที่วิศวกรแก้ไขใหม่ก่อนสั่งรันจริง (ข้อมูลอยู่ครบ 100% และทำงานระดับ Metadata ทันที)
+ALTER TABLE "orders" RENAME COLUMN "delivery_note" TO "butcher_instruction";
+```
+
+หลังจากแก้ไขและบันทึกไฟล์ `.sql` แล้ว จึงสั่งรันจริง:
+```bash filename="02_apply_reviewed_migration.sh"
+# ขั้นตอนที่ 2: สั่งรันไฟล์ที่เราแก้ไขเรียบร้อยแล้วเข้าสู่ฐานข้อมูล
+npx prisma migrate dev
+```
+
+#### ตัวอย่างที่ 2: การกู้คืนเมื่อ Migration ล้มเหลวบน Production ด้วย `prisma migrate resolve`
+สมมติว่าไฟล์ `20261017040000_enforce_unique_payment_ref` ล้มเหลวบน Production เพราะมีข้อมูล `provider_tx_id` ซ้ำกันอยู่ 2 แถวในตาราง `payments` เนื่องจาก PostgreSQL รองรับ Transactional DDL คำสั่งสร้าง Unique Index จึงถูก Rollback ไปแล้วอัตโนมัติ แต่ตาราง `_prisma_migrations` ยังขึ้นสถานะว่า Failed:
+
+```sql filename="01_fix_duplicate_data_on_prod.sql"
+-- 1. ค้นหาแถวข้อมูลการชำระเงินที่ซ้ำกันซึ่งเป็นต้นเหตุให้สร้าง Unique Constraint ไม่ผ่าน
+SELECT provider_tx_id, COUNT(*)
+FROM payments
+WHERE provider_tx_id IS NOT NULL
+GROUP BY provider_tx_id
+HAVING COUNT(*) > 1;
+
+-- 2. ทำความสะอาดข้อมูลที่ซ้ำซ้อน (เช่น เติม suffix ให้รายการที่ถูกยกเลิกไปแล้ว)
+UPDATE payments
+SET provider_tx_id = provider_tx_id || '_DUP_' || id::text
+WHERE id = '9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d';
+```
+
+```bash filename="02_resolve_and_redeploy.sh"
+# 3. แจ้ง Prisma ว่า Migration ที่พังไปนั้นถูก Rollback กลับสู่สภาพเดิมแล้ว
+npx prisma migrate resolve --rolled-back "20261017040000_enforce_unique_payment_ref"
+
+# 4. สั่งรัน migrate deploy อีกครั้ง (คราวนี้จะผ่านฉลุยเพราะแก้ข้อมูลที่ซ้ำกันแล้ว)
+npx prisma migrate deploy
+```
+
+<Callout type="warning" title="ความแตกต่างระหว่าง --rolled-back กับ --applied">
+ใช้ `--rolled-back` เมื่อคำสั่งในไฟล์ Migration ถูกยกเลิกไปแล้วและเราต้องการให้ `prisma migrate deploy` รันไฟล์นั้นใหม่อีกครั้ง แต่ใช้ `--applied` เฉพาะกรณีที่เราเข้าไปรันคำสั่ง SQL แก้ไขตารางด้วยมือจนเสร็จสมบูรณ์ตรงตามไฟล์แล้ว และต้องการบอก Prisma ให้ข้ามไฟล์นี้ไปไม่ต้องรันซ้ำ
+</Callout>
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การเปลี่ยนชื่อคอลัมน์** | แก้ชื่อใน `schema.prisma` แล้วกดรัน `migrate dev` ทันทีโดยไม่อ่านคำเตือน ทำให้เกิด `DROP` + `ADD` | ใช้ `--create-only` แล้วเปลี่ยนคำสั่งในไฟล์ SQL เป็น `ALTER TABLE ... RENAME COLUMN ...` |
+| **การแก้ปัญหาเมื่อ Deploy พัง** | เข้าไปสั่ง `DELETE FROM _prisma_migrations` ด้วยมือโดยไม่เข้าใจสถานะของตาราง | ตรวจสอบว่า Transaction ถูก Rollback หรือยัง แก้ไขต้นตอของปัญหา แล้วใช้ `prisma migrate resolve` |
+| **การป้องกันการล็อกค้างนาน** | รัน `ALTER TABLE` บนตารางใหญ่โดยไม่กำหนด `lock_timeout` จนคิวรีของลูกค้าค้างสะสมทั้งระบบ | กำหนด `SET lock_timeout = '5s';` ไว้ที่หัวไฟล์ `migration.sql` ที่มีความเสี่ยงในการล็อกตาราง |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `--create-only` เมื่อ:** มีการเปลี่ยนชื่อตาราง เปลี่ยนชื่อคอลัมน์ เปลี่ยนชนิดข้อมูล หรือต้องการเขียนฟีเจอร์ของ PostgreSQL 16 ที่ Prisma ยังไม่รองรับใน DSL (เช่น Partial Index ซับซ้อน, `CHECK` constraints, Triggers หรือ Materialized Views)
+- **ไม่ควรใช้ `prisma migrate resolve --applied` เมื่อ:** คำสั่งในไฟล์ `migration.sql` ยังทำงานไม่ครบทุกบรรทัด เพราะจะทำให้โครงสร้างตารางจริงขาดตกบกพร่องไปตลอดกาล
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: หากต้องการเพิ่ม `CHECK (price_per_kg > 0)` ลงในตาราง `products` โดยใช้ Prisma Migrate ต้องทำอย่างไร เพราะในไฟล์ `schema.prisma` ไม่มี Syntax สำหรับ Check Constraint?**
+  - **แนวคำตอบ:** ให้รันคำสั่ง `npx prisma migrate dev --create-only --name add_price_check_constraint` เพื่อสร้างไฟล์ `migration.sql` เปล่าหรือไฟล์ที่มีการเปลี่ยนแปลงอื่น จากนั้นเปิดไฟล์ `migration.sql` แล้วเขียนคำสั่ง SQL `ALTER TABLE "products" ADD CONSTRAINT "chk_price_positive" CHECK ("price_per_kg" > 0);` ลงไปโดยตรง แล้วรัน `npx prisma migrate dev` เพื่อให้ Prisma บันทึก Checksum และรันเข้าสู่ฐานข้อมูล
+- **Q2: ทำไมการรัน `ALTER TABLE` บนตารางที่มีการใช้งานหนาแน่นจึงควรตั้งค่า `lock_timeout` เสมอ?**
+  - **แนวคำตอบ:** คำสั่ง `ALTER TABLE` ส่วนใหญ่ต้องการ `ACCESS EXCLUSIVE LOCK` หากในจังหวะนั้นมีคิวรีที่รันอยู่นาน (Long-running query) ถือล็อกการอ่านอยู่ คำสั่ง `ALTER TABLE` จะต้องเข้าคิวรอ และใน PostgreSQL คิวรี `SELECT` หรือ `INSERT` ของลูกค้ารายใหม่ๆ ที่เข้ามาทีหลังคำสั่ง `ALTER TABLE` จะถูกบล็อกต่อคิวทั้งหมด (Lock Queueing) ทำให้ระบบล่มทั้งเว็บ การใส่ `SET lock_timeout = '3s';` จะช่วยให้คำสั่ง Migration ยอมแพ้และยกเลิกตัวเองทันทีหากขอ Lock ไม่ได้ภายใน 3 วินาที เพื่อให้ระบบหน้าร้านยังคงทำงานต่อไปได้
+
+---
+
+## 4. เทคนิค Zero-Downtime Schema Evolution (เปลี่ยนโครงสร้างโดยข้อมูลไม่สูญหาย)
+
+### แนวคิด (Concept)
+ในระบบ E-Commerce ที่เปิดรับคำสั่งซื้อเนื้อสเต๊กตลอด 24 ชั่วโมง ขณะที่เรากำลังอัปเดตเวอร์ชันใหม่ (Rolling Deployment) จะมีช่วงเวลาที่ **โค้ดแอปพลิเคชันเวอร์ชันเก่า (v1)** และ **โค้ดเวอร์ชันใหม่ (v2)** รันทำงานควบคู่กันและชี้มาที่ฐานข้อมูลก้อนเดียวกัน
+
+หากเราสั่งเปลี่ยนโครงสร้างตารางแบบหักดิบในขั้นตอนเดียว (เช่น แยกคอลัมน์ `customer_address` ในตาราง `orders` ออกเป็นโครงสร้างใหม่ หรือบังคับ `NOT NULL` บนคอลัมน์ใหม่ทันที) โค้ดเวอร์ชันเก่า (v1) ที่ยังรันอยู่บนบาง Container จะพังทันทีเพราะไม่รู้จักคอลัมน์ใหม่
+
+เราจึงต้องใช้สถาปัตยกรรมที่เรียกว่า **Expand-and-Contract Pattern (หรือ Parallel Change)** ซึ่งแบ่งการเปลี่ยนแปลงออกเป็น 3-4 เฟสย่อยที่ปลอดภัยและไม่ต้องปิดระบบ (Zero-Downtime)
+
+```text filename="docs/database/migrations.txt"
+เฟสที่ 1: EXPAND (ขยายโครงสร้าง)
+[ เพิ่มคอลัมน์ใหม่แบบ Nullable ] ---> โค้ด v1 ยังทำงานได้ปกติ
+           │
+           ▼
+เฟสที่ 2: DUAL-WRITE & BACKFILL (เขียนสองทางและย้ายข้อมูลเก่า)
+[ Deploy โค้ด v2 ที่เขียนลงทั้งคอลัมน์เก่า+ใหม่ และรันสคริปต์แปลงข้อมูลเก่า ]
+           │
+           ▼
+เฟสที่ 3: SWITCH READS & ENFORCE (สลับมาอ่านของใหม่)
+[ Deploy โค้ด v3 ที่อ่านจากคอลัมน์ใหม่ 100% + เพิ่ม Constraint NOT NULL แบบ NOT VALID -> VALIDATE ]
+           │
+           ▼
+เฟสที่ 4: CONTRACT (หดโครงสร้างเก่าทิ้ง)
+[ ลบคอลัมน์เก่าออกจากโค้ดก่อน แล้วจึงรัน Migration DROP COLUMN ในภายหลัง ]
+```
+
+### หลักการเบื้องหลัง (Under the Hood)
+1. **การเพิ่ม Constraint แบบไม่บล็อกตาราง (`NOT VALID` + `VALIDATE CONSTRAINT`):**
+   หากเราสั่ง `ALTER TABLE orders ADD CONSTRAINT ... CHECK (...)` หรือบังคับ `NOT NULL` โดยตรงบนตารางที่มี 10 ล้านแถว PostgreSQL จะล็อกตาราง (`ACCESS EXCLUSIVE`) เพื่อสแกนตรวจข้อมูลเก่าทั้ง 10 ล้านแถว
+   แต่ใน PostgreSQL 16 เราสามารถแยกคำสั่งเป็น 2 จังหวะ:
+   - จังหวะที่ 1: `ALTER TABLE ... ADD CONSTRAINT ... CHECK (col IS NOT NULL) NOT VALID;` คำสั่งนี้จะบังคับใช้เฉพาะกับแถวใหม่ที่กำลังจะ `INSERT/UPDATE` เข้ามาเท่านั้น โดยไม่ตรวจแถวเก่า จึงทำงานเสร็จในเสี้ยววินาที
+   - จังหวะที่ 2: `ALTER TABLE ... VALIDATE CONSTRAINT ...;` คำสั่งนี้จะไล่ตรวจข้อมูลเก่าทั้งหมดโดยใช้ล็อกระดับต่ำ (`SHARE UPDATE EXCLUSIVE LOCK`) ซึ่ง **ไม่บล็อกการอ่าน (`SELECT`) และการเขียน (`INSERT/UPDATE/DELETE`) ของลูกค้าเลย!**
+2. **การย้ายข้อมูลระหว่างตาราง (`INSERT INTO ... SELECT`):**
+   เมื่อต้องการแยกข้อมูลออกจากตารางเดิมไปตารางใหม่ การดึงข้อมูลออกมาวนลูปใน Node.js แล้วสั่ง `INSERT` ทีละแถวจะช้ามากและเสี่ยงต่อปัญหาหน่วยความจำเต็ม การใช้คำสั่ง `INSERT INTO target_table (...) SELECT ... FROM source_table` ภายในไฟล์ SQL หรือแบ่งรันเป็น Batch จะทำงานจบภายใน Engine ของ PostgreSQL ด้วยความเร็วสูงสุด
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: การเพิ่มคอลัมน์บังคับ (`NOT NULL`) บนตาราง `orders` ขนาดใหญ่แบบ Zero-Downtime
+สมมติว่าตาราง `orders` มีข้อมูลอยู่แล้ว 2 ล้านรายการ และเราต้องการเพิ่มคอลัมน์ `packaging_type` (เช่น `'VACUUM_SEALED'`, `'SKIN_PACK'`) ที่ห้ามเป็นค่าว่างโดยไม่ให้เว็บค้าง:
+
+```sql filename="prisma/migrations/20261017050000_expand_orders_packaging_type/migration.sql"
+-- กำหนดเวลารอ Lock สูงสุดไม่เกิน 3 วินาทีเพื่อความปลอดภัยของ Production
+SET lock_timeout = '3s';
+
+-- เฟส Expand: เพิ่มคอลัมน์แบบอนุญาตให้เป็น NULL ก่อน (ทำงานระดับ Metadata ทันที ไม่เกิด Table Rewrite)
+ALTER TABLE "orders"
+ADD COLUMN "packaging_type" VARCHAR(30);
+```
+
+หลังจาก Deploy โค้ดให้เริ่มเขียนค่าลง `packaging_type` และทำ Backfill ข้อมูลเก่าเป็นชุดๆ (Batch) จนครบแล้ว จึงรัน Migration เฟส Enforce:
+
+```sql filename="prisma/migrations/20261017060000_enforce_orders_packaging_not_null/migration.sql"
+SET lock_timeout = '3s';
+
+-- ขั้นตอนที่ 1: สร้าง Check Constraint แบบ NOT VALID (บังคับแถวใหม่ทันทีโดยไม่สแกนแถวเก่า)
+ALTER TABLE "orders"
+ADD CONSTRAINT "chk_orders_packaging_type_not_null"
+CHECK ("packaging_type" IS NOT NULL) NOT VALID;
+
+-- ขั้นตอนที่ 2: สั่ง Validate ข้อมูลเก่าทั้งหมด (ใช้เพียง SHARE UPDATE EXCLUSIVE LOCK ลูกค้ายังสั่งซื้อเนื้อได้ปกติ)
+ALTER TABLE "orders"
+VALIDATE CONSTRAINT "chk_orders_packaging_type_not_null";
+
+-- ขั้นตอนที่ 3: ใน PostgreSQL 12+ เมื่อมี Check Constraint ที่ Validate แล้ว
+-- การสั่ง SET NOT NULL จะรู้ทันทีว่าข้อมูลไม่มี NULL และไม่ต้องสแกนตารางซ้ำอีก!
+ALTER TABLE "orders"
+ALTER COLUMN "packaging_type" SET NOT NULL;
+
+-- ขั้นตอนที่ 4: ลบ Check Constraint ชั่วคราวออกเพราะคอลัมน์เป็น NOT NULL สมบูรณ์แล้ว
+ALTER TABLE "orders"
+DROP CONSTRAINT "chk_orders_packaging_type_not_null";
+```
+
+#### ตัวอย่างที่ 2: การแยกข้อมูลการชำระเงินจากตาราง `orders` ไปยังตาราง `payments` ด้วย `INSERT ... SELECT`
+ในระบบเวอร์ชันแรก ข้อมูลการจ่ายเงินอาจถูกเก็บปนอยู่ในตาราง `orders` เมื่อต้องการแยกออกมาเป็นตาราง `payments` โดยข้อมูลไม่สูญหาย:
+
+```sql filename="prisma/migrations/20261017070000_migrate_legacy_payments_data/migration.sql"
+-- 1. สร้างตาราง payments ใหม่
+CREATE TABLE "payments" (
+    "id" UUID NOT NULL DEFAULT gen_random_uuid(),
+    "order_id" UUID NOT NULL,
+    "amount" NUMERIC(12, 2) NOT NULL,
+    "payment_method" VARCHAR(50) NOT NULL,
+    "paid_at" TIMESTAMPTZ(6),
+    "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "payments_pkey" PRIMARY KEY ("id"),
+    CONSTRAINT "payments_order_id_fkey" FOREIGN KEY ("order_id")
+        REFERENCES "orders"("id") ON DELETE RESTRICT ON UPDATE CASCADE
+);
+
+CREATE UNIQUE INDEX "idx_payments_order_id_unique" ON "payments"("order_id");
+
+-- 2. คัดลอกข้อมูลการชำระเงินเดิมจากตาราง orders มายังตาราง payments รวดเดียวในระดับ Database Engine
+INSERT INTO "payments" ("order_id", "amount", "payment_method", "paid_at", "created_at")
+SELECT
+    o."id" AS order_id,
+    o."total_amount" AS amount,
+    COALESCE(o."legacy_payment_channel", 'PROMPTPAY') AS payment_method,
+    o."legacy_paid_at" AS paid_at,
+    o."created_at"
+FROM "orders" o
+WHERE o."status" IN ('PAID', 'PREPARING_CUT', 'SHIPPING', 'DELIVERED')
+ON CONFLICT ("order_id") DO NOTHING;
+```
+
+<Callout type="note" title="ข้อควรระวังก่อนสั่ง DROP COLUMN ในเฟส Contract">
+ห้ามสั่งลบคอลัมน์เก่า (`legacy_payment_channel`, `legacy_paid_at`) ในไฟล์ Migration เดียวกันกับตอนสร้างตารางใหม่เด็ดขาด! ต้องรอให้โค้ดแอปพลิเคชันเวอร์ชันใหม่ที่เลิกอ้างอิงคอลัมน์เหล่านั้นถูก Deploy ขึ้นครบทุกเซิร์ฟเวอร์และทำงานนิ่งแล้วอย่างน้อย 1 รอบการ Deploy จึงค่อยสร้าง Migration อีกรอบเพื่อลบคอลัมน์เก่าทิ้ง
+</Callout>
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การย้ายข้อมูลโครงสร้าง** | ลบคอลัมน์เก่าและสร้างคอลัมน์ใหม่ในขั้นตอนเดียว ทำให้โค้ดที่กำลังรันอยู่เกิด Error `column does not exist` | ใช้ Expand-and-Contract Pattern: ขยายคอลัมน์ -> ย้ายข้อมูล -> สลับโค้ด -> ลบคอลัมน์เก่าทีหลัง |
+| **การบังคับ `NOT NULL` บนตารางใหญ่** | สั่ง `ALTER COLUMN ... SET NOT NULL` ตรงๆ บนตารางหลักล้านแถว ทำให้ตารางถูกล็อกจนเว็บค้าง | ใช้ `ADD CONSTRAINT ... CHECK (... IS NOT NULL) NOT VALID` ตามด้วย `VALIDATE CONSTRAINT` |
+| **การสร้าง Index บนตารางใหญ่** | สร้าง Index ปกติซึ่งจะบล็อกการ `INSERT/UPDATE` ตลอดเวลาที่สร้าง | ใช้ `CREATE INDEX CONCURRENTLY` เพื่อสร้าง Index โดยไม่บล็อกการเขียนข้อมูลของลูกค้า |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Expand-and-Contract Pattern เมื่อ:** ระบบให้บริการอยู่บน Production ที่มีผู้ใช้งานจริงและไม่สามารถประกาศปิดปรับปรุงระบบ (Maintenance Window) ได้ รวมถึงตารางที่มีขนาดใหญ่เกิน 100,000 แถวขึ้นไป
+- **ไม่ควรใช้ความซับซ้อนระดับนี้เมื่อ:** ระบบยังอยู่ในช่วงพัฒนาก่อนเปิดตัวจริง (Pre-launch) หรือเป็นตารางตั้งค่าขนาดเล็กที่มีข้อมูลไม่กี่สิบแถวและสามารถยอมรับการหยุดระบบชั่วคราวได้
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: यदिคุณต้องการลบคอลัมน์ `legacy_tax_id` ออกจากตาราง `users` บนระบบที่ทำ Zero-Downtime Deployment ด้วย Kubernetes คุณต้องวางลำดับการลบอย่างไร?**
+  - **แนวคำตอบ:** เนื่องจาก Prisma Client เวลาทำคำสั่ง `findMany()` หรือ `findUnique()` โดยไม่ได้ระบุ `select` จะทำการดึงทุกคอลัมน์ที่ประกาศอยู่ใน `schema.prisma` ออกมาทั้งหมด หากเราสั่ง `DROP COLUMN` ในฐานข้อมูลก่อนที่ Pod เก่าจะถูกปิดตัวลง Pod เก่าที่ยังยิงคิวรี `SELECT id, email, legacy_tax_id FROM users` จะพังทันที ดังนั้นลำดับที่ถูกต้องคือ:
+    1. **Release ที่ 1 (Code Change):** ลบฟิลด์ `legacy_tax_id` ออกจากโค้ดและ `schema.prisma` (หรือใส่ `@ignore`) แล้ว Deploy โค้ดชุดใหม่ให้ครบทุก Pod จนไม่มี Pod ไหนเรียกใช้คอลัมน์นี้อีก
+    2. **Release ที่ 2 (Database Drop):** จึงค่อยรันไฟล์ Migration ที่มีคำสั่ง `ALTER TABLE "users" DROP COLUMN "legacy_tax_id";`
+- **Q2: ทำไมการใช้ `CREATE INDEX CONCURRENTLY` ในไฟล์ Migration ของ Prisma จึงต้องระมัดระวังเป็นพิเศษ?**
+  - **แนวคำตอบ:** เพราะ PostgreSQL ไม่อนุญาตให้รัน `CREATE INDEX CONCURRENTLY` ภายใน Transaction Block (`BEGIN ... COMMIT`) ในขณะที่ Prisma Migrate มีพฤติกรรมเริ่มต้นในการครอบทุกไฟล์ `migration.sql` ด้วย Transaction หากต้องการรันคำสั่งนี้ ต้องแยกเป็นไฟล์ Migration เฉพาะที่มีคำสั่งนี้เพียงคำสั่งเดียว หรือรันผ่านสคริปต์แยกต่างหากนอก Transaction ปกติ
+
+---
+
+## 5. การบริหารจัดการ Migration ข้ามสภาพแวดล้อม (Dev/Staging/Prod) และการทำงานเป็นทีม
+
+### แนวคิด (Concept)
+เมื่อทีมวิศวกรของ **Smart Butcher Marketplace** ขยายใหญ่ขึ้น มีนักพัฒนาหลายคนแยกกิ่ง Git (Feature Branches) ไปทำฟีเจอร์ของตัวเองพร้อมๆ กัน:
+- **นักพัฒนา A (กิ่ง `feat/loyalty-tier`):** สร้าง Migration เวลา `10:00` เพื่อเพิ่มคอลัมน์ระดับสมาชิกในตาราง `users`
+- **นักพัฒนา B (กิ่ง `feat/cold-chain-tracking`):** สร้าง Migration เวลา `10:30` เพื่อเพิ่มตารางบันทึกอุณหภูมิรถขนส่ง
+
+เมื่อทั้งสองคนรวมโค้ดเข้าสู่กิ่ง `main` ลำดับของโฟลเดอร์ Migration และการเปลี่ยนแปลงในไฟล์ `schema.prisma` จะต้องสอดคล้องกันอย่างสมบูรณ์ก่อนที่จะถูกส่งต่อไปยังสภาพแวดล้อม **Staging** และ **Production** ผ่านระบบ CI/CD อัตโนมัติ
+
+### หลักการเบื้องหลัง (Under the Hood)
+1. **การเรียงลำดับการรันด้วยชื่อโฟลเดอร์ (Lexicographical Sorting):**
+   Prisma Migrate เรียงลำดับการรันไฟล์ `migration.sql` ตามตัวอักษรของชื่อโฟลเดอร์ซึ่งขึ้นต้นด้วยประทับเวลา `YYYYMMDDHHMMSS_name` ในรูปแบบ UTC เสมอ
+2. **การตรวจจับความขัดแย้งด้วย `prisma migrate diff` และ `status`:**
+   ในขั้นตอน Continuous Integration (CI) ก่อนที่จะอนุญาตให้รวม Pull Request เข้ากิ่งหลัก เราสามารถใช้คำสั่งตรวจสอบว่าโฟลเดอร์ `prisma/migrations` มีความสมบูรณ์ตรงกับ `schema.prisma` หรือไม่ หากนักพัฒนาสองคนแก้ตารางเดียวกันขัดแย้งกัน นักพัฒนาคนที่รวมโค้ดทีหลังจะต้องดึงกิ่ง `main` ล่าสุดลงมา (`git rebase origin/main`), ลบโฟลเดอร์ Migration ของตัวเองออกชั่วคราว แล้วสั่ง `npx prisma migrate dev` ใหม่เพื่อให้ได้ประทับเวลาล่าสุดที่ต่อท้ายกิ่ง `main` อย่างถูกต้อง
+3. **การแยกขั้นตอน Migration ออกจาก Application Startup:**
+   ห้ามตั้งค่าให้แอปพลิเคชันสั่ง `prisma migrate deploy` ในสคริปต์ `CMD` ตอนเปิด Container (Application Startup) เพราะหากเราสั่งขยาย Container ออกเป็น 10 Instances พร้อมกัน ทั้ง 10 ตัวจะแย่งกันรัน Migration จนเกิด Race Condition (แม้ Prisma จะใช้ Advisory Lock ของ PostgreSQL `pg_advisory_lock(72707369)` ช่วยกั้นไว้ แต่หาก Migration ใช้เวลานาน Container อื่นอาจเกิด Healthcheck Timeout และรีสตาร์ทวนลูป) จึงต้องรัน Migration ในขั้นตอน **Pre-deploy Job บน CI/CD** เพียงจุดเดียวเท่านั้น
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: ขั้นตอนการแก้ไขความขัดแย้งของ Migration เมื่อทำงานเป็นทีม (Git Rebase Workflow)
+เมื่อนักพัฒนา B พบว่ากิ่ง `main` มี Migration ใหม่ของนักพัฒนา A เพิ่งถูก Merge เข้าไปก่อนหน้า:
+
+```bash filename="team_conflict_resolution.sh"
+# 1. ดึงโค้ดล่าสุดจากกิ่ง main
+git fetch origin main
+
+# 2. ลบโฟลเดอร์ Migration ในกิ่งของตัวเองที่ยังไม่ได้ Merge ออกชั่วคราว
+rm -rf prisma/migrations/20261017103000_add_cold_chain_tracking
+
+# 3. ทำการ Rebase กิ่งของตัวเองบน origin/main (และแก้ Conflict ในไฟล์ schema.prisma หากมี)
+git rebase origin/main
+
+# 4. รีเซ็ตฐานข้อมูล Local ให้รับ Migration ของเพื่อนร่วมทีมเข้ามา แล้วสร้าง Migration ของเราต่อท้ายใหม่
+npx prisma migrate reset --force
+npx prisma migrate dev --name add_cold_chain_tracking
+```
+
+#### ตัวอย่างที่ 2: ไปป์ไลน์ CI/CD อัตโนมัติด้วย GitHub Actions สำหรับ Staging และ Production
+ไฟล์ตั้งค่า GitHub Actions ที่แยกขั้นตอนการตรวจสอบบน Pull Request และการรัน `prisma migrate deploy` ผ่าน Direct Connection ก่อนสั่งอัปเดตแอปพลิเคชัน:
+
+```yaml filename=".github/workflows/database-deploy.yml"
+name: Smart Butcher - Database Migration & Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate-migrations:
+    name: Validate Schema & Migrations on PR
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: butcher_ci
+          POSTGRES_PASSWORD: ci_secret_password
+          POSTGRES_DB: smart_butcher_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+
+      - name: Apply all existing migrations to clean PostgreSQL 16
+        env:
+          DATABASE_URL: postgresql://butcher_ci:ci_secret_password@localhost:5432/smart_butcher_ci
+          DIRECT_URL: postgresql://butcher_ci:ci_secret_password@localhost:5432/smart_butcher_ci
+        run: npx prisma migrate deploy
+
+      - name: Verify no ungenerated schema changes exist
+        env:
+          DATABASE_URL: postgresql://butcher_ci:ci_secret_password@localhost:5432/smart_butcher_ci
+        run: |
+          npx prisma migrate diff \
+            --from-migrations ./prisma/migrations \
+            --to-schema-datamodel ./prisma/schema.prisma \
+            --shadow-database-url postgresql://butcher_ci:ci_secret_password@localhost:5432/postgres \
+            --exit-code
+
+  deploy-production-db:
+    name: Run Production Migration
+    needs: validate-migrations
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+
+      - name: Execute Prisma Migrate Deploy on Production
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_POOLER_URL }}
+          DIRECT_URL: ${{ secrets.PROD_DATABASE_DIRECT_URL }}
+        run: npx prisma migrate deploy
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การตรวจสอบก่อน Merge PR** | Merge โค้ดที่แก้ `schema.prisma` แต่ลืมรัน `migrate dev` ทำให้บน Production ไม่มีการสร้างคอลัมน์ | ใช้ `prisma migrate diff --exit-code` ใน CI เพื่อบังคับให้ `schema.prisma` ต้องตรงกับโฟลเดอร์ `migrations` เสมอ |
+| **ตำแหน่งที่สั่งรัน Migration** | ใส่ `"start": "prisma migrate deploy && node dist/main.js"` ใน `package.json` ทุก Container | รัน `prisma migrate deploy` ใน Dedicated CI/CD Step หรือ Kubernetes Init Job เพียง 1 Instance ก่อนสลับ Traffic |
+| **การจัดการโฟลเดอร์ Migration** | ใส่ `prisma/migrations` ไว้ใน `.gitignore` แล้วให้แต่ละเครื่องสร้างไฟล์เอาเอง | Commit โฟลเดอร์ `prisma/migrations` ทั้งหมดและไฟล์ `migration_lock.toml` เข้าสู่ Git เสมอ |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Dedicated Migration Step ใน CI/CD เมื่อ:** ระบบรันแบบ Multi-instance, Auto-scaling หรือ Serverless เพื่อป้องกันปัญหาการแย่งกันล็อกฐานข้อมูลตอนเริ่มต้นระบบ
+- **ไม่ควรรวม Migration ที่มีทั้ง Schema Change และ Breaking Code Change ไว้ใน Deploy รอบเดียวกัน:** หากการเปลี่ยนแปลงนั้นทำลายความเข้ากันได้กับโค้ดเวอร์ชันเก่าที่ยังทำงานอยู่ระหว่างการสลับ Container
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ในขณะที่รัน `prisma migrate deploy` หากมีโปรเซสสองตัวเผลอรันคำสั่งนี้เข้าหา PostgreSQL พร้อมกัน Prisma มีกลไกป้องกันอย่างไร?**
+  - **แนวคำตอบ:** Prisma Migrate ใช้กลไก **PostgreSQL Advisory Lock** (`pg_advisory_lock(72707369)`) ทันทีที่เริ่มเชื่อมต่อเพื่อทำ Migration โปรเซสแรกที่ได้รับ Lock จะสามารถอ่านตาราง `_prisma_migrations` และรันสคริปต์ SQL ได้ ส่วนโปรเซสที่สองจะต้องรอจนกว่าโปรเซสแรกจะปล่อย Lock (หรือเกิด Timeout หลังผ่านไป 10 วินาทีพร้อมแจ้งรหัสข้อผิดพลาด `P1002`)
+- **Q2: ทำไมใน CI Pipeline เราจึงใช้คำสั่ง `prisma migrate diff --exit-code` เปรียบเทียบระหว่างโฟลเดอร์ `migrations` กับ `schema.prisma`?**
+  - **แนวคำตอบ:** เพื่อป้องกันกรณีที่นักพัฒนาแก้ไขไฟล์ `schema.prisma` บนเครื่องตัวเองแล้วเผลอ Commit ขึ้น Git โดยลืมรัน `npx prisma migrate dev` เพื่อสร้างไฟล์ `.sql` คำสั่ง `migrate diff --exit-code` จะคืนค่า Exit Code ที่ไม่ใช่ 0 (คือ 2) ทันทีหากพบว่าโครงสร้างจากการรันไฟล์ Migration ทั้งหมดไม่ตรงกับ `schema.prisma` ทำให้ CI ตกและเตือนให้นักพัฒนาสร้างไฟล์ Migration ให้ครบถ้วนก่อน Merge
+
+---
+
+## 6. Seeding: การเตรียมข้อมูลตั้งต้นแบบ Idempotent แยกตามสภาพแวดล้อม
+
+### แนวคิด (Concept)
+หลังจากสร้างโครงสร้างตารางเปล่าๆ เสร็จแล้ว ระบบร้านค้าเนื้อ **Smart Butcher Marketplace** จะยังไม่สามารถเปิดทำงานได้หากไม่มีข้อมูลตั้งต้น (Master Data) เช่น หมวดหมู่เนื้อมาตรฐาน (Wagyu, Dry-Aged, Grass-Fed) หรือบัญชีผู้ดูแลระบบคนแรก
+
+กระบวนการใส่ข้อมูลตั้งต้นนี้เรียกว่า **Database Seeding** ซึ่งกฎเหล็กที่สำคัญที่สุดของการเขียนสคริปต์ Seed คือต้องมีคุณสมบัติ **Idempotency (การทำงานซ้ำได้โดยผลลัพธ์เหมือนเดิม)** ไม่ว่าเราจะเผลอรันคำสั่ง `npx prisma db seed` ซ้ำกัน 1 ครั้ง หรือ 100 ครั้ง ข้อมูลหมวดหมู่เนื้อต้องไม่ถูกสร้างซ้ำซ้อน และไม่โยน Error `Unique constraint failed` ออกมา
+
+นอกจากนี้ ข้อมูลที่ใช้ Seed ต้องถูกแบ่งแยกตามสภาพแวดล้อม (`NODE_ENV`) อย่างชัดเจน:
+- **Production:** ใส่เฉพาะข้อมูลตั้งต้นของระบบที่จำเป็นต้องมีจริงๆ (System Master Data / Lookup Categories) เท่านั้น ห้ามใส่สินค้าตัวอย่างหรือบัญชีทดสอบรหัสผ่านเดาง่ายเด็ดขาด
+- **Development / Staging:** ใส่ทั้งข้อมูลตั้งต้นของระบบ และข้อมูลจำลอง (Mock Products, Test Users, Sample Orders) เพื่อให้นักพัฒนาและ QA ใช้ทดสอบหน้าเว็บได้ทันที
+
+### หลักการเบื้องหลัง (Under the Hood)
+1. **การทำงานของ `prisma.model.upsert()`:**
+   คำสั่ง `upsert` ของ Prisma จะตรวจสอบว่ามีแถวที่ตรงกับเงื่อนไข `where` (ซึ่งต้องเป็นคอลัมน์ที่เป็น `@id` หรือ `@unique` เช่น `slug` หรือ `sku`) อยู่หรือไม่ หากยังไม่มีจะทำการ `INSERT` (`create`) แต่หากมีอยู่แล้วจะทำการ `UPDATE` (`update`) ข้อมูลให้เป็นปัจจุบัน ใน PostgreSQL เวอร์ชันใหม่ Prisma จะแปลงคำสั่งนี้ให้ใช้ `INSERT ... ON CONFLICT DO UPDATE` ในระดับฐานข้อมูลซึ่งปลอดภัยจากปัญหา Race Condition
+2. **การทำงานของ `createMany({ skipDuplicates: true })`:**
+   เมื่อต้องการเพิ่มข้อมูลตั้งต้นจำนวนมากรวดเดียว การใช้ `skipDuplicates: true` จะสั่งให้ Prisma สร้างคำสั่ง SQL `INSERT INTO ... VALUES (...), (...) ON CONFLICT DO NOTHING;` ของ PostgreSQL 16 ซึ่งหากพบข้อมูลที่มี Unique Key ซ้ำอยู่แล้วจะข้ามแถวนั้นไปอย่างรวดเร็วโดยไม่เกิด Error
+3. **การผูกสคริปต์เข้ากับวงจรชีวิตของ Prisma:**
+   เมื่อกำหนดค่า `"prisma": { "seed": "tsx prisma/seed.ts" }` ในไฟล์ `package.json` Prisma จะรันสคริปต์นี้ให้อัตโนมัติทุกครั้งที่สั่ง `npx prisma migrate reset` หรือเมื่อเราสั่ง `npx prisma db seed` ด้วยตัวเอง
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: การตั้งค่า `package.json` เพื่อเรียกใช้สคริปต์ Seed ด้วย TypeScript (`tsx`)
+กำหนดคำสั่งรันสคริปต์ Seed ในไฟล์ `package.json` ของโปรเจกต์:
+
+```json filename="package.json"
+{
+  "name": "smart-butcher-marketplace",
+  "version": "1.0.0",
+  " prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "scripts": {
+    "db:migrate:dev": "prisma migrate dev",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "db:seed": "prisma db seed"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.20.0"
+  },
+  "devDependencies": {
+    "prisma": "^5.20.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
+```
+
+#### ตัวอย่างที่ 2: สคริปต์ `prisma/seed.ts` แบบ Idempotent แยกตามสภาพแวดล้อม (`NODE_ENV`)
+สคริปต์ด้านล่างใช้ `upsert` สำหรับหมวดหมู่หลักที่ต้องมีทุกสภาพแวดล้อม และแยกการสร้างสินค้าเนื้อวากิวจำลองไว้เฉพาะเมื่อไม่ได้รันบน Production:
+
+```typescript filename="prisma/seed.ts"
+import { PrismaClient, Prisma } from '@prisma/client';
+
+const prisma = new PrismaClient();
+
+// 1. ข้อมูล Master Categories ที่ต้องมีในทุกสภาพแวดล้อม (รวมถึง Production)
+const MASTER_CATEGORIES = [
+  { name: 'Japanese A5 Wagyu', slug: 'japanese-a5-wagyu' },
+  { name: '45-Day Dry-Aged Beef', slug: '45-day-dry-aged-beef' },
+  { name: 'Australian Grass-Fed', slug: 'australian-grass-fed' },
+  { name: 'Artisanal Sausages & Burgers', slug: 'artisanal-sausages-burgers' },
+];
+
+async function seedMasterCategories() {
+  console.log('🥩 Seeding master categories (Idempotent)...');
+
+  for (const cat of MASTER_CATEGORIES) {
+    await prisma.category.upsert({
+      where: { slug: cat.slug },
+      update: { name: cat.name },
+      create: {
+        name: cat.name,
+        slug: cat.slug,
+      },
+    });
+  }
+}
+
+// 2. ข้อมูลสินค้าจำลองสำหรับสภาพแวดล้อม Development และ Staging เท่านั้น
+async function seedDevelopmentCatalog() {
+  console.log('🧪 Seeding development sample products for Smart Butcher...');
+
+  const wagyuCategory = await prisma.category.findUniqueOrThrow({
+    where: { slug: 'japanese-a5-wagyu' },
+  });
+
+  const dryAgedCategory = await prisma.category.findUniqueOrThrow({
+    where: { slug: '45-day-dry-aged-beef' },
+  });
+
+  const sampleProducts: Prisma.ProductCreateManyInput[] = [
+    {
+      categoryId: wagyuCategory.id,
+      sku: 'SB-WAGYU-RIBEYE-A5',
+      name: 'Miyazaki Wagyu A5 Ribeye Steak',
+      marblingScore: 12,
+      pricePerKg: new Prisma.Decimal('6800.00'),
+      stockWeightGr: 15000,
+    },
+    {
+      categoryId: wagyuCategory.id,
+      sku: 'SB-WAGYU-STRIPLOIn-A5',
+      name: 'Kagoshima Wagyu A5 Striploin',
+      marblingScore: 11,
+      pricePerKg: new Prisma.Decimal('6200.00'),
+      stockWeightGr: 12000,
+    },
+    {
+      categoryId: dryAgedCategory.id,
+      sku: 'SB-DRY45-TOMAHAWK',
+      name: '45-Day Dry-Aged Black Angus Tomahawk',
+      marblingScore: 5,
+      pricePerKg: new Prisma.Decimal('3900.00'),
+      stockWeightGr: 25000,
+    },
+  ];
+
+  // ใช้ skipDuplicates เพื่อแปลงเป็น INSERT ... ON CONFLICT DO NOTHING ใน PostgreSQL 16
+  const result = await prisma.product.createMany({
+    data: sampleProducts,
+    skipDuplicates: true,
+  });
+
+  console.log(`✅ Inserted ${result.count} new sample products (duplicates skipped).`);
+}
+
+async function main() {
+  const currentEnv = process.env.NODE_ENV || 'development';
+  console.log(`🚀 Running database seed for environment: [${currentEnv}]`);
+
+  // รันข้อมูลตั้งต้นหลักเสมอไม่ว่าจะอยู่สภาพแวดล้อมใด
+  await seedMasterCategories();
+
+  // ป้องกันการนำข้อมูลจำลองขึ้นสู่ฐานข้อมูล Production เด็ดขาด
+  if (currentEnv !== 'production') {
+    await seedDevelopmentCatalog();
+  } else {
+    console.log('🔒 Production environment detected: Skipping mock catalog data.');
+  }
+}
+
+main()
+  .then(async () => {
+    await prisma.$disconnect();
+  })
+  .catch(async (error) => {
+    console.error('❌ Database seed failed:', error);
+    await prisma.$disconnect();
+    process.exit(1);
+  });
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **วิธีการเขียนคำสั่งเพิ่มข้อมูล** | ใช้ `prisma.category.create()` ธรรมดา พอรันครั้งที่สองก็พังเพราะ `Unique constraint failed` | ใช้ `upsert()` หรือ `createMany({ skipDuplicates: true })` เพื่อให้รันซ้ำกี่ครั้งก็ได้ผลลัพธ์เดิม |
+| **การจัดการข้อมูลเดิมใน Seed** | ใส่ `await prisma.product.deleteMany()` ไว้บรรทัดแรกของไฟล์ `seed.ts` โดยไม่เช็ค `NODE_ENV` | ห้ามสั่ง `deleteMany()` ในไฟล์ Seed หากต้องการล้างข้อมูลบน Local ให้ใช้ `prisma migrate reset` แทน |
+| **การแยกสภาพแวดล้อม** | รันข้อมูลสินค้าปลอมและผู้ใช้ทดสอบ `admin@test.com` รหัสผ่าน `123456` ขึ้นไปบน Production | แยกฟังก์ชัน Master Data ออกจาก Mock Data โดยตรวจสอบค่า `process.env.NODE_ENV` อย่างรัดกุม |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Database Seeding เมื่อ:** ต้องการเตรียมข้อมูลอ้างอิงพื้นฐานของระบบ (Lookup Tables, Default Categories, System Roles) และต้องการสร้างชุดข้อมูลจำลองให้นักพัฒนาเริ่มต้นทำงานบนเครื่องใหม่ได้ภายในคำสั่งเดียว
+- **ไม่ควรใช้ไฟล์ `seed.ts` แทนการทำ Data Migration ของข้อมูลจริงบน Production:** หากต้องการแปลงค่าข้อมูลของลูกค้าที่มีอยู่แล้วบน Production ให้เขียนเป็นคำสั่ง SQL ภายในไฟล์ `migration.sql` (เพื่อให้ถูกบันทึกและควบคุมลำดับในตาราง `_prisma_migrations` เพียงครั้งเดียว) แทนการใส่ไว้ใน `seed.ts`
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: คำว่า Idempotent ในบริบทของ Database Seeding หมายความว่าอย่างไร และใน PostgreSQL เราใช้คำสั่ง SQL ใดเพื่อรับประกันคุณสมบัตินี้?**
+  - **แนวคำตอบ:** Idempotent หมายถึงการที่สคริปต์สามารถถูกรันซ้ำกี่ครั้งก็ได้โดยที่สถานะของข้อมูลในฐานข้อมูลยังคงถูกต้องเหมือนกับการรันครั้งแรก ไม่เกิดข้อมูลซ้ำซ้อนและไม่เกิดข้อผิดพลาด ใน PostgreSQL 16 เราใช้ไวยากรณ์ `INSERT INTO ... VALUES (...) ON CONFLICT (unique_column) DO UPDATE SET ...` (ซึ่งตรงกับ `prisma.upsert`) หรือ `ON CONFLICT DO NOTHING` (ซึ่งตรงกับ `skipDuplicates: true`)
+- **Q2: ทำไมการแปลงข้อมูลเก่าของลูกค้าบน Production (Data Migration) ถึงควรเขียนอยู่ในไฟล์ `migration.sql` หรือสคริปต์เฉพาะกิจ แทนที่จะเขียนไว้ใน `prisma/seed.ts`?**
+  - **แนวคำตอบ:** เพราะไฟล์ `migration.sql` มีกลไกการติดตามสถานะในตาราง `_prisma_migrations` ซึ่งรับประกันว่าจะถูกรันเพียงครั้งเดียวตามลำดับเวลาที่ถูกต้องคู่กับการเปลี่ยนโครงสร้างตาราง ในขณะที่ `seed.ts` ไม่มีการบันทึกประวัติการรันและถูกออกแบบมาให้ใช้เตรียมข้อมูลตั้งต้นของระบบเท่านั้น
+
+---
+
+## ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การรัน `prisma db push` หรือ `prisma migrate dev` บนฐานข้อมูล Production**
+   - **สาเหตุ:** นักพัฒนาเข้าใจผิดว่าคำสั่งเหล่านี้ใช้ซิงค์ตารางได้เหมือนกันทุกที่
+   - **ผลกระทบ:** คำสั่งเหล่านี้อาจพยายามสร้าง Shadow Database หรือแจ้งเตือนให้รีเซ็ตล้างข้อมูลทั้งฐานข้อมูล ส่งผลให้ข้อมูลคำสั่งซื้อหายทั้งหมด
+   - **วิธีแก้:** ล็อกสคริปต์ CI/CD ให้รันเฉพาะ `npx prisma migrate deploy` เท่านั้น
+
+2. **การปล่อยให้ Prisma สร้างคำสั่ง `DROP COLUMN` + `ADD COLUMN` เวลาเปลี่ยนชื่อฟิลด์**
+   - **สาเหตุ:** เปลี่ยนชื่อฟิลด์ใน `schema.prisma` แล้วกดรันทันทีโดยไม่เปิดดูไฟล์ `migration.sql`
+   - **ผลกระทบ:** ข้อมูลเดิมในคอลัมน์นั้นถูกลบทิ้ง 100%
+   - **วิธีแก้:** ใช้คำสั่ง `npx prisma migrate dev --create-only` แล้วเข้าไปแก้ไฟล์ SQL ให้เป็น `ALTER TABLE ... RENAME COLUMN ... TO ...`
+
+3. **การรัน Migration ผ่าน Connection Pooler (เช่น PgBouncer โหมด Transaction)**
+   - **สาเหตุ:** ใช้ `DATABASE_URL` ตัวเดียวที่มีพารามิเตอร์ `?pgbouncer=true` ในการรันทั้งแอปพลิเคชันและ Migration
+   - **ผลกระทบ:** Prisma Migrate ต้องใช้ Session-level Advisory Lock (`pg_advisory_lock`) เพื่อป้องกันการรันซ้ำซ้อน ซึ่งในโหมด Transaction Pooling การเชื่อมต่อจะถูกสลับไปมาหลังจบแต่ละคำสั่ง ทำให้ล็อกค้างหรือรันไม่ผ่าน
+   - **วิธีแก้:** กำหนด `directUrl = env("DIRECT_URL")` ใน `schema.prisma` ให้ชี้ไปยังพอร์ตตรงของ PostgreSQL (เช่น 5432) เสมอ
+
+4. **การแก้ไขหรือลบไฟล์ `migration.sql` ที่ถูก Merge เข้ากิ่งหลักไปแล้ว**
+   - **สาเหตุ:** นักพัฒนาต้องการแก้ชนิดข้อมูลนิดหน่อย เลยแอบไปแก้ไฟล์ Migration เก่าแทนการสร้างไฟล์ใหม่
+   - **ผลกระทบ:** ค่า SHA-256 Checksum ในตาราง `_prisma_migrations` บนเครื่อง Staging/Production จะไม่ตรงกับไฟล์ใน Git ทำให้ไปป์ไลน์พังทันที
+   - **วิธีแก้:** มองไฟล์ Migration ที่ Merge แล้วเป็นสิ่งที่ไม่สามารถแก้ไขย้อนหลังได้ (Immutable) หากต้องการเปลี่ยนโครงสร้างให้สร้าง Migration ใบใหม่เสมอ
+
+5. **การใส่ `await prisma.table.deleteMany()` ไว้ในไฟล์ `seed.ts` โดยไม่มีเงื่อนไขป้องกัน**
+   - **สาเหตุ:** นักพัฒนาเขียนเพื่อความสะดวกในการล้างข้อมูลเก่าบนเครื่องตัวเองก่อนใส่ข้อมูลใหม่
+   - **ผลกระทบ:** หากมีใครเผลอรัน `npx prisma db seed` บนสภาพแวดล้อมจริง ข้อมูลทั้งหมดจะถูกลบทิ้งทันที
+   - **วิธีแก้:** เขียนสคริปต์ Seed แบบ Idempotent ด้วย `upsert` และตรวจเช็ค `process.env.NODE_ENV !== 'production'` ก่อนใส่ข้อมูลทดสอบเสมอ
+
+---
+
+## Checklist สรุป
+
+ก่อนเปิด Pull Request หรือสั่ง Deploy การเปลี่ยนแปลงฐานข้อมูลของระบบ **Smart Butcher Marketplace** ให้ตรวจสอบตามรายการต่อไปนี้ทุกครั้ง:
+
+- [ ] **Create-Only Inspection:** ใช้ `--create-only` และเปิดอ่านไฟล์ `migration.sql` ทุกบรรทัดแล้วว่าไม่มีคำสั่ง `DROP TABLE` หรือ `DROP COLUMN` ที่ไม่ได้ตั้งใจ
+- [ ] **Lock Timeout Protection:** ในไฟล์ Migration ที่แก้ตารางขนาดใหญ่ มีการใส่ `SET lock_timeout = '3s';` หรือ `'5s'` ป้องกันการบล็อกคิวรีหน้าร้านค้างยาวนาน
+- [ ] **Zero-Downtime Safe:** การเพิ่ม Constraint บนตารางใหญ่ใช้เทคนิค `NOT VALID` ตามด้วย `VALIDATE CONSTRAINT` และการลบคอลัมน์ถูกแยกไว้ทำหลังจากโค้ดเวอร์ชันใหม่เลิกใช้งานคอลัมน์นั้นแล้ว
+- [ ] **Direct URL Configured:** ตั้งค่า `directUrl` ใน `schema.prisma` สำหรับรัน Migration โดยไม่ผ่าน Connection Pooler
+- [ ] **CI Validation Passed:** รัน `prisma migrate diff --exit-code` ใน CI เพื่อยืนยันว่า `schema.prisma` ตรงกับโฟลเดอร์ `prisma/migrations` 100%
+- [ ] **Pre-Deploy Backup:** มีการตรวจสอบว่าฐานข้อมูล Production มี Backup ล่าสุดพร้อมใช้งานก่อนรัน `prisma migrate deploy`
+- [ ] **Idempotent Seed:** สคริปต์ `prisma/seed.ts` ใช้ `upsert` หรือ `skipDuplicates: true` และแยกข้อมูลทดสอบออกจาก Production อย่างชัดเจน
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อคุณเข้าใจกระบวนการเปลี่ยนแปลงโครงสร้างฐานข้อมูลอย่างปลอดภัยแล้ว ขั้นตอนต่อไปที่วิศวกรฐานข้อมูลต้องเตรียมพร้อมคือการสำรองและกู้คืนข้อมูลเผื่อเกิดเหตุไม่คาดฝัน:
+
+<Callout type="tip" title="เส้นทางการศึกษาต่อสำหรับระบบฐานข้อมูลระดับ Production">
+1. **การสำรองและกู้คืนข้อมูลเมื่อเกิดภัยพิบัติ:**  
+   👉 **[Backup](/docs/database/backup)** — เจาะลึกการทำ Backup ด้วย `pg_dump`, `pg_restore`, การกู้คืนข้อมูลบน Docker และการทำ Point-in-Time Recovery (PITR)
+
+2. **การรักษาความปลอดภัยและการจำกัดสิทธิ์ Role ของ Migration:**  
+   👉 **[Security](/docs/database/security)** — เรียนรู้การแยก Role ระหว่างผู้ใช้แอปพลิเคชันปกติกับผู้ใช้ที่มีสิทธิ์รัน DDL Migration ตามหลัก Least Privilege
+
+3. **การตั้งค่าการเชื่อมต่อและใช้งาน Prisma ORM เชิงลึก:**  
+   👉 **[Prisma ORM](/docs/backend/prisma-orm)** และ **[Connection Pooling](/docs/database/connection-pooling)** — ศึกษากลไกของ `url` คู่กับ `directUrl` และการใช้งาน Prisma Client ในฝั่ง Backend
+</Callout>

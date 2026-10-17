@@ -1,0 +1,120 @@
+---
+title: Typography
+category: Frontend
+parentTitle: CSS
+version: CSS3 / Modern CSS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+กว่า 90% ของข้อมูลบนหน้าเว็บคือ **"ตัวหนังสือ (Typography)"** การจัดรูปแบบตัวอักษรที่ดีไม่ได้มีไว้เพื่อความสวยงามเพียงอย่างเดียว แต่มีหน้าที่หลักคือ **"ความสะดวกสบายในการอ่าน (Readability & Legibility)"**
+
+คุณสมบัติหลัก:
+- **`font-family`**: ลำดับฟอนต์สำรอง (Font Stack)
+- **`font-size` & `font-weight`**: ขนาดและน้ำหนักความหนา (300, 400, 500, 600, 700)
+- **`line-height`**: ระยะห่างระหว่างบรรทัด (สำคัญยิ่งยวดสำหรับภาษาไทย!)
+- **`letter-spacing`**: ระยะห่างระหว่างตัวอักษร
+- **`overflow-wrap` & `word-break`**: การควบคุมการตัดคำเมื่อข้อความยาวเกินกรอบ
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ปัญหาเฉพาะตัวของ "ฟอนต์ภาษาไทย" ในงาน CSS
+1. **สระและวรรณยุกต์ซ้อนกัน 3 ชั้น**: ภาษาไทยมีพยัญชนะ สระบน/ล่าง และวรรณยุกต์ (เช่น คำว่า *"ที่"*, *"หนึ่ง"*) หากใช้ `line-height: 1.2` หรือ `1.3` แบบภาษาอังกฤษ สระบนของบรรทัดล่างจะชนกับสระล่างของบรรทัดบนทันที!
+   > **กฎทองของภาษาไทย**: ควรกำหนด `line-height` สำหรับเนื้อหาทั่วไปอยู่ที่ **`1.65` ถึง `1.75`** เสมอ เพื่อความสบายตา
+2. **การตัดคำภาษาไทย**: ภาษาไทยไม่มีช่องว่างเว้นวรรคระหว่างคำ หากเจอคำยาวๆ หรือ URL ยาวๆ ในหน้าจอมือถือ ข้อความจะทะลุขอบจอทันที ต้องควบคุมด้วย `overflow-wrap: break-word;`
+
+---
+
+## 3. ตัวอย่างโค้ด (Modern CSS)
+
+### ตัวอย่างที่ 1: การตั้งค่า Typography ที่สมบูรณ์แบบสำหรับภาษาไทยและภาษาอังกฤษ
+
+```css filename="typography.css"
+/* การตั้งค่าระบบตัวอักษรสากล */
+body {
+  font-family: var(--font-sarabun), var(--font-inter), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 1rem; /* 16px */
+  /* line-height ที่ผ่อนคลาย ป้องกันสระชนกัน */
+  line-height: 1.7; 
+  color: #1e293b;
+  /* เปิดใช้งานการเกลี่ยฟอนต์ให้คมชัดบนจอ Retina (macOS/iOS) */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* ป้องกันคำภาษาไทยยาวๆ ล้นทะลุขอบจอมือถือ */
+  overflow-wrap: break-word;
+}
+
+/* หัวข้อบทความ */
+h1, h2, h3 {
+  font-weight: 700;
+  /* หัวข้อยิ่งขนาดใหญ่ line-height ยิ่งต้องแคบลงเพื่อความกระชับ */
+  line-height: 1.25;
+  letter-spacing: -0.02em; /* บีบตัวอักษรให้แน่นสวยสไตล์ Apple */
+  color: #0f172a;
+}
+```
+
+### ตัวอย่างที่ 2: การใช้ `font-display: swap` โหลด Web Font ไม่ให้กระตุก
+
+```css filename="webfonts.css"
+@font-face {
+  font-family: 'SarabunCustom';
+  src: url('/fonts/sarabun-regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  /* swap: แสดงฟอนต์ระบบสำรองทันที แล้วค่อยสลับเป็นฟอนต์จริงเมื่อโหลดเสร็จ (ป้องกันจอว่าง) */
+  font-display: swap;
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ใช้ `line-height` แคบ และไม่กำหนดการตัดคำ
+
+```css
+/* ผิด: สระบน-ล่างชนกันจนอ่านไม่ออก และข้อความภาษาไทยล้นขอบจอมือถือ */
+.thai-content {
+  line-height: 1.1;
+  width: 300px;
+}
+```
+
+### ✅ โค้ดที่ถูกต้อง: เว้นระยะบรรทัดโปร่งสบาย และตัดคำปลอดภัย
+
+```css
+/* ถูกต้อง: สระไม่ชนกัน ตัวหนังสืออ่านง่าย ไม่ล้นจอ */
+.thai-content {
+  line-height: 1.68;
+  overflow-wrap: break-word;
+  word-break: normal;
+  width: 300px;
+}
+```
+
+---
+
+## 5. เทียบกับ Tailwind CSS v4
+
+| Typography CSS Property | Tailwind CSS v4 Utility |
+| :--- | :--- |
+| `font-size: 1.125rem; line-height: 1.75rem;` | `text-lg` |
+| `line-height: 1.75;` | `leading-relaxed` หรือ `leading-[1.75]` |
+| `letter-spacing: -0.02em;` | `tracking-tight` |
+| `overflow-wrap: break-word;` | `break-words` |
+| `text-align: center;` | `text-center` |
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการกำหนด `line-height` สำหรับเนื้อหาภาษาไทยจึงไม่ควรใช้ค่าเดียวกับภาษาอังกฤษ (เช่น 1.2 - 1.4)?
+**แนวทางคำตอบ**: ภาษาอังกฤษเป็นภาษาที่มีตัวอักษรอยู่ในระนาบเดียว (มีเพียงตัวพิมพ์ใหญ่และตัวพิมพ์เล็กที่มีหางขึ้นหรือลงเล็กน้อย) จึงสามารถใช้ `line-height` ที่แคบอย่าง 1.2 - 1.4 ได้โดยไม่ทับซ้อนกัน 
+แต่ภาษาไทยมีโครงสร้างระนาบตัวอักษรถึง 4 ระดับ (สระล่าง, พยัญชนะฐาน, สระบน, และวรรณยุกต์) หากใช้ `line-height` แคบเกินไป วรรณยุกต์ของบรรทัดล่างจะชนและซ้อนทับกับสระล่างของบรรทัดบนทันที ทำให้อ่านยากและดูไม่เป็นมืออาชีพ จึงควรใช้ `line-height` ขั้นต่ำที่ 1.6 - 1.75 เสมอ
+
+### Q2: แอตทริบิวต์ `font-display: swap` ในคำสั่ง `@font-face` มีหน้าที่อะไร และช่วยยกระดับ Core Web Vitals อย่างไร?
+**แนวทางคำตอบ**: `font-display: swap` สั่งให้เบราว์เซอร์แสดงผลตัวหนังสือด้วย **Fallback System Font** ทันทีในระหว่างที่ไฟล์ Web Font จริงกำลังดาวน์โหลด (กำจัดปัญหา FOIT: Flash of Invisible Text ที่ผู้ใช้ต้องมองหน้าจอว่างเปล่า) และเมื่อไฟล์ Web Font ดาวน์โหลดเสร็จ จึงค่อยทำการสลับ (Swap) มาเป็นฟอนต์ที่กำหนด ซึ่งช่วยปรับปรุงคะแนน **First Contentful Paint (FCP)** และ **Largest Contentful Paint (LCP)** ให้เร็วขึ้นอย่างเห็นได้ชัด

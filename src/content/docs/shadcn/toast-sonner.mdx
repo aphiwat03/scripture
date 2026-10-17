@@ -1,0 +1,169 @@
+---
+title: Toast with Sonner
+category: Frontend
+parentTitle: shadcn/ui
+version: shadcn/ui & Radix UI
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**Toast** คือระบบการแจ้งเตือนแบบลอยตัวชั่วคราว (Temporary Non-blocking Notification) ที่ปรากฏขึ้นมุมหน้าจอเพื่อส่งสัญญาณสั้นๆ ให้ผู้ใช้งานทราบถึงผลลัพธ์ของการกระทำ (Feedback) แล้วค่อยๆ จางหายไปเองโดยไม่ขัดขวางการทำงานของผู้ใช้
+
+ในเวอร์ชันปัจจุบัน shadcn/ui ได้เปลี่ยนจากระบบ `use-toast` ดั้งเดิมมาเป็น **Sonner** ซึ่งสร้างโดย Emil Kowalski:
+- **เบาและเร็วกว่า**: โค้ดมีขนาดเล็กและมีประสิทธิภาพสูงมาก
+- **ท่าทางสัมผัสที่ลื่นไหล (Gestures)**: รองรับการปัดทิ้ง (Swipe to dismiss) บนหน้าจอสัมผัส
+- **การเรียงซ้อน (Stacking Cards)**: เมื่อมีการแจ้งเตือนหลายอัน การ์ดจะซ้อนกันเป็นมิติที่สวยงาม
+- **รองรับ `toast.promise`**: แสดงสถานะ Loading ระหว่างเรียก API และสลับเป็น Success หรือ Error ให้อัตโนมัติในแถบเดียว
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### สถาปัตยกรรมของ Sonner
+1. **Observer Pattern & Event Emitter**:
+   - เมื่อคุณเรียกใช้ `toast.success("บันทึกสำเร็จ")` จากที่ใดก็ได้ในแอป (แม้แต่ภายในฟังก์ชัน callback ที่ไม่ใช่ React Component) Sonner จะส่ง Event ไปยัง State Store ภายใน
+2. **Global `<Toaster />` Mount**:
+   - คอมโพเนนต์ `<Toaster />` ที่ติดตั้งไว้ใน `app/layout.tsx` จะคอยฟัง Event นั้น และเรนเดอร์ Toast Items ผ่าน React Portal ลอยขึ้นไปที่เลเยอร์สูงสุดของหน้าจอ
+3. **Theming & Color Tokens Integration**:
+   - ใน shadcn/ui ตัว Toaster ของ Sonner ถูกห่อหุ้มให้ดึงตัวแปรสีจาก Tailwind CSS (`bg-background text-foreground border-border`) ทำให้เมื่อคุณสลับโหมด Dark/Light ผ่าน `next-themes` ตัว Toast จะเปลี่ยนสีตามธีมของเว็บไซต์ทันที
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### 1. การติดตั้ง `<Toaster />` ใน Root Layout (`app/layout.tsx`)
+```tsx filename="app/layout.tsx"
+import { Toaster } from "@/components/ui/sonner";
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="th" suppressHydrationWarning>
+      <body>
+        {children}
+        {/* ติดตั้ง Toaster ไว้ที่ระดับ Root */}
+        <Toaster position="top-right" richColors closeButton />
+      </body>
+    </html>
+  );
+}
+```
+
+### 2. ตัวอย่างการใช้งานจริง: ปุ่มประมวลผลการจ่ายเงินด้วย `toast.promise`
+```tsx filename="app/billing/InvoiceActionButtons.tsx"
+"use client";
+
+import * as React from "react";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { CreditCard, Download, ExternalLink } from "lucide-react";
+
+interface InvoiceActionProps {
+  invoiceId: string;
+  amount: number;
+}
+
+export function InvoiceActionButtons({ invoiceId, amount }: InvoiceActionProps) {
+  // จำลอง API Call จ่ายเงิน
+  async function payInvoiceApi(): Promise<{ transactionId: string }> {
+    return new Promise((resolve, reject) => {
+      setTimeout(() => {
+        // สุ่มความสำเร็จ 80%
+        if (Math.random() > 0.2) {
+          resolve({ transactionId: `TXN-${Date.now()}` });
+        } else {
+          reject(new Error("วงเงินในบัตรไม่เพียงพอ"));
+        }
+      }, 2000);
+    });
+  }
+
+  // 1. ตัวอย่าง toast.promise: ครอบคลุมทั้ง Loading -> Success / Error
+  function handlePayNow() {
+    toast.promise(payInvoiceApi(), {
+      loading: `กำลังตัดเงินจำนวน ฿${amount.toLocaleString()} ผ่านบัตรเครดิต...`,
+      success: (data) => {
+        return `ชำระเงินสำเร็จ! รหัสธุรกรรม: ${data.transactionId}`;
+      },
+      error: (err: Error) => {
+        return `การชำระเงินล้มเหลว: ${err.message}`;
+      },
+      action: {
+        label: "ดูใบเสร็จ",
+        onClick: () => window.open(`/receipts/${invoiceId}`, "_blank"),
+      },
+    });
+  }
+
+  // 2. ตัวอย่าง toast.info ธรรมดา
+  function handleDownloadPdf() {
+    toast.info("กำลังสร้างไฟล์ PDF", {
+      description: "ระบบกำลังดาวน์โหลดไฟล์ใบแจ้งหนี้ลงในเครื่องของคุณ",
+      duration: 3000,
+    });
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-3 p-4 border rounded-2xl bg-card">
+      <div className="flex-1 min-w-[200px]">
+        <span className="text-xs text-muted-foreground block">ยอดค้างชำระ (#{invoiceId})</span>
+        <span className="text-lg font-bold">฿{amount.toLocaleString()}</span>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <Button variant="outline" size="sm" onClick={handleDownloadPdf} className="gap-1.5">
+          <Download className="w-4 h-4 text-muted-foreground" />
+          ดาวน์โหลด PDF
+        </Button>
+
+        <Button size="sm" onClick={handlePayNow} className="gap-1.5">
+          <CreditCard className="w-4 h-4" />
+          ชำระเงินทันที
+        </Button>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **ใช้ Toast สำหรับการยืนยันการลบข้อมูล (Action Confirmation)**<br/>เช่น เด้ง Toast ขึ้นมาถามว่า "คุณต้องการลบบัญชีหรือไม่?"<br/>ผลลัพธ์: Toast จะเลือนหายไปเองก่อนที่ผู้ใช้จะทันตัดสินใจ | **ใช้ `AlertDialog` สำหรับการยืนยันการกระทำ**<br/>และใช้ Toast เฉพาะเมื่อการกระทำเสร็จสิ้นแล้วเพื่อแจ้ง Feedback สั้นๆ ว่า "ลบข้อมูลสำเร็จแล้ว" |
+| **ใส่ข้อความยาวเป็นย่อหน้าลงใน Toast**<br/>ทำให้ Toast บังหน้าจอ รกสายตา และอ่านไม่ทัน | **ใช้ข้อความกระชับ 1 บรรทัด (และอาจมี Description สั้นๆ เพิ่มเติม)**<br/>ข้อมูลที่ยาวควรแสดงในหน้าเพจหรือ Modal |
+| **ประกาศ `<Toaster />` ซ้ำในทุกๆ หน้า (Page/Component)**<br/>ทำให้เกิด Toaster ซ้อนทับกันหลายชั้นและแจ้งเตือนเบิ้ล | **วาง `<Toaster />` เพียงจุดเดียวใน `app/layout.tsx`**<br/>แล้วเรียก `toast()` ได้อย่างอิสระจากทุกไฟล์ |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้เมื่อ:
+- **แจ้งผลลัพธ์การทำงานที่ผู้ใช้คาดหมายไว้แล้ว (Expected Feedback)**: เช่น "คัดลอกลิงก์แล้ว", "บันทึกข้อมูลแบบร่างสำเร็จ", "ส่งคำขอเป็นเพื่อนแล้ว"
+- **การประมวลผลพื้นหลังแบบ Asynchronous**: ใช้ `toast.promise` แจ้งสถานะ Upload ไฟล์ หรือประมวลผลธุรกรรม
+
+### ไม่ควรใช้เมื่อ:
+- **ข้อผิดพลาดระดับวิกฤต (System Fatal Errors)**: เช่น เซิร์ฟเวอร์ล่ม (500 Internal Server Error) หรือผู้ใช้ไม่มีสิทธิ์เข้าถึง (403 Unauthorized) กรณีนี้ควรใช้ Error Boundary หรือ Alert Banner กลางหน้าจอ
+- **ข้อมูลที่ต้องมีการตัดสินใจ (Critical Decision)**: ที่ต้องเลือกว่าจะ "ยินยอม" หรือ "ปฏิเสธ" ให้ใช้ `AlertDialog` หรือ `Dialog`
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: `toast.promise` ใน Sonner ทำงานอย่างไร และมีข้อดีอย่างไรต่อ User Experience (UX) เมื่อเทียบกับการเขียน `toast.loading` และ `toast.success` ด้วยตนเอง?
+**แนวทางตอบ:**
+`toast.promise` รับพารามิเตอร์เป็น Promise อ็อบเจกต์ พร้อมทั้งข้อความสำหรับ 3 สถานะ: `loading`, `success`, และ `error`:
+- **ข้อดีต่อ UX**:
+  1. **ความต่อเนื่อง (Single Element Lifecycle)**: Toast ตัวเดิมจะคงอยู่บนหน้าจอ โดยเริ่มต้นด้วยสถานะ Loading (มีไอคอนหมุน) และเมื่อ Promise คืนค่าสำเร็จ มันจะ Transition สลับเป็นไอคอนเครื่องหมายถูกสีเขียวอย่างนุ่มนวล โดยไม่ทำให้เกิด Toast 2 ตัวเด้งชนกัน
+  2. **ลดโค้ด Boilerplate**: นักพัฒนาไม่ต้องเขียนบล็อก `try-catch-finally` และไม่ต้องคอยสั่งปิดหรือลบ ID ของ Loading Toast ด้วยตนเอง โค้ดสั้น กระชับ และป้องกันข้อผิดพลาดกรณีลืมเคลียร์ Loading State
+
+### Q2: ในการออกแบบระบบ Web Accessibility (a11y) Toast จัดอยู่ในหมวดหมู่ ARIA ประเภทใด และต้องระวังเรื่องระยะเวลาแสดงผล (Timeout) อย่างไร?
+**แนวทางตอบ:**
+- **ARIA Classification**: Toast มักใช้คุณลักษณะ `role="status"` หรือ `aria-live="polite"` ซึ่งแปลว่าเครื่อง Screen Reader จะรอให้อ่านประโยคปัจจุบันจบก่อน แล้วค่อยประกาศข้อความ Toast เพื่อไม่ให้ขัดจังหวะการรับรู้หลักของผู้ใช้
+- **ระยะเวลาแสดงผล (Timeout)**: ตามเกณฑ์ WCAG ต้องระวังไม่ให้ Toast หายไปเร็วเกินไป (ควรให้แสดงผลอย่างน้อย 3-5 วินาที) และควรมีปุ่มปิด (`closeButton`) หรือฟังก์ชันหยุดเวลาชั่วคราวเมื่อผู้ใช้นำเมาส์ไปชี้ (Hover to pause) เพื่อให้ผู้มีปัญหาการอ่านมีเวลาทำความเข้าใจเนื้อหา

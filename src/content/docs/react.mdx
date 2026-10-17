@@ -1,0 +1,55 @@
+---
+title: React 19
+category: Frontend
+version: v19.0
+updatedAt: 2026-10-17
+---
+
+## 1. ภาพรวมของ React 19 (Overview & Philosophy)
+
+**React 19** คือไลบรารี JavaScript/TypeScript สำหรับสร้างส่วนต่อประสานกับผู้ใช้ (User Interface) ที่ทรงอิทธิพลที่สุดในโลก พัฒนาโดย Meta ในเวอร์ชัน 19 นี้ React ได้ก้าวข้ามจากการเป็นเพียง UI Library ฝั่งเบราว์เซอร์ สู่การเป็น **Full-Stack UI Architecture** ที่ผสานการทำงานระหว่างเซิร์ฟเวอร์และไคลเอนต์อย่างไร้รอยต่อ
+
+หัวใจหลักของ React คือแนวคิด **Declarative Programming** (เราบอกว่าต้องการให้ UI มีหน้าตาอย่างไรตาม State ณ ปัจจุบัน แล้วปล่อยให้ React จัดการอัปเดต DOM ที่แท้จริงให้เอง) ร่วมกับระบบ **Virtual DOM & Fiber Engine** ที่คำนวณส่วนต่างของการเปลี่ยนแปลง (Reconciliation) ได้อย่างรวดเร็วระดับมิลลิวินาที
+
+<InteractiveFlowDiagram variant="auth" title="วงจรการทำงานของ React 19 (Trigger ➔ Render Phase ➔ Commit Phase ➔ Paint)" subtitle="แสดงขั้นตอนการแปลง State ไปเป็น Virtual DOM และส่งต่อผลต่างไปยัง Real DOM บนเบราว์เซอร์" />
+
+---
+
+## 2. เสาหลักการทำงานของ React (Core Pillars)
+
+| เสาหลัก | คำอธิบายและบทบาทสำคัญ |
+| :--- | :--- |
+| **Component-Driven UI** | การแบ่งหน้าจอขนาดใหญ่ออกเป็นชิ้นส่วนขนาดเล็กที่นำกลับมาใช้ซ้ำได้ (Reusable & Composable) |
+| **Unidirectional Data Flow** | ข้อมูลไหลจากคอมโพเนนต์แม่ลงไปยังคอมโพเนนต์ลูกทางเดียวเสมอผ่าน `props` ทำให้คาดเดาการทำงานได้ง่าย |
+| **Fiber Reconciliation** | อัลกอริทึมเปรียบเทียบ Virtual DOM ต้นเดิมกับต้นใหม่ และเลือกอัปเดตเฉพาะโหนดที่เปลี่ยนจริงบน Real DOM |
+| **React 19 Actions & Hooks** | ฟีเจอร์ใหม่ที่ลดความซ้ำซ้อนของการเขียน Async/Form State ด้วย `use()`, `useActionState()`, และ `useOptimistic()` |
+
+---
+
+## 3. สารบัญหัวข้อการเรียนรู้เชิงลึก 14 ระดับ (Learning Directory)
+
+เนื้อหาการเรียนรู้ React 19 ถูกจัดแบ่งเป็น 14 หัวข้อย่อย เรียงลำดับจากรากฐานที่สำคัญไปจนถึงเทคนิคขั้นสูง:
+
+| หัวข้อย่อย | ขอบเขตเนื้อหา | ลิงก์เข้าสู่บทเรียน |
+| :--- | :--- | :--- |
+| **JSX & Props** | พื้นฐาน JSX, Functional Components, การส่ง Props, การ Render รายการด้วย `key`, และ Conditional Rendering | [เปิดอ่าน JSX & Props](/docs/react/basics) |
+| **State & Render** | `useState`, เบื้องหลังวงจร Render & Commit, ความเป็น Immutable ของ State, และ Automatic Batching | [เปิดอ่าน State & Render](/docs/react/state-render) |
+| **useEffect** | Lifecycle, Dependency Array, Cleanup Functions, และหลักคิดเมื่อไหร่ที่ไม่ควรใช้ Effect | [เปิดอ่าน useEffect](/docs/react/use-effect) |
+| **Hooks & Memo** | การทำงานของ `useRef`, `useMemo`, `useCallback`, และ `React.memo` เพื่อป้องกัน Over-optimization | [เปิดอ่าน Hooks & Memo](/docs/react/memo-hooks) |
+| **Context vs Zustand** | การแชร์ State ข้ามคอมโพเนนต์ด้วย `useContext` เปรียบเทียบกับ Global State Manager อย่าง Zustand | [เปิดอ่าน Context vs Zustand](/docs/react/context-zustand) |
+| **useReducer** | การจัดการ State ที่มีเงื่อนไขและ Action ซับซ้อนด้วย Reducer Pattern | [เปิดอ่าน useReducer](/docs/react/use-reducer) |
+| **Custom Hooks** | หลักการสกัด Logic ออกมาเป็น Hook นำกลับมาใช้ซ้ำ (เช่น `useDebounce`, `useLocalStorage`) | [เปิดอ่าน Custom Hooks](/docs/react/custom-hooks) |
+| **Forms** | เปรียบเทียบ Controlled vs Uncontrolled Components และการใช้ React Hook Form + Zod | [เปิดอ่าน Forms](/docs/react/forms) |
+| **Client Fetching** | เทคนิคการดึงข้อมูลฝั่งหน้าบ้าน และการจัดการสถานะ Loading / Error อย่างเป็นระบบ | [เปิดอ่าน Client Fetching](/docs/react/client-fetching) |
+| **React 19 New** | เจาะลึกฟีเจอร์ใหม่: `use()`, `useActionState`, `useOptimistic`, และ `useFormStatus` | [เปิดอ่าน React 19 New](/docs/react/react-19-features) |
+| **Error & Suspense** | การดักจับความผิดพลาดด้วย Error Boundaries และการสตรีม UI ขณะรอข้อมูลด้วย Suspense | [เปิดอ่าน Error & Suspense](/docs/react/error-suspense) |
+| **Performance** | เทคนิคค้นหา Re-render ที่ไม่จำเป็น, การทำ Code Splitting, และ Lazy Loading ด้วย `React.lazy` | [เปิดอ่าน Performance](/docs/react/performance) |
+| **Architecture** | สถาปัตยกรรมการออกแบบ Component: Composition Patterns, การแยก Logic/UI, และ Folder Structure | [เปิดอ่าน Architecture](/docs/react/architecture) |
+| **Pitfalls & Q&A** | ข้อผิดพลาดที่พบบ่อย (Anti-Patterns) และคลังคำถาม-คำตอบเตรียมสัมภาษณ์งาน React ทุกระดับ | [เปิดอ่าน Pitfalls & Q&A](/docs/react/pitfalls) |
+
+---
+
+## 4. แหล่งอ้างอิงทางการ (Official Documentation)
+
+- [React 19 Official Documentation](https://react.dev) — คู่มือและเอกสารการใช้งานฉบับสมบูรณ์
+- [React 19 Upgrade Guide](https://react.dev/blog/2024/12/05/v19) — สรุปการเปลี่ยนแปลงและฟีเจอร์ใหม่ใน React 19

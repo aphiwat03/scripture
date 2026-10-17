@@ -1,0 +1,336 @@
+---
+title: Tables & Charts
+category: Frontend
+parentTitle: shadcn/ui
+version: shadcn/ui & Radix UI
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การนำเสนอข้อมูลเชิงปริมาณและสถิติ (Data Visualization & Tabular Data) เป็นหัวใจสำคัญของแอปพลิเคชันสายธุรกิจ:
+
+shadcn/ui แบ่งการแสดงผลข้อมูลออกเป็น 2 เสาหลัก:
+1. **Data Table (ขับเคลื่อนด้วย TanStack Table v8)**: ตารางข้อมูลขั้นสูงที่แยกตรรกะ (Headless Logic) ออกจากหน้าตา รองรับการจัดเรียง (Sorting), การกรองข้อมูล (Filtering), การแบ่งหน้า (Pagination), และการเลือกแถว (Row Selection) ได้อย่างยืดหยุ่น โดยเรนเดอร์ผ่านคอมโพเนนต์ `<Table>` ของ shadcn
+2. **shadcn Chart (ขับเคลื่อนด้วย Recharts)**: ระบบกราฟและชาร์ตที่ถูกปรับแต่งใหม่ให้รองรับ **CSS Variables** ช่วยให้สีกราฟ เส้นกริด Tooltip และ Legend ปรับเปลี่ยนตามโหมด Dark/Light ของระบบโดยอัตโนมัติ โดยไม่ต้องมานั่งตั้งค่า Palette แยกใน JavaScript
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. สถาปัตยกรรม Headless Table ของ TanStack Table
+- แทนที่จะผูกมัดกับโครงสร้าง HTML แบบไลบรารีตารางทั่วไป **TanStack Table** ทำหน้าที่เป็น State Machine ในหน่วยความจำ:
+  - มันคำนวณตำแหน่งแถว, การตัดหน้า, คอลัมน์ที่ถูกซ่อน, และลำดับการจัดเรียง
+  - จากนั้นมันส่งอ็อบเจกต์ Header Groups และ Row Models มาให้เราวนลูปเรนเดอร์ด้วยคอมโพเนนต์ HTML Table ของ shadcn (`<TableHeader>`, `<TableBody>`, `<TableRow>`, `<TableCell>`)
+- สถาปัตยกรรมนี้เปิดโอกาสให้เราสไตลิ่งทุกเซลล์ด้วย Tailwind CSS ได้อย่างอิสระ 100%
+
+### 2. Theming ใน shadcn Chart
+- Recharts แบบดั้งเดิมมักบังคับให้นักพัฒนาส่งค่าสี Hex ตรงๆ เช่น `fill="#3b82f6"` ซึ่งทำให้การทำ Dark Mode ยากลำบาก
+- shadcn นำเสนอคอมโพเนนต์ `<ChartContainer config={chartConfig}>`:
+  - ทำการฉีดตัวแปร CSS Variables (เช่น `--color-desktop`, `--color-mobile`) เข้าไปใน Container
+  - คอมโพเนนต์ Recharts (เช่น `<Area>`, `<Bar>`, `<Line>`) สามารถอ้างอิงสีผ่าน `var(--color-desktop)` ได้ทันที
+  - เมื่อผู้ใช้สลับโหมดสี ตัวแปร CSS เปลี่ยน สีกราฟก็จะเปลี่ยนตามทันทีโดยไม่ต้อง Re-render ทั้งกราฟใหม่
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่าง: หน้าจอสถิติรายได้และตารางประวัติธุรกรรม (Financial Dashboard)
+
+```tsx filename="app/finance/TransactionsDashboard.tsx"
+"use client";
+
+import * as React from "react";
+import {
+  ColumnDef,
+  flexRender,
+  getCoreRowModel,
+  getPaginationRowModel,
+  getSortedRowModel,
+  SortingState,
+  useReactTable,
+} from "@tanstack/react-table";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  ChartConfig,
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+} from "@/components/ui/chart";
+import { Area, AreaChart, CartesianGrid, XAxis, ResponsiveContainer } from "recharts";
+import { ArrowUpDown, ChevronLeft, ChevronRight, TrendingUp } from "lucide-react";
+
+// 1. โครงสร้างข้อมูลธุรกรรม
+interface Transaction {
+  id: string;
+  customer: string;
+  amount: number;
+  status: "completed" | "pending" | "failed";
+  date: string;
+}
+
+const transactionData: Transaction[] = [
+  { id: "TXN-101", customer: "บริษัท สยามเทค จำกัด", amount: 125000, status: "completed", date: "2026-10-15" },
+  { id: "TXN-102", customer: "ห้างหุ้นส่วน ปัญญาดิจิทัล", amount: 45000, status: "pending", date: "2026-10-15" },
+  { id: "TXN-103", customer: "คุณกิตติศักดิ์ เจริญพร", amount: 8900, status: "completed", date: "2026-10-16" },
+  { id: "TXN-104", customer: "บริษัท บางกอกคลาวด์ โซลูชั่นส์", amount: 320000, status: "completed", date: "2026-10-16" },
+  { id: "TXN-105", customer: "คุณวิภาดา มณีรัตน์", amount: 15400, status: "failed", date: "2026-10-17" },
+];
+
+// 2. ข้อมูลกราฟสรุปรายได้
+const chartData = [
+  { month: "พ.ค.", revenue: 180000 },
+  { month: "มิ.ย.", revenue: 240000 },
+  { month: "ก.ค.", revenue: 210000 },
+  { month: "ส.ค.", revenue: 310000 },
+  { month: "ก.ย.", revenue: 290000 },
+  { month: "ต.ค.", revenue: 420000 },
+];
+
+const chartConfig = {
+  revenue: {
+    label: "รายได้รวม (บาท)",
+    color: "hsl(var(--primary))",
+  },
+} satisfies ChartConfig;
+
+export function TransactionsDashboard() {
+  const [sorting, setSorting] = React.useState<SortingState>([]);
+
+  // 3. กำหนด Columns สำหรับ TanStack Table
+  const columns: ColumnDef<Transaction>[] = [
+    {
+      accessorKey: "id",
+      header: "รหัสธุรกรรม",
+      cell: ({ row }) => <span className="font-mono text-xs">{row.getValue("id")}</span>,
+    },
+    {
+      accessorKey: "customer",
+      header: "ลูกค้า / องค์กร",
+      cell: ({ row }) => <span className="font-medium">{row.getValue("customer")}</span>,
+    },
+    {
+      accessorKey: "amount",
+      header: ({ column }) => (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="-ml-3 h-8"
+          onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
+        >
+          ยอดเงิน
+          <ArrowUpDown className="ml-2 h-3.5 w-3.5" />
+        </Button>
+      ),
+      cell: ({ row }) => {
+        const val = parseFloat(row.getValue("amount"));
+        return <span className="font-semibold">฿{val.toLocaleString()}</span>;
+      },
+    },
+    {
+      accessorKey: "status",
+      header: "สถานะ",
+      cell: ({ row }) => {
+        const status = row.getValue("status") as Transaction["status"];
+        return (
+          <Badge
+            variant={
+              status === "completed"
+                ? "secondary"
+                : status === "pending"
+                ? "outline"
+                : "destructive"
+            }
+          >
+            {status === "completed" ? "สำเร็จ" : status === "pending" ? "รอดำเนินการ" : "ล้มเหลว"}
+          </Badge>
+        );
+      },
+    },
+    {
+      accessorKey: "date",
+      header: "วันที่ทำรายการ",
+    },
+  ];
+
+  const table = useReactTable({
+    data: transactionData,
+    columns,
+    state: { sorting },
+    onSortingChange: setSorting,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    getPaginationRowModel: getPaginationRowModel(),
+    initialState: { pagination: { pageSize: 3 } },
+  });
+
+  return (
+    <div className="space-y-6 max-w-5xl mx-auto py-6">
+      {/* 1. ส่วนกราฟ Recharts */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle>แนวโน้มรายได้ (Monthly Revenue)</CardTitle>
+              <CardDescription>สรุปยอดการเติบโตของรายได้ย้อนหลัง 6 เดือน</CardDescription>
+            </div>
+            <div className="flex items-center gap-1 text-emerald-600 text-sm font-semibold">
+              <TrendingUp className="w-4 h-4" />
+              <span>+34.2%</span>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <ChartContainer config={chartConfig} className="h-64 w-full">
+            <AreaChart data={chartData}>
+              <defs>
+                <linearGradient id="fillRevenue" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="var(--color-revenue)" stopOpacity={0.8} />
+                  <stop offset="95%" stopColor="var(--color-revenue)" stopOpacity={0.1} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid vertical={false} strokeDasharray="3 3" />
+              <XAxis dataKey="month" tickLine={false} axisLine={false} />
+              <ChartTooltip content={<ChartTooltipContent />} />
+              <Area
+                type="natural"
+                dataKey="revenue"
+                fill="url(#fillRevenue)"
+                stroke="var(--color-revenue)"
+                strokeWidth={2}
+              />
+            </AreaChart>
+          </ChartContainer>
+        </CardContent>
+      </Card>
+
+      {/* 2. ส่วนตาราง TanStack Data Table */}
+      <Card>
+        <CardHeader>
+          <CardTitle>รายการธุรกรรมล่าสุด</CardTitle>
+          <CardDescription>แสดงรายการธุรกรรมและสถานะการโอนเงิน</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="rounded-xl border">
+            <Table>
+              <TableHeader>
+                {table.getHeaderGroups().map((headerGroup) => (
+                  <TableRow key={headerGroup.id}>
+                    {headerGroup.headers.map((header) => (
+                      <TableHead key={header.id}>
+                        {header.isPlaceholder
+                          ? null
+                          : flexRender(header.column.columnDef.header, header.getContext())}
+                      </TableHead>
+                    ))}
+                  </TableRow>
+                ))}
+              </TableHeader>
+              <TableBody>
+                {table.getRowModel().rows.length ? (
+                  table.getRowModel().rows.map((row) => (
+                    <TableRow key={row.id}>
+                      {row.getVisibleCells().map((cell) => (
+                        <TableCell key={cell.id}>
+                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ))
+                ) : (
+                  <TableRow>
+                    <TableCell colSpan={columns.length} className="h-24 text-center text-muted-foreground">
+                      ไม่พบข้อมูลธุรกรรม
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </div>
+
+          {/* Pagination Controls */}
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span>
+              หน้า {table.getState().pagination.pageIndex + 1} จาก {table.getPageCount()}
+            </span>
+            <div className="flex items-center space-x-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => table.previousPage()}
+                disabled={!table.getCanPreviousPage()}
+              >
+                <ChevronLeft className="h-4 w-4 mr-1" />
+                ก่อนหน้า
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => table.nextPage()}
+                disabled={!table.getCanNextPage()}
+              >
+                ถัดไป
+                <ChevronRight className="h-4 w-4 ml-1" />
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **เขียน Sorting และ Pagination เองด้วย `useState` หลายตัว**<br/>โค้ดเต็มไปด้วย logic จัดการ index และ array slice ที่เกิดบั๊กง่ายเมื่อมีเงื่อนไขค้นหาเพิ่ม | **ใช้ TanStack Table (React Table)**<br/>จัดการ State และ Memoization ของตารางอย่างมีประสิทธิภาพระดับ Enterprise |
+| **Hardcode สี Hex ใน Recharts เช่น `stroke="#2563eb"`**<br/>เมื่อผู้ใช้เปิด Dark Mode สีกราฟจะไม่กลมกลืน หรือตัวหนังสือใน Tooltip จะมองไม่เห็น | **ใช้ shadcn Chart และ CSS Variables**<br/>อ้างอิง `var(--color-...)` ทำให้รองรับ Dark Mode ทันที |
+| **ไม่ใส่ Key ที่มั่นคงในแถวของตาราง (เช่น ใช้ `key={index}`)**<br/>เมื่อมีการ Sort หรือลบแถว React จะ Re-render สับสน | **ใช้ Primary Key เช่น `key={row.id}`**<br/>เพื่อประสิทธิภาพการ Re-render สูงสุด |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้เมื่อ:
+- **ตารางข้อมูลธุรกิจขนาดใหญ่**: เช่น รายการออเดอร์, ประวัติธุรกรรม, รายชื่อผู้ใช้งาน ที่ต้องมีฟังก์ชัน Sort/Filter/Paging
+- **Analytics Dashboard**: กราฟแสดงผลสถิติที่ต้องการความสวยงามและเข้ากับ Design System
+
+### ไม่ควรใช้เมื่อ:
+- **ตารางเปรียบเทียบราคาแบบ Static 3 คอลัมน์**: ให้ใช้แท็ก `<Table>` ธรรมดาของ shadcn ได้เลย ไม่จำเป็นต้องติดตั้ง TanStack Table
+- **ต้องการตารางแบบ Excel ที่แก้ไขเซลล์ได้หลายหมื่นช่องพร้อมกัน**: กรณีนี้ควรพิจารณา Dedicated Canvas/Virtual Data Grid เช่น AG Grid หรือ Handsontable
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: สถาปัตยกรรม "Headless Table" ของ TanStack Table แตกต่างจาก Component-based Table (เช่น Ant Design Table) อย่างไร และมีข้อดีอย่างไร?
+**แนวทางตอบ:**
+- **Component-based Table (Ant Design/MUI)**: รวม Logic และ Markup ไว้ด้วยกัน นักพัฒนาส่ง Props เช่น `columns` และ `dataSource` เข้าไป แล้วคอมโพเนนต์จะวาด HTML ออกมาเอง ข้อเสียคือ หากต้องการเปลี่ยนโครงสร้าง DOM หรือใส่ Tailwind Utility ที่ซับซ้อน จะทำได้ยากมากเพราะติดขอบเขตของคอมโพเนนต์
+- **Headless Table (TanStack Table)**: ไม่ส่งคืน HTML หรือ CSS แม้แต่อย่างเดียว แต่มอบเฉพาะ **"สมองการคำนวณ (State & Logic)"** (เช่น วิธีคำนวณหน้า, สลับคอลัมน์, คำนวณผลรวม) จากนั้นให้นักพัฒนาเขียน JSX เองผ่าน shadcn `<Table>` ข้อดีคือเราได้สิทธิ์ควบคุมมาร์กอัปและสไตล์ 100% พร้อมความเร็วสูงสุด
+
+### Q2: shadcn Chart แก้ปัญหาการทำ Theming และ Dark Mode ของ Recharts ได้อย่างไร?
+**แนวทางตอบ:**
+Recharts ในอดีตต้องการค่าสีที่เป็น Hex string หรือ RGB string ซึ่งทำงานขัดแย้งกับระบบ CSS Variables ของ Next.js และ Tailwind
+- shadcn Chart แก้ปัญหานี้ด้วยการสร้างคอมโพเนนต์ Wrapper ชื่อ `<ChartContainer>` ซึ่งรับอ็อบเจกต์ `chartConfig` เข้าไป
+- คอนเทนเนอร์จะแปลงค่าสีเหล่านั้นเป็น CSS Custom Properties ในระดับ DOM Element (Inline Variables)
+- ทำให้คอมโพเนนต์กราฟลูกสามารถเข้าถึงสีผ่านฟังก์ชัน `var(--color-name)` ได้อย่างสมบูรณ์แบบ เมื่อคลาส `.dark` สลับ ค่าสีในตัวแปรจะเปลี่ยนตามทันทีโดยไม่ต้อง Re-calculate หรือ Mount กราฟใหม่

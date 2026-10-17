@@ -1,0 +1,222 @@
+---
+title: Arbitrary Values & CSS Variables
+category: Frontend
+parentTitle: Tailwind CSS v4
+version: Tailwind v4.0 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+แม้ Tailwind CSS จะมีระบบ Spacing และ Color Scale ที่ครอบคลุม แต่ในโลกความเป็นจริง นักพัฒนาจะต้องเจอกรณีพิเศษ (Edge Cases) เช่น:
+- ต้องกำหนดความกว้างเป๊ะๆ ตามสเปกของ Third-party Widget (เช่น `w-[320px]`)
+- การคำนวณมิติตามสมการคณิตศาสตร์ เช่น `min-h-[calc(100vh-4rem)]`
+- การเชื่อมโยงสไตล์เข้ากับ **Dynamic CSS Variables** จาก JavaScript Runtime
+
+ใน **Tailwind CSS v4** ได้ปรับปรุงไวยากรณ์ให้ทรงพลังยิ่งขึ้น:
+- **วงเล็บเหลี่ยม Arbitrary Values `[...]`**: สำหรับใส่ค่าตายตัวแบบ One-off
+- **ไวยากรณ์ตัวแปรแบบใหม่ `bg-(--my-color)`**: ย่อรูปจากแบบเดิม `bg-[var(--my-color)]` ให้เหลือเพียงวงเล็บเดียว สั้น กระชับ และอ่านง่าย
+- **เกณฑ์การตัดสินใจ**: เรียนรู้ว่าเมื่อไหร่ควรใช้ Arbitrary และเมื่อไหร่ต้องย้ายค่าไปไว้ใน `@theme`
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### กลไก Dynamic Token Parsing ของ Oxide Engine
+1. **The `(--variable)` Shorthand**:
+   เมื่อคุณเขียน `text-(--user-accent)` ใน Tailwind v4 คอมไพเลอร์จะตรวจจับ prefix `(--` และแปลงเป็น:
+   ```css
+   color: var(--user-accent);
+   ```
+   โดยอัตโนมัติ โดยไม่ต้องพิมพ์คีย์เวิร์ด `var(...)` ให้รกรุงรัง
+2. **Space vs Underscore Parsing**:
+   เนื่องจาก HTML Class Name ไม่อนุญาตให้มีช่องว่าง (Whitespace) หากคุณเขียน `grid-cols-[200px 1fr]` เบราว์เซอร์จะมองเห็นเป็น 2 คลาสที่พัง Tailwind จึงกำหนดกฎว่า:
+   - **ห้ามเว้นวรรค** เช่น `calc(100%-20px)` หรือ
+   - **ใช้อันเดอร์สกอร์แทนช่องว่าง** เช่น `grid-cols-[200px_1fr]` ซึ่ง Oxide จะแปลง `_` กลับเป็นช่องว่างใน CSS
+3. **Specificity และ Memory**:
+   Arbitrary Classes ไม่ได้ถูกสร้างล่วงหน้า แต่ Oxide Engine จะสร้าง Rule เฉพาะตัวขึ้นในหน่วยความจำทันทีที่พบในไฟล์ TSX
+
+---
+
+## 3. ตัวอย่างโค้ด (Tailwind v4 & TSX)
+
+### ตัวอย่างที่ 1: กราฟแท่งไดนามิกที่ควบคุมผ่าน CSS Variables (DynamicMetricsChart)
+
+```tsx filename="src/components/DynamicMetricsChart.tsx"
+import type { CSSProperties } from "react";
+
+interface MetricData {
+  day: string;
+  value: number; // 0 - 100
+  color: string;
+}
+
+const weeklyData: MetricData[] = [
+  { day: "จันทร์", value: 65, color: "#6366f1" },
+  { day: "อังคาร", value: 85, color: "#8b5cf6" },
+  { day: "พุธ", value: 45, color: "#ec4899" },
+  { day: "พฤหัส", value: 92, color: "#10b981" },
+  { day: "ศุกร์", value: 78, color: "#f59e0b" },
+];
+
+export function DynamicMetricsChart() {
+  return (
+    <div className="w-full max-w-md rounded-3xl border border-neutral-200 bg-white p-6 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
+      <h3 className="text-sm font-bold text-neutral-900 dark:text-white">
+        ประสิทธิภาพประจำสัปดาห์
+      </h3>
+      <p className="mt-1 text-xs text-neutral-500">
+        ควบคุมความสูงและสีของแท่งกราฟด้วย CSS Variable Shorthand ใน v4
+      </p>
+
+      <div className="mt-8 flex h-52 items-end justify-between gap-3 border-b border-neutral-200 pb-2 dark:border-neutral-800">
+        {weeklyData.map((item) => (
+          <div key={item.day} className="flex flex-1 flex-col items-center gap-2">
+            {/* ส่งค่า Dynamic Variable เข้าไปใน Inline Style */}
+            <div
+              style={
+                {
+                  "--bar-target-height": `${item.value}%`,
+                  "--bar-color": item.color,
+                } as CSSProperties
+              }
+              // ใช้ไวยากรณ์ใหม่ bg-(--bar-color) และ h-(--bar-target-height)
+              className="w-full rounded-xl bg-(--bar-color) h-(--bar-target-height) transition-all duration-500 hover:opacity-80"
+            />
+            <span className="text-[11px] font-medium text-neutral-500">
+              {item.day}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: หน้าจอจัดวางสัดส่วนแบบพิเศษ (CustomStudioLayout)
+
+```tsx filename="src/components/CustomStudioLayout.tsx"
+import { Layers, Sliders, Play } from "lucide-react";
+
+export function CustomStudioLayout() {
+  return (
+    // กำหนด Grid สามช่องแบบแม่นยำ: Sidebar ซ้าย 260px, Content กลางยืดหยุ่น, Inspector ขวา 300px
+    // และ min-h คำนวณหักลบ Navbar 64px
+    <div className="grid min-h-[calc(100vh-4rem)] grid-cols-1 lg:grid-cols-[260px_minmax(0,1fr)_300px] bg-neutral-50 dark:bg-neutral-950">
+      
+      {/* พาเนลซ้าย */}
+      <aside className="border-r border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
+        <div className="flex items-center gap-2 text-xs font-bold text-neutral-700 dark:text-neutral-300">
+          <Layers className="size-4 text-indigo-600" /> เลเยอร์ชิ้นงาน
+        </div>
+        <div className="mt-4 space-y-2">
+          {["ฉากหลัง", "กล่องข้อความหลัก", "ปุ่มสั่งการ"].map((name, i) => (
+            <div
+              key={i}
+              className="flex h-9 items-center rounded-lg border border-neutral-200/60 px-3 text-xs font-medium text-neutral-600 hover:bg-neutral-50 dark:border-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800"
+            >
+              {name}
+            </div>
+          ))}
+        </div>
+      </aside>
+
+      {/* พื้นที่ทำงานกลาง (Canvas) */}
+      <main className="flex flex-col items-center justify-center p-8">
+        <div className="flex aspect-16/9 w-full max-w-[720px] items-center justify-center rounded-2xl border-2 border-dashed border-neutral-300 bg-white shadow-inner dark:border-neutral-800 dark:bg-neutral-900">
+          <button
+            type="button"
+            className="flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-xs font-semibold text-white shadow-md transition hover:bg-indigo-500"
+          >
+            <Play className="size-4" /> เริ่มต้นเรนเดอร์ Canvas
+          </button>
+        </div>
+      </main>
+
+      {/* พาเนลขวา (Inspector) */}
+      <aside className="border-l border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
+        <div className="flex items-center gap-2 text-xs font-bold text-neutral-700 dark:text-neutral-300">
+          <Sliders className="size-4 text-indigo-600" /> การตั้งค่าพารามิเตอร์
+        </div>
+        <div className="mt-4 space-y-3">
+          <div>
+            <label className="text-[11px] font-medium text-neutral-400">ขนาดความกว้าง (px)</label>
+            <input
+              type="text"
+              readOnly
+              value="720"
+              className="mt-1 h-8 w-full rounded-lg border border-neutral-200 bg-neutral-100 px-2.5 font-mono text-xs text-neutral-700 dark:border-neutral-800 dark:bg-neutral-800 dark:text-neutral-300"
+            />
+          </div>
+        </div>
+      </aside>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับ CSS ปกติ
+
+| สไตล์ความต้องการ | Tailwind v4 Shorthand | Tailwind v3 รูปแบบเดิม | Pure CSS |
+| :--- | :--- | :--- | :--- |
+| **อ้างอิง CSS Variable** | `bg-(--brand-color)` | `bg-[var(--brand-color)]` | `background-color: var(--brand-color);` |
+| **Grid Column ฟิกซ์** | `grid-cols-[200px_1fr]` | `grid-cols-[200px_1fr]` | `grid-template-columns: 200px 1fr;` |
+| **คำนวณสมการ** | `h-[calc(100vh-64px)]` | `h-[calc(100vh-64px)]` | `height: calc(100vh - 64px);` |
+| **Z-index อิสระ** | `z-[999]` | `z-[999]` | `z-index: 999;` |
+
+---
+
+## 5. ผิด vs ถูก
+
+### จุดที่ 1: การเว้นวรรค (Whitespace) ภายในสมการ Arbitrary
+```tsx
+// ❌ ผิด: ใส่ space รอบเครื่องหมายลบ เบราว์เซอร์จะแยกเป็น 3 คลาส และ Tailwind จะคอมไพล์ไม่ได้
+<div className="w-[calc(100% - 32px)]">
+
+// ✅ ถูก: เขียนติดกันโดยไม่เว้นวรรค หรือใช้อันเดอร์สกอร์ (_)
+<div className="w-[calc(100%-32px)]">
+// หรือ
+<div className="w-[calc(100%_-_32px)]">
+```
+*เหตุผล*: ตัวแยกคลาสใน HTML คือเครื่องหมายเว้นวรรค การพิมพ์เว้นวรรคข้างในวงเล็บเหลี่ยมจะทำให้มาร์กอัปฉีกขาด
+
+### จุดที่ 2: ใช้ Arbitrary Values ซ้ำๆ จนโปรเจกต์สูญเสียความเป็นระบบ (Design Drift)
+```tsx
+// ❌ ผิด: ใช้ arbitrary สีและขนาดเดียวกันกระจัดกระจายหลายสิบไฟล์
+<button className="bg-[#4338ca] text-[#f8fafc] p-[13px] rounded-[11px]">
+
+// ✅ ถูก: บันทึกเข้า @theme ใน globals.css แล้วเรียกใช้เป็นชื่อ Token สากล
+// ใน globals.css: @theme { --color-primary: #4338ca; --radius-btn: 11px; }
+<button className="bg-primary text-slate-50 p-3 rounded-btn">
+```
+*เหตุผล*: หากวันข้างหน้าต้องการรีแบรนด์สีหรือเปลี่ยนขอบมน คุณต้องแก้โค้ดค้นหาตามไฟล์ทั้งหมด ซึ่งขัดต่อหลักการบำรุงรักษาซอฟต์แวร์ที่ดี
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Arbitrary Values `[...]` และ `(--var)`
+- ค่าที่เกิดจาก Dynamic Data ใน Runtime เช่น ความสูงของแท่งกราฟ หรือเปอร์เซ็นต์ความคืบหน้าของ Progress Bar
+- ขนาดมิติที่ต้องทำงานเชื่อมต่อกับ Canvas, Map, หรือ 3rd-party iFrame แบบเฉพาะจุดจริงๆ
+- การคำนวณ Layout ที่ผูกกับความสูงของ Fixed Header เช่น `min-h-[calc(100vh-4rem)]`
+
+### ไม่ควรใช้
+- ไม่ควรใช้ Arbitrary สำหรับชุดสีหลักของโปรเจกต์ หรือ Padding/Margin ปกติ ให้ใช้ Tailwind Scale มาตรฐานหรือลงทะเบียนใน `@theme`
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ไวยากรณ์ `bg-(--brand)` ใน Tailwind v4 ต่างจาก `bg-[var(--brand)]` ใน v3 อย่างไร และมีประโยชน์อะไรบ้าง?
+**แนวทางคำตอบ**: 
+ใน Tailwind v4 ทีมพัฒนาได้เปิดตัวไวยากรณ์ย่อสำหรับ CSS Custom Properties โดยเฉพาะคือ `bg-(--my-var)` ซึ่งทำหน้าที่เหมือนกับ `bg-[var(--my-var)]` ทุกประการ แต่ลดจำนวนตัวอักษรลง ป้องกันข้อผิดพลาดในการสะกดคำว่า `var` และทำให้นักพัฒนาสามารถผสมผสานสไตล์ระหว่าง CSS Variables ภายนอกกับ Tailwind Utilities ได้กระชับและเป็นธรรมชาติยิ่งขึ้น
+
+### Q2: ในฐานะ Lead Front-end คุณจะวางข้อตกลง (Guideline) ในทีมอย่างไร เพื่อไม่ให้สมาชิกใช้ Arbitrary Values พร่ำเพรื่อจนดีไซน์พัง?
+**แนวทางคำตอบ**: 
+ผมจะกำหนดกฎระเบียบ 3 ข้อ:
+1. **Rule of Three**: หากมีตัวเลข Arbitrary ใดถูกเขียนซ้ำเกิน 3 ครั้ง ต้องนำค่านั้นเข้าที่ประชุมดีไซน์เพื่อพิจารณาเพิ่มเป็น Token กลางใน `@theme`
+2. **Dynamic Only**: อนุญาตให้ใช้ Arbitrary ได้อย่างอิสระเฉพาะกรณีที่เป็น Dynamic Value ที่ถูกส่งมาจาก JavaScript state/props (เช่น ขนาดพิกเซลจากการลาก Drag-and-Drop หรือความสูงของแท่งกราฟ)
+3. **Automated Linting**: ใช้ ESLint หรือ Tailwind CSS Plugin เพื่อเตือนเมื่อมีการใช้คลาส Arbitrary ในจุดที่ไม่จำเป็น

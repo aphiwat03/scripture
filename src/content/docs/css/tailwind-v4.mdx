@@ -1,0 +1,143 @@
+---
+title: Tailwind CSS v4
+category: Frontend
+parentTitle: CSS
+version: Tailwind v4.0 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+หลายคนมองว่า **Tailwind CSS** คือ "ภาษาใหม่" แต่ในความเป็นจริง Tailwind เป็นเพียง **"เครื่องมือช่วยเขียน CSS ดั้งเดิมให้กระชับขึ้นผ่าน Utility Classes"**
+
+> **สัจธรรมของ Frontend**: *"หากคุณไม่เข้าใจ CSS พื้นฐาน คุณจะไม่มีวันใช้ Tailwind ได้อย่างคล่องแคล่ว"* เพราะทุกคลาสของ Tailwind ล้วนแมป 1-to-1 กับ CSS Properties ดั้งเดิมทั้งสิ้น เช่น `justify-between` คือ `justify-content: space-between;`
+
+ใน **Tailwind CSS v4**:
+- ระบบเปลี่ยนเป็น **CSS-First Architecture 100%**
+- เลิกใช้ไฟล์ `tailwind.config.js` แบบเดิม และหันมากำหนด Design Tokens ผ่าน Directive **`@theme`** ภายในไฟล์ CSS โดยตรง
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. การแมป Utility Class ไปเป็น CSS จริง
+```css
+/* Tailwind Class:              /* CSS จริงที่เบราว์เซอร์ได้รับ: */
+.flex                           --> display: flex;
+.items-center                   --> align-items: center;
+.p-4                            --> padding: 1rem; /* 16px */
+.hover\:bg-blue-600:hover       --> background-color: oklch(...);
+.md\:grid-cols-2                --> @media (min-width: 768px) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+```
+
+### 2. เมื่อไหร่ควรใช้ `@apply`?
+- **สิ่งที่ควรทำ**: เมื่อต้องการสไตล์เนื้อหาภายนอกที่แก้ไข HTML ตรงๆ ไม่ได้ (เช่น Markdown Prose หรือ Third-party Widget)
+- **สิ่งที่ไม่ควรทำ**: การนำ `@apply` ไปเขียนครอบทุก Component (เช่น `.btn { @apply px-4 py-2 bg-blue-500 rounded; }`) เพราะเป็นการทำลายหัวใจของ Utility-first และทำให้โค้ดบวม ควรใช้วิธี **"แยกเป็น React Component"** แทน
+
+---
+
+## 3. ตัวอย่างโค้ด (Tailwind v4 & CSS)
+
+### ตัวอย่างที่ 1: การตั้งค่า `@theme` แบบ CSS-First ใน Next.js 16
+
+```css filename="src/app/globals.css"
+/* 1. นำเข้า Tailwind v4 บรรทัดเดียว */
+@import "tailwindcss";
+
+/* 2. กำหนดธีมของโปรเจกต์ด้วย @theme โดยไม่ต้องง้อ tailwind.config.js */
+@theme {
+  --font-display: var(--font-inter), sans-serif;
+  --font-thai: var(--font-sarabun), sans-serif;
+
+  /* เพิ่มสีแบรนด์เฉพาะขององค์กร */
+  --color-brand-primary: #0071e3;
+  --color-brand-surface: #f8fafc;
+  
+  /* ปรับแต่งรัศมีความโค้ง */
+  --radius-card: 16px;
+}
+```
+
+### ตัวอย่างที่ 2: คอมโพเนนต์การ์ดสินค้าพร้อม Variants ครบชุด
+
+```tsx filename="components/ProductCard.tsx"
+export function ProductCard() {
+  return (
+    <article className="
+      group relative p-6 
+      bg-white dark:bg-slate-900 
+      border border-slate-200 dark:border-slate-800 
+      rounded-2xl shadow-xs hover:shadow-lg 
+      transition-all duration-200 ease-out
+    ">
+      <h3 className="text-lg font-semibold text-slate-900 dark:text-white group-hover:text-blue-600 transition-colors">
+        หูฟังบลูทูธ Pro Max
+      </h3>
+      <p className="mt-2 text-sm text-slate-600 dark:text-slate-400 line-clamp-2">
+        ตัดเสียงรบกวนรอบทิศทาง แบตเตอรี่อึด 40 ชั่วโมงเต็ม
+      </p>
+      <button 
+        type="button"
+        className="mt-4 px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 active:scale-95 rounded-xl cursor-pointer transition"
+      >
+        สั่งซื้อทันที
+      </button>
+    </article>
+  );
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ใช้ `@apply` พร่ำเพรื่อแทนการแยก Component
+
+```css
+/* ผิด: ฝืนเขียนแบบเดิม กลับไปสู่ปัญหาตั้งชื่อคลาสและการจัดการ CSS แบบเก่า */
+.my-custom-button {
+  @apply px-4 py-2 bg-blue-600 text-white font-medium rounded-lg shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2;
+}
+```
+
+### ✅ โค้ดที่ถูกต้อง: แยกเป็น Reusable React Component
+
+```tsx
+/* ถูกต้อง: รวม Utility ไว้ใน JSX Component แล้วนำกลับมาใช้ซ้ำ */
+export function Button({ children, ...props }: React.ComponentProps<'button'>) {
+  return (
+    <button 
+      className="px-4 py-2 bg-blue-600 text-white font-medium rounded-lg shadow-xs hover:bg-blue-700 focus-visible:ring-2 cursor-pointer transition"
+      {...props}
+    >
+      {children}
+    </button>
+  );
+}
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้
+- ใช้ Utility Classes โดยตรงใน JSX / HTML สำหรับ Component UI ทั้งหมด
+- ใช้ Variants (`hover:`, `focus-visible:`, `dark:`, `md:`) สำหรับการตอบสนองต่อสภาพแวดล้อมและปฏิสัมพันธ์ของผู้ใช้
+
+### ไม่ควรใช้
+- **ห้ามสร้าง Class Name ด้วย Dynamic String Concatenation**: เช่น `className={`text-${color}-500`}` เพราะ Tailwind Scanner จะจับคู่คำไม่ได้และจะไม่สร้าง CSS ให้ ให้ใช้ Record Map หรือฟังก์ชัน `cn()` แทน
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: Tailwind CSS v4 มีการเปลี่ยนแปลงสถาปัตยกรรมสำคัญอย่างไรเมื่อเทียบกับ v3?
+**แนวทางคำตอบ**: 
+1. **CSS-First Architecture**: ใน v4 มีการยกเลิกไฟล์ `tailwind.config.js` เป็นค่าเริ่มต้น โดยการตั้งค่าทั้งหมด (สี, ฟอนต์, Breakpoints) ถูกย้ายมาทำผ่าน Directive **`@theme`** ภายในไฟล์ CSS หลักโดยตรง
+2. **เครื่องยนต์คอมไพล์ใหม่ (Oxide Engine)**: พัฒนาด้วยภาษา Rust ทำให้ความเร็วในการประมวลผลและการทำ HMR (Hot Module Replacement) เร็วขึ้นกว่าเดิมถึง 10 เท่า
+3. **Automatic Content Detection**: ไม่ต้องระบุรายการ Glob Pattern ในอาร์เรย์ `content: []` อีกต่อไป ระบบจะสแกนหาไฟล์ในโปรเจกต์ให้อัตโนมัติ
+4. **Modern CSS Integration**: รองรับ Container Queries (`@container`), 3D transforms, และโมเดลสี **OKLCH** เป็นค่าเริ่มต้น
+
+### Q2: ทำไมการประกอบชื่อคลาสแบบไดนามิก เช่น `text-${isPrimary ? 'blue' : 'gray'}-600` จึงไม่ทำงานใน Tailwind CSS?
+**แนวทางคำตอบ**: เพราะ Tailwind CSS ใช้วิธี **Static Source Code Scanning** (การอ่านโค้ดแบบคงที่ด้วย Regular Expression หรือ Parser ก่อนที่ JavaScript จะถูกรัน) มันจะมองหาคำเต็มๆ ที่ปรากฏในไฟล์เท่านั้น เช่น `text-blue-600` 
+เมื่อเราเขียนเป็น Template String ที่มีการตัดแปะคำ ตัว Scanner จะเห็นแค่คำว่า `text-${isPrimary...` ซึ่งไม่ตรงกับ Utility Class ใดๆ ในระบบ ทำให้ Tailwind ไม่สามารถสร้างคลาสสีน้ำเงินลงในไฟล์ CSS ผลลัพธ์ได้ วิธีที่ถูกต้องคือการเขียนชื่อคลาสเต็มๆ ทั้งสองตัวเลือกเสมอ เช่น `isPrimary ? 'text-blue-600' : 'text-gray-600'`

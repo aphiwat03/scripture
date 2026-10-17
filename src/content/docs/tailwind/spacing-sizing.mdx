@@ -1,0 +1,245 @@
+---
+title: Spacing & Sizing
+category: Frontend
+parentTitle: Tailwind CSS v4
+version: Tailwind v4.0 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ระบบ **Spacing & Sizing** ใน Tailwind CSS v4 ช่วยแก้ปัญหาความไม่สม่ำเสมอของระยะห่าง (Visual Inconsistency) ในการจัด Layout โดยใช้ **Spacing Scale** ที่มีฐานอิงตามหน่วย `4px` (`1 unit = 0.25rem = 4px` เมื่อ root font size คือ `16px`)
+
+การมีสเกลมาตรฐานช่วยให้นักพัฒนาไม่ต้องเดาตัวเลข เช่น `13px`, `17px`, `22px` แต่เลือกใช้ค่าที่มีจังหวะทางสายตาลงตัว (Design Rhythm) เช่น:
+- `p-2` = 8px, `p-4` = 16px, `p-6` = 24px, `p-8` = 32px
+- ใน Tailwind v4 มีคลาสใหม่ที่สำคัญอย่างยิ่งคือ **`size-*`** สำหรับกำหนดทั้งความกว้างและความสูงพร้อมกัน เช่น `size-10` แทนการเขียน `w-10 h-10`
+- รองรับขนาดขอบเขตจำกัด `min-w-*`, `max-w-*`, `min-h-*`, `max-h-*`
+- และเปิดโอกาสให้ใส่ค่าเฉพาะเจาะจงผ่าน Arbitrary Values เช่น `w-[320px]` เมื่อต้องตรงตาม Pixel-perfect Spec
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### กลไก Spacing Scale และ CSS Variables ใน Tailwind v4
+ใน Tailwind v4 ค่าระยะห่างทั้งหมดถูกแปลงเป็น **Native CSS Custom Properties** ภายใต้โครงสร้าง `--spacing-*`:
+1. **Rem-based Calculation**: ทุกหน่วยตัวเลขจะถูกคูณด้วย `0.25rem` เช่น:
+   ```css
+   /* p-4 */
+   padding: calc(var(--spacing) * 4); /* หรือ 1rem / 16px */
+   ```
+2. **`size-*` Utility Property**: คลาส `size-8` ถูกคอมไพล์โดย Oxide Engine เป็นทั้ง `width: 2rem; height: 2rem;` ภายใน rule เดียว ช่วยลดความซ้ำซ้อนในมาร์กอัป
+3. **Arbitrary Value Generation**: เมื่อเขียน `w-[320px]` หรือ `h-[calc(100vh-4rem)]` เอนจิน Oxide จะสร้าง Atomic Rule ทันทีโดยไม่เกิด runtime overhead ใดๆ
+
+---
+
+## 3. ตัวอย่างโค้ด (Tailwind v4 & TSX)
+
+### ตัวอย่างที่ 1: การ์ดโปรไฟล์ผู้ใช้งาน (UserProfileCard)
+
+```tsx filename="src/components/UserProfileCard.tsx"
+import Image from "next/image";
+import { Mail, MapPin, ShieldCheck } from "lucide-react";
+
+interface UserProfileCardProps {
+  name: string;
+  role: string;
+  location: string;
+  email: string;
+  avatarUrl: string;
+}
+
+export function UserProfileCard({
+  name,
+  role,
+  location,
+  email,
+  avatarUrl,
+}: UserProfileCardProps) {
+  return (
+    // กำหนด max-w-sm, p-6, rounded-2xl
+    <div className="w-full max-w-sm rounded-2xl border border-neutral-200 bg-white p-6 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
+      <div className="flex items-center gap-4">
+        {/* ใช้ size-16 กำหนดทั้ง width และ height 64px ในคลาสเดียว */}
+        <div className="relative size-16 shrink-0 overflow-hidden rounded-full border-2 border-indigo-500">
+          <Image
+            src={avatarUrl}
+            alt={name}
+            fill
+            className="object-cover"
+            sizes="64px"
+          />
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <h3 className="truncate text-base font-semibold text-neutral-900 dark:text-neutral-100">
+              {name}
+            </h3>
+            <ShieldCheck className="size-4 shrink-0 text-indigo-500" />
+          </div>
+          <p className="truncate text-xs font-medium text-neutral-500 dark:text-neutral-400">
+            {role}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-6 space-y-2.5 border-t border-neutral-100 pt-4 dark:border-neutral-800/80">
+        <div className="flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-400">
+          <MapPin className="size-3.5 shrink-0 text-neutral-400" />
+          <span className="truncate">{location}</span>
+        </div>
+        <div className="flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-400">
+          <Mail className="size-3.5 shrink-0 text-neutral-400" />
+          <span className="truncate">{email}</span>
+        </div>
+      </div>
+
+      <button
+        type="button"
+        className="mt-6 flex h-10 w-full items-center justify-center rounded-xl bg-indigo-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 active:scale-[0.98]"
+      >
+        ส่งข้อความ
+      </button>
+    </div>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: ตารางแพ็กเกจราคา (PricingTierCard)
+
+```tsx filename="src/components/PricingTierCard.tsx"
+import { Check } from "lucide-react";
+
+interface PricingTierProps {
+  title: string;
+  price: string;
+  description: string;
+  features: string[];
+  isPopular?: boolean;
+}
+
+export function PricingTierCard({
+  title,
+  price,
+  description,
+  features,
+  isPopular = false,
+}: PricingTierProps) {
+  return (
+    <div
+      className={`relative flex w-full max-w-xs flex-col justify-between rounded-3xl p-8 transition-all ${
+        isPopular
+          ? "border-2 border-indigo-600 bg-white shadow-xl dark:bg-neutral-900"
+          : "border border-neutral-200 bg-white/60 dark:border-neutral-800 dark:bg-neutral-950"
+      }`}
+    >
+      {isPopular && (
+        <span className="absolute -top-3.5 left-1/2 -translate-x-1/2 rounded-full bg-indigo-600 px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-white">
+          ยอดนิยม
+        </span>
+      )}
+
+      <div>
+        <h4 className="text-sm font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-400">
+          {title}
+        </h4>
+        <div className="mt-4 flex items-baseline gap-1">
+          <span className="text-4xl font-extrabold tracking-tight text-neutral-900 dark:text-white">
+            {price}
+          </span>
+          <span className="text-xs text-neutral-500">/เดือน</span>
+        </div>
+        <p className="mt-2 text-xs text-neutral-600 dark:text-neutral-400">
+          {description}
+        </p>
+
+        {/* จัดระยะห่างภายในรายการด้วย gap-3 */}
+        <ul className="mt-6 flex flex-col gap-3">
+          {features.map((feature, idx) => (
+            <li key={idx} className="flex items-center gap-2.5 text-xs text-neutral-700 dark:text-neutral-300">
+              <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400">
+                <Check className="size-2.5 stroke-[3]" />
+              </span>
+              <span>{feature}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <div className="mt-8 pt-4">
+        <button
+          type="button"
+          className={`h-11 w-full rounded-xl text-xs font-semibold transition ${
+            isPopular
+              ? "bg-indigo-600 text-white hover:bg-indigo-700 shadow-md"
+              : "bg-neutral-100 text-neutral-800 hover:bg-neutral-200 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
+          }`}
+        >
+          เริ่มต้นใช้งาน
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับ CSS ปกติ
+
+| Tailwind v4 Utility | CSS เสมือนจริง | คำอธิบายความหมาย |
+| :--- | :--- | :--- |
+| `size-10` | `width: 2.5rem; height: 2.5rem;` | กำหนดขนาดกว้างและสูงเท่ากัน (40px) |
+| `p-4 px-6` | `padding: 1rem 1.5rem;` | Padding รวม 16px และขยายซ้ายขวาเป็น 24px |
+| `m-auto` | `margin: auto;` | จัดกึ่งกลางก้อนบล็อกในแนวนอน |
+| `gap-y-4` | `row-gap: 1rem;` | ระยะห่างระหว่างแถวใน Flex หรือ Grid |
+| `max-w-md` | `max-width: 28rem; /* 448px */` | จำกัดความกว้างสูงสุดระดับ Medium |
+| `w-[320px]` | `width: 320px;` | Arbitrary value สำหรับขนาดฟิกซ์เฉพาะจุด |
+
+---
+
+## 5. ผิด vs ถูก
+
+### จุดที่ 1: การกำหนดขนาดสี่เหลี่ยมจัตุรัสของ Icon หรือ Avatar
+```tsx
+// ❌ ผิด (ล้าสมัย ยาวเกินจำเป็น)
+<div className="w-10 h-10 rounded-full">
+
+// ✅ ถูก (ใช้ size-* ใน Tailwind v4)
+<div className="size-10 rounded-full">
+```
+*เหตุผล*: `size-*` ถูกออกแบบมาเพื่อลดความซ้ำซ้อนและลดความเสี่ยงที่นักพัฒนาจะเปลี่ยนค่า `w` แต่ลืมเปลี่ยนค่า `h`
+
+### จุดที่ 2: สับสนเรื่องการใช้ Arbitrary Values แทน Design Scale
+```tsx
+// ❌ ผิด: ใส่ค่าพิกเซลสุ่มมั่ว ทำให้สูญเสีย Design Consistency
+<div className="p-[15px] m-[7px] w-[318px]">
+
+// ✅ ถูก: ยึดตามระบบ 4px scale ของทีม
+<div className="p-4 m-2 w-80">
+```
+*เหตุผล*: การใช้ Arbitrary ค่าแปลกๆ โดยไม่จำเป็นทำลายความสอดคล้องของระบบ UI ควรใช้ Arbitrary เฉพาะเมื่อต้องทำงานร่วมกับ Asset หรือ Third-party Widget ที่มีขนาดฟิกซ์เท่านั้น
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้
+- กำหนดขนาด Layout สัดส่วน Icon, Button, Card, Modal และ Avatar
+- กำหนดระยะห่างระหว่างชิ้นส่วนด้วย `gap-*` ภายใน Flexbox และ CSS Grid
+- ใช้ `size-*` เสมอเมื่อ Width และ Height ต้องมีขนาดเท่ากัน
+
+### ไม่ควรใช้
+- ไม่ควรใช้ `space-y-*` หรือ `space-x-*` ร่วมกับองค์ประกอบที่มีการซ่อน element ด้วย `hidden` บ่อยครั้ง เพราะตัว selector `> :not([hidden]) ~ :not([hidden])` ของ space อาจคำนวณ margin ผิดพลาด ให้เลือกใช้ `flex flex-col gap-*` แทนเสมอในโค้ดสมัยใหม่
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไม Tailwind v4 ถึงแนะนำให้ใช้ `gap-*` ร่วมกับ Flexbox แทนที่จะใช้ Utility ตระกูล `space-x-*` / `space-y-*`?
+**แนวทางคำตอบ**: 
+ในอดีต `space-x-*` และ `space-y-*` ใช้วิธีแทรก `margin-left` หรือ `margin-top` ผ่าน CSS Child Selector (`> * + *`) ซึ่งมีจุดอ่อนคือ หากมีคอมโพเนนต์ลูกตัวใดตัวหนึ่งถูกสั่งซ่อน (`display: none` หรือ conditional rendering ใน React) อาจทำให้เกิด margin ตกค้างหรือระยะห่างกระโดด แต่ในโมเดิร์นเบราว์เซอร์ทุกตัวรองรับ `gap` บน Flexbox และ Grid อย่างสมบูรณ์แล้ว การใช้ `flex gap-4` จึงเสถียรกว่า ทรงพลังกว่า และไม่สร้าง side effect ต่อ sibling elements
+
+### Q2: ใน Tailwind v4 คลาส `size-8` มีข้อได้เปรียบอย่างไร และคอมไพเลอร์แปลงเป็น CSS อย่างไร?
+**แนวทางคำตอบ**: 
+คลาส `size-8` ช่วยลดความซ้ำซ้อนจากการเขียน `w-8 h-8` ทำให้ JSX มาร์กอัปกระชับขึ้น และป้องกันข้อผิดพลาดกรณีที่ผู้พัฒนาอัปเดตความกว้างแต่ลืมอัปเดตความสูง ในระดับคอมไพเลอร์ Oxide จะสร้าง CSS rule ที่มีทั้ง `width: 2rem; height: 2rem;` ซึ่งช่วยรักษา atomic specificity และทำงานร่วมกับ Tailwind theme tokens ได้อย่างไร้รอยต่อ

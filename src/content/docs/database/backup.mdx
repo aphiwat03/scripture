@@ -1,0 +1,588 @@
+---
+title: Backup
+category: DATABASE
+version: PostgreSQL 16 (pg_dump / PITR)
+updatedAt: 2026-10-17
+---
+
+# Backup
+
+ในโลกของวิศวกรรมซอฟต์แวร์ เซิร์ฟเวอร์สามารถพังได้ ดิสก์สามารถเสียได้ และมนุษย์สามารถเผลอรันคำสั่ง `DELETE` โดยลืมใส่ `WHERE` ได้ทุกเมื่อ สิ่งเดียวที่คั่นกลางระหว่าง "อุบัติเหตุทางเทคนิค" กับ "การปิดกิจการของบริษัท" คือระบบ **Database Backup & Disaster Recovery** ที่สามารถกู้คืนกลับมาใช้งานได้จริง เอกสารฉบับนี้เจาะลึกสถาปัตยกรรมการสำรองและกู้คืนข้อมูลบน **PostgreSQL 16** สำหรับระบบ **Smart Butcher Marketplace** ครอบคลุมตั้งแต่ระดับคำสั่ง CLI, การทำงานผ่าน Docker, แนวคิด Point-in-Time Recovery (PITR) ไปจนถึงการบริหารจัดการบนคลาวด์
+
+| หัวข้อในหน้านี้ | สาระสำคัญ |
+| :--- | :--- |
+| **1. การทำ Backup และ Restore ด้วย pg_dump, pg_restore และ psql** | ความแตกต่างของรูปแบบไฟล์ `.sql` (Plain) กับ `.dump` (Custom Format `-Fc`) และการกู้คืนแบบขนาน |
+| **2. การสำรองและกู้คืนข้อมูล PostgreSQL 16 ที่รันอยู่บน Docker Container** | การใช้ `docker exec` ร่วมกับ Pipe Stream และข้อควรระวังเรื่อง TTY Flags (`-i` vs `-it`) |
+| **3. เปรียบเทียบ Logical Backup vs Physical Backup และแนวคิด PITR** | กลไก Write-Ahead Log (WAL) Archiving, `pg_basebackup`, ค่า RPO และ RTO |
+| **4. กลยุทธ์ตั้งเวลา Backup อัตโนมัติ, การแยกพื้นที่จัดเก็บ และการซ้อมกู้คืนข้อมูล** | กฎ 3-2-1 Backup Rule, สคริปต์อัตโนมัติขึ้น S3/R2 และการทำ Restore Drill |
+| **5. ระบบ Backup ของ Supabase และข้อจำกัดของแพ็กเกจ Free Tier** | นโยบายการสำรองข้อมูลแยกตามแพ็กเกจและวิธีการทำ Backup ด้วยตัวเองสำหรับ Free Tier |
+
+<Callout type="warning" title="กฎเหล็กของวิศวกรฐานข้อมูล: Backup ที่ยังไม่เคยลอง Restore คือไม่มี Backup">
+การตั้งเวลาให้สคริปต์รันสร้างไฟล์ `.dump` ทุกคืนไม่ได้แปลว่าคุณปลอดภัย จนกว่าคุณจะได้ทดลองนำไฟล์นั้นมากู้คืนลงฐานข้อมูลจำลองและเปิดดูข้อมูลในตาราง `orders` และ `payments` ว่ากลับมาครบถ้วนสมบูรณ์
+</Callout>
+
+---
+
+## 1. การทำ Backup และ Restore ด้วย pg_dump, pg_restore และ psql
+
+### แนวคิด (Concept)
+ในระบบร้านค้าเนื้อพรีเมียม **Smart Butcher Marketplace** ข้อมูลคำสั่งซื้อ (`orders`), รายการตัดแต่งเนื้อ (`order_items`), และหลักฐานการโอนเงิน (`payments`) มีการเปลี่ยนแปลงตลอดเวลา หากเราใช้วิธีคัดลอกไฟล์ในโฟลเดอร์ฐานข้อมูลดื้อๆ ขณะที่เซิร์ฟเวอร์กำลังทำงาน ข้อมูลที่ได้จะพังเสียหายและเปิดไม่ขึ้นเพราะตารางกำลังถูกเขียนค้างอยู่
+
+PostgreSQL 16 จึงเตรียมเครื่องมือมาตรฐานชื่อว่า **`pg_dump`** ซึ่งทำงานเสมือนการถ่ายภาพนิ่ง (Consistent Snapshot) ของฐานข้อมูลทั้งก้อน ณ วินาทีที่สั่งรัน โดยไม่ต้องหยุดการทำงานของเว็บไซต์ ลูกค้ายังสามารถกดสั่งซื้อเนื้อวากิวได้ตามปกติในขณะที่ `pg_dump` กำลังดึงข้อมูลออกมาอย่างเงียบเชียบ
+
+### หลักการเบื้องหลัง (Under the Hood)
+1. **MVCC Snapshot Consistency:**
+   เมื่อเริ่มต้นทำงาน `pg_dump` จะเปิด Transaction แบบอ่านอย่างเดียวในโหมด `REPEATABLE READ` ทำให้มันมองเห็นข้อมูลทุกตาราง (`users`, `categories`, `products`, `orders`, `order_items`, `payments`) ณ จุดเวลาเดียวกันเป๊ะ ไม่มีการล็อกการเขียนของแอปพลิเคชันหน้าร้าน
+2. **รูปแบบไฟล์ของ `pg_dump` และเครื่องมือคู่ใจในการกู้คืน:**
+   - **Plain-Text SQL Format (`-Fp` หรือค่าเริ่มต้น):** สร้างไฟล์สคริปต์ข้อความ `.sql` ที่มีคำสั่ง `CREATE TABLE` และ `COPY ... FROM stdin` ข้อดีคือเปิดอ่านด้วยตาเปล่าได้ แต่ไฟล์มีขนาดใหญ่และไม่สามารถเลือกกู้คืนเฉพาะบางตารางได้ง่าย **ต้องกู้คืนด้วยคำสั่ง `psql`**
+   - **Custom Archive Format (`-Fc` - แนะนำสำหรับ Production):** สร้างไฟล์ไบนารีที่ถูกบีบอัด (ด้วยอัลกอริทึม zlib หรือ `zstd` ซึ่งรองรับอย่างสมบูรณ์ใน PostgreSQL 16) มีสารบัญตาราง (Table of Contents) ฝังอยู่ในไฟล์ ทำให้สามารถเลือกกู้คืนเฉพาะตารางที่ต้องการ และรองรับการแตกไฟล์พร้อมกันหลายซีพียู (`--jobs`) **ต้องกู้คืนด้วยคำสั่ง `pg_restore`**
+   - **Directory Format (`-Fd`):** แยกแต่ละตารางออกเป็นไฟล์ย่อยในโฟลเดอร์ รองรับทั้งการทำ Parallel Dump และการทำ Parallel Restore ความเร็วสูง
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: การสำรองและกู้คืนแบบ Plain-Text SQL (`pg_dump` + `psql`) และการแยก Schema/Data
+เหมาะสำหรับการสำรองข้อมูลขนาดเล็ก หรือการดึงเฉพาะโครงสร้างตารางไปตรวจสอบ:
+
+```bash filename="01_plain_sql_backup_restore.sh"
+# 1. สำรองฐานข้อมูลทั้งหมดออกมาเป็นไฟล์ข้อความ .sql
+pg_dump -h localhost -p 5432 -U butcher_admin -d smart_butcher_db \
+  --no-owner --no-privileges \
+  -f backup_smart_butcher_20261017.sql
+
+# 2. สำรองเฉพาะโครงสร้างตาราง (Schema-only) ไม่เอาข้อมูลแถว
+pg_dump -h localhost -U butcher_admin -d smart_butcher_db \
+  --schema-only -f schema_only_20261017.sql
+
+# 3. สำรองเฉพาะข้อมูลในตารางสินค้าและหมวดหมู่ (Data-only + Specific Tables)
+pg_dump -h localhost -U butcher_admin -d smart_butcher_db \
+  --data-only -t public.categories -t public.products \
+  -f catalog_data_20261017.sql
+
+# 4. การกู้คืนไฟล์ .sql เข้าสู่ฐานข้อมูลใหม่ด้วย psql (บังคับหยุดทันทีหากพบ Error และทำงานใน 1 Transaction)
+psql -h localhost -U butcher_admin -d smart_butcher_recovery_db \
+  -v ON_ERROR_STOP=1 --single-transaction \
+  -f backup_smart_butcher_20261017.sql
+```
+
+#### ตัวอย่างที่ 2: การสำรองระดับ Production ด้วย Custom Format (`-Fc` + Zstandard) และการกู้คืนความเร็วสูงด้วย `pg_restore`
+ใน PostgreSQL 16 เราสามารถใช้การบีบอัดแบบ `zstd` ร่วมกับ `-Fc` และสั่งกู้คืนแบบขนานหลายคอร์ (`-j 4`) หรือเลือกกู้คืนเฉพาะตาราง `orders` ที่เผลอทำข้อมูลหายได้ทันที:
+
+```bash filename="02_custom_format_production.sh"
+# 1. สร้าง Backup แบบ Custom Format (-Fc) พร้อมบีบอัดด้วย Zstandard ระดับ 5 (ฟีเจอร์เด่นใน PG 16)
+pg_dump -h localhost -p 5432 -U butcher_admin -d smart_butcher_db \
+  -Fc --compress=zstd:5 --no-owner --no-privileges \
+  -f smart_butcher_prod_20261017.dump
+
+# 2. ตรวจสอบสารบัญ (Table of Contents) ข้างในไฟล์ .dump โดยไม่ต้องกู้คืนจริง
+pg_restore --list smart_butcher_prod_20261017.dump | grep -E "TABLE|INDEX"
+
+# 3. กู้คืนทั้งฐานข้อมูลด้วยความเร็วสูงโดยใช้ CPU 4 Cores ช่วยกันทำงานขนานกัน (-j 4)
+# --clean --if-exists จะลบตารางเก่าในฐานข้อมูลปลายทางก่อนสร้างใหม่
+pg_restore -h localhost -p 5432 -U butcher_admin -d smart_butcher_recovery_db \
+  --clean --if-exists --no-owner --no-privileges \
+  -j 4 smart_butcher_prod_20261017.dump
+
+# 4. กรณีฉุกเฉิน: กู้คืนเฉพาะข้อมูลของตาราง orders และ order_items จากไฟล์ .dump ก้อนใหญ่
+pg_restore -h localhost -p 5432 -U butcher_admin -d smart_butcher_recovery_db \
+  --data-only -t orders -t order_items \
+  smart_butcher_prod_20261017.dump
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การเลือกใช้เครื่องมือกู้คืน** | นำไฟล์ที่สร้างด้วย `-Fc` (`.dump`) ไปรันเข้า `psql -f` ทำให้เกิด Syntax Error เพราะเป็นไฟล์ไบนารี | ไฟล์ `.sql` (Plain) ใช้คู่กับ `psql` เสมอ ส่วนไฟล์ `.dump` (`-Fc`) ใช้คู่กับ `pg_restore` เสมอ |
+| **การจัดการสิทธิ์เจ้าของตาราง** | ไม่ใส่ `--no-owner --no-privileges` ทำให้เวลานำไฟล์ไปกู้คืนบนเซิร์ฟเวอร์ใหม่ที่มีชื่อ User ต่างกันเกิด Error | ใส่ `--no-owner --no-privileges` เสมอเพื่อให้ตารางที่กู้คืนตกเป็นของ Role ที่กำลังรันคำสั่งกู้คืน |
+| **เวอร์ชันของเครื่องมือ `pg_dump`** | ใช้ `pg_dump` เวอร์ชัน 14 ไปดึงข้อมูลจากเซิร์ฟเวอร์ PostgreSQL 16 ทำให้ทำงานไม่ได้ | ใช้ `pg_dump` ที่มีเวอร์ชัน **เท่ากับหรือใหม่กว่า** เวอร์ชันของเซิร์ฟเวอร์ PostgreSQL เสมอ |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `pg_dump -Fc` คู่กับ `pg_restore` เมื่อ:** สำรองฐานข้อมูลระดับ Production ที่มีขนาดตั้งแต่หลักเมกะไบต์ไปจนถึงระดับ 100-300 GB เพราะประหยัดพื้นที่ดิสก์ กู้คืนแบบขนานได้เร็ว และเลือกกู้เฉพาะตารางได้
+- **ไม่ควรใช้ `pg_dump` เพียงอย่างเดียวเมื่อ:** ฐานข้อมูลมีขนาดใหญ่ระดับหลาย Terabytes (TB) หรือระบบห้ามมีข้อมูลสูญหายแม้แต่วินาทีเดียวระหว่างวัน (ในกรณีนั้นต้องใช้ Physical Backup ร่วมกับ WAL Archiving / PITR)
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ในขณะที่รันคำสั่ง `pg_dump` บนฐานข้อมูล Production ที่มีลูกค้ากำลังสั่งซื้อสินค้าอยู่ มันจะทำให้ตาราง `orders` ถูกล็อกจนลูกค้าสั่งซื้อไม่ได้หรือไม่?**
+  - **แนวคำตอบ:** ไม่บล็อกการอ่านและการเขียนข้อมูลปกติของลูกค้าเลย เพราะ `pg_dump` อาศัยกลไก MVCC ของ PostgreSQL โดยถือล็อกเพียงระดับ `ACCESS SHARE LOCK` (ระดับเดียวกับคำสั่ง `SELECT` ธรรมดา) ดังนั้นคำสั่ง `INSERT`, `UPDATE`, `DELETE` ของแอปพลิเคชันยังคงทำงานได้ตามปกติ จะมีเพียงคำสั่งแก้ไขโครงสร้างตารางระดับ `ACCESS EXCLUSIVE LOCK` (เช่น `DROP TABLE` หรือ `ALTER TABLE`) เท่านั้นที่ไม่ควรรันชนกับจังหวะที่ทำ `pg_dump`
+- **Q2: ทำไมในการใช้งานจริงบน Production วิศวกรจึงนิยมใช้ `pg_dump -Fc` มากกว่าการออกไฟล์เป็น `.sql` ธรรมดา?**
+  - **แนวคำตอบ:** เพราะ Custom Format (`-Fc`) มีข้อได้เปรียบหลัก 3 ประการ: (1) ข้อมูลถูกบีบอัดโดยอัตโนมัติทำให้ขนาดไฟล์เล็กลงมาก (2) สามารถใช้ `pg_restore -j <จำนวนคอร์>` เพื่อแบ่งงานการสร้าง Index และการใส่ข้อมูลให้ทำงานพร้อมกันหลาย Thread ทำให้เวลาในการกู้คืน (RTO) สั้นลงหลายเท่า และ (3) สามารถเลือกกู้คืนเฉพาะบางตาราง (`-t`) หรือเรียงลำดับการกู้คืนใหม่ได้โดยไม่ต้องไปตัดแก้ไฟล์ข้อความขนาดหลายกิกะไบต์
+
+---
+
+## 2. การสำรองและกู้คืนข้อมูล PostgreSQL 16 ที่รันอยู่บน Docker Container
+
+### แนวคิด (Concept)
+ในการพัฒนาและทดสอบระบบ **Smart Butcher Marketplace** (รวมถึงการรันบนเซิร์ฟเวอร์ VPS ขนาดกลาง) เรามักรัน PostgreSQL 16 อยู่ภายใน **Docker Container** ปัญหาที่นักพัฒนามักเจอคือเครื่อง Host ภายนอกไม่ได้ติดตั้งโปรแกรม `postgresql-client` เวอร์ชัน 16 เอาไว้ หรือไม่ต้องการคัดลอกไฟล์ข้ามไปมาระหว่าง Container กับ Host ให้ซับซ้อน
+
+ทางออกที่สะอาดและปลอดภัยที่สุดคือการสั่งรัน `pg_dump` หรือ `pg_restore` **จากภายใน Container แล้วส่งกระแสข้อมูล (Standard Input/Output Stream) ทะลุออกมาเขียนเป็นไฟล์บนเครื่อง Host โดยตรง**
+
+### หลักการเบื้องหลัง (Under the Hood)
+1. **การทำงานของ Pipe และ Redirection ข้าม Docker Boundary:**
+   เมื่อเราสั่ง `docker exec <container> pg_dump ... > host_file.sql` คำสั่ง `pg_dump` จะทำงานโดยใช้ CPU และไบนารีเวอร์ชัน 16.x ที่อยู่ใน Container แล้วพ่นผลลัพธ์ออกทาง `stdout` จากนั้น Shell ของเครื่อง Host จะรับกระแสข้อมูลนั้นมาบันทึกลงดิสก์ของเครื่อง Host โดยไม่สร้างไฟล์ขยะค้างไว้ในพื้นที่ของ Container เลย
+2. **อันตรายของการใช้แฟล็ก `-it` (TTY Allocation) ตอนทำ Backup:**
+   คำสั่งที่พบบ่อยแต่ทำให้ไฟล์พังคือ `docker exec -it ... pg_dump -Fc > backup.dump` การใส่ `-t` (Allocate a pseudo-TTY) จะทำให้ Docker แปลงอักขระขึ้นบรรทัดใหม่จาก `\n` (LF) ให้กลายเป็น `\r\n` (CRLF) ซึ่งจะ **ทำลายโครงสร้างไฟล์ไบนารี `.dump` หรือไฟล์บีบอัด `.gz` จนไม่สามารถกู้คืนกลับมาได้อีกเลย!** ดังนั้นในการทำ Stream Backup/Restore ผ่าน Docker ต้องใช้แฟล็ก **`-i` (Interactive / Keep STDIN open) เท่านั้น ห้ามใส่ `-t` เด็ดขาด**
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: การสำรองและกู้คืนไฟล์ `.sql.gz` ผ่าน Docker Stream
+เหมาะสำหรับการบีบอัดไฟล์ SQL ข้ามมาจาก Container ลงสู่เครื่อง Host โดยตรง:
+
+```bash filename="01_docker_sql_gzip_backup.sh"
+# 1. ดึงข้อมูลจาก Container 'smart-butcher-postgres' บีบอัดด้วย gzip แล้วเซฟลงเครื่อง Host
+# สังเกตว่าเราไม่ใส่แฟล็ก -t เด็ดขาด!
+docker exec -i smart-butcher-postgres \
+  pg_dump -U butcher_admin -d smart_butcher_db --no-owner --no-privileges \
+  | gzip -9 > ./backups/smart_butcher_$(date +%Y%m%d_%H%M%S).sql.gz
+
+# 2. แตกไฟล์ .sql.gz จากเครื่อง Host แล้วส่งกระแสข้อมูล (stdin) เข้าไปกู้คืนใน Container
+gunzip -c ./backups/smart_butcher_20261017_020000.sql.gz \
+  | docker exec -i smart-butcher-postgres \
+    psql -U butcher_admin -d smart_butcher_recovery_db -v ON_ERROR_STOP=1
+```
+
+#### ตัวอย่างที่ 2: การสำรองและกู้คืนด้วย Custom Format (`-Fc`) ผ่าน Docker Container
+การใช้รูปแบบ `-Fc` ร่วมกับ `pg_restore` ผ่านท่อ `stdin` ของ Docker Container:
+
+```bash filename="02_docker_custom_format_restore.sh"
+# 1. สร้างไฟล์ Custom Format (.dump) จากใน Container ออกมาวางบนเครื่อง Host
+docker exec -i smart-butcher-postgres \
+  pg_dump -U butcher_admin -d smart_butcher_db -Fc --compress=zstd:5 --no-owner \
+  > ./backups/smart_butcher_prod.dump
+
+# 2. ตรวจสอบความสมบูรณ์ของไฟล์ .dump ที่ได้บนเครื่อง Host โดยส่งกลับไปให้ pg_restore เช็คสารบัญ
+docker exec -i smart-butcher-postgres pg_restore --list < ./backups/smart_butcher_prod.dump | head -n 25
+
+# 3. สร้างฐานข้อมูลเปล่าใน Container สำหรับทดสอบการกู้คืน
+docker exec -i smart-butcher-postgres \
+  psql -U butcher_admin -d postgres -c "CREATE DATABASE smart_butcher_verify_db;"
+
+# 4. ส่งไฟล์ .dump จากเครื่อง Host เข้าไปให้ pg_restore ใน Container ทำการกู้คืน
+docker exec -i smart-butcher-postgres \
+  pg_restore -U butcher_admin -d smart_butcher_verify_db --clean --if-exists --no-owner \
+  < ./backups/smart_butcher_prod.dump
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การใช้แฟล็กของ `docker exec`** | ใช้ `docker exec -it ... pg_dump -Fc > file.dump` ทำให้ TTY แปลง Byte ไบนารีจนไฟล์เสีย | ใช้ `docker exec -i` (ไม่มี `-t`) เสมอเมื่อมีการ Redirect `stdout` หรือ `stdin` |
+| **การสำรองผ่าน Docker Volume ดิบ** | สั่ง `tar -czf backup.tar.gz /var/lib/docker/volumes/pgdata` ขณะที่ฐานข้อมูลกำลังรันอยู่ | ใช้ `pg_dump` หรือ `pg_basebackup` เพื่อรับประกันความถูกต้องของข้อมูลตามหลัก ACID |
+| **ตำแหน่งที่เก็บไฟล์ Backup** | สั่ง `pg_dump -f /tmp/backup.dump` ทิ้งไว้ข้างใน Container พอ Container ถูกลบไฟล์ก็หายไปด้วย | ส่งกระแสข้อมูลออกมาเก็บที่ดิสก์ของ Host หรืออัปโหลดขึ้น Cloud Object Storage ทันที |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `docker exec -i` Stream เมื่อ:** ฐานข้อมูลรันอยู่บน Docker หรือ Docker Compose และต้องการหลีกเลี่ยงปัญหาความไม่ตรงกันของเวอร์ชัน `pg_dump` ระหว่างเครื่อง Host กับตัว Container
+- **ไม่ควรใช้ `pg_restore` ผ่านท่อ `< file.dump` เมื่อ:** ต้องการใช้ความสามารถกู้คืนแบบขนานหลายคอร์ (`-j 4`) เพราะ `pg_restore` ต้องเข้าถึงไฟล์แบบสุ่ม (Random Seek) เพื่อแบ่งงานให้หลายโปรเซส ในกรณีที่ต้องใช้ `-j 4` ให้挂载 (Mount) โฟลเดอร์ Backup เข้าไปใน Container แบบ Read-only (`-v ./backups:/backups:ro`) แล้วอ้างอิงพาธไฟล์แทนการใช้ `<`
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ทำไมการสั่ง `docker exec -it postgres-container pg_dump -Fc ... > backup.dump` จึงทำให้ไฟล์ `.dump` เสียหายและกู้คืนไม่ได้?**
+  - **แนวคำตอบ:** เพราะแฟล็ก `-t` (`--tty`) สั่งให้ Docker จำลองหน้าจอเทอร์มินัล ซึ่งมีพฤติกรรมแปลงรหัสควบคุมการขึ้นบรรทัดใหม่จาก `0x0A` (`\n`) ให้เป็น `0x0D 0x0A` (`\r\n`) เนื่องจากไฟล์ `-Fc` เป็นไฟล์ไบนารีที่ถูกบีบอัด เมื่อไบต์ที่มีค่าตรงกับ `0x0A` ถูกแทรก `0x0D` เข้าไป โครงสร้างข้อมูลบีบอัดและ Checksum ภายในไฟล์จะพังทลายทันที
+- **Q2: หากเราทำการ Mount Docker Volume `/var/lib/postgresql/data` ไว้กับโฟลเดอร์บนเครื่อง Host แล้ว ทำไมเรายังต้องทำ `pg_dump` อีก?**
+  - **แนวคำตอบ:** Docker Volume ช่วยให้ข้อมูลไม่หายเวลา Container รีสตาร์ทเท่านั้น แต่ไม่ได้ช่วยป้องกันความผิดพลาดระดับตรรกะ (Human/Application Error) เช่น การเผลอรันสคริปต์ลบข้อมูลตาราง `orders` หรือตารางเสียหายจากการอัปเดตโค้ดผิดพลาด เพราะความเสียหายนั้นจะถูกเขียนทับลงไปใน Volume ทันที การมีไฟล์ Backup แยกตามช่วงเวลาเท่านั้นที่จะช่วยให้ย้อนข้อมูลกลับไปก่อนเกิดเหตุได้
+
+---
+
+## 3. เปรียบเทียบ Logical Backup vs Physical Backup และแนวคิด PITR
+
+### แนวคิด (Concept)
+ลองนึกภาพว่าฐานข้อมูลของร้าน **Smart Butcher Marketplace** มีการสำรองข้อมูลด้วย `pg_dump` ทุกวันตอนเที่ยงคืน (`00:00 น.`)
+แต่วันหนึ่งเวลา **`14:32:15 น.`** พนักงานดูแลระบบเผลอรันคำสั่ง `DELETE FROM order_items;` โดยลืมใส่เงื่อนไข `WHERE` ทำให้รายการเนื้อสเต๊กที่ลูกค้าสั่งซื้อเข้ามาตั้งแต่เที่ยงคืนจนถึงบ่ายสองครึ่งหายไปทั้งหมด!
+
+หากเรามีแค่ไฟล์ `pg_dump` ตอนเที่ยงคืน เรากู้คืนกลับมาได้แค่ข้อมูลของเมื่อวาน แต่คำสั่งซื้อตลอด 14 ชั่วโมงครึ่งของวันนี้จะสูญหายไปตลอดกาล นี่คือเหตุผลที่ระบบระดับองค์กรต้องเข้าใจความแตกต่างระหว่าง **Logical Backup** กับ **Physical Backup** และต้องใช้เทคโนโลยีที่เรียกว่า **PITR (Point-in-Time Recovery)** เพื่อย้อนเวลากลับไปที่เวลา **`14:32:14 น.`** (1 วินาทีก่อนเกิดหายนะ) ได้อย่างแม่นยำ
+
+### หลักการเบื้องหลัง (Under the Hood)
+1. **Logical Backup (`pg_dump` / `pg_dumpall`):**
+   สกัดข้อมูลออกมาในระดับตรรกะ (ตาราง, แถว, คอลัมน์, โครงสร้าง SQL) เป็นภาพนิ่ง ณ จุดเวลาใดเวลาหนึ่ง (Point-in-Time Snapshot)
+2. **Physical Backup (`pg_basebackup`) + WAL Archiving:**
+   คัดลอกไฟล์ไบนารีระดับระบบไฟล์ของ PostgreSQL 16 ทั้งหมด (Base Backup) ควบคู่ไปกับการจัดเก็บไฟล์บันทึกการเปลี่ยนแปลงรายธุรกรรมที่เรียกว่า **WAL (Write-Ahead Log)** อย่างต่อเนื่อง:
+   - ทุกครั้งที่มีการ `INSERT` คำสั่งซื้อเนื้อ หรือ `UPDATE` สถานะการจ่ายเงินในตาราง `payments` PostgreSQL 16 จะเขียนบันทึกเหตุการณ์นั้นลงในไฟล์ WAL ขนาดไฟล์ละ 16MB (ในโฟลเดอร์ `pg_wal`) ก่อนเสมอ
+   - เมื่อเปิดโหมด `archive_mode = on` ทันทีที่ไฟล์ WAL เต็มหรือถึงเวลาที่กำหนด ระบบจะส่งไฟล์ WAL นั้นไปเก็บไว้ในคลังภายนอก (WAL Archive)
+3. **กลไกการย้อนเวลาด้วย PITR (Point-in-Time Recovery):**
+   เมื่อต้องการกู้คืนข้อมูลไปที่เวลา `14:32:14 น.` เราจะนำ **Physical Base Backup** ก้อนล่าสุดมาวางตั้งต้น แล้วสั่งให้ PostgreSQL 16 อ่านไฟล์ **WAL Archive** ไล่ทำซ้ำ (Replay) ทุกธุรกรรมตั้งแต่วินาทีที่ทำ Base Backup เรื่อยมา และหยุดการทำงานทันทีเมื่อถึงประทับเวลา `2026-10-17 14:32:14+07`!
+
+```text filename="docs/database/backup.txt"
+[ 00:00 น. Base Backup ] ══════► (บันทึก WAL Segments ต่อเนื่องทุกวินาที) ══════► [ 14:32:15 น. เผลอลบตาราง! ]
+         │                                     │
+         └──────────► นำ Base Backup + Replay WAL หยุดที่เวลา 14:32:14 น. ◄─────┘
+                               (กู้คืนข้อมูลกลับมาได้ 100% ก่อนถูกลบ 1 วินาที)
+```
+
+#### ตารางเปรียบเทียบ Logical Backup vs Physical Backup + PITR
+
+| มิติการเปรียบเทียบ | Logical Backup (`pg_dump`) | Physical Backup (`pg_basebackup` + WAL PITR) |
+| :--- | :--- | :--- |
+| **ลักษณะข้อมูลที่เก็บ** | คำสั่ง SQL หรือโครงสร้างข้อมูลระดับตาราง (`.sql` / `.dump`) | สำเนาไฟล์ระบบฐานข้อมูลระดับไบนารี + ไฟล์บันทึกธุรกรรม WAL |
+| **RPO (ข้อมูลที่ยอมให้หายได้)** | ขึ้นอยู่กับรอบการรัน (เช่น ถ้ารันวันละครั้ง ข้อมูลอาจหายได้สูงสุด 24 ชม.) | **ใกล้เคียงศูนย์ (วินาที)** สามารถย้อนกลับไปวินาทีใดก็ได้ |
+| **RTO (เวลาที่ใช้ในการกู้คืน)** | ช้าเมื่อข้อมูลมีขนาดใหญ่ เพราะต้องรันคำสั่ง `INSERT/COPY` และสร้าง Index ใหม่ทั้งหมด | **เร็วมากสำหรับข้อมูลขนาดใหญ่** เพราะไฟล์ Data Page และ Index ถูกสร้างไว้พร้อมแล้ว แค่ Replay WAL เพิ่มเติม |
+| **การเลือกกู้คืนบางตาราง** | ทำได้ง่ายมาก (`pg_restore -t orders`) | ทำโดยตรงไม่ได้ (ต้องกู้ทั้งคลัสเตอร์ขึ้นมาก่อนแล้วค่อยดึงตารางออก) |
+| **การข้ามเวอร์ชันหลัก (Major Upgrade)** | ใช้ย้ายข้ามเวอร์ชันได้ (เช่น ดึงจาก PG 15 ไปใส่ PG 16) | ใช้ข้ามเวอร์ชันหลักไม่ได้ และต้องเป็นสถาปัตยกรรม OS/CPU เดียวกัน |
+
+<Callout type="note" title="นิยามของ RPO และ RTO ที่วิศวกรต้องตอบได้ทันที">
+RPO (Recovery Point Objective) คือ ปริมาณข้อมูลย้อนหลังมากที่สุดที่ธุรกิจยอมรับได้หากสูญหาย (วัดเป็นเวลา เช่น ไม่เกิน 5 นาที) ส่วน RTO (Recovery Time Objective) คือ ระยะเวลาสูงสุดที่ระบบสามารถล่มได้นับตั้งแต่เกิดเหตุจนกระทั่งกู้คืนกลับมาเปิดให้บริการได้อีกครั้ง (เช่น ต้องกู้เสร็จภายใน 30 นาที)
+</Callout>
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: การตั้งค่า `postgresql.conf` เพื่อเปิดใช้งาน WAL Archiving และการทำ `pg_basebackup`
+การกำหนดค่าให้ PostgreSQL 16 ส่งไฟล์ WAL ออกไปเก็บสะสมไว้สำหรับทำ PITR:
+
+```ini filename="postgresql.conf"
+# 1. กำหนดระดับข้อมูลใน WAL ให้เพียงพอสำหรับการทำ Archiving และ Replication
+wal_level = replica
+
+# 2. เปิดโหมดส่งไฟล์ WAL ที่เขียนเต็มแล้วออกไปเก็บในคลังสำรอง
+archive_mode = on
+
+# 3. คำสั่งคัดลอกไฟล์ WAL (%p = พาธไฟล์ต้นทาง, %f = ชื่อไฟล์) ไปยังโฟลเดอร์ Archive (หรือส่งขึ้น S3 ด้วย pgBackRest / WAL-G)
+archive_command = 'test ! -f /var/lib/postgresql/wal_archive/%f && cp %p /var/lib/postgresql/wal_archive/%f'
+
+# 4. บังคับให้สลับไฟล์ WAL อย่างน้อยทุกๆ 5 นาที (300 วินาที) แม้มีคำสั่งซื้อน้อย เพื่อจำกัด RPO ไม่ให้เกิน 5 นาที
+archive_timeout = 300
+```
+
+คำสั่งสร้าง Physical Base Backup ก้อนตั้งต้น:
+```bash filename="run_basebackup.sh"
+# สร้างสำเนาฐานข้อมูลระดับ Physical แบบบีบอัดด้วย zstd พร้อมตรวจสอบ Checksum ของ Data Pages
+pg_basebackup -h localhost -p 5432 -U replication_user \
+  -D /var/lib/postgresql/basebackups/backup_20261017 \
+  -Ft --compress=server-zstd:5 --checkpoint=fast --progress
+```
+
+#### ตัวอย่างที่ 2: การตั้งค่ากู้คืนย้อนเวลา (PITR) ไปยังวินาทีก่อนที่ตาราง `order_items` จะถูกลบ
+ใน PostgreSQL 12 ขึ้นไปจนถึง PostgreSQL 16 (ที่ยกเลิกไฟล์ `recovery.conf` แบบเก่าแล้ว) เราใช้การสร้างไฟล์สัญญาณชื่อ **`recovery.signal`** คู่กับการระบุเวลาเป้าหมายใน `postgresql.auto.conf`:
+
+```ini filename="postgresql.auto.conf"
+# สั่งให้ PostgreSQL ดึงไฟล์ WAL จากคลังที่เราเก็บสะสมไว้มาทำซ้ำ (Replay)
+restore_command = 'cp /var/lib/postgresql/wal_archive/%f %p'
+
+# ระบุเวลาเป้าหมายที่ต้องการย้อนกลับไป (1 วินาทีก่อนที่พนักงานจะเผลอรันคำสั่ง DELETE ผิดเวลา 14:32:15)
+recovery_target_time = '2026-10-17 14:32:14+07'
+
+# เมื่อ Replay WAL มาถึงเวลาที่กำหนดแล้ว ให้ปรับสถานะฐานข้อมูลเป็นพร้อมใช้งาน (Read/Write) ทันที
+recovery_target_action = 'promote'
+```
+
+```bash filename="trigger_pitr_recovery.sh"
+# สร้างไฟล์สัญญาณบอกให้ PostgreSQL 16 เข้าสู่โหมด Point-in-Time Recovery ตอนเปิดเครื่อง
+touch /var/lib/postgresql/data/recovery.signal
+
+# เริ่มต้นโปรเซส PostgreSQL 16 เพื่อเริ่มกระบวนการย้อนเวลา
+systemctl start postgresql@16-main
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การพึ่งพา Backup เพียงรูปแบบเดียว** | ใช้เฉพาะ `pg_dump` วันละครั้งกับระบบการเงิน ทำให้ข้อมูลระหว่างวันมีความเสี่ยงสูงมาก | ผสมผสานทั้ง Physical Backup + WAL PITR (เพื่อ RPO ระดับวินาที) และ `pg_dump -Fc` รายวัน (เพื่อความคล่องตัว) |
+| **การตั้งค่า `archive_command`** | เขียนสคริปต์คัดลอกไฟล์ทับของเดิมโดยไม่เช็คว่ามีไฟล์อยู่แล้วหรือไม่ และไม่คืนค่า Exit Code เมื่อพัง | ตรวจสอบก่อนเขียนทับและหากส่งไฟล์ขึ้น Cloud ไม่สำเร็จต้องคืนค่า Exit Code != 0 เพื่อให้ Postgres เก็บไฟล์ WAL นั้นไว้ส่งใหม่ |
+| **การปล่อยให้ WAL เต็มดิสก์** | เปิด `archive_mode = on` แต่ปลายทางที่เก็บไฟล์พัง ทำให้ PostgreSQL ไม่กล้าลบไฟล์ WAL จนดิสก์เต็มและฐานข้อมูลล่ม | ตั้งระบบแจ้งเตือน (Monitoring Alert) ติดตามขนาดโฟลเดอร์ `pg_wal` และสถานะ `pg_stat_archiver` เสมอ |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Physical Backup + PITR เมื่อ:** ระบบเกี่ยวข้องกับคำสั่งซื้อและการชำระเงินจริงที่ไม่สามารถยอมให้ข้อมูลสูญหายระหว่างวันได้ หรือฐานข้อมูลมีขนาดใหญ่เกินกว่าที่ `pg_dump` จะกู้คืนได้ทันภายในเวลา RTO ที่กำหนด
+- **ไม่ควรตั้งค่า WAL Archiving เองแบบดิบๆ ด้วยสคริปต์ `cp` บน Production ขนาดใหญ่:** แนะนำให้ใช้เครื่องมือมาตรฐานระดับ Enterprise อย่าง **pgBackRest** หรือ **WAL-G** มาจัดการเรื่องการบีบอัด เข้ารหัส และส่งไฟล์ขึ้น Object Storage แทน
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: จงอธิบายความแตกต่างระหว่าง RPO และ RTO พร้อมยกตัวอย่างว่าหากธุรกิจกำหนด RPO = 5 นาที เราสามารถใช้ `pg_dump` ที่รันทุกเที่ยงคืนเพียงอย่างเดียวได้หรือไม่?**
+  - **แนวคำตอบ:** RPO (Recovery Point Objective) คืออายุของข้อมูลที่ยอมให้สูญหายได้ย้อนหลังเมื่อเกิดเหตุ ส่วน RTO (Recovery Time Objective) คือระยะเวลาที่ใช้ในการกู้ระบบให้กลับมาทำงานได้ หากธุรกิจกำหนด RPO = 5 นาที เราไม่สามารถใช้ `pg_dump` ที่รันวันละครั้งได้ เพราะหากระบบพังตอน 23:50 น. ข้อมูลจะหายไปถึง 23 ชั่วโมง 50 นาที เราจึงต้องใช้ Continuous WAL Archiving (ควบคู่กับการตั้ง `archive_timeout = 300`) หรือ Streaming Replication เพื่อให้ข้อมูลสูญหายไม่เกิน 5 นาทีตามข้อกำหนด
+- **Q2: ทำไมการกู้คืนด้วย Physical Backup (`pg_basebackup`) บนฐานข้อมูลขนาด 500 GB จึงใช้เวลา (RTO) เร็วกว่าการกู้คืนจากไฟล์ `pg_dump` อย่างมหาศาล?**
+  - **แนวคำตอบ:** เพราะการกู้คืนจาก `pg_dump` ต้องให้ PostgreSQL ประมวลผลคำสั่งสร้างตาราง แปลงข้อมูลใส่ลงตารางทีละแถว และที่กินเวลามากที่สุดคือ **ต้องคำนวณและสร้าง B-Tree / GIN Index ใหม่ทั้งหมดตั้งแต่ต้น** ซึ่งใช้ CPU และ Disk I/O มหาศาล ในขณะที่ Physical Backup คือการคัดลอกไฟล์ Data Pages และไฟล์ Index ที่สร้างเสร็จเรียบร้อยแล้วมาวางลงดิสก์โดยตรง แล้วอ่านเฉพาะไฟล์ WAL ส่วนต่างเพิ่มเติมเท่านั้น
+
+---
+
+## 4. กลยุทธ์ตั้งเวลา Backup อัตโนมัติ, การแยกพื้นที่จัดเก็บ และการซ้อมกู้คืนข้อมูล
+
+### แนวคิด (Concept)
+เหตุการณ์สุดคลาสสิกที่ทำลายหลายบริษัทมาแล้วคือ: ตั้งเวลา Cronjob ให้รัน `pg_dump` ทุกคืนอย่างดี แต่ดันเซฟไฟล์ Backup ไว้ในฮาร์ดดิสก์ก้อนเดียวกันกับที่รันฐานข้อมูล! วันหนึ่งเมื่อดิสก์ของเซิร์ฟเวอร์พัง หรือถูกแรนซัมแวร์เข้ารหัสเครื่อง ทั้งฐานข้อมูลจริงและไฟล์ Backup ที่ทำสะสมมาตลอด 2 ปีก็หายวับไปพร้อมกันในพริบตา
+
+วิศวกรโครงสร้างพื้นฐานจึงต้องยึดหลัก **กฎ 3-2-1 Backup Rule**:
+- **3 สำเนาของข้อมูล:** ข้อมูลจริง 1 ชุด และข้อมูลสำรองอย่างน้อย 2 ชุด
+- **2 สื่อจัดเก็บที่ต่างกัน:** เช่น บนดิสก์ NVMe ของเซิร์ฟเวอร์ และบน Cloud Object Storage (AWS S3 หรือ Cloudflare R2)
+- **1 สำเนาต้องอยู่นอกสถานที่ (Off-site / Cross-Region):** แยกบัญชีหรือแยกศูนย์ข้อมูล (Data Center) เพื่อป้องกันภัยพิบัติระดับภูมิภาค
+
+และที่สำคัญที่สุดคือการจัดตาราง **Automated Restore Drill (การซ้อมกู้คืนข้อมูลจริง)** เพื่อพิสูจน์ว่าไฟล์ที่อัปโหลดขึ้นคลาวด์สามารถนำมากู้คืนและอ่านข้อมูลได้จริง
+
+### หลักการเบื้องหลัง (Under the Hood)
+1. **การป้องกันรหัสผ่านรั่วไหลใน Process List (`.pgpass` หรือ Environment Variable):**
+   ในการเขียนสคริปต์อัตโนมัติ ห้ามส่งรหัสผ่านเป็นอาร์กิวเมนต์ในบรรทัดคำสั่ง (เพราะผู้ใช้อื่นบนเครื่องสามารถรัน `ps aux` แอบดูได้) ให้ใช้ไฟล์ `~/.pgpass` ที่ตั้งสิทธิ์ `chmod 0600` หรือส่งผ่านตัวแปรสภาพแวดล้อม `PGPASSWORD` ภายในสคริปต์ที่รัดกุม
+2. **การเข้ารหัสก่อนส่งขึ้นคลาวด์และการจัดการอายุไฟล์ (Retention Policy):**
+   ไฟล์สำรองข้อมูลของร้าน **Smart Butcher Marketplace** มีทั้งชื่อ เบอร์โทร ที่อยู่จัดส่งของลูกค้า (`users`, `orders`) และยอดเงิน (`payments`) จึงต้องถูกเข้ารหัส (Server-Side Encryption `SSE-KMS` หรือ Client-Side Encryption) ก่อนจัดเก็บบน S3/R2 พร้อมตั้งกฎ Lifecycle Policy เพื่อลบไฟล์เก่าที่เกินระยะเวลา (เช่น เก็บรายวันย้อนหลัง 14 วัน, รายสัปดาห์ย้อนหลัง 8 สัปดาห์, รายเดือนย้อนหลัง 12 เดือน - GFS Rotation)
+3. **การตรวจสอบความถูกต้องอัตโนมัติ (Automated Verification):**
+   สคริปต์ซ้อมกู้คืนจะทำการดึงไฟล์ล่าสุดจาก S3/R2 ลงมารันใส่ Container ชั่วคราว แล้วรันคิวรีตรวจสอบจำนวนแถว (`COUNT(*)`) และยอดรวมเงิน (`SUM(amount)`) เทียบเกณฑ์มาตรฐานก่อนส่งแจ้งเตือนผลลัพธ์เข้า Slack หรือ Discord ของทีมวิศวกร
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: สคริปต์ Production Backup อัตโนมัติพร้อมส่งขึ้น Cloud Object Storage (S3 / Cloudflare R2)
+สคริปต์ Bash มาตรฐานสูงที่เปิดโหมด `set -euo pipefail` (หยุดทันทีเมื่อคำสั่งใดๆ ในท่อส่งข้อมูลพัง) บีบอัดด้วย Zstandard และอัปโหลดขึ้น S3/R2:
+
+```bash filename="scripts/automated_pg_backup.sh"
+#!/usr/bin/env bash
+# บังคับให้สคริปต์หยุดทำงานทันทีหากเกิด Error แม้แต่จุดเดียวในไปป์ไลน์
+set -euo pipefail
+
+TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
+BACKUP_DIR="/var/backups/smart_butcher"
+BACKUP_FILENAME="smart_butcher_${TIMESTAMP}.dump"
+LOCAL_PATH="${BACKUP_DIR}/${BACKUP_FILENAME}"
+S3_BUCKET_URI="s3://smart-butcher-offsite-backups/daily/${BACKUP_FILENAME}"
+RETENTION_DAYS=7
+
+mkdir -p "${BACKUP_DIR}"
+
+echo "[$(date -u)] Starting PostgreSQL 16 backup for Smart Butcher Marketplace..."
+
+# 1. รัน pg_dump รูปแบบ Custom Format (-Fc) พร้อมบีบอัดระดับ 6 ด้วย Zstandard
+pg_dump -h "${DB_HOST}" -p "${DB_PORT:-5432}" -U "${DB_BACKUP_USER}" -d "${DB_NAME}" \
+  -Fc --compress=zstd:6 --no-owner --no-privileges \
+  -f "${LOCAL_PATH}"
+
+# 2. ตรวจสอบเบื้องต้นว่าไฟล์ไม่ว่างเปล่าและอ่านสารบัญได้ปกติ
+pg_restore --list "${LOCAL_PATH}" > /dev/null
+
+# 3. อัปโหลดไฟล์ขึ้นแยกพื้นที่จัดเก็บ (Off-site S3 / Cloudflare R2) พร้อมเข้ารหัสฝั่งเซิร์ฟเวอร์
+aws s3 cp "${LOCAL_PATH}" "${S3_BUCKET_URI}" \
+  --storage-class STANDARD_IA \
+  --sse AES256 \
+  --only-show-errors
+
+echo "[$(date -u)] Successfully uploaded backup to ${S3_BUCKET_URI}"
+
+# 4. ลบไฟล์เก่าในเครื่อง Local ที่อายุเกิน 7 วันเพื่อไม่ให้ดิสก์เซิร์ฟเวอร์เต็ม
+find "${BACKUP_DIR}" -type f -name "smart_butcher_*.dump" -mtime +${RETENTION_DAYS} -delete
+
+echo "[$(date -u)] Backup workflow completed cleanly."
+```
+
+#### ตัวอย่างที่ 2: สคริปต์ซ้อมกู้คืนข้อมูลอัตโนมัติ (Automated Restore Drill & Data Integrity Check)
+สคริปต์สำหรับรันทุกสัปดาห์เพื่อพิสูจน์ว่าไฟล์ Backup ล่าสุดสามารถกู้คืนกลับมาและมีข้อมูลตารางหลักครบถ้วนจริง:
+
+```bash filename="scripts/weekly_restore_drill.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+DRILL_CONTAINER="butcher-restore-drill-pg16"
+LATEST_DUMP_FILE="$1"
+
+echo "🧪 [Restore Drill] Starting temporary PostgreSQL 16 container..."
+docker run -d --rm \
+  --name "${DRILL_CONTAINER}" \
+  -e POSTGRES_USER=drill_admin \
+  -e POSTGRES_PASSWORD=drill_temp_pass \
+  -e POSTGRES_DB=smart_butcher_drill \
+  postgres:16-alpine
+
+# รอจนกว่า PostgreSQL ใน Container จะพร้อมรับการเชื่อมต่อ
+until docker exec "${DRILL_CONTAINER}" pg_isready -U drill_admin -d smart_butcher_drill; do
+  sleep 1
+done
+
+echo "🔄 [Restore Drill] Restoring backup file: ${LATEST_DUMP_FILE}..."
+docker exec -i "${DRILL_CONTAINER}" \
+  pg_restore -U drill_admin -d smart_butcher_drill --no-owner --no-privileges \
+  < "${LATEST_DUMP_FILE}"
+
+echo "🔍 [Restore Drill] Verifying restored tables and data integrity..."
+VERIFICATION_RESULT=$(docker exec -i "${DRILL_CONTAINER}" \
+  psql -U drill_admin -d smart_butcher_drill -t -A -c "
+    SELECT json_build_object(
+      'categories_count', (SELECT COUNT(*) FROM categories),
+      'products_count', (SELECT COUNT(*) FROM products),
+      'orders_count', (SELECT COUNT(*) FROM orders),
+      'payments_total_amount', COALESCE((SELECT SUM(amount) FROM payments), 0)
+    );
+  ")
+
+echo "✅ [Restore Drill] Verification Passed! Stats: ${VERIFICATION_RESULT}"
+
+# ปิดและลบ Container ชั่วคราวทิ้งทันทีหลังทดสอบเสร็จ
+docker stop "${DRILL_CONTAINER}" > /dev/null
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **สถานที่เก็บไฟล์ Backup** | เก็บไว้ในโฟลเดอร์ `/home/ubuntu/backups` บนเครื่องเดียวกับที่รันฐานข้อมูลเท่านั้น | ส่งไฟล์ขึ้น Off-site Object Storage (S3/R2/GCS) คนละโซนกับเซิร์ฟเวอร์ฐานข้อมูลทันที |
+| **การจัดการข้อผิดพลาดในสคริปต์** | เขียนสคริปต์ Bash โดยไม่ใส่ `set -euo pipefail` พอ `pg_dump` พัง สคริปต์ก็ยังอัปโหลดไฟล์เปล่าขนาด 0 KB ขึ้น S3 | เปิด `set -euo pipefail` เสมอ และรัน `pg_restore --list` ตรวจไฟล์ก่อนอัปโหลดขึ้นคลาวด์ |
+| **การทดสอบการกู้คืน** | ไม่เคยลองนำไฟล์มา Restore เลยตลอด 3 ปี มารู้ตัวอีกทีตอนระบบล่มว่าไฟล์ Backup เสียทุกไฟล์ | ตั้งระบบ Automated Restore Drill ทดสอบกู้คืนลงฐานข้อมูลจำลองอย่างน้อยเดือนละ 1 ครั้งหรือทุกสัปดาห์ |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้กฎ 3-2-1 และการซ้อมกู้คืนอัตโนมัติเมื่อ:** ระบบเริ่มเก็บข้อมูลจริงของลูกค้าตั้งแต่วันแรกที่เปิดให้บริการบน Production
+- **ไม่ควรนำไฟล์ Backup ของ Production ไปให้นักพัฒนาใช้บนเครื่อง Local โดยตรง:** เพราะในตาราง `users` และ `orders` มีข้อมูลส่วนบุคคล (PII) ของลูกค้าจริง หากต้องการนำข้อมูลไปใช้ในสภาพแวดล้อม Staging ต้องผ่านกระบวนการปกปิดข้อมูล (Data Masking / Anonymization) ก่อนเสมอ
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: ในการเขียนสคริปต์ Bash เพื่อรัน `pg_dump | gzip > backup.sql.gz` ทำไมการใส่บรรทัด `set -euo pipefail` จึงมีความสำคัญระดับวิกฤต?**
+  - **แนวคำตอบ:** โดยค่าเริ่มต้นของ Bash หากคำสั่งในท่อ (`|`) เช่น `pg_dump` ล้มเหลวเพราะรหัสผ่านผิดหรือดิสก์เต็ม แต่คำสั่งตัวสุดท้ายของท่อคือ `gzip` ทำงานสำเร็จ (บีบอัดความว่างเปล่าได้ไฟล์ขนาด 20 ไบต์) Bash จะถือว่าบรรทัดนั้นสำเร็จ (Exit Code 0) และไม่แจ้งเตือนใดๆ การใส่ `set -o pipefail` จะบังคับว่าหากคำสั่งใดคำสั่งหนึ่งในท่อพัง ให้ถือว่าทั้งบรรทัดพังทันทีและส่งสัญญาณแจ้งเตือนทีมวิศวกร
+- **Q2: กฎ 3-2-1 Backup Rule คืออะไร และเราจะประยุกต์ใช้กับฐานข้อมูล PostgreSQL ของระบบ E-Commerce ได้อย่างไร?**
+  - **แนวคำตอบ:** คือการมีข้อมูลอย่างน้อย **3 ชุด** (ฐานข้อมูลจริง 1 ชุด + สำรอง 2 ชุด), เก็บบนสื่อบันทึกที่ต่างกัน **2 ประเภท** (เช่น ดิสก์ NVMe ของเครื่องเซิร์ฟเวอร์ และ Cloud Object Storage อย่าง AWS S3), และมีอย่างน้อย **1 ชุดที่เก็บแยกสถานที่หรือแยก Region** เพื่อป้องกันกรณีที่ Data Center หลักเกิดเพลิงไหม้หรือบัญชีคลาวด์หลักถูกโจมตี
+
+---
+
+## 5. ระบบ Backup ของ Supabase และข้อจำกัดของแพ็กเกจ Free Tier
+
+### แนวคิด (Concept)
+ทีมพัฒนายุคใหม่จำนวนมากเลือกใช้ **Supabase** ซึ่งเป็นแพลตฟอร์ม Managed PostgreSQL 16 ที่ช่วยลดภาระการดูแลเซิร์ฟเวอร์ลงได้มหาศาล แต่ความเข้าใจผิดที่อันตรายที่สุดของนักพัฒนาคือการคิดว่า **"ขึ้นชื่อว่าอยู่บน Cloud แปลว่าเขามีระบบสำรองข้อมูลให้เราฟรีทุกแพ็กเกจอยู่แล้ว"**
+
+ในความเป็นจริง นโยบายการสำรองข้อมูลของแพลตฟอร์มคลาวด์ขึ้นอยู่กับระดับแพ็กเกจ (Pricing Tier) ที่เราเลือกใช้อย่างเคร่งครัด โดยเฉพาะแพ็กเกจ **Free Tier ที่ไม่มีการทำ Database Backup อัตโนมัติให้ผู้ใช้งานเรียกคืนได้เองเลย!**
+
+### หลักการเบื้องหลัง (Under the Hood)
+การทำงานของระบบสำรองข้อมูลบน Supabase แบ่งออกเป็น 3 ระดับตามสถาปัตยกรรมเบื้องหลัง:
+1. **Free Plan (ไม่มี User-accessible Backups):**
+   Supabase ไม่ได้สร้าง Daily Backup ให้ผู้ใช้ดาวน์โหลดในหน้า Dashboard และหากโปรเจกต์ไม่มีการใช้งานติดต่อกัน 7 วัน โปรเจกต์จะถูกสั่งหยุดทำงานชั่วคราว (Paused) หากผู้ใช้ต้องการความอุ่นใจบน Free Tier จะต้องตั้งเวลา **GitHub Actions** เพื่อรัน `pg_dump` ดึงข้อมูลออกมาเก็บเอง
+2. **Pro Plan (Daily Automated Backups):**
+   ระบบจะทำการถ่ายสำเนาฐานข้อมูลรายวันเก็บย้อนหลังให้ **7 วัน** (เหมาะกับระบบที่ยอมรับ RPO สูงสุดไม่เกิน 24 ชั่วโมงได้) สำหรับฐานข้อมูลขนาดไม่เกิน 15 GB จะเป็น Logical Backup ที่ดาวน์โหลดไฟล์ออกมาได้ แต่หากเกิน 15 GB ระบบจะสลับไปใช้ Physical Snapshot ระดับดิสก์อัตโนมัติ
+3. **Pro Plan + PITR Add-on / Team / Enterprise (Point-in-Time Recovery):**
+   ใช้สถาปัตยกรรม **WAL-G** เบื้องหลังในการส่งไฟล์ Physical Base Backup และสตรีมไฟล์ WAL ขึ้นสู่ Object Storage อย่างต่อเนื่องทุกๆ 2 นาที ช่วยให้ผู้ดูแลระบบของ **Smart Butcher Marketplace** สามารถเลื่อนแถบเวลาในหน้า Dashboard เพื่อย้อนฐานข้อมูลกลับไปที่ **วินาทีใดก็ได้** ย้อนหลัง 7 ถึง 28 วัน
+
+#### ตารางสรุปเปรียบเทียบระบบ Backup ของ Supabase แยกตามแพ็กเกจ
+
+| คุณสมบัติการสำรองข้อมูล | Free Tier | Pro Tier (มาตรฐาน) | Pro Tier + PITR Add-on |
+| :--- | :--- | :--- | :--- |
+| **Daily Automated Backup** | ❌ ไม่มีให้ใช้งาน | ✅ มี (เก็บย้อนหลัง 7 วัน) | ✅ มี (เป็น Physical Base Backup) |
+| **Point-in-Time Recovery (PITR)** | ❌ ไม่มี | ❌ ไม่มี | ✅ ย้อนเวลาได้ระดับวินาที (RPO ~2 นาที) |
+| **การดาวน์โหลดไฟล์ Backup ออกมาเอง** | ต้องรัน `pg_dump` เองผ่าน CLI / CI | ดาวน์โหลดได้จาก Dashboard (ถ้า DB < 15GB) | ต้องสั่ง `pg_dump` แยกหากต้องการไฟล์ `.dump` |
+| **ความเหมาะสมกับ Smart Butcher** | ใช้เฉพาะช่วงพัฒนาและทดสอบเท่านั้น | เหมาะกับช่วงเปิดตัวร้านแรกๆ | **แนะนำสำหรับ Production ที่มีคำสั่งซื้อต่อเนื่อง** |
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: การใช้ `pg_dump` ดึงข้อมูลจาก Supabase Cloud ลงมาสำรองไว้ด้วยตัวเอง
+เมื่อต้องการดึงข้อมูลจาก Supabase ด้วย `pg_dump` เราควรเชื่อมต่อผ่าน **Session Pooler (พอร์ต 5432 บนโฮสต์ pooler)** หรือ **Direct Connection (IPv6)** ไม่ควรดึงผ่าน Transaction Pooler (พอร์ต 6543):
+
+```bash filename="supabase_manual_dump.sh"
+# กำหนด Connection String ของ Supabase (ใช้พอร์ต 5432 Session Mode หรือ Direct Connection)
+export SUPABASE_DB_URL="postgresql://postgres.projectref:YourStrongPassword@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres"
+
+# สำรองเฉพาะ Schema 'public' (ที่เป็นตารางของร้าน Smart Butcher ไม่ปนกับตารางระบบภายในของ Supabase เช่น auth/storage)
+pg_dump "${SUPABASE_DB_URL}" \
+  --schema=public \
+  -Fc --compress=zstd:5 \
+  --no-owner --no-privileges \
+  -f smart_butcher_supabase_public_$(date +%Y%m%d).dump
+```
+
+#### ตัวอย่างที่ 2: GitHub Actions ตั้งเวลาสำรองฐานข้อมูล Supabase อัตโนมัติทุกคืน (ช่วยชีวิตโปรเจกต์ Free / Pro Tier)
+เวิร์กโฟลว์นี้จะตื่นขึ้นมาทุกวันเวลา 03:00 น. (เวลาไทย) เพื่อดึงข้อมูลจาก Supabase มาเก็บเป็นไฟล์สำรองโดยอัตโนมัติ:
+
+```yaml filename=".github/workflows/supabase-nightly-backup.yml"
+name: Nightly Supabase Database Backup
+
+on:
+  schedule:
+    # รันทุกวันเวลา 20:00 UTC (ตรงกับ 03:00 น. เวลาประเทศไทย)
+    - cron: '0 20 * * *'
+  workflow_dispatch: # อนุญาตให้กดรันด้วยมือได้ทันทีก่อนทำ Migration สำคัญ
+
+jobs:
+  backup-supabase:
+    name: Dump Public Schema & Upload to S3/Artifact
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install PostgreSQL 16 Client Tools
+        run: |
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16
+
+      - name: Run pg_dump on Supabase public schema
+        env:
+          SUPABASE_DIRECT_URL: ${{ secrets.SUPABASE_DIRECT_URL }}
+        run: |
+          TIMESTAMP=$(date -u +"%Y%m%d_%H%M%S")
+          FILENAME="smart_butcher_${TIMESTAMP}.dump"
+          pg_dump "$SUPABASE_DIRECT_URL" \
+            --schema=public \
+            -Fc --no-owner --no-privileges \
+            -f "$FILENAME"
+          echo "BACKUP_FILE=$FILENAME" >> $GITHUB_ENV
+
+      - name: Verify Backup Archive Integrity
+        run: pg_restore --list "${{ env.BACKUP_FILE }}"
+
+      - name: Upload Encrypted Backup Artifact (Retention 14 Days)
+        uses: actions/upload-artifact@v4
+        with:
+          name: supabase-db-backup-${{ github.run_id }}
+          path: ${{ env.BACKUP_FILE }}
+          retention-days: 14
+```
+
+<Callout type="tip" title="ทำไมตอนใช้ pg_dump กับ Supabase จึงควรระบุ --schema=public?">
+ภายในฐานข้อมูลของ Supabase มี Schema ระบบที่แพลตฟอร์มสร้างและดูแลเองอยู่จำนวนมาก เช่น `auth`, `storage`, `realtime`, `supabase_functions` และ `extensions` หากเราสั่ง `pg_dump` ทั้งฐานข้อมูลโดยไม่ระบุ `--schema=public` เวลานำไฟล์ไป `pg_restore` ลงโปรเจกต์ใหม่มักจะติดปัญหา Permission Denied บน Schema ระบบเหล่านั้น การระบุ `--schema=public` (หรือแยกดึงเฉพาะข้อมูลใน `auth.users` ด้วย `--data-only`) จะทำให้การกู้คืนตารางธุรกิจของเราราบรื่นที่สุด
+</Callout>
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ❌ ผิด (Anti-pattern) | ✅ ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การนำ Free Tier ขึ้น Production** | ใช้แพ็กเกจ Free Tier รันระบบขายจริงโดยไม่ทำสคริปต์ Backup แยก พอข้อมูลพังก็ไม่มีจุดให้กู้คืนเลย | อัปเกรดเป็น Pro Tier (และเปิด PITR เมื่อยอดขายสูง) หรือตั้งเวลา GitHub Actions ทำ Backup นอกคลาวด์ทุกคืน |
+| **การสำรองไฟล์รูปภาพเนื้อสเต๊ก** | เข้าใจผิดว่าการ Backup ฐานข้อมูลของ Supabase จะสำรองไฟล์รูปภาพใน Supabase Storage ให้ด้วย | ทราบชัดเจนว่า Database Backup เก็บเฉพาะข้อมูลตารางใน Postgres ส่วนไฟล์รูปใน Storage ต้องสำรองแยกต่างหาก |
+| **การดึง Backup ทั้งคลัสเตอร์** | สั่ง `pg_dump` ดึงทุก Schema ของ Supabase แล้วพยายามทับใส่โปรเจกต์ใหม่จนพังเพราะติดสิทธิ์ `supabase_admin` | ระบุ `--schema=public --no-owner --no-privileges` เพื่อสำรองและกู้คืนเฉพาะตารางของแอปพลิเคชันอย่างสะอาด |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรเปิดใช้งาน PITR Add-on บน Supabase เมื่อ:** ระบบ **Smart Butcher Marketplace** มีคำสั่งซื้อและการโอนเงินเข้ามาตลอดทั้งวัน และไม่สามารถยอมให้ข้อมูลระหว่างวันสูญหายได้หากเกิดอุบัติเหตุ
+- **ไม่ควรพึ่งพาเพียงระบบ Backup ภายในบัญชีคลาวด์เดียว 100%:** แม้จะใช้แพ็กเกจ Pro หรือเปิด PITR แล้ว ก็ยังควรมีสคริปต์ดึงไฟล์ `.dump` ออกมาเก็บแยกไว้ที่คลังสำรองภายนอกสัปดาห์ละครั้ง (Off-provider Backup) เผื่อกรณีบัญชีหลักถูกระงับหรือเกิดเหตุขัดข้องระดับผู้ให้บริการ
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+- **Q1: หากโปรเจกต์ของคุณใช้ Supabase และเก็บไฟล์รูปภาพเนื้อวากิวไว้ใน Supabase Storage เวลาที่คุณกด Restore Database จาก Daily Backup รูปภาพที่ถูกลบไปจะกลับมาด้วยหรือไม่ เพราะเหตุใด?**
+  - **แนวคำตอบ:** รูปภาพที่ถูกลบไปแล้วจะไม่กลับมา เพราะระบบ Database Backup ของ Supabase สำรองเฉพาะข้อมูลใน PostgreSQL (ซึ่งใน Schema `storage.objects` เก็บเพียงแค่ Metadata และชื่อพาธของไฟล์เท่านั้น) ส่วนตัวไฟล์ไบนารีของรูปภาพจริงๆ ถูกจัดเก็บแยกอยู่ในระบบ Object Storage (S3) ดังนั้นหากต้องการป้องกันไฟล์รูปภาพสูญหาย ต้องทำการซิงค์ไฟล์จาก Bucket ออกไปสำรองแยกต่างหาก
+- **Q2: ทำไมในการรัน `pg_dump` กับฐานข้อมูลบน Supabase เราถึงไม่ควรเชื่อมต่อผ่านพอร์ต 6543 (Transaction Pooler)?**
+  - **แนวคำตอบ:** เพราะพอร์ต 6543 ทำงานในโหมด Transaction Pooling ซึ่งถูกออกแบบมาสำหรับคิวรีสั้นๆ ที่สลับการเชื่อมต่อทันทีหลังจบแต่ละ Transaction ในขณะที่ `pg_dump` ต้องเปิด Transaction ที่ถือ Snapshot ยาวนานต่อเนื่องและมีการตั้งค่า Session Parameters เฉพาะตัว จึงควรเชื่อมต่อผ่านพอร์ต 5432 (Session Mode หรือ Direct Connection) เสมอ
+
+---
+
+## ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การเก็บไฟล์ Backup ไว้ในเครื่องเดียวกับเซิร์ฟเวอร์ฐานข้อมูล (Single Point of Failure)**
+   - **สาเหตุ:** ตั้ง Cronjob เขียนไฟล์ลง `/var/backups` บนเครื่องเดิมแล้วจบแค่นั้น
+   - **ผลกระทบ:** เมื่อดิสก์ของเซิร์ฟเวอร์เสีย หรือเครื่องถูกลบ ทั้งฐานข้อมูลและ Backup หายพร้อมกัน 100%
+   - **วิธีแก้:** ปฏิบัติตามกฎ 3-2-1 ส่งไฟล์ขึ้น Cloud Object Storage คนละโซนทันทีหลังสร้างไฟล์เสร็จ
+
+2. **การใส่แฟล็ก `-t` ในคำสั่ง `docker exec -it` ตอนทำ Stream Backup**
+   - **สาเหตุ:** ความเคยชินจากการพิมพ์ `docker exec -it` เวลาเข้าใช้งาน Shell
+   - **ผลกระทบ:** Pseudo-TTY แปลงรหัส `\n` เป็น `\r\n` ในกระแสข้อมูลไบนารี ทำให้ไฟล์ `.dump` หรือ `.gz` พังจนกู้คืนไม่ได้
+   - **วิธีแก้:** ใช้เฉพาะ `docker exec -i` เท่านั้นในสคริปต์อัตโนมัติและการทำ Redirection
+
+3. **การไม่เคยทดสอบกู้คืนไฟล์ Backup จริงเลย (Schrödinger's Backup)**
+   - **สาเหตุ:** ดูแค่ว่ามีไฟล์ใหม่ถูกสร้างขึ้นมาทุกวันก็สบายใจแล้ว
+   - **ผลกระทบ:** บางครั้งรหัสผ่านเปลี่ยนหรือสิทธิ์ขาดหาย ทำให้ไฟล์ที่สร้างขึ้นมาเป็นไฟล์เปล่าขนาด 0 ไบต์ หรือขาดตารางสำคัญไปโดยไม่มีใครรู้จนกระทั่งวันเกิดเหตุจริง
+   - **วิธีแก้:** สร้างไปป์ไลน์ Automated Restore Drill ทดลองกู้คืนลง Container จำลองและตรวจสอบจำนวนข้อมูลเป็นประจำ
+
+4. **การลืมใส่ `--no-owner --no-privileges` ตอนสร้างไฟล์ Backup**
+   - **สาเหตุ:** รัน `pg_dump` ด้วยพารามิเตอร์เริ่มต้น
+   - **ผลกระทบ:** ในไฟล์ Backup จะฝังคำสั่ง `ALTER TABLE ... OWNER TO old_role_name;` ติดมาด้วย เมื่อนำไปกู้คืนลงเซิร์ฟเวอร์ใหม่หรือ Managed Cloud ที่ไม่มี Role ชื่อเดิมจะเกิด Error ทันที
+   - **วิธีแก้:** ระบุ `--no-owner --no-privileges` เสมอในการสำรองข้อมูลระดับแอปพลิเคชัน
+
+5. **การคัดลอกโฟลเดอร์ `/var/lib/postgresql/data` ด้วย `cp` หรือ `rsync` ขณะฐานข้อมูลกำลังทำงาน**
+   - **สาเหตุ:** พยายามทำ Physical Backup เองโดยไม่ใช้เครื่องมือของ PostgreSQL
+   - **ผลกระทบ:** ข้อมูลในแต่ละตารางและไฟล์ WAL จะไม่สอดคล้องกัน (Torn Pages / Inconsistent State) เมื่อนำมาเปิดใช้งาน PostgreSQL จะพังและเปิดไม่ขึ้น
+   - **วิธีแก้:** ใช้ `pg_basebackup` หรือ `pg_dump` ซึ่งเป็นเครื่องมือมาตรฐานที่รองรับการทำงานแบบ Online เท่านั้น
+
+---
+
+## Checklist สรุป
+
+ตรวจสอบความพร้อมของระบบสำรองและกู้คืนข้อมูลสำหรับ **Smart Butcher Marketplace** ตามรายการมาตรฐานระดับ Production:
+
+- [ ] **Format & Compression:** ใช้ `pg_dump -Fc --compress=zstd:5 --no-owner --no-privileges` สำหรับการสำรองข้อมูลแบบ Logical
+- [ ] **Script Fail-Safe:** สคริปต์อัตโนมัติทุกตัวมีบรรทัด `set -euo pipefail` และมีการตรวจเช็คสารบัญไฟล์ด้วย `pg_restore --list` ก่อนส่งขึ้นคลาวด์
+- [ ] **Docker TTY Clean:** คำสั่ง `docker exec` ที่ใช้สำรองหรือกู้คืนข้อมูลทั้งหมดใช้แฟล็ก `-i` โดยไม่มี `-t` ปะปน
+- [ ] **3-2-1 Off-site Storage:** ไฟล์ Backup ถูกเข้ารหัสและส่งไปเก็บแยกที่ Cloud Object Storage (เช่น AWS S3 หรือ Cloudflare R2) พร้อมตั้งนโยบายลบไฟล์เก่าอัตโนมัติ (Retention Policy)
+- [ ] **PITR Configured:** สำหรับฐานข้อมูล Production ที่มีธุรกรรมต่อเนื่อง มีการเปิดใช้งาน Point-in-Time Recovery (PITR) เพื่อให้ได้ค่า RPO ในระดับวินาทีหรือนาที
+- [ ] **Restore Drill Verified:** มีการทดสอบนำไฟล์ Backup มากู้คืนจริงและตรวจสอบความถูกต้องของข้อมูลในตาราง `orders` และ `payments` อย่างสม่ำเสมอ
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อระบบของคุณมีแผนการทำ Migration ที่ปลอดภัยและมีระบบ Backup ที่พร้อมกู้คืนจากทุกวิกฤตแล้ว ขั้นตอนต่อไปคือการสร้างเกราะป้องกันความปลอดภัยให้ฐานข้อมูลและข้อมูลส่วนบุคคลของลูกค้า:
+
+<Callout type="tip" title="เส้นทางการศึกษาต่อสำหรับระบบฐานข้อมูลระดับ Production">
+1. **การรักษาความปลอดภัยของฐานข้อมูลและไฟล์ข้อมูลสำรอง:**  
+   👉 **[Security](/docs/database/security)** — เจาะลึกการแยกสิทธิ์ตามหลัก Least Privilege, การเข้ารหัส SSL/TLS และการคุ้มครองข้อมูลตามกฎหมาย PDPA
+
+2. **การบริหารจัดการฐานข้อมูลบนแพลตฟอร์ม Supabase:**  
+   👉 **[Supabase](/docs/database/supabase)** — เรียนรู้สถาปัตยกรรมของ Supabase Cloud, การเชื่อมต่อผ่าน Supavisor Pooler และข้อควรระวังในการใช้งานจริง
+
+3. **การรันฐานข้อมูลและจัดการ Volume บน Docker:**  
+   👉 **[Docker](/docs/backend/docker)** และ **[Migrations](/docs/database/migrations)** — ศึกษาการตั้งค่า Container สำหรับ PostgreSQL 16 และการสำรองข้อมูลก่อนรัน `prisma migrate deploy`
+</Callout>

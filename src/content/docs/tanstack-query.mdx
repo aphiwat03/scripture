@@ -1,0 +1,44 @@
+---
+title: TanStack Query v5
+category: Frontend
+version: TanStack Query v5.x
+updatedAt: 2026-10-17
+---
+
+## ภาพรวม TanStack Query v5 & Server State Management
+
+**TanStack Query (เดิมชื่อ React Query)** คือไลบรารีระดับมาตรฐานอุตสาหกรรมสำหรับการจัดการ **"Server State"** ในเว็บแอปพลิเคชันยุคใหม่
+
+หลายคนเข้าใจผิดว่า TanStack Query คือไลบรารีสำหรับดึงข้อมูล (Data Fetching Library) เช่นเดียวกับ `fetch` หรือ `axios` แต่ในความเป็นจริง TanStack Query คือ **"Async State Manager & Smart Caching Engine"** ที่ทำหน้าที่:
+- ขจัดปัญหา **Race Conditions** เมื่อผู้ใช้พิมพ์ค้นหาอย่างรวดเร็ว
+- จัดการสถานะ **Loading, Error, Success** ให้โดยอัตโนมัติ 100%
+- ทำ **Deduplication** (รวมคำขอ API ที่ซ้ำซ้อนให้ยิงเพียงครั้งเดียว)
+- ทำ **Background Refetching** ดึงข้อมูลสดใหม่ทันทีเมื่อสลับหน้าต่างกลับมา (`refetchOnWindowFocus`) หรือเครือข่ายต่อติดใหม่ (`refetchOnReconnect`)
+- จัดการ **Cache Invalidation** และ **Optimistic Updates** (อัปเดตหน้าจอทันทีก่อนที่เซิร์ฟเวอร์จะตอบกลับ)
+
+---
+
+## แผนผังเนื้อหา TanStack Query v5 (Directory)
+
+บทเรียนนี้อ้างอิง **TanStack Query v5 ล่าสุด** ร่วมกับ **Next.js 16** และ **React 19**:
+
+| หัวข้อ | ลิงก์อ่านเนื้อหา | คำอธิบายสังเขป |
+| :--- | :--- | :--- |
+| **1. ปัญหาที่ Query แก้** | [Server vs Client State](/docs/tanstack-query/server-vs-client-state) | Server State vs Client State, ทำไม `useEffect` + `useState` ถึงพัง |
+| **2. ติดตั้งใน Next.js 16** | [Next.js 16 Setup](/docs/tanstack-query/installation-nextjs) | QueryClient, SSR-safe client creation, React Query Devtools |
+| **3. useQuery พื้นฐาน** | [useQuery Basics](/docs/tanstack-query/use-query-basics) | `queryKey`, `queryFn`, `data`, `isPending` vs `isFetching` vs `isLoading` |
+| **4. Query Keys** | [Query Keys Factory](/docs/tanstack-query/query-keys) | โครงสร้าง Hierarchical Array, Query Key Factory Pattern |
+| **5. Caching Lifecycle** | [staleTime & gcTime](/docs/tanstack-query/caching-lifecycle) | `staleTime` vs `gcTime`, ความหมายของ Fresh/Stale, Auto-refetch |
+| **6. ออกแบบ queryFn** | [queryFn Architecture](/docs/tanstack-query/query-fn-design) | แยก API Client, Error throwing, TypeScript types, Zod Validation |
+| **7. useMutation** | [useMutation](/docs/tanstack-query/use-mutation) | `mutationFn`, `mutate` vs `mutateAsync`, การเชื่อมฟอร์ม RHF + Zod |
+| **8. Invalidation & Cache** | [Cache Invalidation](/docs/tanstack-query/invalidation-cache-updates) | `invalidateQueries` vs `setQueryData`, การอัปเดตหลัง CRUD |
+| **9. Optimistic Updates** | [Optimistic Updates](/docs/tanstack-query/optimistic-updates) | อัปเดต UI ทันที, Rollback เมื่อ Error เกิดขึ้น |
+| **10. Pagination & Infinite** | [Pagination & Infinite](/docs/tanstack-query/pagination-infinite) | `placeholderData: keepPreviousData`, `useInfiniteQuery`, Infinite scroll |
+| **11. Dependent & Parallel** | [Dependent & Parallel](/docs/tanstack-query/dependent-parallel) | Option `enabled`, การดึงข้อมูลต่อเนื่อง, `useQueries` |
+| **12. Error & Loading UI** | [Error & Loading UI](/docs/tanstack-query/error-loading-ui) | Retry logic, Error Boundary (`throwOnError`), Suspense, Sonner toast |
+| **13. Next.js App Router** | [App Router & Prefetch](/docs/tanstack-query/nextjs-app-router) | Server Fetch vs Query, `HydrationBoundary`, Server Actions |
+| **14. ต่อเชื่อม NestJS Auth** | [NestJS Auth Integration](/docs/tanstack-query/auth-nest-integration) | Credentials cookie/token, 401 handling, Refresh token flow |
+| **15. Custom Feature Hooks** | [Custom Feature Hooks](/docs/tanstack-query/custom-hooks) | ห่อหุ้ม API เป็น custom hook (`useProducts`, `useCreateOrder`) |
+| **16. Testing & Mocking** | [Testing & Mocking](/docs/tanstack-query/testing-debugging) | Devtools, Vitest + React Testing Library, Mock Service Worker |
+| **17. Performance Tuning** | [Performance & Select](/docs/tanstack-query/performance) | `select` data transformation, Structural Sharing, ลด re-renders |
+| **18. Pitfalls & Q&A** | [Pitfalls & Q&A](/docs/tanstack-query/pitfalls) | รวม Anti-patterns ยอดฮิต, คำถามสัมภาษณ์งาน, Checklist สรุป และ Roadmap |

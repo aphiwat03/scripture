@@ -1,0 +1,455 @@
+---
+title: Responsive & Dark Mode
+category: Frontend
+parentTitle: Recharts
+version: Recharts v3 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การสร้าง Data Visualization ที่ยอดเยี่ยมไม่ได้หมายถึงเพียงแค่การย่อ-ขยายกราฟให้พอดีกับหน้าจอ (Vector Scaling) แต่คือการ **ปรับเปลี่ยนความหนาแน่นของข้อมูล (Information Density Adaptation)** ให้สอดคล้องกับขนาดหน้าจอของผู้ใช้งานอย่างชาญฉลาด
+
+### ความท้าทายในโลกความเป็นจริง
+
+1. **ปัญหาพื้นที่บนหน้าจอ Mobile**:
+   * การแสดงผล 30 Ticks บนแกน X ของหน้าจอมือถือจะทำให้ตัวหนังสือซ้อนทับกันจนอ่านไม่ออก (Label Clutter)
+   * กราฟแท่งแนวตั้ง (Vertical BarChart) ที่มีชื่อกำกับยาวๆ เช่น "อุปกรณ์อิเล็กทรอนิกส์และเครื่องใช้ไฟฟ้า" จะถูกตัดทอนคำ หรือต้องเอียงฟอนต์ 45-90 องศาทำให้อ่านยาก การสลับเป็นแนวนอน (Horizontal BarChart) บน Mobile จึงมอบประสบการณ์ที่ดีกว่ามาก
+2. **ระบบ Theming และ Dark Mode**:
+   * เมื่อผู้ใช้เปลี่ยนจากสภาวะแสงกลางวันเป็น Dark Mode หากใช้รหัสสี HEX แบบตายตัว เช่น `#111827` กราฟจะกลืนไปกับพื้นหลังสีดำ หรือเส้น Grid สว่างจ้าแทงตาผู้ใช้
+   * การ Theming ที่ดีใน Next.js 16 และ Tailwind CSS v4 จะต้องใช้ **Semantic CSS Variables** ที่ผูกโยงกับ Root Theme เพื่อให้ทั้งแกน (Axes), เส้นกริด (Gridlines), Tooltip, และตัวซีรีส์ข้อมูลปรับระดับ Contrast อัตโนมัติในระดับเบราว์เซอร์
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### การทำงานของ `ResponsiveContainer` และ ResizeObserver
+
+คอมโพเนนต์ `<ResponsiveContainer>` ของ Recharts อาศัย Web API เบื้องหลังคือ **`ResizeObserver`** ในการเฝ้าติดตามขนาดกล่องของ Parent DOM Node:
+
+```
+[ Parent DOM Element (เช่น <div className="h-[350px] w-full">) ]
+                   │
+                   ▼  ResizeObserver ตรวจพบการขยาย/หดของ Parent
+[ ResponsiveContainer ]
+  1. คำนวณความกว้าง (clientWidth) และความสูง (clientHeight)
+  2. ปรับตัวแปร Aspect Ratio (ถ้ามีการระบุ)
+  3. ส่ง Dimensions (width, height) ลงสู่ SVG <Chart> คอมโพเนนต์ลูก
+                   │
+                   ▼
+[ SVG Canvas / Elements (<LineChart>, <BarChart>) ]
+  ทำการคำนวณ d3-scale ใหม่ และวาดเส้น <path>, <rect> ตามพิกัดจริง
+```
+
+> [!WARNING]
+> **ข้อควรระวังเรื่อง Resize Loop**: หาก Parent Node ของ `ResponsiveContainer` อยู่ใน `display: flex` โดยไม่ได้ระบุ `min-width: 0` หรือไม่มีการกำหนดความสูงที่แน่นอน `ResizeObserver` อาจเกิดอาการคำนวณขนาดวนลูปไม่สิ้นสุด จนเบราว์เซอร์โยน Error: *"ResizeObserver loop limit exceeded"*
+
+### กลยุทธ์ Theming: Tailwind CSS v4 + `next-themes`
+
+ใน Next.js 16 ร่วมกับ Tailwind CSS v4 เราสามารถกำหนดตัวแปรสีในไฟล์ CSS แล้วนำมาอ้างอิงใน Recharts ผ่าน `hsl(var(--...))` หรือชื่อคลาส Tailwind โดยไม่ต้องใช้ JavaScript เข้าไปคำนวณรหัสสี HEX ซ้ำซ้อน:
+
+```
+[ User Toggle Dark Mode ]
+       │
+       ▼ (next-themes เพิ่ม class="dark" ที่ <html>)
+[ Tailwind v4 Global CSS ]
+  :root { --chart-grid: 220 13% 91%; --chart-text: 220 9% 46%; }
+  .dark { --chart-grid: 217 19% 27%; --chart-text: 215 20% 65%; }
+       │
+       ▼ (CSS Cascading ทำงานทันที 0ms)
+[ Recharts SVG ]
+  <CartesianGrid stroke="hsl(var(--chart-grid))" />
+  <XAxis tick={{ fill: "hsl(var(--chart-text))" }} />
+```
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่างที่ 1: Adaptive Revenue Timeline LineChart (ปรับ Density ตาม Viewport)
+
+ตัวอย่างนี้แสดงเทคนิคการเขียน Hook `useMediaQuery` เพื่อตรวจสอบขนาดหน้าจอ และปรับการแสดงผลของแกน X:
+- บน Mobile (`< 768px`): ซ่อน Label ข้ามจุดด้วย `interval={2}`, ลดขนาดตัวอักษร, ลด Margin, และตัดแกน Y ให้สั้นลง
+- บน Desktop: แสดงรายละเอียดแบบครบถ้วนพร้อม Tooltip เส้น Cursor
+
+```tsx filename="src/components/charts/adaptive-revenue-chart.tsx"
+'use client';
+
+import * as React from 'react';
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+
+interface DailyRevenue {
+  date: string;
+  revenue: number;
+}
+
+const mockDailyData: DailyRevenue[] = [
+  { date: '01 ต.ค.', revenue: 14200 },
+  { date: '02 ต.ค.', revenue: 18500 },
+  { date: '03 ต.ค.', revenue: 12000 },
+  { date: '04 ต.ค.', revenue: 29000 },
+  { date: '05 ต.ค.', revenue: 34000 },
+  { date: '06 ต.ค.', revenue: 26000 },
+  { date: '07 ต.ค.', revenue: 31000 },
+  { date: '08 ต.ค.', revenue: 45000 },
+  { date: '09 ต.ค.', revenue: 39000 },
+  { date: '10 ต.ค.', revenue: 52000 },
+  { date: '11 ต.ค.', revenue: 48000 },
+  { date: '12 ต.ค.', revenue: 61000 },
+];
+
+function useIsMobile(breakpoint = 768): boolean {
+  const [isMobile, setIsMobile] = React.useState<boolean>(false);
+
+  React.useEffect(() => {
+    const mediaQuery = window.matchMedia(`(max-width: ${breakpoint - 1}px)`);
+    const updateSize = () => setIsMobile(mediaQuery.matches);
+    
+    updateSize();
+    mediaQuery.addEventListener('change', updateSize);
+    return () => mediaQuery.removeEventListener('change', updateSize);
+  }, [breakpoint]);
+
+  return isMobile;
+}
+
+export function AdaptiveRevenueChart() {
+  const isMobile = useIsMobile();
+
+  return (
+    <div className="w-full rounded-2xl border border-border bg-card p-6 shadow-sm">
+      <div className="mb-4">
+        <h3 className="text-lg font-semibold text-card-foreground">
+          แนวโน้มยอดขายรายวัน (ตุลาคม 2026)
+        </h3>
+        <p className="text-sm text-muted-foreground">
+          {isMobile ? 'แสดงผลแบบย่อสำหรับอุปกรณ์เคลื่อนที่' : 'แสดงข้อมูลละเอียดรายวันแบบเต็มรูปแบบ'}
+        </p>
+      </div>
+
+      <div className="h-[320px] w-full min-w-0">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart
+            data={mockDailyData}
+            margin={{
+              top: 10,
+              right: isMobile ? 8 : 24,
+              left: isMobile ? -16 : 0,
+              bottom: 0,
+            }}
+          >
+            <CartesianGrid
+              strokeDasharray="3 3"
+              vertical={false}
+              className="stroke-border/60"
+            />
+            <XAxis
+              dataKey="date"
+              interval={isMobile ? 'preserveStartEnd' : 0}
+              tickLine={false}
+              axisLine={false}
+              tickMargin={8}
+              tick={{
+                fontSize: isMobile ? 10 : 12,
+                fill: 'hsl(var(--muted-foreground))',
+              }}
+            />
+            <YAxis
+              tickLine={false}
+              axisLine={false}
+              tickMargin={8}
+              tickFormatter={(v: number) =>
+                isMobile ? `${(v / 1000).toFixed(0)}k` : `฿${v.toLocaleString()}`
+              }
+              tick={{
+                fontSize: isMobile ? 10 : 12,
+                fill: 'hsl(var(--muted-foreground))',
+              }}
+            />
+            <Tooltip
+              content={({ active, payload, label }) => {
+                if (!active || !payload?.length) return null;
+                const value = payload[0].value as number;
+                return (
+                  <div className="rounded-lg border border-border bg-popover p-3 shadow-md">
+                    <p className="text-xs font-medium text-muted-foreground">{label}</p>
+                    <p className="text-base font-bold text-popover-foreground">
+                      ฿{value.toLocaleString('th-TH')}
+                    </p>
+                  </div>
+                );
+              }}
+            />
+            <Line
+              type="monotone"
+              dataKey="revenue"
+              stroke="hsl(var(--primary))"
+              strokeWidth={isMobile ? 2 : 3}
+              dot={isMobile ? false : { r: 4, fill: 'hsl(var(--primary))' }}
+              activeDot={{ r: 6, stroke: 'hsl(var(--background))', strokeWidth: 2 }}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: Responsive Category BarChart (สลับ Vertical / Horizontal ตามขนาดจอ)
+
+ตัวอย่างนี้แสดงเทคนิคการเปลี่ยนแกนข้อมูล (Orientation Flip) โดยอัตโนมัติ:
+- **Desktop (md ขึ้นไป)**: ใช้กราฟแท่งแนวตั้ง (Default `layout="horizontal"`)
+- **Mobile (ต่ำกว่า md)**: สลับเป็นกราฟแท่งแนวนอน (`layout="vertical"`) เพื่อให้ชื่อหมวดหมู่ภาษาไทยที่มีขนาดยาวมีพื้นที่แสดงผลเต็มบรรทัด ไม่บีบอัด
+
+```tsx filename="src/components/charts/responsive-device-breakdown.tsx"
+'use client';
+
+import * as React from 'react';
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+
+interface CategoryMetric {
+  name: string;
+  transactions: number;
+}
+
+const categoryData: CategoryMetric[] = [
+  { name: 'คอมพิวเตอร์และโน้ตบุ๊ก', transactions: 1240 },
+  { name: 'สมาร์ตโฟนและแท็บเล็ต', transactions: 2180 },
+  { name: 'อุปกรณ์เสริมและแกดเจ็ต', transactions: 3420 },
+  { name: 'เครื่องใช้ไฟฟ้าภายในบ้าน', transactions: 980 },
+  { name: 'เกมมิ่งเกียร์และคอนโซล', transactions: 1750 },
+];
+
+export function ResponsiveCategoryBarChart() {
+  const [isMobile, setIsMobile] = React.useState(false);
+
+  React.useEffect(() => {
+    const checkViewport = () => setIsMobile(window.innerWidth < 768);
+    checkViewport();
+    window.addEventListener('resize', checkViewport);
+    return () => window.removeEventListener('resize', checkViewport);
+  }, []);
+
+  return (
+    <div className="w-full rounded-2xl border border-border bg-card p-6 shadow-sm">
+      <div className="mb-4">
+        <h3 className="text-lg font-semibold text-card-foreground">
+          ยอดคำสั่งซื้อแยกตามหมวดหมู่สินค้า
+        </h3>
+        <p className="text-sm text-muted-foreground">
+          ระบบปรับการวางแกนชาร์ตอัตโนมัติเพื่อความชัดเจนบนทุกขนาดหน้าจอ
+        </p>
+      </div>
+
+      <div className="h-[360px] w-full min-w-0">
+        <ResponsiveContainer width="100%" height="100%">
+          {isMobile ? (
+            // Layout แนวนอนสำหรับหน้าจอมือถือ (ให้อ่าน Category สบายๆ)
+            <BarChart
+              layout="vertical"
+              data={categoryData}
+              margin={{ top: 10, right: 24, left: 24, bottom: 0 }}
+            >
+              <CartesianGrid horizontal={false} strokeDasharray="3 3" className="stroke-border/60" />
+              <XAxis
+                type="number"
+                tickLine={false}
+                axisLine={false}
+                tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
+              />
+              <YAxis
+                type="category"
+                dataKey="name"
+                tickLine={false}
+                axisLine={false}
+                width={120}
+                tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
+              />
+              <Tooltip
+                content={({ active, payload }) => {
+                  if (!active || !payload?.length) return null;
+                  const item = payload[0].payload as CategoryMetric;
+                  return (
+                    <div className="rounded-lg border border-border bg-popover p-2.5 text-xs shadow-md">
+                      <p className="font-semibold text-popover-foreground">{item.name}</p>
+                      <p className="text-muted-foreground">
+                        ยอดขาย: <span className="font-bold text-foreground">{item.transactions} รายการ</span>
+                      </p>
+                    </div>
+                  );
+                }}
+              />
+              <Bar
+                dataKey="transactions"
+                fill="hsl(var(--chart-1, 220 70% 50%))"
+                radius={[0, 6, 6, 0]}
+                barSize={20}
+              />
+            </BarChart>
+          ) : (
+            // Layout แนวตั้งมาตรฐานสำหรับหน้าจอคอมพิวเตอร์
+            <BarChart
+              layout="horizontal"
+              data={categoryData}
+              margin={{ top: 16, right: 16, left: 0, bottom: 20 }}
+            >
+              <CartesianGrid vertical={false} strokeDasharray="3 3" className="stroke-border/60" />
+              <XAxis
+                dataKey="name"
+                tickLine={false}
+                axisLine={false}
+                tickMargin={12}
+                tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }}
+              />
+              <YAxis
+                tickLine={false}
+                axisLine={false}
+                tickMargin={8}
+                tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }}
+              />
+              <Tooltip
+                content={({ active, payload, label }) => {
+                  if (!active || !payload?.length) return null;
+                  return (
+                    <div className="rounded-lg border border-border bg-popover p-2.5 text-xs shadow-md">
+                      <p className="font-semibold text-popover-foreground">{label}</p>
+                      <p className="text-muted-foreground">
+                        ยอดขาย: <span className="font-bold text-foreground">{payload[0].value} รายการ</span>
+                      </p>
+                    </div>
+                  );
+                }}
+              />
+              <Bar
+                dataKey="transactions"
+                fill="hsl(var(--chart-1, 220 70% 50%))"
+                radius={[6, 6, 0, 0]}
+                barSize={40}
+              />
+            </BarChart>
+          )}
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีอื่น (Recharts vs Canvas/Chart.js/D3)
+
+| ปัจจัย | Recharts ResponsiveContainer | Chart.js (Canvas responsive) | Raw D3.js (SVG viewBox) |
+| :--- | :--- | :--- | :--- |
+| **กลไกการคำนวณ Responsive** | ใช้ `ResizeObserver` คำนวณความกว้าง/ยาวจริง และ re-calculate พิกัด SVG nodes | ปรับขนาด HTML5 Canvas buffer และสั่ง redraw frame | ใช้ SVG `viewBox="0 0 800 400"` และปล่อยให้เบราว์เซอร์ scale เวกเตอร์ |
+| **ความคมชัดบนจอ Retina/HiDPI** | **คมชัด 100%** เสมอ เพราะเป็น Native SVG Elements | ต้องคูณ `window.devicePixelRatio` ใน canvas context ไม่อย่างนั้นภาพจะเบลอ | **คมชัด 100%** เพราะเป็น Vector |
+| **Dark Mode Adaptation** | เปลี่ยนสีได้ทันทีผ่าน CSS Variables (0ms overhead) | ต้องเรียก API `chart.update()` เพื่อเคลียร์ Canvas แล้ววาดสีใหม่ | ต้องเลือก DOM Elements เพื่อสั่ง `.attr('fill', ...)` |
+| **การปรับ UX ตามจอมือถือ (Orientation Flip)** | ทำได้ง่ายด้วย Declarative JSX และเงื่อนไข React | ต้องทำลาย instance เดิม หรืออัปเดต config object ก้อนใหญ่ | ต้องเขียนตรรกะคำนวณคณิตศาสตร์แกน X/Y ใหม่ทั้งหมด |
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practices)
+
+### ข้อผิดพลาดที่ 1: กำหนดความกว้างและความสูงเป็น Absolute Pixels
+
+```tsx
+// ❌ ผิด: ระบุขนาดแบบตายตัว ทำให้กราฟล้นทะลุจอมือถือและไม่ขยายบนจอ Desktop
+<LineChart width={800} height={400} data={data}>
+  <Line ... />
+</LineChart>
+
+// ✅ ถูกต้อง: ครอบด้วย ResponsiveContainer พร้อมตั้ง min-h บน Parent
+<div className="h-[350px] w-full min-w-0">
+  <ResponsiveContainer width="100%" height="100%">
+    <LineChart data={data}>
+      <Line ... />
+    </LineChart>
+  </ResponsiveContainer>
+</div>
+```
+
+### ข้อผิดพลาดที่ 2: ครอบ ResponsiveContainer ภายใน Flexbox โดยไม่มี `min-w-0`
+
+```tsx
+// ❌ ผิด: ใน CSS Flexbox หากไม่ใส่ min-w-0 กล่องลูกจะดันขนาดตัวเองจนเกิน Parent 
+// ส่งผลให้ ResizeObserver วนลูปขยายขนาดจนกราฟพัง
+<div className="flex">
+  <div className="flex-1">
+    <ResponsiveContainer width="100%" height={300}>
+      <BarChart data={data} />
+    </ResponsiveContainer>
+  </div>
+</div>
+
+// ✅ ถูกต้อง: ใส่ min-w-0 เพื่อบังคับให้ Flex Item เคารพขอบเขตของ Container
+<div className="flex">
+  <div className="flex-1 min-w-0">
+    <ResponsiveContainer width="100%" height={300}>
+      <BarChart data={data} />
+    </ResponsiveContainer>
+  </div>
+</div>
+```
+
+### ข้อผิดพลาดที่ 3: ใช้รหัสสี HEX แบบฝังตายตัว
+
+```tsx
+// ❌ ผิด: กราฟจะไม่ยอมเปลี่ยนสีตาม Dark Mode
+<CartesianGrid stroke="#e5e7eb" />
+<XAxis tick={{ fill: "#6b7280" }} />
+
+// ✅ ถูกต้อง: อ้างอิง Semantic CSS Tokens จากระบบ Theme
+<CartesianGrid stroke="hsl(var(--border))" />
+<XAxis tick={{ fill: "hsl(var(--muted-foreground))" }} />
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ ResponsiveContainer และ Adaptive Pattern เมื่อ:
+- เว็บไซต์รองรับผู้ใช้ทั้งกลุ่ม Desktop และ Mobile (เช่น แดชบอร์ดสำหรับผู้บริหารที่ตรวจยอดขายผ่านมือถือ)
+- ชาร์ตมี Label ภาษาไทยที่ยาว หรือมีจำนวน Data Point ต่อเดือนสูง
+- ต้องการความคมชัดระดับ Retina โดยไม่ต้องคำนวณ Device Pixel Ratio
+
+### ไม่ควรใช้เมื่อ:
+- แสดงผลกราฟขนาดเล็กแบบ Sparkline หรือ Widget ภายในตาราง (Data Table Cell) ที่มีขนาดคงที่ชัดเจน (เช่น กว้าง 120px สูง 30px) ในกรณีนี้ควรกำหนด `width={120} height={30}` ตรงๆ เพื่อประหยัด CPU จากการรัน ResizeObserver
+- แสดงผลกราฟในระบบส่งออกเอกสาร PDF หรือรูปภาพฝั่งเซิร์ฟเวอร์ (SSR / Headless Chromium) เพราะไม่มีหน้าจอ Viewport และไม่มี Resize Event
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการใช้ `ResponsiveContainer` บน Recharts ถึงเกิด Error "ResizeObserver loop limit exceeded" ได้บ่อยครั้ง และมีแนวทางแก้ไขในระดับสถาปัตยกรรม CSS อย่างไร?
+**แนวทางตอบแบบ Senior Developer**:
+Error ดังกล่าวเกิดขึ้นเมื่อ ResizeObserver ตรวจพบการเปลี่ยนแปลงขนาดของ DOM Element แต่การคำนวณและวาดกราฟลูกนั้นกลับส่งผลสะท้อนทำให้ขนาดของ Parent เปลี่ยนแปลงอีกครั้งใน Tick เดียวกัน เกิดเป็น Infinite Layout Thrashing สาเหตุหลักใน 90% ของเคสมักเกิดจาก:
+1. Parent ขาดการกำหนดความสูงที่ชัดเจน (`height: auto` ร่วมกับ Flex/Grid) ทำให้ขนาดขึ้นอยู่กับ SVG ลูกที่ยังคำนวณไม่เสร็จ
+2. การลืมใส่ `min-width: 0` ใน Flex item container
+
+**วิธีแก้ปัญหา**:
+- กำหนดสไตล์ให้ Parent Node อย่างรัดกุม เช่น `h-[300px] w-full min-w-0 overflow-hidden`
+- หรือใน Next.js ให้กำหนด Debounce การวัดขนาด หรือกำหนด `aspect={16/9}` บน `ResponsiveContainer` เพื่อล็อคอัตราส่วนเรขาคณิต
+
+### Q2: ในการทำ Dark Mode ควบคู่กับ Next.js 16 และ Tailwind CSS v4 เหตุใดการใช้ CSS Variables ใน SVG Fill/Stroke จึงเหนือกว่าการใช้ Hook `useTheme()` จาก `next-themes` มากำหนดสีใน State?
+**แนวทางตอบแบบ Senior Developer**:
+1. **Zero Re-render & Performance**: หากใช้ `useTheme()` ทุกครั้งที่ผู้ใช้สลับ Theme คอมโพเนนต์กราฟจะต้อง Re-render ใหม่ทั้งชุดผ่าน React Lifecycle ในขณะที่การใช้ CSS Variables (`hsl(var(--chart-1))`) เบราว์เซอร์จะจัดการ Paint สีใหม่ที่ GPU Compositor Level ทันทีโดยไม่ต้องรัน JavaScript ใดๆ
+2. **SSR Consistency & Flash of Incorrect Theme**: การใช้ JavaScript สลับสีอาจทำให้เกิด Hydration Flash ระหว่างสีกราฟบน Server กับ Client แต่การใช้ CSS Class (`.dark`) จะถูกประเมินโดย CSS Engine ตั้งแต่วินาทีแรกที่ HTML render ออกมาบนหน้าจอ

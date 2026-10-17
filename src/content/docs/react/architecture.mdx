@@ -1,0 +1,79 @@
+---
+title: Architecture
+category: Frontend
+parentTitle: React 19
+version: v19.0
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การจัดโครงสร้างคอมโพเนนต์ที่ดีทำให้ระบบรองรับการสเกลเมื่อโปรเจกต์มีขนาดใหญ่ โดยมี 2 หัวใจหลัก:
+- **Component Composition**: การประกอบส่วนย่อยเข้าด้วยกันผ่าน `children` หรือ Slots แทนการเขียน Props ซับซ้อนหลายสิบตัว
+- **Container / Presentational Pattern**: การแยกคอมโพเนนต์ที่เป็นสมอง (Logic/Data Fetching) ออกจากคอมโพเนนต์ที่เป็นหน้าตา (Pure View/UI)
+
+---
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### การใช้ Component Composition แทน Mega Component
+
+```tsx filename="components/DialogComposition.tsx"
+import React from 'react';
+
+// แยกส่วนเป็นชิ้นย่อยเพื่อความยืดหยุ่นสูงสุด
+export function Dialog({ children }: { children: React.ReactNode }) {
+  return <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4">{children}</div>;
+}
+
+Dialog.Header = function DialogHeader({ title }: { title: string }) {
+  return <h3 className="text-lg font-bold border-b pb-2 mb-3">{title}</h3>;
+};
+
+Dialog.Body = function DialogBody({ children }: { children: React.ReactNode }) {
+  return <div className="py-2 text-sm">{children}</div>;
+};
+
+Dialog.Footer = function DialogFooter({ children }: { children: React.ReactNode }) {
+  return <div className="mt-4 flex justify-end gap-2">{children}</div>;
+};
+
+// ใช้งานได้ยืดหยุ่น:
+export function ConfirmDeleteModal() {
+  return (
+    <Dialog>
+      <div className="bg-elevated p-6 rounded-2xl max-w-sm w-full">
+        <Dialog.Header title="ยืนยันการลบข้อมูล" />
+        <Dialog.Body>คุณแน่ใจหรือไม่ว่าต้องการลบรายการนี้อย่างถาวร?</Dialog.Body>
+        <Dialog.Footer>
+          <button className="px-3 py-1.5 rounded-lg border text-xs">ยกเลิก</button>
+          <button className="px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs">ยืนยัน</button>
+        </Dialog.Footer>
+      </div>
+    </Dialog>
+  );
+}
+```
+
+---
+
+## 3. โครงสร้างโฟลเดอร์ที่แนะนำ (Recommended Structure)
+
+```
+src/
+├── app/                  # เส้นทาง Routing (Next.js App Router)
+├── components/           # คอมโพเนนต์ UI ทั่วไป
+│   ├── ui/               # ปุ่ม, กล่องอินพุต, Modal (ดีไซน์ซิสเต็มพื้นฐาน)
+│   └── modules/          # คอมโพเนนต์เฉพาะฟีเจอร์ (เช่น CartDrawer, UserMenu)
+├── hooks/                # Custom Hooks ที่นำกลับมาใช้ซ้ำได้
+├── lib/                  # ตัวช่วย, ฟังก์ชันคณิตศาสตร์, คอนฟิกภายนอก
+├── store/                # Zustand Global Stores
+└── types/                # TypeScript Interfaces ส่วนกลาง
+```
+
+---
+
+## 4. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไม Composition ถึงดีกว่า Inheritance ใน React?
+**แนวทางคำตอบ**: React แนะนำแนวคิด **Composition over Inheritance** เพราะการส่งชิ้นส่วนผ่าน `children` หรือ Props ทำให้คอมโพเนนต์มีความยืดหยุ่นสูง ปราศจากการผูกมัดโครงสร้างแบบตายตัว (Tight Coupling) และง่ายต่อการปรับเปลี่ยนโค้ดโดยไม่กระทบคลาสแม่

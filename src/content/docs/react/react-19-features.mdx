@@ -1,0 +1,103 @@
+---
+title: React 19 New
+category: Frontend
+parentTitle: React 19
+version: v19.0
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**React 19** เปิดตัวฟีเจอร์ระดับปฏิวัติวงการ โดยมุ่งเน้นการลด Boilerplate ของการเขียน Asynchronous Logic และ Form State ในอดีต นักพัฒนาต้องเขียน `isPending`, `error`, `data`, และ Optimistic Updates ด้วยตนเองหลายสิบบรรทัด
+
+React 19 จึงเพิ่ม Hooks และ APIs ชุดใหม่เข้ามาเป็นมาตรฐาน ได้แก่ **`use()`**, **`useActionState`**, **`useOptimistic`**, และ **`useFormStatus`**
+
+---
+
+## 2. เจาะลึกฟีเจอร์สำคัญใน React 19
+
+### 1. `use()` API
+ฟังก์ชันใหม่ที่สามารถอ่านค่าจาก **Promise** หรือ **Context** ได้โดยตรง และที่พิเศษคือ **สามารถเรียกใช้ในเงื่อนไข `if` หรือ Loop ได้** (ต่างจาก Hooks อื่นๆ ที่ห้ามอยู่ใน `if`):
+
+```tsx
+import { use } from 'react';
+
+function UserProfile({ userPromise }: { userPromise: Promise<User> }) {
+  // use() จะ pause การ render และส่งไม้ต่อให้ Suspense จัดการจนกว่า Promise จะ resolve
+  const user = use(userPromise);
+  return <h2>{user.name}</h2>;
+}
+```
+
+### 2. `useActionState` (แทนที่ useFormState เดิม)
+ใช้จัดการสถานะของ Async Action โดยจะส่งคืน `[state, formAction, isPending]` อัตโนมัติ:
+
+```tsx
+'use client';
+
+import { useActionState } from 'react';
+import { updateNameAction } from '@/actions/user';
+
+export function EditNameForm() {
+  const [state, formAction, isPending] = useActionState(updateNameAction, null);
+
+  return (
+    <form action={formAction} className="space-y-3">
+      <input name="name" placeholder="ชื่อใหม่" className="border p-2 rounded" />
+      <button disabled={isPending} className="bg-blue-600 text-white px-4 py-2 rounded">
+        {isPending ? 'กำลังบันทึก...' : 'บันทึก'}
+      </button>
+      {state?.error && <p className="text-red-500 text-xs">{state.error}</p>}
+    </form>
+  );
+}
+```
+
+### 3. `useOptimistic` (แสดงผลลัพธ์ล่วงหน้าทันที)
+ช่วยให้อัปเดต UI ให้ผู้ใช้เห็นล่วงหน้าทันทีก่อนที่เซิร์ฟเวอร์จะตอบกลับ หากเซิร์ฟเวอร์เกิด Error ตัว React จะ Rollback กลับไปค่าเดิมให้อัตโนมัติ:
+
+```tsx
+'use client';
+
+import { useOptimistic } from 'react';
+
+export function MessageList({ messages, sendMessage }: { messages: string[]; sendMessage: (msg: string) => Promise<void> }) {
+  const [optimisticMessages, addOptimisticMessage] = useOptimistic(
+    messages,
+    (state, newMessage: string) => [...state, `${newMessage} (กำลังส่ง...)`]
+  );
+
+  async function formAction(formData: FormData) {
+    const text = formData.get('message') as string;
+    addOptimisticMessage(text); // UI อัปเดตทันที!
+    await sendMessage(text);
+  }
+
+  return (
+    <div>
+      <ul>
+        {optimisticMessages.map((m, i) => <li key={i}>{m}</li>)}
+      </ul>
+      <form action={formAction}>
+        <input name="message" />
+        <button type="submit">ส่ง</button>
+      </form>
+    </div>
+  );
+}
+```
+
+---
+
+## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- `useActionState`: ใช้กับทุกฟอร์มที่มีการบันทึกข้อมูลแบบ Asynchronous (เช่น ส่งฟอร์ม Server Actions)
+- `useOptimistic`: ใช้กับฟังก์ชันที่ผู้ใช้คาดหวังความเร็วทันที เช่น ปุ่ม Like, การส่งข้อความแชท, การติ๊กถูก To-Do
+- `use()`: ใช้เมื่อต้องการส่ง Promise จาก Server Component ลงมา Unwrap ใน Client Component ร่วมกับ `<Suspense>`
+
+---
+
+## 4. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: `use()` ใน React 19 แตกต่างจาก Hooks ทั่วไปอย่างไร?
+**แนวทางคำตอบ**: `use()` สามารถเรียกใช้งาน **ภายในเงื่อนไข `if` หรือ Block ต่างๆ ได้** ซึ่งเป็น Hook ตัวแรกที่สามารถละเมิดกฎเดิมของ Hooks ได้ นอกจากนี้ยังสามารถ Unwrap ได้ทั้ง Promise และ Context ทำให้สามารถอ่านข้อมูลแบบ Asynchronous ร่วมกับ React Suspense ได้อย่างลงตัว

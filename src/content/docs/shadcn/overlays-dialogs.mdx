@@ -1,0 +1,250 @@
+---
+title: Overlays & Dialogs
+category: Frontend
+parentTitle: shadcn/ui
+version: shadcn/ui & Radix UI
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+คอมโพเนนต์กลุ่ม **Overlays** คือหน้าต่างและองค์ประกอบลอยตัวที่ปรากฏซ้อนทับเนื้อหาหลักของเว็บแอปพลิเคชัน เพื่อดึงดูดความสนใจ หรือเปิดให้ผู้ใช้งานทำกิจกรรมเฉพาะหน้าให้เสร็จสิ้นก่อนกลับสู่หน้าเดิม:
+
+1. **`Dialog` (Modal)**: หน้าต่างกึ่งกลางหน้าจอสำหรับงานทั่วไป เช่น ฟอร์มสร้างโปรเจกต์ใหม่
+2. **`AlertDialog`**: หน้าต่างยืนยันการกระทำที่มีความเสี่ยงสูง (เช่น การลบข้อมูล หรือตัดเงิน) ซึ่งถูกออกแบบมาเพื่อ **ทดแทนไลบรารีรุ่นเก่าอย่าง SweetAlert2 หรือ Native `window.confirm()`**
+3. **`Sheet` (Drawer)**: หน้าต่างบานเลื่อนที่สไลด์ออกมาจากขอบจอ (ซ้าย ขวา บน ล่าง) เหมาะอย่างยิ่งสำหรับหน้าจอเมนูบนมือถือ หรือฟอร์มแก้ไขข้อมูลขนาดยาว
+4. **`Popover`**: หน้าต่างลอยตัวขนาดเล็ก ผูกติดกับตำแหน่งของปุ่มหรือ Trigger element เช่น ตัวเลือกวันที่ (Date Picker)
+5. **`Tooltip`**: กล่องข้อความสั้นๆ ที่ปรากฏเมื่อเมาส์ชี้ เพื่ออธิบายความหมายของไอคอนหรือฟังก์ชัน
+6. **`DropdownMenu`**: เมนูตัวเลือกแบบพับเก็บได้ มักใช้กับปุ่มจุดสามจุด (Context Action Menu)
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ทำไม Overlays ของ shadcn/ui ถึงเหนือกว่า Custom Div หรือ SweetAlert2?
+
+1. **React Portal Rendering**:
+   - คอมโพเนนต์กลุ่มนี้จะเรนเดอร์เนื้อหาไปยัง `document.body` เสมอผ่าน Portal
+   - ทำให้หลุดพ้นจากปัญหา CSS `overflow: hidden`, `z-index` คับแคบ หรือ CSS `filter/transform` ของ Parent container ที่อาจตัดขาดการแสดงผล
+2. **Focus Management & Trapping**:
+   - เมื่อเปิด Modal ขึ้นมา โฟกัสจะถูกดึงเข้าไปยัง Element ตัวแรกภายใน Modal ทันที
+   - ผู้ใช้จะไม่สามารถกดปุ่ม `Tab` ทะลุออกไปยังลิงก์หรือปุ่มที่อยู่ด้านหลังฉากได้
+   - เมื่อปิด Modal ลง โฟกัสจะถูกคืนกลับไปยังปุ่มเดิมที่ผู้ใช้กดเปิด (Focus Restoration)
+3. **Scroll Locking อัจฉริยะ**:
+   - หน้าเว็บด้านหลังจะไม่สามารถเลื่อน Scroll ได้ขณะเปิด Modal
+   - มีการชดเชย Scrollbar Width เพื่อป้องกันไม่ให้เนื้อหาของหน้าเว็บด้านหลัง "กระตุก (Layout Jitter)"
+4. **Type-Safe & Integrated Theme**:
+   - รองรับ Next.js App Router, React 19, และสลับโหมด Dark/Light Mode ตาม `globals.css` อัตโนมัติ โดยไม่ต้องพึ่ง Global Event Emitter เหมือน SweetAlert2
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่าง: ระบบจัดการสมาชิกทีม (รวม AlertDialog, Sheet, DropdownMenu และ Tooltip)
+
+```tsx filename="app/team/TeamMemberRow.tsx"
+"use client";
+
+import * as React from "react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+} from "@/components/ui/sheet";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { MoreHorizontal, ShieldAlert, Edit, Trash2, KeyRound } from "lucide-react";
+
+interface MemberProps {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+}
+
+export function TeamMemberRow({ id, name, email, role }: MemberProps) {
+  const [isSheetOpen, setIsSheetOpen] = React.useState(false);
+  const [isAlertOpen, setIsAlertOpen] = React.useState(false);
+
+  async function handleConfirmDelete() {
+    // ยืนยันการลบสมาชิกออกจากทีม
+    console.log(`Member ${id} deleted successfully`);
+    setIsAlertOpen(false);
+  }
+
+  return (
+    <div className="flex items-center justify-between p-4 border rounded-xl bg-card">
+      <div className="space-y-0.5">
+        <h4 className="text-sm font-semibold">{name}</h4>
+        <p className="text-xs text-muted-foreground">{email} • ตำแหน่ง: {role}</p>
+      </div>
+
+      <div className="flex items-center gap-2">
+        {/* Tooltip อธิบายปุ่ม Reset Password */}
+        <TooltipProvider delayDuration={200}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-8 w-8">
+                <KeyRound className="w-4 h-4 text-muted-foreground" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p className="text-xs">ส่งลิงก์รีเซ็ตรหัสผ่านทางอีเมล</p>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+
+        {/* Action Dropdown Menu */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="outline" size="icon" className="h-8 w-8">
+              <MoreHorizontal className="w-4 h-4" />
+              <span className="sr-only">เปิดเมนูจัดการ</span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48">
+            <DropdownMenuLabel>การจัดการสมาชิก</DropdownMenuLabel>
+            <DropdownMenuSeparator />
+
+            {/* Trigger เปิด Sheet Drawer */}
+            <DropdownMenuItem onSelect={() => setIsSheetOpen(true)}>
+              <Edit className="w-4 h-4 mr-2" />
+              แก้ไขสิทธิ์การใช้งาน
+            </DropdownMenuItem>
+
+            {/* Trigger เปิด AlertDialog */}
+            <DropdownMenuItem
+              onSelect={() => setIsAlertOpen(true)}
+              className="text-destructive focus:bg-destructive/10 focus:text-destructive"
+            >
+              <Trash2 className="w-4 h-4 mr-2" />
+              ลบออกจากองค์กร
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        {/* Sheet Drawer สำหรับแก้ไขข้อมูล */}
+        <Sheet open={isSheetOpen} onOpenChange={setIsSheetOpen}>
+          <SheetContent side="right" className="w-full sm:max-w-md">
+            <SheetHeader>
+              <SheetTitle>แก้ไขข้อมูลสมาชิก: {name}</SheetTitle>
+              <SheetDescription>
+                ปรับเปลี่ยนสิทธิ์การเข้าถึงทรัพยากรบนคลาวด์และโปรเจกต์ภายใน
+              </SheetDescription>
+            </SheetHeader>
+            <div className="space-y-4 py-6">
+              <div className="space-y-2">
+                <Label htmlFor="memberName">ชื่อเต็ม</Label>
+                <Input id="memberName" defaultValue={name} />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="memberEmail">อีเมล</Label>
+                <Input id="memberEmail" defaultValue={email} disabled />
+              </div>
+              <Button onClick={() => setIsSheetOpen(false)} className="w-full mt-4">
+                บันทึกการเปลี่ยนแปลง
+              </Button>
+            </div>
+          </SheetContent>
+        </Sheet>
+
+        {/* AlertDialog สำหรับการยืนยันลบข้อมูล (แทน SweetAlert2) */}
+        <AlertDialog open={isAlertOpen} onOpenChange={setIsAlertOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-full bg-destructive/10 text-destructive">
+                  <ShieldAlert className="w-5 h-5" />
+                </div>
+                <AlertDialogTitle>ยืนยันการลบสมาชิก?</AlertDialogTitle>
+              </div>
+              <AlertDialogDescription className="pt-2">
+                คุณกำลังจะลบ <strong>{name}</strong> ออกจากระบบ สมาชิกผู้นี้จะไม่สามารถเข้าถึงโปรเจกต์
+                และ API Keys ของทีมได้อีกต่อไป การกระทำนี้ไม่สามารถย้อนกลับได้
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>ยกเลิก</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={handleConfirmDelete}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                ยืนยันการลบ
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **ใช้ `window.confirm()` หรือ SweetAlert2 ดั้งเดิม**<br/>สร้างปัญหาหน้าต่างดีไซน์แตก ไม่รองรับธีม Dark Mode, ทำลาย React Context และไม่เป็นมิตรกับ Mobile Keyboard | **ใช้ shadcn `AlertDialog`**<br/>สอดคล้องกับ Design System 100%, ทำงานผ่าน React State ปลอดภัย และรองรับ Screen Reader อย่างสมบูรณ์ |
+| **เรนเดอร์ Modal ไว้ใน Parent Div ที่มี `overflow: hidden`**<br/>ทำให้ขอบของ Modal โดนตัดแหว่ง หรือเงาของ Popover หายไป | **ใช้ Radix Portal เสมอ**<br/>(ซึ่งถูกห่อไว้ใน `DialogContent` / `SheetContent` อัตโนมัติแล้ว) เรนเดอร์ลอยตัวขึ้นไปที่ `document.body` อย่างปลอดภัย |
+| **ลืมใส่ `sr-only` ให้กับปุ่ม Trigger ที่มีแต่ไอคอน**<br/>เช่น `<button><MoreHorizontal /></button>` ส่งผลให้ Screen Reader อ่านไม่ออกว่าปุ่มทำหน้าที่อะไร | **ใส่ `<span className="sr-only">เปิดเมนู</span>` เสมอ**<br/>ช่วยให้ผู้ใช้ที่ใช้โปรแกรมอ่านหน้าจอเข้าใจหน้าที่ของปุ่มอย่างชัดเจน |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้เมื่อ:
+- **`AlertDialog`**: ใช้เมื่อมีการกระทำที่อันตราย ไม่สามารถกู้คืนข้อมูลได้ (Destructive Actions) เช่น ลบฐานข้อมูล, ยุติการเป็นสมาชิก
+- **`Sheet`**: ใช้เมื่อมีแบบฟอร์มที่มีหลายช่องกรอก (Multi-field Forms) หรือเมนู Drawer บนสมาร์ตโฟน
+- **`Tooltip`**: ใช้บนปุ่มที่มีเฉพาะไอคอน (Icon-only buttons) เพื่อบอกชื่อหน้าที่ของปุ่ม
+
+### ไม่ควรใช้เมื่อ:
+- **ยัดฟอร์มขนาดยักษ์ 50 ฟิลด์ลงใน Dialog กึ่งกลางหน้าจอ**: ผู้ใช้บนอุปกรณ์จอเล็กจะไม่สามารถกรอกข้อมูลได้สะดวก ควรเปลี่ยนเป็นหน้า Page แยก หรือใช้ Multi-step Wizard แทน
+- **ใช้ Tooltip บนอุปกรณ์ทัชสกรีน (Mobile Phone)**: บนมือถือไม่มีเมาส์ให้ Hover การใส่ Tooltip มักทำให้ผู้ใช้กดไม่ติดหรือสร้างความรำคาญ
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: อะไรคือความแตกต่างเชิง UX และ Accessibility ระหว่าง `Dialog` กับ `AlertDialog` ในมาตรฐาน WAI-ARIA?
+**แนวทางตอบ:**
+1. **บทบาทตามมาตรฐาน (ARIA Role)**:
+   - `Dialog` ใช้ `role="dialog"` เหมาะกับงานทั่วไป เช่น ฟอร์มกรอกข้อมูลสั้นๆ ผู้ใช้สามารถปิดได้ด้วยการคลิกฉากหลัง (Backdrop Click) หรือกด Escape
+   - `AlertDialog` ใช้ `role="alertdialog"` เป็นหน้าต่างที่มีความสำคัญระดับวิกฤต ซึ่ง Screen Reader จะขัดจังหวะการอ่านปัจจุบันเพื่อแจ้งเตือนผู้ใช้ทันที
+2. **การโต้ตอบ (User Interaction)**:
+   - `AlertDialog` มักจะไม่อนุญาตให้ปิดด้วยการคลิก Backdrop เพื่อบังคับให้ผู้ใช้ต้องตัดสินใจกดปุ่ม "ตกลง" หรือ "ยกเลิก" อย่างชัดเจนเท่านั้น เพื่อป้องกันอุบัติเหตุข้อมูลสูญหาย
+
+### Q2: ในการทำ DropdownMenu หรือ Popover ซ้อนอยู่ภายใน Dialog เกิดปัญหาทางเทคนิคเรื่อง Focus และ Event Bubbling อย่างไร และ Radix UI ป้องกันปัญหานี้อย่างไร?
+**แนวทางตอบ:**
+- **ปัญหา**: เมื่อเราเปิด Dropdown ภายใน Dialog แล้วกดคลิกเลือกรายการ Event `pointerdown` หรือ `click` อาจลอย (Bubble) ขึ้นไปถึง Dialog และทำให้ Dialog เข้าใจผิดว่าผู้ใช้คลิกฉากหลังภายนอก ส่งผลให้ Dialog ปิดตัวลงไปด้วย (Accidental Close)
+- **การแก้ไขของ Radix UI**: มีระบบ **Interacting Outside Detection** และ **Dismissable Layer Stack** ภายใน ซึ่งคอยตรวจสอบว่า Element ที่ถูกคลิกนั้นอยู่ในเลเยอร์ลูกของ Stack หรือไม่ หากอยู่ใน Layer เดียวกันหรือลูก มันจะดัก Event และป้องกันไม่ให้ Parent Dismissable Layer ปิดตัวเองโดยไม่เจตนา

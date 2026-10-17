@@ -1,0 +1,572 @@
+---
+title: useFieldArray & Complex Forms
+category: Frontend
+parentTitle: React Hook Form + Zod
+version: RHF v7 & Zod v4 (Next.js 16)
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ในระบบงานจริง ฟอร์มมักไม่ได้มีโครงสร้างแบนราบ (Flat) แค่ `name` หรือ `email` แต่ประกอบด้วยข้อมูลที่มีโครงสร้างซับซ้อน:
+1. **Dynamic Lists (รายการที่เพิ่ม/ลดได้อิสระ)**: เช่น รายการสินค้าในใบสั่งซื้อ (Order Line Items), รายการทักษะ/ประวัติการทำงานในเรซูเม, หรือผู้รับผลประโยชน์ในกรมธรรม์ประกันภัย
+2. **Nested Objects (ออบเจกต์ซ้อนหลายชั้น)**: เช่น ที่อยู่จัดส่ง `shippingAddress.street`, `shippingAddress.province`, `shippingAddress.postalCode`
+3. **Conditional Fields (ฟิลด์ที่มีเงื่อนไขตามค่าอื่น)**: เช่น การแสดงช่องระบุหมายเลขเที่ยวบินและเบอร์ติดต่อด่วนเฉพาะเมื่อผู้ใช้เลือกวิธีจัดส่งเป็น "Express Delivery"
+4. **Multi-step Wizard Forms (ฟอร์มหลายขั้นตอน)**: การแบ่งแบบฟอร์มขนาดยาวออกเป็นสเต็ปย่อย (Account -> Shipping -> Review & Payment) โดยที่ยังคงรักษา State ความต่อเนื่องและตรวจสอบความถูกต้องทีละหน้า
+
+React Hook Form เตรียมเครื่องมือเฉพาะทางอย่าง **`useFieldArray`**, **`useWatch`**, และ **`trigger()`** เพื่อจัดการกับโครงสร้างเหล่านี้ด้วยประสิทธิภาพสูงสุดโดยไม่ทำให้แอปเกิดอาการกระตุกหรือสูญเสียการพิมพ์
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 สถาปัตยกรรมของ `useFieldArray`
+
+เมื่อเราเรียกใช้งาน `useFieldArray({ control, name: 'items' })`:
+
+```tsx
+const { fields, append, prepend, remove, swap, move, insert } = useFieldArray({
+  control,
+  name: 'items',
+});
+```
+
+RHF จะสร้าง Internal Identifiers ขึ้นมาผูกกับแต่ละแถวของ Array ภายใน Form State:
+
+- **`fields`**: Array ของออบเจกต์ที่มี property พิเศษชื่อว่า **`id`** (เช่น `field.id = "c3f1b0a8-..."`)
+- **`append(value)`**: เพิ่มรายการใหม่ต่อท้าย
+- **`prepend(value)`**: เพิ่มรายการใหม่ไว้ด้านหน้าสุด
+- **`remove(index)`**: ลบรายการที่ตำแหน่ง index ที่กำหนด
+- **`swap(indexA, indexB)`**: สลับตำแหน่งสองแถว
+- **`move(fromIndex, toIndex)`**: ย้ายแถวจากตำแหน่งหนึ่งไปยังอีกตำแหน่งหนึ่ง
+- **`insert(index, value)`**: แทรกรายการ ณ ตำแหน่งที่ต้องการ
+
+#### ⚠️ กฎเหล็ก: ทำไมต้องใช้ `field.id` เป็น `key` ใน React `.map()` เสมอ?
+
+```tsx
+// ❌ ผิดมหันต์: ใช้ index เป็น key
+{fields.map((field, index) => (
+  <div key={index}>...</div>
+))}
+
+// ✅ ถูกต้อง: ใช้ field.id ที่ RHF สร้างขึ้นให้เสมอ
+{fields.map((field, index) => (
+  <div key={field.id}>...</div>
+))}
+```
+
+**สาเหตุทางเทคนิค**:
+React Hook Form ทำงานบนพื้นฐานของ Uncontrolled DOM Inputs หากเราใช้ `index` เป็น React Key เมื่อผู้ใช้ลบแถวที่ 1 ออกจาก Array 3 แถว:
+1. แถวเดิมที่ Index 1 จะกลายเป็น Index 0 และแถวเดิม Index 2 กลายเป็น Index 1
+2. React Reconciliation Algorithm จะเข้าใจผิดว่าคอมโพเนนต์ที่ Key `0` และ `1` ยังคงมีอยู่เหมือนเดิม เพียงแค่ Props เปลี่ยน
+3. ผลลัพธ์คือ **Native DOM Input จะไม่ยอมลบค่าที่ผู้ใช้พิมพ์ในแถวนั้นทิ้ง!** แต่จะไปลบค่าแถวสุดท้ายแทน ทำให้ข้อมูลแสดงผลเพี้ยนสลับแถวทันที
+4. การใช้ `field.id` ซึ่งเป็น Unique UUID คงที่ประจำแถวนั้น จะบังคับให้ React ทำการ Unmount และ Remount DOM Elements ได้อย่างถูกต้อง 100%
+
+### 2.2 การควบคุมฟิลด์ตามเงื่อนไข: `watch` vs `useWatch`
+
+| คุณสมบัติ | `form.watch('fieldName')` | `useWatch({ control, name })` |
+| :--- | :--- | :--- |
+| **ขอบเขตการ Re-render** | **Re-render ทั้งฟอร์ม** (Root Component) ทุกครั้งที่ค่านั้นเปลี่ยน | **Re-render เฉพาะคอมโพเนนต์ย่อย** ที่เรียก Hook นั้น |
+| **ผลกระทบด้าน Performance** | สูง หากเรียกในฟอร์มใหญ่ที่มีอินพุตหลายสิบช่อง | ต่ำมาก (Isolated Subscription Model) |
+| **ตำแหน่งที่ควรเรียก** | ในฟังก์ชัน Submit หรือนอก React Render Tree | แยกออกเป็น Custom Component ลูกที่ต้องการฟังค่านั้น |
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+ตัวอย่างระบบจัดทำใบสั่งซื้อสินค้าและการจัดส่งระดับองค์กร (`EnterpriseOrderInvoiceForm.tsx`) ครอบคลุม:
+1. `useFieldArray` สำหรับรายการสินค้า คำนวณยอดเงินรวม (Subtotal + VAT 7%) อัตโนมัติ
+2. Nested Address Objects
+3. Conditional Fields ด้วย `useWatch`
+4. การจัดการ 3 ขั้นตอน Wizard (Cart -> Delivery -> Review) ด้วย `form.trigger()`
+
+```tsx filename="src/features/orders/components/EnterpriseOrderInvoiceForm.tsx"
+'use client';
+
+import React, { useState } from 'react';
+import { useForm, useFieldArray, useWatch, type Control } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
+import { Plus, Trash2, ArrowRight, ArrowLeft, CheckCircle2 } from 'lucide-react';
+
+// ==========================================
+// 1. Zod v4 Schemas
+// ==========================================
+const lineItemSchema = z.object({
+  sku: z.string().min(1, 'ต้องระบุรหัสสินค้า'),
+  description: z.string().min(1, 'ต้องระบุชื่อสินค้า'),
+  quantity: z.number().int().min(1, 'จำนวนขั้นต่ำ 1 ชิ้น'),
+  unitPrice: z.number().min(0.01, 'ราคาต่อหน่วยต้องมากกว่า 0'),
+});
+
+export const orderInvoiceSchema = z.object({
+  // Step 1: Customer & Line Items
+  customerName: z.string().min(2, 'ชื่อลูกค้าต้องมีอย่างน้อย 2 ตัวอักษร'),
+  items: z.array(lineItemSchema).min(1, 'ต้องมีสินค้าอย่างน้อย 1 รายการในใบสั่งซื้อ'),
+
+  // Step 2: Shipping & Conditional Fields
+  deliveryMethod: z.enum(['STANDARD', 'EXPRESS', 'WAREHOUSE_PICKUP']),
+  expressContactNumber: z.string().optional(),
+  shippingAddress: z.object({
+    street: z.string().min(5, 'กรุณาระบุที่อยู่และถนน'),
+    province: z.string().min(2, 'กรุณาระบุจังหวัด'),
+    postalCode: z.string().regex(/^\d{5}$/, 'รหัสไปรษณีย์ต้องเป็นตัวเลข 5 หลัก'),
+  }),
+}).superRefine((data, ctx) => {
+  if (data.deliveryMethod === 'EXPRESS' && (!data.expressContactNumber || data.expressContactNumber.length < 9)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'การจัดส่งด่วน Express จำเป็นต้องระบุเบอร์ติดต่อด่วนของพนักงานรับสินค้า',
+      path: ['expressContactNumber'],
+    });
+  }
+});
+
+export type OrderInvoiceInput = z.infer<typeof orderInvoiceSchema>;
+
+// ==========================================
+// 2. Component ลูก: คำนวณราคายอดรวมด้วย useWatch (Isolated Re-render)
+// ==========================================
+function OrderSummarySection({ control }: { control: Control<OrderInvoiceInput> }) {
+  const items = useWatch({
+    control,
+    name: 'items',
+  });
+
+  const subtotal = (items || []).reduce((acc, curr) => {
+    const qty = Number(curr?.quantity) || 0;
+    const price = Number(curr?.unitPrice) || 0;
+    return acc + qty * price;
+  }, 0);
+
+  const vat = subtotal * 0.07;
+  const grandTotal = subtotal + vat;
+
+  return (
+    <div className="p-4 bg-slate-50 dark:bg-slate-800/60 rounded-lg space-y-2 text-sm border border-slate-200 dark:border-slate-700">
+      <div className="flex justify-between text-slate-600 dark:text-slate-300">
+        <span>มูลค่าสินค้ารวม (Subtotal):</span>
+        <span className="font-mono">฿{subtotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })}</span>
+      </div>
+      <div className="flex justify-between text-slate-600 dark:text-slate-300">
+        <span>ภาษีมูลค่าเพิ่ม (VAT 7%):</span>
+        <span className="font-mono">฿{vat.toLocaleString('th-TH', { minimumFractionDigits: 2 })}</span>
+      </div>
+      <div className="flex justify-between font-bold text-base text-slate-900 dark:text-white pt-2 border-t border-slate-200 dark:border-slate-700">
+        <span>ยอดรวมสุทธิ (Grand Total):</span>
+        <span className="font-mono text-blue-600 dark:text-blue-400">
+          ฿{grandTotal.toLocaleString('th-TH', { minimumFractionDigits: 2 })}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ==========================================
+// 3. Component ลูก: จัดการเงื่อนไข Express Contact ด้วย useWatch
+// ==========================================
+function ExpressDeliveryOptions({ control, register, error }: {
+  control: Control<OrderInvoiceInput>;
+  register: any;
+  error?: string;
+}) {
+  const deliveryMethod = useWatch({
+    control,
+    name: 'deliveryMethod',
+  });
+
+  if (deliveryMethod !== 'EXPRESS') return null;
+
+  return (
+    <div className="p-4 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900 rounded-lg space-y-2">
+      <label className="text-sm font-semibold text-amber-900 dark:text-amber-200">
+        เบอร์โทรศัพท์ติดต่อด่วนพิเศษสำหรับไรเดอร์ Express *
+      </label>
+      <input
+        type="tel"
+        placeholder="081-999-9999"
+        {...register('expressContactNumber')}
+        className="w-full px-3 py-2 border rounded-md bg-white dark:bg-slate-900 border-amber-300 dark:border-amber-800"
+      />
+      {error && <p className="text-xs text-red-600">{error}</p>}
+    </div>
+  );
+}
+
+// ==========================================
+// 4. Wizard Multi-Step Form หลัก
+// ==========================================
+export function EnterpriseOrderInvoiceForm() {
+  const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
+
+  const {
+    register,
+    control,
+    handleSubmit,
+    trigger,
+    getValues,
+    formState: { errors, isSubmitting },
+  } = useForm<OrderInvoiceInput>({
+    resolver: zodResolver(orderInvoiceSchema),
+    defaultValues: {
+      customerName: 'บริษัท สยามดิจิทัลพาร์ทเนอร์ จำกัด',
+      items: [
+        { sku: 'SRV-01', description: 'Cloud Server Instance 8vCPU/32GB', quantity: 2, unitPrice: 3500 },
+      ],
+      deliveryMethod: 'STANDARD',
+      shippingAddress: {
+        street: '123/45 อาคารเอ็มไพร์ทาวเวอร์ ชั้น 28 ถนนสาทรใต้',
+        province: 'กรุงเทพมหานคร',
+        postalCode: '10120',
+      },
+    },
+    mode: 'onTouched',
+  });
+
+  const { fields, append, remove } = useFieldArray({
+    control,
+    name: 'items',
+  });
+
+  // นำทางไปยัง Step ถัดไป พร้อมตรวจสอบ Validation เฉพาะฟิลด์ใน Step นั้นๆ
+  const nextStep = async () => {
+    let isValid = false;
+    if (currentStep === 1) {
+      isValid = await trigger(['customerName', 'items']);
+    } else if (currentStep === 2) {
+      isValid = await trigger(['deliveryMethod', 'expressContactNumber', 'shippingAddress']);
+    }
+    if (isValid) setCurrentStep((prev) => (prev + 1) as any);
+  };
+
+  const prevStep = () => setCurrentStep((prev) => (prev - 1) as any);
+
+  const onSubmit = async (values: OrderInvoiceInput) => {
+    await new Promise((r) => setTimeout(r, 1200));
+    console.log('Final Order Submitted:', values);
+    alert('สร้างใบสั่งซื้อสำเร็จ!');
+  };
+
+  return (
+    <div className="max-w-3xl mx-auto p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-lg space-y-6">
+      {/* Wizard Progress Stepper */}
+      <div className="flex items-center justify-between border-b pb-4">
+        {[
+          { step: 1, title: '1. รายการสินค้า (Items)' },
+          { step: 2, title: '2. การจัดส่ง (Delivery)' },
+          { step: 3, title: '3. สรุปข้อมูล (Review)' },
+        ].map((item) => (
+          <div
+            key={item.step}
+            className={`flex items-center space-x-2 text-sm font-semibold ${
+              currentStep === item.step
+                ? 'text-blue-600'
+                : currentStep > item.step
+                ? 'text-emerald-600'
+                : 'text-slate-400'
+            }`}
+          >
+            <span className="flex items-center justify-center w-7 h-7 rounded-full border-2 border-current text-xs">
+              {currentStep > item.step ? '✓' : item.step}
+            </span>
+            <span>{item.title}</span>
+          </div>
+        ))}
+      </div>
+
+      <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
+        {/* STEP 1: ITEMS & useFieldArray */}
+        {currentStep === 1 && (
+          <div className="space-y-4">
+            <div>
+              <label className="text-sm font-medium">ชื่อลูกค้า / นิติบุคคล</label>
+              <input
+                {...register('customerName')}
+                className="w-full mt-1 px-3 py-2 border rounded-md dark:bg-slate-800"
+              />
+              {errors.customerName && <p className="text-xs text-red-500 mt-1">{errors.customerName.message}</p>}
+            </div>
+
+            <div className="space-y-3 pt-2">
+              <div className="flex justify-between items-center">
+                <h3 className="font-semibold text-sm">รายการสินค้าในใบสั่งซื้อ</h3>
+                <button
+                  type="button"
+                  onClick={() => append({ sku: '', description: '', quantity: 1, unitPrice: 0 })}
+                  className="flex items-center space-x-1 text-xs bg-blue-50 text-blue-600 px-3 py-1.5 rounded-md hover:bg-blue-100 font-medium"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>เพิ่มรายการ</span>
+                </button>
+              </div>
+
+              {errors.items?.message && (
+                <p className="text-xs text-red-500">{errors.items.message}</p>
+              )}
+
+              {fields.map((field, index) => (
+                <div
+                  key={field.id} // ✅ สำคัญมาก: ต้องใช้ field.id เสมอ
+                  className="p-3 border rounded-lg bg-slate-50/50 dark:bg-slate-800/40 grid grid-cols-12 gap-2 items-center"
+                >
+                  <div className="col-span-3">
+                    <input
+                      placeholder="รหัส SKU"
+                      {...register(`items.${index}.sku` as const)}
+                      className="w-full text-xs px-2.5 py-1.5 border rounded bg-white dark:bg-slate-900"
+                    />
+                    {errors.items?.[index]?.sku && (
+                      <p className="text-[10px] text-red-500">{errors.items[index]?.sku?.message}</p>
+                    )}
+                  </div>
+                  <div className="col-span-4">
+                    <input
+                      placeholder="คำอธิบายสินค้า"
+                      {...register(`items.${index}.description` as const)}
+                      className="w-full text-xs px-2.5 py-1.5 border rounded bg-white dark:bg-slate-900"
+                    />
+                    {errors.items?.[index]?.description && (
+                      <p className="text-[10px] text-red-500">{errors.items[index]?.description?.message}</p>
+                    )}
+                  </div>
+                  <div className="col-span-2">
+                    <input
+                      type="number"
+                      placeholder="จำนวน"
+                      {...register(`items.${index}.quantity` as const, { valueAsNumber: true })}
+                      className="w-full text-xs px-2.5 py-1.5 border rounded bg-white dark:bg-slate-900"
+                    />
+                  </div>
+                  <div className="col-span-2">
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="ราคาต่อหน่วย"
+                      {...register(`items.${index}.unitPrice` as const, { valueAsNumber: true })}
+                      className="w-full text-xs px-2.5 py-1.5 border rounded bg-white dark:bg-slate-900"
+                    />
+                  </div>
+                  <div className="col-span-1 text-right">
+                    <button
+                      type="button"
+                      onClick={() => remove(index)}
+                      className="text-slate-400 hover:text-red-600 p-1 rounded"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <OrderSummarySection control={control} />
+          </div>
+        )}
+
+        {/* STEP 2: SHIPPING & CONDITIONAL FIELDS */}
+        {currentStep === 2 && (
+          <div className="space-y-4">
+            <div>
+              <label className="text-sm font-medium">รูปแบบการจัดส่ง</label>
+              <select
+                {...register('deliveryMethod')}
+                className="w-full mt-1 px-3 py-2 border rounded-md dark:bg-slate-800"
+              >
+                <option value="STANDARD">จัดส่งพัสดุมาตรฐาน (Standard Courier 2-3 วัน)</option>
+                <option value="EXPRESS">จัดส่งด่วนพิเศษภายในวัน (Same-day Express Delivery)</option>
+                <option value="WAREHOUSE_PICKUP">รับสินค้าด้วยตนเองที่คลังสินค้า (Warehouse Pickup)</option>
+              </select>
+            </div>
+
+            {/* Conditional Input ผ่าน useWatch */}
+            <ExpressDeliveryOptions
+              control={control}
+              register={register}
+              error={errors.expressContactNumber?.message}
+            />
+
+            {/* Nested Objects */}
+            <div className="space-y-3 pt-2">
+              <h3 className="text-sm font-semibold">ที่อยู่สำหรับออกใบกำกับภาษีและจัดส่ง (Shipping Address)</h3>
+              <div>
+                <input
+                  placeholder="เลขที่, อาคาร, ถนน, ตำบล/แขวง"
+                  {...register('shippingAddress.street')}
+                  className="w-full text-sm px-3 py-2 border rounded-md dark:bg-slate-800"
+                />
+                {errors.shippingAddress?.street && (
+                  <p className="text-xs text-red-500 mt-1">{errors.shippingAddress.street.message}</p>
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <input
+                    placeholder="จังหวัด"
+                    {...register('shippingAddress.province')}
+                    className="w-full text-sm px-3 py-2 border rounded-md dark:bg-slate-800"
+                  />
+                  {errors.shippingAddress?.province && (
+                    <p className="text-xs text-red-500 mt-1">{errors.shippingAddress.province.message}</p>
+                  )}
+                </div>
+                <div>
+                  <input
+                    placeholder="รหัสไปรษณีย์ 5 หลัก"
+                    {...register('shippingAddress.postalCode')}
+                    className="w-full text-sm px-3 py-2 border rounded-md dark:bg-slate-800"
+                  />
+                  {errors.shippingAddress?.postalCode && (
+                    <p className="text-xs text-red-500 mt-1">{errors.shippingAddress.postalCode.message}</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* STEP 3: REVIEW & CONFIRM */}
+        {currentStep === 3 && (
+          <div className="space-y-4">
+            <div className="flex items-center space-x-2 text-emerald-600 font-semibold text-sm">
+              <CheckCircle2 className="w-5 h-5" />
+              <span>กรุณาตรวจสอบความถูกต้องของข้อมูลก่อนยืนยันการสั่งซื้อ</span>
+            </div>
+            <div className="p-4 bg-slate-50 dark:bg-slate-800 rounded-lg text-sm space-y-2 border">
+              <p><strong>ผู้สั่งซื้อ:</strong> {getValues('customerName')}</p>
+              <p><strong>วิธีจัดส่ง:</strong> {getValues('deliveryMethod')}</p>
+              <p><strong>ที่อยู่:</strong> {getValues('shippingAddress.street')} {getValues('shippingAddress.province')} {getValues('shippingAddress.postalCode')}</p>
+              <p><strong>จำนวนสินค้า:</strong> {getValues('items')?.length} รายการ</p>
+            </div>
+            <OrderSummarySection control={control} />
+          </div>
+        )}
+
+        {/* Navigation Buttons */}
+        <div className="flex justify-between pt-4 border-t">
+          {currentStep > 1 ? (
+            <button
+              type="button"
+              onClick={prevStep}
+              className="flex items-center space-x-1.5 px-4 py-2 text-sm font-medium text-slate-600 border rounded-md hover:bg-slate-50"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span>ย้อนกลับ</span>
+            </button>
+          ) : <div />}
+
+          {currentStep < 3 ? (
+            <button
+              type="button"
+              onClick={nextStep}
+              className="flex items-center space-x-1.5 px-5 py-2 text-sm font-semibold text-white bg-blue-600 rounded-md hover:bg-blue-700"
+            >
+              <span>ขั้นตอนถัดไป</span>
+              <ArrowRight className="w-4 h-4" />
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              className="px-6 py-2 text-sm font-bold text-white bg-emerald-600 rounded-md hover:bg-emerald-700 disabled:opacity-50"
+            >
+              {isSubmitting ? 'กำลังสร้างใบสั่งซื้อ...' : 'ยืนยันและออกใบแจ้งหนี้'}
+            </button>
+          )}
+        </div>
+      </form>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม
+
+| มิติการเปรียบเทียบ | วิธีเดิม: จัดการ Dynamic Array ด้วย `useState` | วิธีโมเดิร์น: ใช้ `useFieldArray` ของ RHF |
+| :--- | :--- | :--- |
+| **การ Re-render เมื่อพิมพ์** | ทุกครั้งที่พิมพ์ในช่อง Quantity แถวใดแถวหนึ่ง ทั้งตารางและฟอร์มจะ Re-render ทั้งหมด | ไม่มีการ Re-render แถวอื่น (Uncontrolled Input ในแต่ละช่อง) |
+| **การจัดการ Key ตอนลบแถว** | มักใช้ Array Index ทำให้เกิดข้อผิดพลาด DOM ลบค่าผิดแถว | มี `field.id` (Unique Identifier) ที่คงอยู่ตลอด Lifecycle ของแถว |
+| **การแทรก/สลับแถว (Drag & Drop)** | ต้องเขียนฟังก์ชัน Slice, Splice, คัดลอก Array เอง | มีฟังก์ชันสำเร็จรูป `swap()`, `move()`, `insert()` ที่ซิงค์กับ Zod Schema อัตโนมัติ |
+| **Nested Schema Validation** | ต้องเขียน Loops ตรวจสอบความถูกต้องของแต่ละ Object ใน Array เอง | ใช้ Zod `z.array(itemSchema).min(1)` เชื่อมผ่าน `zodResolver` ทันที |
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practices)
+
+### 5.1 ผิด ❌: ใช้ `index` แทน `field.id` เป็น key ในการวนลูป `.map()`
+
+```tsx
+// ❌ ผิด: เมื่อกด remove(index) แถวที่ 1 ข้อมูลในช่อง input ของแถวที่ 2 จะยังค้างอยู่ที่แถวเดิม
+{fields.map((field, index) => (
+  <div key={index}>
+    <input {...register(`items.${index}.name`)} />
+    <button type="button" onClick={() => remove(index)}>ลบ</button>
+  </div>
+))}
+```
+
+```tsx
+// ✅ ถูกต้อง: ผูก key เข้ากับ field.id เสมอ
+{fields.map((field, index) => (
+  <div key={field.id}>
+    <input {...register(`items.${index}.name`)} />
+    <button type="button" onClick={() => remove(index)}>ลบ</button>
+  </div>
+))}
+```
+
+### 5.2 ผิด ❌: สั่ง `form.watch()` ใน Component แม่ของตารางคำนวณ
+
+```tsx
+// ❌ ผิด: การเรียก watch('items') ที่ระดับ Root Form Component
+// จะทำให้ทุกการเคาะแป้นพิมพ์ใน input ใดๆ สั่ง Re-render ฟอร์มทั้งหมด 100%
+export function BadOrderForm() {
+  const { watch, register } = useForm();
+  const items = watch('items'); // Re-render ทุกครั้งที่ตัวเลขขยับ
+
+  return <div>...</div>;
+}
+```
+
+```tsx
+// ✅ ถูกต้อง: แยกส่วนที่ต้องคำนวณยอดเงินออกเป็น Component ลูก แล้วใช้ useWatch
+function OrderTotals({ control }: { control: Control<OrderInput> }) {
+  const items = useWatch({ control, name: 'items' }); // Isolate Re-render เฉพาะในกล่องยอดเงิน
+  const total = items?.reduce((acc, curr) => acc + (curr.price || 0), 0);
+  return <div>ยอดรวม: {total}</div>;
+}
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ `useFieldArray` เมื่อ:
+- มีรายการข้อมูลแบบ Dynamic List ที่ผู้ใช้สามารถ **เพิ่ม (Add), ลบ (Delete), หรือสลับตำแหน่ง (Reorder/Drag-and-Drop)** ได้
+- แบบฟอร์มใบเสร็จ, ใบแจ้งหนี้, ประวัติการศึกษา, ทักษะในโปรไฟล์, รายชื่อผู้โดยสารในตั๋วเครื่องบิน
+- ฟอร์มที่มี Nested Sub-forms หลายระดับ
+
+### ไม่ควรใช้ `useFieldArray` เมื่อ:
+- Array ที่มีขนาดตายตัวแน่นอน เช่น ช่องกรอกพิกัด GPS `coordinates: [lat, lng]` (ใช้ `register('coordinates.0')` และ `register('coordinates.1')` แบบปกติได้เลย)
+- ข้อมูลที่ต้องการแสดงผลแบบ Read-only ในตารางโดยไม่มีการเปิดให้แก้ไขในเซลล์
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการใช้ Array `index` เป็น `key` ใน `useFieldArray` จึงทำให้เกิดบั๊กการลบแถวผิดช่องใน React Hook Form และ `field.id` แก้ไขปัญหานี้ได้อย่างไร?
+**แนวทางตอบแบบ Senior**:
+"บั๊กนี้เกิดจากการทำงานร่วมกันระหว่าง **React Reconciliation Engine** และ **Uncontrolled Form Inputs**:
+1. เมื่อฟิลด์ใน RHF ทำงานแบบ Uncontrolled ค่าที่ผู้ใช้พิมพ์จะถูกเก็บไว้ใน Internal DOM Node ของเบราว์เซอร์โดยตรง ไม่ได้ถูกผูกด้วย React State
+2. หากเราใช้ `key={index}` สมมติมี 3 แถว (Keys: 0, 1, 2) เมื่อผู้ใช้กดลบแถวที่ 0 ออก อาร์เรย์จะเหลือ 2 แถว React จะเทียบ Keys เดิมและพบว่ายังมี Key `0` และ `1` อยู่ React จึงตัดสินใจ Re-use DOM Node เดิมของ Key `0` และ `1` แล้วทำลายเฉพาะ Node ของ Key `2` ทิ้งไป
+3. ผลลัพธ์คือ ข้อมูลใน DOM ของแถวที่ 0 เดิมยังคงแสดงค้างอยู่บนหน้าจอ เหมือนกับว่าเราไปลบแถวสุดท้ายแทน!
+4. RHF จึงสร้าง **`field.id`** ซึ่งเป็น Unique String ที่สร้างขึ้นเพียงครั้งเดียวตั้งแต่แถวนั้นถูก `append()` เข้ามา และไม่เปลี่ยนแปลงตามลำดับ Array เมื่อส่ง `key={field.id}` ตัว React จะรู้ทันทีว่า DOM Node ของ ID ใดถูกทำลาย จึงถอด Element ออกได้อย่างถูกต้องแม่นยำครับ"
+
+### Q2: ในการทำ Wizard Multi-Step Form เราควรทำ Validation ข้อมูลอย่างไรเพื่อไม่ให้ Error ของขั้นตอนข้างหน้า (เช่น Step 3) แสดงขึ้นมาฟ้องตั้งแต่ผู้ใช้ยังกรอก Step 1 ไม่เสร็จ?
+**แนวทางตอบแบบ Senior**:
+"เราไม่ควรกด `handleSubmit` ก่อนที่จะถึงขั้นตอนสุดท้ายครับ แนวทางปฏิบัติระดับ Production คือ:
+1. ประกาศ Zod Schema รวมของทั้งฟอร์มไว้ตามปกติ เพื่อให้ TypeScript ได้ Type ที่สมบูรณ์
+2. ในปุ่ม 'ถัดไป (Next Step)' ของแต่ละขั้นตอน ให้เรียกใช้ **`const isValid = await form.trigger(['field1', 'field2'])`**
+3. เมธอด `form.trigger()` อนุญาตให้เราส่ง Array ของ Field Names เฉพาะขั้นตอนปัจจุบันเข้าไปเพื่อสั่ง Validate เฉพาะฟิลด์เหล่านั้น หากคืนค่า `true` จึงอนุญาตให้เลื่อนไป Step ถัดไป
+4. วิธีนี้ทำให้ฟิลด์ใน Step ถัดไปยังคงสถานะ Pristine ไม่ถูก Trigger ข้อผิดพลาด และเมื่อผู้ใช้ไปถึง Step สุดท้าย ค่อยเรียก `form.handleSubmit(onSubmit)` เพื่อ Validate ความถูกต้องของทั้งระบบอีกครั้งก่อนส่งข้อมูลครับ"

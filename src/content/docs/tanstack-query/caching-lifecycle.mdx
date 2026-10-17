@@ -1,0 +1,228 @@
+---
+title: staleTime & gcTime
+category: Frontend
+parentTitle: TanStack Query v5
+version: TanStack Query v5.x
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+หัวใจสำคัญที่ทำให้ **TanStack Query v5** มีประสิทธิภาพเหนือกว่าการเขียนโค้ดดึงข้อมูลแบบเดิม คือกลไก **Stale-While-Revalidate (SWR)** ซึ่งควบคุมโดยตัวแปรสำคัญ 2 ตัว:
+
+1. **`staleTime` (ระยะเวลาที่ข้อมูลยังถือว่าสดใหม่)**:
+   - ตราบใดที่เวลายังไม่เกิน `staleTime` ข้อมูลจะถูกจัดอยู่ในสถานะ **`fresh`**
+   - เมื่อข้อมูลอยู่ในสถานะ `fresh` คอมโพเนนต์จะดึงข้อมูลจากหน่วยความจำไปใช้ทันที **โดยไม่มีการส่ง Network Request ไปที่เซิร์ฟเวอร์เด็ดขาด**
+   - ค่าเริ่มต้นใน v5 คือ `0` (ข้อมูลจะกลายเป็น `stale` หรือ "ล้าสมัย" ทันทีที่ดึงเสร็จ)
+2. **`gcTime` (Garbage Collection Time - เดิมชื่อ `cacheTime` ใน v4)**:
+   - คือระยะเวลาที่แคชซึ่งไม่มีคอมโพเนนต์ใดใช้งานแล้ว (สถานะ **`inactive`**) จะถูกเก็บไว้ในหน่วยความจำ RAM ก่อนที่จะถูกทำลายทิ้งเพื่อคืน Memory
+   - ค่าเริ่มต้นใน v5 คือ `5 * 60 * 1000` (5 นาที)
+
+การเปลี่ยนชื่อจาก `cacheTime` ใน v4 มาเป็น `gcTime` ใน v5 เกิดขึ้นเพื่อแก้ปัญหาความเข้าใจผิดของนักพัฒนา ที่มักคิดว่า `cacheTime` คือระยะเวลาที่ข้อมูลจะอยู่ในแคช แต่ความจริงแล้วมันคือ **ตัวจับเวลาทำลายทิ้งเมื่อคอมโพเนนต์ Unmount** ต่างหาก
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### แผนผังวงจรชีวิตข้อมูลในแคช (Cache Lifecycle Timeline)
+
+```
+[1. Mount ครั้งแรก]
+   │
+   ├─► Network Request (isFetching = true, isPending = true)
+   │
+[2. ได้ข้อมูลกลับมา]
+   │
+   ├─► สถานะเป็น: 'fresh' ──── (นับถอยหลังตาม staleTime เช่น 1 นาที) ────┐
+   │   (ถ้ามีคอมโพเนนต์อื่นเรียก Key นี้ จะได้ข้อมูลทันที ไม่ยิงซ้ำ)             │
+   │                                                                     │
+[3. หมด staleTime] <─────────────────────────────────────────────────────┘
+   │
+   ├─► สถานะเปลี่ยนเป็น: 'stale' (ข้อมูลล้าสมัย)
+   │   (ยังคงแสดงบนจอได้ปกติ แต่จะถูกดึงใหม่เมื่อเกิด Trigger)
+   │
+[4. ผู้ใช้เปลี่ยนหน้า (Component Unmount)]
+   │
+   ├─► สถานะเปลี่ยนเป็น: 'inactive' (ไม่มีใครเชื่อมโยงแล้ว)
+   │   │
+   │   └─► เริ่มนับถอยหลังตาม gcTime (เช่น 5 นาที) ──────────────────────┐
+   │                                                                     │
+[5. ถ้าผู้ใช้กลับมาเปิดหน้านี้อีกครั้ง ก่อนครบ gcTime]                          │
+   │   │                                                                 │
+   │   ├─► แสดงข้อมูลเก่าจากแคชทันที (Zero Skeleton / Instant Load)        │
+   │   └─► ส่ง Background Refetch ในเบื้องหลังเพื่ออัปเดตข้อมูลให้สดใหม่      │
+   │                                                                     │
+[6. ถ้าผู้ใช้ไม่กลับมาจนหมดเวลา gcTime] <────────────────────────────────┘
+   │
+   └─► Garbage Collector ลบข้อมูลออกจาก RAM ถาวร
+```
+
+### เงื่อนไขการ Trigger ให้เกิด Auto-Refetch (เมื่อข้อมูลอยู่ในสถานะ `stale`)
+- **`refetchOnMount`**: เมื่อมีคอมโพเนนต์ที่ใช้ Key นี้ Mount ขึ้นมาใหม่
+- **`refetchOnWindowFocus`**: เมื่อผู้ใช้สลับหน้าต่างเบราว์เซอร์กลับมาที่แท็บของเว็บเรา
+- **`refetchOnReconnect`**: เมื่ออุปกรณ์ต่อสัญญาณอินเทอร์เน็ตได้ใหม่อีกครั้งหลังจากเน็ตหลุด
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+การประยุกต์ใช้ `staleTime` และ `gcTime` ใน 2 สถานการณ์จริง: สินค้า Flash Sale ที่เปลี่ยนไว vs หมวดหมู่สินค้าหลักที่เป็น Master Data:
+
+```tsx filename="src/features/catalog/components/CatalogViews.tsx"
+'use client';
+
+import React from 'react';
+import { useQuery } from '@tanstack/react-query';
+
+// ========================================================
+// กรณีที่ 1: ข้อมูลเปลี่ยนแปลงบ่อย (Flash Sale Stock)
+// staleTime สั้นมาก (10 วินาที) เพื่อป้องกันการซื้อเกินสต็อก
+// ========================================================
+interface FlashSaleItem {
+  id: string;
+  name: string;
+  discountPrice: number;
+  remainingStock: number;
+}
+
+export function FlashSaleWidget({ itemId }: { itemId: string }) {
+  const { data: item, isPending, isFetching } = useQuery<FlashSaleItem>({
+    queryKey: ['flash-sale', itemId],
+    queryFn: async () => {
+      const res = await fetch(`/api/flash-sale/${itemId}`);
+      return res.json();
+    },
+    staleTime: 10 * 1000, // สดใหม่เพียง 10 วินาที
+    gcTime: 60 * 1000,    // ถ้า unmount ให้เก็บแคชไว้ 1 นาที
+    refetchInterval: 15 * 1000, // สั่ง Polling อัตโนมัติทุกๆ 15 วินาที
+  });
+
+  if (isPending) return <div className="h-20 bg-amber-50 animate-pulse rounded" />;
+
+  return (
+    <div className="border-2 border-red-500 bg-red-50 p-4 rounded-xl">
+      <div className="flex justify-between items-center">
+        <h4 className="font-bold text-red-700">⚡ ดีลพิเศษลดกระหน่ำ</h4>
+        {isFetching && <span className="text-xs text-red-500 animate-pulse">กำลังเช็คสต็อก...</span>}
+      </div>
+      <p className="font-semibold text-gray-800 mt-1">{item.name}</p>
+      <div className="flex justify-between mt-2">
+        <span className="text-xl font-bold text-red-600">฿{item.discountPrice.toLocaleString()}</span>
+        <span className="text-sm font-medium text-gray-600">เหลือเพียง {item.remainingStock} ชิ้น!</span>
+      </div>
+    </div>
+  );
+}
+
+// ========================================================
+// กรณีที่ 2: ข้อมูลคงที่ (Master Categories)
+// staleTime เป็น Infinity เพราะหมวดหมู่สินค้าแทบไม่มีการเปลี่ยนในแต่ละวัน
+// ========================================================
+interface Category {
+  id: string;
+  slug: string;
+  title: string;
+}
+
+export function CategorySidebar() {
+  const { data: categories, isPending } = useQuery<Category[]>({
+    queryKey: ['categories', 'master'],
+    queryFn: async () => {
+      const res = await fetch('/api/categories');
+      return res.json();
+    },
+    staleTime: Infinity,          // ไม่มีวันหมดอายุใน Session นี้
+    gcTime: 24 * 60 * 60 * 1000,  // เก็บไว้ในหน่วยความจำ 24 ชั่วโมง
+    refetchOnWindowFocus: false,   // ไม่ต้องดึงใหม่เมื่อสลับแท็บ
+  });
+
+  if (isPending) return <div className="w-48 h-64 bg-gray-100 animate-pulse" />;
+
+  return (
+    <nav className="w-48 space-y-1">
+      <h3 className="font-bold text-gray-700 px-3 py-2 text-sm">หมวดหมู่ทั้งหมด</h3>
+      {categories?.map((cat) => (
+        <a
+          key={cat.id}
+          href={`/categories/${cat.slug}`}
+          className="block px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg"
+        >
+          {cat.title}
+        </a>
+      ))}
+    </nav>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม (useEffect vs TanStack Query)
+
+| ฟังก์ชันการทำงาน | วิธีเดิม (เขียน `useEffect` เอง) | TanStack Query v5 (`staleTime` + `gcTime`) |
+| :--- | :--- | :--- |
+| **การใช้ข้อมูลจาก RAM ทันที** | ต้องสร้างตัวแปรโกลบอลนอก React หรือเขียน Context เอง | ทำได้ทันที หากข้อมูลยังไม่เกิน `gcTime` จะแสดงผลไวระดับ 0ms |
+| **การป้องกัน Double Fetch** | ทำได้ยาก ทุกครั้งที่ Mount คอมโพเนนต์จะยิง API ใหม่เสมอ | ป้องกันอัตโนมัติด้วย `staleTime > 0` |
+| **การคืน Memory ที่ไม่ได้ใช้** | มักเกิด Memory Leak เพราะเก็บตัวแปรไว้ใน Global Store ตลอดกาล | จัดการคืน Memory อัตโนมัติด้วย Garbage Collection ตาม `gcTime` |
+| **การอัปเดตเมื่อสลับหน้าต่าง** | ต้องผูก `window.addEventListener('focus', ...)` ในทุกหน้า | ควบคุมได้จากส่วนกลางด้วย Flag `refetchOnWindowFocus` |
+
+---
+
+## 5. ผิด vs ถูก
+
+### แบบที่ผิด ❌: ตั้ง `gcTime: 0` โดยเข้าใจผิดว่าจะปิดการ Revalidate
+
+```tsx
+// ❌ ผิด: ตั้ง gcTime: 0 เพราะคิดว่าต้องการให้ข้อมูลสดใหม่ตลอดเวลา
+export function BadStockTracker({ id }: { id: string }) {
+  const { data } = useQuery({
+    queryKey: ['stock', id],
+    queryFn: () => fetchStock(id),
+    // ❌ ข้อผิดพลาด: ทันทีที่ unmount ข้อมูลจะถูกลบทิ้งจากหน่วยความจำทันที
+    // เมื่อผู้ใช้กดสลับหน้ากลับมา จะเห็นหน้าจอกระพริบเป็น Skeleton เสมอ!
+    gcTime: 0,
+  });
+}
+```
+
+### แบบที่ถูก ✅: ปล่อย `gcTime` ไว้ตามค่าเริ่มต้น และปรับแต่งที่ `staleTime`
+
+```tsx
+// ✅ ถูกต้อง: ถ้าต้องการให้ข้อมูลถูกดึงใหม่ทุกครั้งที่กลับมา ให้ตั้ง staleTime: 0
+// แต่คง gcTime ไว้ (เช่น 5 นาที) เพื่อให้หน้าจอแสดงผลข้อมูลเดิมรอระหว่างยิง Network
+export function GoodStockTracker({ id }: { id: string }) {
+  const { data, isFetching } = useQuery({
+    queryKey: ['stock', id],
+    queryFn: () => fetchStock(id),
+    staleTime: 0,              // ข้อมูลถือว่าล้าสมัยทันที เพื่อสั่ง Revalidate ทุกครั้ง
+    gcTime: 5 * 60 * 1000,     // แคชยังคงอยู่ เพื่อให้ผู้ใช้เห็นข้อมูลทันทีโดยจอไม่ขาว
+  });
+}
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### การกำหนดค่า `staleTime` ที่เหมาะสมตามประเภทข้อมูล:
+- **`staleTime: 0` (ค่าเริ่มต้น)**: เหมาะกับข้อมูลที่เปลี่ยนแปลงตลอดเวลาทุกวินาที เช่น ราคาหุ้น, อัตราแลกเปลี่ยน, ข้อมูล Sensor IoT
+- **`staleTime: 30 * 1000` (30 วินาที - 1 นาที)**: เหมาะกับข้อมูลทั่วไป เช่น รายการสินค้า, ข้อมูลโปรไฟล์ผู้ใช้, โพสต์ในฟีด
+- **`staleTime: Infinity`**: เหมาะกับข้อมูลคงที่ (Master/Static Data) เช่น ประเทศ, จังหวัด, อัตราภาษี VAT, ค่าคงที่ Config ของระบบ
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: อธิบายความแตกต่างที่ชัดเจนระหว่าง `staleTime` กับ `gcTime` (ใน v4 คือ `cacheTime`)?
+**แนวทางตอบ**:
+- **`staleTime`** คือตัวกำหนดว่า **"ข้อมูลจะสดใหม่อยู่กี่มิลลิวินาที"** ตราบใดที่ยังไม่หมดเวลานี้ เมื่อคอมโพเนนต์เรียกใช้ Query จะไม่มีการส่ง Request ไปหาเซิร์ฟเวอร์เลย
+- **`gcTime`** คือตัวกำหนดว่า **"ข้อมูลที่ไม่มีคอมโพเนนต์ใดใช้งานแล้ว (Unmounted / Inactive) จะถูกเก็บไว้ในหน่วยความจำ RAM นานเท่าไร"** ก่อนที่ระบบ Garbage Collector จะลบทิ้งจากเมมโมรีถาวร
+- สรุป: `staleTime` ควบคุมการยิง Network Request ส่วน `gcTime` ควบคุมการจัดการหน่วยความจำ RAM
+
+### Q2: หากผู้ใช้เปิดหน้าทิ้งไว้แล้วสลับแท็บไป 2 ชั่วโมง เมื่อสลับแท็บกลับมา จะเกิดอะไรขึ้นถ้าเราตั้ง `staleTime: 5 นาที` และ `gcTime: 10 นาที`?
+**แนวทางตอบ**:
+- ในขณะที่ผู้ใช้เปิดหน้านั้นค้างอยู่ คอมโพเนนต์ยังคง Mount อยู่ใน DOM ดังนั้นสถานะของ Query คือ `active` (ไม่ได้เป็น `inactive`)
+- ตัวจับเวลา `gcTime` จะยัง **ไม่เริ่มนับถอยหลัง** (เพราะ `gcTime` จะนับเฉพาะเมื่อ Query กลายเป็น `inactive` เท่านั้น)
+- ดังนั้นข้อมูลจึงยังคงอยู่ในหน่วยความจำ ไม่ถูก Garbage Collect
+- แต่เนื่องจากเวลาผ่านไป 2 ชั่วโมง ซึ่งเกิน `staleTime: 5 นาที` สถานะของข้อมูลจึงกลายเป็น `stale`
+- เมื่อผู้ใช้สลับแท็บกลับมา ฟีเจอร์ `refetchOnWindowFocus` จะทำงานทันที: ผู้ใช้จะเห็นข้อมูลเดิมบนหน้าจอทันทีโดยไม่มีหน้าขาว และในเวลาเดียวกัน TanStack Query จะส่ง Network Request เบื้องหลังเพื่อนำข้อมูลใหม่ล่าสุดมาอัปเดตหน้าจอ

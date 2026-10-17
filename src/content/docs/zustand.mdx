@@ -1,0 +1,43 @@
+---
+title: Zustand v5
+category: Frontend
+version: Zustand v5.0
+updatedAt: 2026-10-17
+---
+
+## ภาพรวม Zustand v5 & Client State Management
+
+**Zustand (ภาษาเยอรมันแปลว่า "สถานะ/State")** คือไลบรารีจัดการ State ฝั่ง Client ยอดนิยมอันดับ 1 สำหรับ React และ Next.js ในปัจจุบัน ด้วยความเรียบง่าย ขนาดไฟล์ที่เล็กจิ๋ว (น้อยกว่า 1.5 KB) และประสิทธิภาพในการป้องกันการ Re-render ที่เหนือกว่า Context API และ Redux Toolkit อย่างเทียบไม่ติด
+
+ความแตกต่างสำคัญใน **Zustand v5**:
+- พัฒนาบนพื้นฐานของ React 18/19 **`useSyncExternalStore`** อย่างสมบูรณ์แบบ กำจัดปัญหา State Tearing ใน Concurrent Rendering
+- ปรับปรุง Type Inference ของ TypeScript ให้กระชับขึ้นด้วยรูปแบบ `create<State>()((set, get) => ...)`
+- การเปรียบเทียบค่าความเปลี่ยนแปลงใน Selector ใช้ **Object Identity (`===`)** เป็นค่าเริ่มต้น หากคืนค่า Object หรือ Array ใหม่ ต้องใช้ Hook **`useShallow`** เพื่อป้องกันอาการ Infinite Re-render Loop
+- สถาปัตยกรรม SSR-safe สำหรับ Next.js App Router เพื่อไม่ให้ State รั่วไหลข้ามคำขอของผู้ใช้ (Isolation per request)
+
+---
+
+## แผนผังเนื้อหา Zustand v5 (Directory)
+
+บทเรียนนี้อ้างอิง **Zustand v5 ล่าสุด** ร่วมกับ **Next.js 16 (App Router)**:
+
+| หัวข้อ | ลิงก์อ่านเนื้อหา | คำอธิบายสังเขป |
+| :--- | :--- | :--- |
+| **1. ปัญหาที่ Zustand แก้** | [Problem & Comparison](/docs/zustand/problem-comparison) | Prop drilling, ข้อจำกัด Context, เทียบกับ Redux Toolkit & Jotai |
+| **2. Client vs Server State** | [Client vs Server State](/docs/zustand/client-vs-server-state) | อะไรควรอยู่ใน Zustand อะไรควรอยู่ใน TanStack Query และเกณฑ์ตัดสิน |
+| **3. สร้าง Store แรก** | [First Store Setup](/docs/zustand/first-store) | `create`, State + Actions รวมกัน, เรียกใช้ใน Component โดยไม่ต้องมี Provider |
+| **4. TypeScript ใน Zustand** | [TypeScript Typing](/docs/zustand/typescript) | Currying syntax `create<T>()(...)`, แยก Type State กับ Actions, Middleware types |
+| **5. การอ่าน & อัปเดต State** | [Reading & Updating State](/docs/zustand/reading-updating-state) | `set` merge vs updater function, `get()`, Immutability ของ Nested State |
+| **6. Selectors & useShallow** | [Selectors & useShallow](/docs/zustand/selectors-re-render) | การเลือกเฉพาะฟิลด์ที่ใช้, `useShallow` ป้องกัน Infinite re-render loop ใน v5 |
+| **7. Actions & Async Logic** | [Actions & Async Logic](/docs/zustand/actions-async) | Action pattern, Async functions, เมื่อไหร่ควรย้ายไป TanStack Query |
+| **8. Middleware ทรงพลัง** | [Middlewares (persist/immer)](/docs/zustand/middleware) | `persist` (localStorage), `devtools`, `immer` (mutate update), `subscribeWithSelector` |
+| **9. Slices Pattern** | [Slices Pattern](/docs/zustand/slices-pattern) | แบ่ง Store ใหญ่เป็นหลาย Slice (เช่น `cartSlice`, `authSlice`) รวมเป็น Store เดียว |
+| **10. Next.js 16 App Router** | [Next.js 16 SSR Safe](/docs/zustand/nextjs-app-router-ssr) | ทำไม global store เสี่ยง state รั่วใน SSR, `createStore` + `Provider` + Context |
+| **11. Hydration & Persist** | [Hydration & Persist](/docs/zustand/hydration-persist) | แก้ปัญหา Hydration Mismatch จาก `persist`, `hasHydrated` flag, ป้องกัน Flash |
+| **12. ตัวอย่าง Store ที่ใช้จริง** | [Real-world Stores](/docs/zustand/real-world-examples) | ตะกร้าสินค้า E-Commerce, Auth State, UI Toggle (Sidebar/Modal), Theme |
+| **13. Derived State** | [Derived State](/docs/zustand/derived-state) | คำนวณยอดรวมผ่าน Selector แทนการเก็บซ้ำ, การใช้ `useMemo` |
+| **14. ใช้งานนอก React** | [Vanilla JS Usage](/docs/zustand/vanilla-usage) | `getState()`, `setState()`, `subscribe()` ใน Axios interceptor อ่าน Token |
+| **15. Integration กับ Libs อื่น** | [Integration (RHF/Query)](/docs/zustand/libraries-integration) | ทำงานร่วมกับ React Hook Form, TanStack Query, shadcn/ui Dialog & Sonner |
+| **16. Testing & DevTools** | [Testing & DevTools](/docs/zustand/testing-debugging) | Reset store ระหว่างเทสต์, Mocking, Redux DevTools time-travel |
+| **17. Performance Tuning** | [Performance Tuning](/docs/zustand/performance) | Atomic Selectors, Bundle size 1.5 KB, Memory optimization |
+| **18. Pitfalls & Q&A** | [Pitfalls & Q&A](/docs/zustand/pitfalls) | รวม Anti-patterns ยอดฮิต, คำถามสัมภาษณ์งาน, Checklist สรุป และ Roadmap |

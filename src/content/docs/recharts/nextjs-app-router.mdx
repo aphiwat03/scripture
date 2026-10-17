@@ -1,0 +1,369 @@
+---
+title: Next.js 16 SSR & Hydration
+category: Frontend
+parentTitle: Recharts
+version: Recharts v3 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ใน **Next.js 16 (App Router)** สถาปัตยกรรมเริ่มต้นของ React 19 คือ **React Server Components (RSC)** ซึ่งโค้ดทั้งหมดจะถูกเอ็กซีคิวต์บน Server Runtime (Node.js หรือ Edge) ก่อนจะส่งเป็นสตรีม HTML กลับมายังเบราว์เซอร์
+
+อย่างไรก็ตาม **Recharts** เป็นไลบรารีกราฟที่ผูกพันกับ **DOM (Document Object Model)** อย่างแยกไม่ออก เพราะจำเป็นต้อง:
+1. วัดขนาดของพาเรนต์เอลิเมนต์ (`getBoundingClientRect()`, `ResizeObserver`) เพื่อคำนวณอัตราส่วนและพิกัด $(x, y)$ ของแกนและเวกเตอร์
+2. ดักจับ Mouse และ Touch Events (`onMouseMove`, `onTouchStart`) เพื่อคำนวณตำแหน่งแสดงผล Tooltip และ Crosshair
+
+### ความขัดแย้งระหว่าง SSR และ Recharts
+
+เมื่อเรานำ Recharts ไปเรนเดอร์บนเซิร์ฟเวอร์ จะเกิดปัญหาหลัก 2 ประการ:
+* **Server Crash**: เกิดข้อผิดพลาด `ReferenceError: window is not defined` หรือ `document is not defined` หากไม่มีการประกาศขอบเขต Client
+* **Hydration Mismatch Error**: แม้จะใส่ `'use client'` แล้ว แต่ช่วงที่ Server สร้าง HTML เริ่มต้น `ResponsiveContainer` จะไม่ทราบขนาดหน้าจอจริง จึงเรนเดอร์ SVG ด้วยขนาด `width="-1"` หรือ `width="0"` แต่เมื่อโค้ดรันถึงเบราว์เซอร์ (Client Hydration) ตัวมันจะคำนวณได้ `width="800"` ความต่างของค่า Attribute นี้จะกระตุ้นให้ React โยนคำเตือนเรื่อง Hydration ล้มเหลวทันที
+
+ทางออกระดับมาตรฐานอุตสาหกรรมคือ **"สถาปัตยกรรมไฮบริด (Hybrid Architecture)"**: ดึงข้อมูลและประมวลผลความปลอดภัยบน Server Component แล้วส่งข้อมูลที่คลีนแล้วเป็น Props สู่ Client Chart Component โดยโหลดแบบ **Dynamic Import (`ssr: false`)** ควบคู่กับ **Chart Skeleton UI**
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ลำดับวงจรชีวิตจาก Server สู่ Client Hydration
+
+```
+[ Step 1: Next.js 16 Server (RSC) ]
+   │
+   ├─► ดึงข้อมูลจาก Database / API ด้วย async/await (ปลอดภัย ไร้ CORS, ไร้ Secret รั่วไหล)
+   ├─► เตรียม Payload เป็น Plain JSON Array
+   └─► เรนเดอร์ Suspense Fallback เป็น <ChartSkeleton /> ลงใน initial HTML
+         │
+         ▼  ส่ง HTML + React Server Component Payload ผ่านสายเคเบิล
+[ Step 2: Browser First Paint ]
+   │
+   ├─► ผู้ใช้เห็นโครงร่าง <ChartSkeleton /> ทันที (CLS = 0, FCP รวดเร็ว)
+   └─► เบราว์เซอร์เริ่มดาวน์โหลด JavaScript Bundle ของ Client Component ในพื้นหลัง
+         │
+         ▼
+[ Step 3: Client Hydration & Mount ]
+   │
+   ├─► dynamic import ({ ssr: false }) โหลด Recharts Bundle เสร็จสิ้น
+   ├─► Component ทำการ Mount เข้าสู่ Real DOM
+   ├─► ResizeObserver วัดขนาดความกว้างจริงของ Container (เช่น 760px)
+   └─► Recharts แปลง Data เป็น SVG Coordinates แล้วเรนเดอร์กราฟจริงพร้อม Animation
+```
+
+การแยกส่วนแบบนี้ทำให้ได้คะแนน **Core Web Vitals** ที่ดีเยี่ยม โดยเฉพาะ **Largest Contentful Paint (LCP)** และไม่เกิดอาการกระตุกของเค้าโครงหน้าเว็บ (**Cumulative Layout Shift - CLS**)
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่างที่ 1: สถาปัตยกรรม Hybrid ด้วย `next/dynamic` (`ssr: false`)
+
+โครงสร้างแบ่งเป็น 3 ไฟล์:
+1. `ChartSkeleton.tsx`: คอมโพเนนต์โครงร่างที่เลียนแบบหน้าตากราฟ
+2. `SalesTrendChart.tsx`: Client Component ที่มี Recharts และ Tooltip
+3. `page.tsx`: Server Component ที่ดึงข้อมูลและประกอบร่าง
+
+#### ไฟล์ย่อยที่ 1: โครงร่าง Skeleton สวยงามตรงตามขนาดจริง
+
+```tsx filename="src/components/charts/chart-skeleton.tsx"
+import { Skeleton } from '@/components/ui/skeleton';
+
+export function ChartSkeleton({ height = 350 }: { height?: number }) {
+  return (
+    <div
+      style={{ height }}
+      className="flex w-full flex-col justify-between rounded-2xl border border-border bg-card p-6 shadow-sm"
+    >
+      <div className="space-y-2">
+        <Skeleton className="h-5 w-48" />
+        <Skeleton className="h-4 w-72" />
+      </div>
+      
+      {/* แท่งจำลองกราฟ */}
+      <div className="flex h-48 items-end gap-3 pt-6">
+        <Skeleton className="h-[40%] flex-1" />
+        <Skeleton className="h-[75%] flex-1" />
+        <Skeleton className="h-[55%] flex-1" />
+        <Skeleton className="h-[90%] flex-1" />
+        <Skeleton className="h-[65%] flex-1" />
+        <Skeleton className="h-[80%] flex-1" />
+      </div>
+
+      <div className="flex justify-between pt-2">
+        <Skeleton className="h-3 w-12" />
+        <Skeleton className="h-3 w-12" />
+        <Skeleton className="h-3 w-12" />
+        <Skeleton className="h-3 w-12" />
+      </div>
+    </div>
+  );
+}
+```
+
+#### ไฟล์ย่อยที่ 2: Client Chart Component
+
+```tsx filename="src/components/charts/sales-trend-chart.tsx"
+'use client';
+
+import * as React from 'react';
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+
+export interface SalesRecord {
+  month: string;
+  revenue: number;
+  target: number;
+}
+
+interface Props {
+  data: SalesRecord[];
+}
+
+export default function SalesTrendChart({ data }: Props) {
+  return (
+    <div className="w-full rounded-2xl border border-border bg-card p-6 shadow-sm">
+      <div className="mb-4">
+        <h3 className="text-lg font-bold text-card-foreground">ผลประกอบการรายไตรมาส</h3>
+        <p className="text-sm text-muted-foreground">เปรียบเทียบยอดขายจริงเทียบกับเป้าหมายประจำปี</p>
+      </div>
+
+      <div className="h-[320px] w-full min-w-0">
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+            <defs>
+              <linearGradient id="revenueGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.4} />
+                <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0.0} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" vertical={false} className="stroke-border/60" />
+            <XAxis dataKey="month" tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} />
+            <YAxis
+              tickFormatter={(v) => `฿${(v / 1000).toFixed(0)}k`}
+              tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }}
+            />
+            <Tooltip
+              formatter={(val: number) => [`฿${val.toLocaleString()}`, '']}
+              labelClassName="font-semibold text-foreground"
+            />
+            <Area
+              type="monotone"
+              dataKey="revenue"
+              stroke="hsl(var(--primary))"
+              strokeWidth={2.5}
+              fill="url(#revenueGrad)"
+            />
+          </AreaChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+```
+
+#### ไฟล์ย่อยที่ 3: Server Component ประกอบร่างด้วย Dynamic Import
+
+```tsx filename="src/app/dashboard/analytics/page.tsx"
+import * as React from 'react';
+import dynamic from 'next/dynamic';
+import { ChartSkeleton } from '@/components/charts/chart-skeleton';
+
+// ปิด SSR สำหรับ Recharts เพื่อป้องกัน Hydration Mismatch 100%
+const SalesTrendChart = dynamic(
+  () => import('@/components/charts/sales-trend-chart'),
+  {
+    ssr: false,
+    loading: () => <ChartSkeleton height={398} />,
+  }
+);
+
+// จำลองฟังก์ชันดึงข้อมูลฝั่งเซิร์ฟเวอร์ (RSC Data Fetching)
+async function getMonthlySalesData() {
+  // ในระบบจริง: await db.order.findMany(...) หรือเรียก Backend Microservice
+  await new Promise((resolve) => setTimeout(resolve, 800)); // จำลอง network delay
+
+  return [
+    { month: 'ม.ค.', revenue: 45000, target: 40000 },
+    { month: 'ก.พ.', revenue: 52000, target: 45000 },
+    { month: 'มี.ค.', revenue: 61000, target: 50000 },
+    { month: 'เม.ย.', revenue: 58000, target: 55000 },
+    { month: 'พ.ค.', revenue: 74000, target: 60000 },
+    { month: 'มิ.ย.', revenue: 89000, target: 70000 },
+  ];
+}
+
+export default async function AnalyticsPage() {
+  const salesData = await getMonthlySalesData();
+
+  return (
+    <main className="container mx-auto p-6">
+      <h1 className="mb-6 text-2xl font-black tracking-tight">รายงานสถิติและผลประกอบการ</h1>
+      <SalesTrendChart data={salesData} />
+    </main>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: Client Component Mount Pattern (ทางเลือกโดยไม่ต้องใช้ `next/dynamic`)
+
+หากไม่ต้องการสร้างไฟล์แยกเพื่อทำ dynamic import เราสามารถใช้เทคนิคตรวจจับสถานะ **Mounted State** ภายใน Client Component ได้เช่นกัน:
+
+```tsx filename="src/components/charts/mounted-guarded-chart.tsx"
+'use client';
+
+import * as React from 'react';
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, XAxis, YAxis } from 'recharts';
+import { Skeleton } from '@/components/ui/skeleton';
+
+interface TrafficMetric {
+  browser: string;
+  sessions: number;
+}
+
+const trafficData: TrafficMetric[] = [
+  { browser: 'Chrome', sessions: 45200 },
+  { browser: 'Safari', sessions: 23400 },
+  { browser: 'Edge', sessions: 11200 },
+  { browser: 'Firefox', sessions: 6700 },
+];
+
+export function MountedGuardedChart() {
+  // ใช้ React state เพื่อตรวจสอบว่าโค้ดกำลังรันอยู่บน Browser จริงแล้วหรือไม่
+  const [hasMounted, setHasMounted] = React.useState(false);
+
+  React.useEffect(() => {
+    setHasMounted(true);
+  }, []);
+
+  // ระหว่าง SSR บนเซิร์ฟเวอร์ ให้แสดง Skeleton ที่มีสัดส่วนเท่ากันทุกประการ
+  if (!hasMounted) {
+    return (
+      <div className="h-[300px] w-full rounded-2xl border border-border bg-card p-6 shadow-sm">
+        <Skeleton className="mb-4 h-5 w-40" />
+        <Skeleton className="h-[200px] w-full rounded-xl" />
+      </div>
+    );
+  }
+
+  // เมื่อรันบน Client เต็มตัวแล้ว ปลอดภัยในการวัด DOM ของ ResponsiveContainer
+  return (
+    <div className="h-[300px] w-full rounded-2xl border border-border bg-card p-6 shadow-sm">
+      <h3 className="mb-4 text-base font-semibold text-card-foreground">
+        สัดส่วนการเข้าชมแยกตามเบราว์เซอร์
+      </h3>
+      <div className="h-[210px] w-full min-w-0">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={trafficData}>
+            <CartesianGrid vertical={false} strokeDasharray="3 3" className="stroke-border/60" />
+            <XAxis dataKey="browser" tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} />
+            <YAxis tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} />
+            <Bar dataKey="sessions" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีอื่น (Next.js Hybrid vs Pure Client SPA vs Node Canvas SSR)
+
+| กลยุทธ์ | Next.js 16 Hybrid (RSC + Client Chart) | Pure Client SPA (เช่น Vite React) | Server-rendered SVG (เช่น D3 บน Node) |
+| :--- | :--- | :--- | :--- |
+| **ความปลอดภัยของฐานข้อมูล / API** | **สูงสุด** เชื่อมต่อ DB โดยตรงผ่าน Server Component ปราศจาก Exposed Keys | ต่ำ ต้องเปิด Public REST API และเสี่ยง Token รั่ว | **สูงสุด** คำนวณบนเซิร์ฟเวอร์ 100% |
+| **ขนาด JavaScript ที่ส่งไปเบราว์เซอร์** | ปานกลาง มีการ Code Splitting กราฟโหลดเมื่อจำเป็น | สูงมาก Bundle ก้อนใหญ่ต้องโหลดให้ครบก่อนแสดงผล | **น้อยที่สุด** ส่งเฉพาะ Static SVG แท้ๆ ไม่มี JS Recharts |
+| **Interactivity & Tooltip** | **สมบูรณ์แบบ** Tooltip ลื่นไหล รองรับ Touch/Hover | **สมบูรณ์แบบ** | ขาด Interactivity ไม่สามารถเลื่อนเมาส์ดูตัวเลขแบบ Dynamic ได้ |
+| **Hydration Mismatch Risk** | **0%** หากใช้ `ssr: false` หรือ Mount Guard | **0%** (เพราะไม่มีขั้นตอน SSR) | **0%** (เป็น Pure HTML/SVG) |
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practices)
+
+### ข้อผิดพลาดที่ 1: ลืมใส่ `'use client'` ที่หัวไฟล์ของคอมโพเนนต์ Recharts
+
+```tsx
+// ❌ ผิดมหันต์: Next.js 16 จะมองเป็น Server Component และแครชทันที
+import { LineChart, Line } from 'recharts';
+
+export function MyChart({ data }: any) {
+  return <LineChart ... />;
+}
+
+// ✅ ถูกต้อง: ประกาศ Directive ให้ Next.js ทราบว่าเป็น Client Boundary
+'use client';
+
+import { LineChart, Line } from 'recharts';
+
+export function MyChart({ data }: any) {
+  return <LineChart ... />;
+}
+```
+
+### ข้อผิดพลาดที่ 2: เรียกใช้ `dynamic()` ภายในฟังก์ชันคอมโพเนนต์
+
+```tsx
+// ❌ ผิด: dynamic import ภายใน Component Body จะสร้าง Component instance ใหม่ทุก Render
+export default function Page() {
+  const Chart = dynamic(() => import('./Chart'), { ssr: false });
+  return <Chart />;
+}
+
+// ✅ ถูกต้อง: ประกาศ dynamic() ไว้นอกคอมโพเนนต์ที่ระดับ Module Scope เสมอ
+const Chart = dynamic(() => import('./Chart'), { ssr: false });
+
+export default function Page() {
+  return <Chart />;
+}
+```
+
+### ข้อผิดพลาดที่ 3: ปล่อยให้หน้าจอขาวโพลน ไม่มี Skeleton ระหว่างรอโหลด
+
+```tsx
+// ❌ ผิด: ระหว่างที่ Client โหลด JS กราฟ หน้าเว็บจะกระตุกวูบและเปลี่ยน Layout กะทันหัน
+const Chart = dynamic(() => import('./Chart'), { ssr: false });
+
+// ✅ ถูกต้อง: ระบุ loading fallback ที่มีขนาดความสูงใกล้เคียงกับชาร์ตจริง
+const Chart = dynamic(() => import('./Chart'), {
+  ssr: false,
+  loading: () => <div className="h-[350px] w-full animate-pulse bg-muted rounded-xl" />,
+});
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Dynamic Import (`ssr: false`) กับ Recharts เมื่อ:
+- หน้าเว็บสร้างด้วย **Next.js App Router (v13 - v16)** ที่ต้องการความเสถียร 100% ปลอดข้อผิดพลาด Hydration
+- กราฟอยู่ในหน้าแดชบอร์ดหลักที่ต้องการให้ตัวอักษรและเนื้อหาอื่นๆ ของเว็บแสดงผลทันท่วงที (High FCP/LCP priority)
+- แดชบอร์ดมีขนาดใหญ่และมีกราฟหลายประเภท การทำ Dynamic Import จะช่วยแตก Chunk (Code Splitting) ทำให้หน้าโหลดไวขึ้น
+
+### ไม่ควรใช้ Dynamic Import (`ssr: false`) เมื่อ:
+- ต้องการให้ Search Engine Bot หรือ Web Scraper อ่านเนื้อหากราฟเพื่อทำ SEO ในกรณีนี้ควรเรนเดอร์ข้อมูลเป็น **HTML Semantic Table** ควบคู่กันไป เพื่อให้บอทเก็บข้อมูลได้โดยไม่ต้องรัน JS กราฟ
+- กราฟเป็นรูปสถิติภาพนิ่งสำหรับส่งใน Email Newsletter หรือส่งออกเป็นรายงาน PDF ทางเลือกที่ถูกต้องคือการใช้ไลบรารีสร้างรูปภาพบน Node.js เช่น `@resvg/resvg-js` หรือ Puppeteer
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการใช้ `ResponsiveContainer` ของ Recharts จึงมักก่อให้เกิดปัญหา Hydration Mismatch บน Next.js App Router และอะไรคือแนวทางสถาปัตยกรรมที่ดีที่สุดในการกำจัดปัญหานี้?
+**แนวทางตอบแบบ Senior Developer**:
+1. **สาเหตุ**: ระหว่างขั้นตอน Server-Side Rendering ใน Node.js เอนจินไม่มีหน้าต่างเบราว์เซอร์ (`window`), ไม่มี viewport, และไม่มี DOM Tree จริง ส่งผลให้ `ResponsiveContainer` ไม่สามารถประเมินความกว้างยาวได้ มันจึงเรนเดอร์มิติเริ่มต้น เช่น `width="-1"` หรือ `0`
+2. เมื่อ HTML ก้อนนี้ถูกส่งมายังเบราว์เซอร์และเริ่มกระบวนการ Hydration โค้ดฝั่ง Client จะวัดขนาดกล่องจริงได้ทันที (เช่น `width="800"`) ความแตกต่างระหว่างค่าใน HTML จากเซิร์ฟเวอร์กับค่าที่คำนวณได้ใหม่บน Client จะทำให้ React ตรวจพบความไม่ตรงกันและแจ้งเตือน Hydration Mismatch
+3. **แนวทางแก้ไขที่ดีที่สุด**: การใช้ `next/dynamic(() => import(...), { ssr: false, loading: () => <ChartSkeleton /> })` เพื่อสั่งให้ Next.js ข้ามขั้นตอนการทำ SSR ของกิ่ง Component นี้ไปอย่างสมบูรณ์ และส่ง Skeleton ออกมาแทนที่ในรอบแรก ซึ่งนอกจากจะป้องกัน Hydration Mismatch ได้ 100% แล้ว ยังช่วยลดขนาด Server Execution Payload อีกด้วย
+
+### Q2: ใน Next.js 16 หากเราดึงข้อมูลจากฐานข้อมูลใน Server Component แล้วส่งเป็น Props ข้าม Boundary ไปยัง Client Chart Component มีข้อจำกัดหรือสิ่งที่ต้องพึงระวังในแง่ของ Data Serialization หรือไม่?
+**แนวทางตอบแบบ Senior Developer**:
+1. **Serialization Constraints**: Props ที่ส่งข้ามจาก Server Component สู่ Client Component จะต้องเป็น **JSON-serializable** เท่านั้น หากข้อมูลจากฐานข้อมูล (เช่น Prisma) มีชนิดข้อมูลเป็น `Date`, `BigInt`, หรือ Class Instance มันจะไม่สามารถส่งผ่านข้ามสายเคเบิลได้ตรงๆ จำเป็นต้องแปลงเป็น ISO String (`date.toISOString()`) หรือ `Number(bigint)` เสียก่อน
+2. **Over-fetching & Payload Size**: ไม่ควรส่ง Entity ก้อนใหญ่ที่มีความสัมพันธ์ (Relations) ซับซ้อนข้ามไป ให้ทำการ Map สกัดเอาเฉพาะฟิลด์ที่กราฟต้องใช้จริง เช่น `{ date: string, amount: number }` เพื่อป้องกันไม่ให้ขนาด HTML Page Payload มีขนาดใหญ่เกินความจำเป็น ซึ่งจะส่งผลเสียต่อความเร็ว Network ของผู้ใช้งาน

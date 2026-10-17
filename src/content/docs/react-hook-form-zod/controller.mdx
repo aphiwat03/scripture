@@ -1,0 +1,419 @@
+---
+title: Controller & Custom Inputs
+category: Frontend
+parentTitle: React Hook Form + Zod
+version: RHF v7 & Zod v4 (Next.js 16)
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+หัวใจสำคัญที่ทำให้ **React Hook Form (RHF)** มีประสิทธิภาพสูงและ Re-render น้อยกว่าไลบรารีฟอร์มอื่น คือการเลือกใช้แนวคิด **Uncontrolled Components** โดยอาศัย Native DOM References (`ref`) ผ่านฟังก์ชัน `register()` เพื่อให้อินพุตแต่ละช่องจัดการ State การพิมพ์ของตัวเองในระดับเบราว์เซอร์
+
+อย่างไรก็ตาม ในการพัฒนาเว็บแอปพลิเคชันยุคใหม่ร่วมกับ UI Libraries ยอดนิยม เช่น **Radix UI**, **shadcn/ui**, **React Aria**, **Headless UI** หรือ Custom Widgets ซับซ้อน (เช่น Rich Text Editor, DatePicker, Range Slider, Switch, Multi-Select) คอมโพเนนต์เหล่านี้มักเป็น **Controlled Components** ที่มีโครงสร้างภายในซับซ้อน:
+- ไม่ได้เรนเดอร์ Native `<input />` ตัวเดียวออกมาตรงๆ แต่มักประกอบด้วย `<div>`, `<button>`, และ Popover Portal
+- ไม่เปิดเผย Native DOM `ref` ที่จะนำมาผูกกับ `register()` ได้โดยตรง
+- มีการจัดการ State ภายในของตัวเอง และต้องการ Props อย่าง `value` และ Callback อย่าง `onValueChange` หรือ `onChange`
+
+เพื่อแก้ปัญหานี้ React Hook Form จึงเตรียม **`Controller`** (และ Hook **`useController`**) เพื่อทำหน้าที่เป็น **"สะพานเชื่อม (Bridge Adapter)"** ระหว่างระบบ Uncontrolled ภายในของ RHF และโลก Controlled ของ 3rd-party UI Components ทำให้เราสามารถควบคุม State, ทำ Validation ด้วย Zod, และจัดการ Focus ได้อย่างสมบูรณ์แบบโดยไม่ต้องละทิ้งข้อได้เปรียบด้าน Performance ของ RHF
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 โครงสร้างและการทำงานของ Controller
+
+เมื่อคอมโพเนนต์ถูกเรนเดอร์ภายใต้ `<Controller control={control} name="fieldName" render={...} />` ตัว RHF จะลงทะเบียนฟิลด์นั้นเข้ากับระบบ Internal Form State และสร้าง **Observer (Subscription)** ดักฟังเฉพาะการเปลี่ยนแปลงที่เกี่ยวข้องกับฟิลด์ดังกล่าว
+
+ในฟังก์ชัน `render` ของ Controller จะส่ง Object ออกมา 3 ตัวหลัก:
+
+```tsx
+<Controller
+  control={control}
+  name="userRole"
+  render={({
+    field,      // ข้อมูลและเมธอดสำหรับผูกเข้ากับ Input Component
+    fieldState, // สถานะความถูกต้องและการปฏิสัมพันธ์ของฟิลด์นี้
+    formState,  // สถานะภาพรวมของฟอร์มทั้งระบบ
+  }) => (
+    // Controlled Component
+  )}
+/>
+```
+
+#### เจาะลึก `field` Object:
+1. **`onChange(value: any)`**: ฟังก์ชันสำหรับส่งค่าใหม่กลับเข้าไปยัง RHF Internal State เมื่อผู้ใช้กระทำการใดๆ ไม่ว่าค่านั้นจะเป็น String, Number, Boolean, Array หรือ Date Object
+2. **`onBlur()`**: ฟังก์ชันแจ้ง RHF ว่าฟิลด์นี้ถูก Blur (หลุดโฟกัส) เพื่อให้อัปเดตสถานะ `isTouched` และกระตุ้นการ Validate หากตั้งค่าโหมดเป็น `mode: 'onBlur'` หรือ `mode: 'onTouched'`
+3. **`value`**: ค่าปัจจุบันของฟิลด์นี้ที่ RHF ถือครองอยู่ (ดึงมาจาก `defaultValues` หรือค่าที่ถูกอัปเดตล่าสุด)
+4. **`ref`**: Callback Ref สำหรับเชื่อมต่อไปยัง Focusable DOM Node เพื่อให้ RHF สามารถสั่ง `.focus()` อัตโนมัติเมื่อฟิลด์นี้เกิด Validation Error ตอนกด Submit
+5. **`name`**: ชื่อฟิลด์ที่ตรงกับ Key ใน Schema
+6. **`disabled`**: สถานะเปิด/ปิดการใช้งานฟิลด์
+
+#### เจาะลึก `fieldState` Object:
+1. **`error`**: Object บรรจุข้อความผิดพลาดที่คำนวณจาก Zod Schema เช่น `fieldState.error?.message`
+2. **`isDirty`**: `boolean` บ่งบอกว่าค่าปัจจุบันของฟิลด์นี้ต่างจากค่าเริ่มต้นใน `defaultValues` หรือไม่
+3. **`isTouched`**: `boolean` บ่งบอกว่าผู้ใช้เคย Focus เข้ามาแล้ว Blur ออกไปจากฟิลด์นี้แล้วหรือยัง
+4. **`invalid`**: `boolean` บ่งบอกว่าฟิลด์นี้ไม่ผ่านการ Validate (`true` เมื่อมี error)
+
+### 2.2 การจัดการ Memory Leak และ Lifecycle ของ Custom Stateful Inputs
+
+ในการต่อเชื่อม Custom Inputs หรือ Complex Widgets (เช่น Rich Text Editor อย่าง Tiptap หรือ DatePicker) ความเสี่ยงหลักคือ **Memory Leak** และ **Re-render Loops**:
+
+1. **Automatic Unsubscription**: ภายใน `useEffect` ของ `Controller` จะมี Cleanup Function ที่สั่ง Unsubscribe Observer ทันทีที่ Component ถูก Unmount ออกจาก DOM เพื่อป้องกันการอ้างอิง State ค้างใน Memory
+2. **Reference Stability**: ค่า Callback `field.onChange` และ `field.onBlur` ถูกสร้างแบบ Memoized ภายใน RHF ทำให้ไม่เปลี่ยน Reference ไปมาระหว่าง Re-render ส่งผลให้ Controlled Component ปลายทางไม่ต้อง Re-render โดยไม่จำเป็น
+3. **Focus Delegation**: สำหรับ Radix UI Primitives (เช่น Select หรือ Checkbox) ตัว Native `<button>` หรือ Trigger Element ควรรับ `ref={field.ref}` เพื่อให้กลไก Auto-focus ของ RHF ทำงานได้อย่างแม่นยำเมื่อ Submit ไม่ผ่าน
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+ตัวอย่างระบบแบบฟอร์มการตั้งค่าความปลอดภัยและการแจ้งเตือนขององค์กรระดับ Enterprise (`EnterpriseNotificationSettings.tsx`) ที่เชื่อมต่อ Custom UI Components หลากหลายประเภทผ่าน `Controller` และ `useController` พร้อม Zod v4:
+
+```tsx filename="src/features/settings/components/EnterpriseNotificationSettings.tsx"
+'use client';
+
+import React from 'react';
+import { useForm, Controller, useController, type Control } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
+
+// ==========================================
+// 1. Zod v4 Validation Schema
+// ==========================================
+export const notificationSettingsSchema = z.object({
+  environment: z.enum(['development', 'staging', 'production'], {
+    message: 'กรุณาเลือกสภาพแวดล้อมระบบ',
+  }),
+  enableAuditLog: z.boolean(),
+  alertThreshold: z.number().min(1, 'ต้องมากกว่า 0%').max(100, 'ต้องไม่เกิน 100%'),
+  maintenanceWindow: z.object({
+    startDate: z.string().min(1, 'กรุณาเลือกวันที่เริ่มบำรุงรักษา'),
+    durationHours: z.number().min(1, 'ต้องบำรุงรักษาอย่างน้อย 1 ชั่วโมง'),
+  }),
+  securityContactEmail: z.string().email('กรุณาระบุอีเมลที่ถูกต้องสำหรับรับการแจ้งเตือนความปลอดภัย'),
+});
+
+export type NotificationSettingsInput = z.infer<typeof notificationSettingsSchema>;
+
+// ==========================================
+// 2. Custom Controlled Components (Mock UI Library)
+// ==========================================
+
+// Custom Toggle Switch
+interface CustomSwitchProps {
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
+  onBlur?: () => void;
+  disabled?: boolean;
+  label: string;
+}
+
+const CustomSwitch = React.forwardRef<HTMLButtonElement, CustomSwitchProps>(
+  ({ checked, onCheckedChange, onBlur, disabled, label }, ref) => {
+    return (
+      <div className="flex items-center justify-between py-2">
+        <span className="text-sm font-medium text-slate-700 dark:text-slate-200">{label}</span>
+        <button
+          ref={ref}
+          type="button"
+          role="switch"
+          aria-checked={checked}
+          disabled={disabled}
+          onClick={() => onCheckedChange(!checked)}
+          onBlur={onBlur}
+          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
+            checked ? 'bg-blue-600' : 'bg-slate-300 dark:bg-slate-700'
+          }`}
+        >
+          <span
+            className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+              checked ? 'translate-x-6' : 'translate-x-1'
+            }`}
+          />
+        </button>
+      </div>
+    );
+  }
+);
+CustomSwitch.displayName = 'CustomSwitch';
+
+// Custom Range Slider Hooked with useController
+interface CustomSliderFieldProps {
+  control: Control<NotificationSettingsInput>;
+  name: 'alertThreshold';
+  label: string;
+}
+
+function CustomSliderField({ control, name, label }: CustomSliderFieldProps) {
+  const {
+    field: { value, onChange, onBlur, ref },
+    fieldState: { error, isDirty },
+  } = useController({
+    control,
+    name,
+  });
+
+  return (
+    <div className="space-y-2">
+      <div className="flex justify-between text-sm">
+        <label className="font-medium text-slate-700 dark:text-slate-200">{label}</label>
+        <span className="font-semibold text-blue-600">{value}% {isDirty && <span className="text-xs text-amber-500">(แก้ไขแล้ว)</span>}</span>
+      </div>
+      <input
+        ref={ref}
+        type="range"
+        min={1}
+        max={100}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        onBlur={onBlur}
+        className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer dark:bg-slate-700 accent-blue-600"
+      />
+      {error && <p className="text-xs text-red-500">{error.message}</p>}
+    </div>
+  );
+}
+
+// ==========================================
+// 3. Main Form Component
+// ==========================================
+export function EnterpriseNotificationSettingsForm() {
+  const {
+    control,
+    register,
+    handleSubmit,
+    formState: { errors, isSubmitting, isDirty },
+    reset,
+  } = useForm<NotificationSettingsInput>({
+    resolver: zodResolver(notificationSettingsSchema),
+    defaultValues: {
+      environment: 'production',
+      enableAuditLog: true,
+      alertThreshold: 85,
+      maintenanceWindow: {
+        startDate: '2026-11-01',
+        durationHours: 4,
+      },
+      securityContactEmail: 'security-alerts@enterprise.corp',
+    },
+    mode: 'onTouched',
+  });
+
+  const onSubmit = async (data: NotificationSettingsInput) => {
+    // จำลองการส่งข้อมูลไปยังเซิร์ฟเวอร์
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    console.log('Saved Settings Payload:', data);
+    alert('บันทึกการตั้งค่าเรียบร้อยแล้ว!');
+    reset(data); // กำหนด defaultValues ใหม่ให้ตรงกับค่าที่บันทึกแล้ว
+  };
+
+  return (
+    <form
+      onSubmit={handleSubmit(onSubmit)}
+      className="max-w-2xl mx-auto p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm space-y-6"
+    >
+      <div>
+        <h2 className="text-xl font-bold text-slate-900 dark:text-white">การตั้งค่าการแจ้งเตือนและความปลอดภัย</h2>
+        <p className="text-sm text-slate-500">กำหนดเกณฑ์การแจ้งเตือนระบบและการบันทึก Audit Logs</p>
+      </div>
+
+      {/* 1. Controller เชื่อมต่อกับ Custom Select สำหรับ Environment */}
+      <div className="space-y-1">
+        <label className="text-sm font-medium text-slate-700 dark:text-slate-200">
+          สภาพแวดล้อมระบบ (Environment)
+        </label>
+        <Controller
+          control={control}
+          name="environment"
+          render={({ field, fieldState: { error } }) => (
+            <div>
+              <select
+                {...field}
+                className="w-full px-3 py-2 border rounded-md bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-700 text-slate-900 dark:text-white focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="development">Development (ทดสอบภายใน)</option>
+                <option value="staging">Staging (ระบบเสมือนจริง)</option>
+                <option value="production">Production (ระบบจริง)</option>
+              </select>
+              {error && <p className="mt-1 text-xs text-red-500">{error.message}</p>}
+            </div>
+          )}
+        />
+      </div>
+
+      {/* 2. Controller เชื่อมต่อกับ Custom Switch */}
+      <Controller
+        control={control}
+        name="enableAuditLog"
+        render={({ field: { value, onChange, onBlur, ref }, fieldState: { error } }) => (
+          <div>
+            <CustomSwitch
+              ref={ref}
+              checked={value}
+              onCheckedChange={onChange}
+              onBlur={onBlur}
+              label="เปิดใช้งานการบันทึก Audit Log ลงระบบจัดเก็บระยะยาว"
+            />
+            {error && <p className="text-xs text-red-500">{error.message}</p>}
+          </div>
+        )}
+      />
+
+      {/* 3. useController เชื่อมต่อกับ Slider Component */}
+      <CustomSliderField
+        control={control}
+        name="alertThreshold"
+        label="ระดับการใช้ CPU ที่ต้องการให้แจ้งเตือนฉุกเฉิน (Alert Threshold)"
+      />
+
+      {/* 4. Native Input ธรรมดา: ใช้ register() โดยตรงเพื่อประสิทธิภาพสูงสุด */}
+      <div className="space-y-1">
+        <label className="text-sm font-medium text-slate-700 dark:text-slate-200">
+          อีเมลทีมความปลอดภัย (Security Contact)
+        </label>
+        <input
+          type="email"
+          {...register('securityContactEmail')}
+          placeholder="sec-ops@company.com"
+          className="w-full px-3 py-2 border rounded-md bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-700 text-slate-900 dark:text-white focus:ring-2 focus:ring-blue-500"
+        />
+        {errors.securityContactEmail && (
+          <p className="text-xs text-red-500">{errors.securityContactEmail.message}</p>
+        )}
+      </div>
+
+      {/* Submit Controls */}
+      <div className="flex items-center justify-end space-x-3 pt-4 border-t border-slate-200 dark:border-slate-800">
+        <button
+          type="button"
+          onClick={() => reset()}
+          disabled={!isDirty || isSubmitting}
+          className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 disabled:opacity-50"
+        >
+          คืนค่าเริ่มต้น
+        </button>
+        <button
+          type="submit"
+          disabled={isSubmitting}
+          className="px-5 py-2 text-sm font-semibold text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50 transition-colors shadow-sm"
+        >
+          {isSubmitting ? 'กำลังบันทึก...' : 'บันทึกการเปลี่ยนแปลง'}
+        </button>
+      </div>
+    </form>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม
+
+| มิติการเปรียบเทียบ | วิธีเดิม: ควบคุมด้วย `useState` แยกส่วน | วิธีเดิม: ฝืนใช้ `register` กับ Controlled Component | วิธีโมเดิร์น: ใช้ `Controller` / `useController` |
+| :--- | :--- | :--- | :--- |
+| **สถาปัตยกรรม (Architecture)** | เขียน `useState` คุมทีละฟิลด์ และเขียน onChange handler เอง | พยายามส่ง `register('role')` ไปให้ Radix/MUI Select | มี Adapter Bridge กลาง เชื่อมต่อ State และ Events อัตโนมัติ |
+| **Re-render Performance** | ทุก keystroke หรือการเลือกค่า ทำให้ Form Component Re-render ทั้งตัว | ค่าไม่อัปเดต หรือ Event signature ไม่ตรง (`e.target.value` เป็น undefined) | Re-render เฉพาะ Controller ที่ค่าเปลี่ยน (Isolated Re-render) |
+| **Validation Integration** | ต้องเขียนเงื่อนไข If-Else ตรวจสอบ State เองก่อนส่งฟอร์ม | ไม่สามารถเชื่อม Error จาก Zod ไปยัง UI ได้อย่างแม่นยำ | ผูกกับ `zodResolver` ทันที ดึง `fieldState.error` มาแสดงได้ตรงช่อง |
+| **Focus Management** | เมื่อเกิด Error ต้องหาทางสั่ง DOM element focus ด้วยมือ | ไม่สามารถโฟกัส Trigger ของ Custom Dropdown ได้ | ส่ง `field.ref` เข้า Focusable Trigger สั่งโฟกัสอัตโนมัติเมื่อ Submit ผิดพลาด |
+| **Dirty & Touched State** | ต้องเขียน Logic ติดตามสถานะเดิมเทียบกับสถานะปัจจุบันเองนับร้อยบรรทัด | ไม่สามารถรู้ได้ว่าผู้ใช้แตะหรือแก้ไขฟิลด์ไปแล้วหรือไม่ | มี `fieldState.isDirty` และ `fieldState.isTouched` ให้ใช้งานทันที |
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practices)
+
+### 5.1 ผิด ❌: ละเลยการกำหนด `defaultValues` ทำให้เกิด Warning "Uncontrolled to Controlled"
+
+```tsx
+// ❌ ผิด: ไม่ระบุ defaultValues ใน useForm ทำให้ value เริ่มต้นเป็น undefined
+// เมื่อผู้ใช้เลือกค่าครั้งแรก คอมโพเนนต์จะเปลี่ยนจาก Uncontrolled เป็น Controlled ใน React
+const { control } = useForm();
+
+<Controller
+  control={control}
+  name="theme"
+  render={({ field }) => (
+    // React จะแจ้งเตือน: "A component is changing an uncontrolled input to be controlled"
+    <CustomSelect value={field.value} onChange={field.onChange} />
+  )}
+/>
+```
+
+```tsx
+// ✅ ถูกต้อง: กำหนด defaultValues ให้ครบทุกฟิลด์เสมอ แม้จะเป็นสตริงว่าง "" หรือ null
+const { control } = useForm({
+  defaultValues: {
+    theme: 'light', // หรือ "" หากยังไม่ได้เลือก
+  },
+});
+
+<Controller
+  control={control}
+  name="theme"
+  render={({ field }) => (
+    <CustomSelect value={field.value} onChange={field.onChange} />
+  )}
+/>
+```
+
+### 5.2 ผิด ❌: ส่ง Custom Callback ผิด Signature ทำให้ State ภายใน RHF เสียหาย
+
+```tsx
+// ❌ ผิด: สำหรับ UI Component ที่คืนค่าดิบ (Raw Value) เช่น string หรือ number
+// แต่ดันไปห่อหุ้มหรือส่ง event object ปลอมเข้าไป
+<Controller
+  control={control}
+  name="country"
+  render={({ field }) => (
+    // Radix onValueChange ส่งค่าเป็น 'TH', แต่เราส่ง { target: { value: 'TH' } }
+    <Select onValueChange={(val) => field.onChange({ target: { value: val } })}>
+      ...
+    </Select>
+  )}
+/>
+```
+
+```tsx
+// ✅ ถูกต้อง: ส่งค่าตรงๆ เข้า field.onChange ได้ทันที RHF รองรับทั้ง Event และ Raw Value
+<Controller
+  control={control}
+  name="country"
+  render={({ field }) => (
+    <Select value={field.value} onValueChange={field.onChange}>
+      ...
+    </Select>
+  )}
+/>
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ `Controller` หรือ `useController` เมื่อ:
+- ใช้งาน **3rd-party UI Libraries** (เช่น Radix UI, shadcn/ui, Headless UI, MUI, Mantine, Ant Design) ในส่วนของคอมโพเนนต์ Select, Checkbox, RadioGroup, Slider, Switch, Popover DatePicker
+- พัฒนา **Custom Complex Input Widgets** เช่น Tag Input, Star Rating Picker, Image Cropper, Rich Text Editor (Tiptap, Quill, Slate)
+- ช่องอินพุตที่เก็บค่าโครงสร้างเป็น Object, Array หรือ Date แทนที่จะเป็น String/Number ทั่วไป
+
+### ไม่ควรใช้ `Controller` เมื่อ:
+- เป็น **Native HTML Form Elements** ทั่วไป เช่น `<input type="text" />`, `<textarea />`, `<select />` เพราะการใช้ `register('name')` ให้ประสิทธิภาพสูงกว่า โค้ดสั้นกว่า และกิน Memory น้อยกว่ามาก
+- ช่องอินพุตที่ไม่ต้องการให้ RHF จัดการ State (เช่น Search Filter ทั่วไปที่ส่งผ่าน URL Query Parameters โดยตรง)
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไม React Hook Form ถึงออกแบบให้มีทั้ง `register` และ `Controller` และการใช้ `Controller` ทำให้สูญเสียประสิทธิภาพของ RHF หรือไม่?
+**แนวทางตอบแบบ Senior**:
+"เหตุผลที่ต้องมีทั้งสองตัวเนื่องจากความแตกต่างด้านสถาปัตยกรรมของคอมโพเนนต์ใน React:
+1. `register` ถูกออกแบบมาสำหรับ **Uncontrolled Components** ที่สามารถเข้าถึง Native DOM `ref` ได้โดยตรง ซึ่งให้ประสิทธิภาพสูงสุดเนื่องจากไม่มีการ Re-render ฝั่ง React เมื่อผู้ใช้พิมพ์ข้อความ
+2. `Controller` ถูกสร้างมาเพื่อเป็น **Bridge Pattern** รองรับ **Controlled Components** ของ UI Libraries สมัยใหม่ (เช่น Radix UI หรือ shadcn/ui) ซึ่งไม่เปิด Native `<input ref>` ออกมาให้เรา และต้องการรับค่า `value` พร้อม Event Handler จากภายนอก
+
+ในแง่ของ Performance การใช้ `Controller` **ไม่ได้ทำให้ประสิทธิภาพทั้งฟอร์มตกต่ำลงอย่างมีนัยสำคัญ** เพราะ Controller ใช้ระบบ **Isolated Re-renders (Subscription Model)** ภายในตัวมันเอง กล่าวคือ เมื่อค่าในฟิลด์ที่ผูกกับ Controller เปลี่ยนแปลง จะเกิด Re-render แค่เฉพาะคอมโพเนนต์ลูกที่ถูกห่อหุ้มใน `render` prop นั้นเท่านั้น โดยที่คอมโพเนนต์แม่หรือฟิลด์อื่นๆ ในฟอร์มจะไม่ถูก Re-render ตามไปด้วย แตกต่างจากการเก็บ State ด้วย `useState` แบบดั้งเดิมครับ"
+
+### Q2: ในการเชื่อมต่อ `Controller` กับ Controlled Component ทำไมบางครั้ง React จึงพ่นคำเตือนว่า *"A component is changing an uncontrolled input to be controlled"* และมีหลักการป้องกันอย่างไร?
+**แนวทางตอบแบบ Senior**:
+"ปัญหานี้เกิดขึ้นเมื่อเราไม่ได้กำหนดค่าเริ่มต้นใน `defaultValues` ของ `useForm()` สำหรับฟิลด์นั้น ทำให้ในการ Mount รอบแรกสุด `field.value` ที่ Controller ส่งเข้ามาจะมีค่าเป็น `undefined` เมื่อ Controlled Component รับ `value={undefined}` ตัว React จะมองว่าอินพุตนี้เป็น Uncontrolled Input แต่ต่อมาเมื่อผู้ใช้พิมพ์หรือเลือกค่า ฟังก์ชัน `field.onChange` ถูกเรียก ทำให้ `field.value` เปลี่ยนเป็น String หรือ Value ที่ไม่ใช่ `undefined` ส่งผลให้ React ตรวจพบว่าอินพุตกำลังถูกเปลี่ยนสถานะข้ามไปเป็น Controlled Component กลางคัน ซึ่งอาจนำไปสู่พฤติกรรม State desynchronization
+
+**แนวทางป้องกันที่ดีที่สุด**:
+1. กำหนด `defaultValues` ให้ครบถ้วนทุกฟิลด์ในตอนประกาศ `useForm()` เสมอ เช่น กำหนดเป็น `""` สำหรับข้อความ, `false` สำหรับ checkbox/switch, หรือ `null` สำหรับฟิลด์ที่อนุญาตให้ว่าง
+2. หากไม่สามารถกำหนด defaultValues ได้ในทันที (เช่น รอข้อมูลจาก Network) ให้ใส่ค่า Fallback ใน render prop เช่น `value={field.value ?? ''}` เพื่อให้แน่ใจว่าค่าที่ส่งเข้า Input จะไม่เป็น `undefined` ในรอบแรกครับ"

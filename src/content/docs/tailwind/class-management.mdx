@@ -1,0 +1,239 @@
+---
+title: Class Management in React (clsx, twMerge, cva)
+category: Frontend
+parentTitle: Tailwind CSS v4
+version: Tailwind v4.0 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+เมื่อพัฒนาคอมโพเนนต์ใน React 19 และ Next.js 16 เพื่อใช้งานในระดับ Production เรามักสร้าง **Reusable Components** เช่น `<Button />` หรือ `<Card />` ที่ต้องเปิดรับพร็อพส์ `className` จากภายนอกเพื่อขยายหรือปรับแต่งสไตล์
+
+ปัญหาระดับพื้นฐานแต่ร้ายแรงที่สุดคือ **Class Collision (การชนกันของคลาส Tailwind)**:
+- หากคอมโพเนนต์แม่กำหนด `p-4` ไว้ แต่ผู้เรียกใช้งานส่ง `className="p-6"` เข้ามา
+- หากต่อสตริงด้วย Template Literal ธรรมดา (`${base} ${className}`) เบราว์เซอร์อาจจะยังคงแสดงผลเป็น `p-4` เหมือนเดิม! เพราะใน CSS ลำดับความสำคัญไม่ได้ขึ้นอยู่กับว่าคำไหนอยู่หลังในสตริง HTML แต่ขึ้นอยู่กับ **ลำดับที่คอมไพเลอร์ประกาศกฎในไฟล์ CSS**
+
+ชุดเครื่องมือมาตรฐานเพื่อแก้ปัญหานี้ประกอบด้วย:
+1. **`clsx`**: จัดการเงื่อนไขเปิด/ปิดคลาส (Conditional classes) อย่างสะอาด
+2. **`tailwind-merge`**: วิเคราะห์หมวดหมู่ของ Utility Classes และลบคลาสเก่าที่ขัดแย้งกันทิ้งให้อัตโนมัติ
+3. **`cn()`**: ฟังก์ชันยูทิลิตี้นิรภัยที่รวม `clsx` และ `tailwind-merge` เข้าด้วยกัน
+4. **`cva` (Class Variance Authority)**: เฟรมเวิร์กสร้าง Variants ของคอมโพเนนต์ที่มี Type-safe สูงสุด
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ทำไมแค่ต่อสตริงจึงไม่เพียงพอ? และ `tailwind-merge` ทำงานอย่างไร
+1. **CSS Specificity vs Class Order Trap**:
+   สมมติในไฟล์ CSS ที่ Tailwind คอมไพล์ออกมา กฎของ `.p-4` ถูกประกาศไว้ที่บรรทัดที่ 500 ส่วน `.p-6` ประกาศไว้ที่บรรทัดที่ 490
+   แม้คุณจะเขียน HTML เป็น:
+   ```html
+   <div class="p-4 p-6">
+   ```
+   เบราว์เซอร์จะเลือกใช้ `.p-4` เสมอเพราะมันถูกประกาศทีหลังใน Stylesheet! การสลับที่ในสตริงไม่มีผลใดๆ
+2. **The `tailwind-merge` Intelligence**:
+   `tailwind-merge` เข้าใจความสัมพันธ์เชิงอรรถศาสตร์ของ Tailwind มันรู้ว่า `p-4`, `p-6`, `px-2`, `py-8` ส่งผลต่อ CSS `padding` ดังนั้นเมื่อเจอ `twMerge('p-4', 'p-6')` มันจะลบ `p-4` ออกและเหลือเพียง `'p-6'` ตัวเดียวในสตริงผลลัพธ์
+3. **`cva` Finite State Compilation**:
+   `cva` ทำหน้าที่จับคู่ระหว่าง Props ใน TypeScript (เช่น `variant: 'primary'`, `size: 'lg'`) กับชุดคลาสที่จับคู่ไว้ พร้อมรองรับ `compoundVariants` (สไตล์พิเศษเมื่อเงื่อนไข 2 ตัวเกิดขึ้นพร้อมกัน)
+
+---
+
+## 3. ตัวอย่างโค้ด (Tailwind v4 & TSX)
+
+### ตัวอย่างที่ 1: การสร้าง `cn()` Helper และ Universal Button Component ด้วย `cva`
+
+```typescript filename="src/lib/utils.ts"
+import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
+
+/**
+ * รวมคลาสแบบปลอดภัย แก้ปัญหา Class Collision และรองรับ Conditional Classes
+ */
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+```
+
+```tsx filename="src/components/ui/Button.tsx"
+import * as React from "react";
+import { cva, type VariantProps } from "class-variance-authority";
+import { cn } from "@/lib/utils";
+import { Loader2 } from "lucide-react";
+
+// กำหนด Variants ของปุ่มด้วย cva
+const buttonVariants = cva(
+  // สไตล์พื้นฐานร่วมกันทั้งหมด (Base styles)
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl text-xs font-semibold transition-all duration-200 outline-none focus-visible:ring-4 focus-visible:ring-indigo-600/20 disabled:pointer-events-none disabled:opacity-50 active:scale-[0.98]",
+  {
+    variants: {
+      variant: {
+        default: "bg-indigo-600 text-white shadow-sm hover:bg-indigo-500",
+        secondary: "bg-neutral-100 text-neutral-800 hover:bg-neutral-200 dark:bg-neutral-800 dark:text-neutral-200 dark:hover:bg-neutral-700",
+        destructive: "bg-rose-600 text-white shadow-sm hover:bg-rose-500 focus-visible:ring-rose-500/20",
+        outline: "border border-neutral-300 bg-transparent hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800",
+        ghost: "hover:bg-neutral-100 dark:hover:bg-neutral-800",
+      },
+      size: {
+        sm: "h-8 px-3 text-[11px]",
+        md: "h-10 px-4",
+        lg: "h-12 px-6 text-sm",
+        icon: "size-10",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+      size: "md",
+    },
+  }
+);
+
+export interface ButtonProps
+  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+    VariantProps<typeof buttonVariants> {
+  isLoading?: boolean;
+}
+
+export function Button({
+  className,
+  variant,
+  size,
+  isLoading = false,
+  children,
+  disabled,
+  ...props
+}: ButtonProps) {
+  return (
+    <button
+      className={cn(buttonVariants({ variant, size, className }))}
+      disabled={disabled || isLoading}
+      {...props}
+    >
+      {isLoading && <Loader2 className="size-3.5 animate-spin" />}
+      {children}
+    </button>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: ป้ายข้อความสถานะ Type-Safe (StatusBadge ด้วย `cva`)
+
+```tsx filename="src/components/ui/StatusBadge.tsx"
+import React from "react";
+import { cva, type VariantProps } from "class-variance-authority";
+import { cn } from "@/lib/utils";
+
+const badgeVariants = cva(
+  "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-semibold transition-colors ring-1 ring-inset",
+  {
+    variants: {
+      status: {
+        success: "bg-emerald-500/10 text-emerald-700 ring-emerald-500/20 dark:text-emerald-400",
+        warning: "bg-amber-500/10 text-amber-700 ring-amber-500/20 dark:text-amber-400",
+        danger: "bg-rose-500/10 text-rose-700 ring-rose-500/20 dark:text-rose-400",
+        neutral: "bg-neutral-500/10 text-neutral-600 ring-neutral-500/20 dark:text-neutral-400",
+      },
+      dot: {
+        true: "pl-2",
+        false: "",
+      },
+    },
+    defaultVariants: {
+      status: "neutral",
+      dot: false,
+    },
+  }
+);
+
+interface StatusBadgeProps
+  extends React.HTMLAttributes<HTMLSpanElement>,
+    VariantProps<typeof badgeVariants> {}
+
+export function StatusBadge({
+  status,
+  dot,
+  className,
+  children,
+  ...props
+}: StatusBadgeProps) {
+  return (
+    <span className={cn(badgeVariants({ status, dot, className }))} {...props}>
+      {dot && (
+        <span
+          className={cn("size-1.5 rounded-full", {
+            "bg-emerald-500": status === "success",
+            "bg-amber-500": status === "warning",
+            "bg-rose-500": status === "danger",
+            "bg-neutral-400": status === "neutral" || !status,
+          })}
+        />
+      )}
+      {children}
+    </span>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับ CSS ปกติ
+
+| สถานการณ์ | เขียนเองด้วยมือเปล่า (Naive String Concatenation) | ใช้มาตรฐาน `cn()` (`clsx` + `twMerge`) |
+| :--- | :--- | :--- |
+| **Override สีปุ่ม** | `` `bg-blue-600 ${props.className}` `` (อาจพังถ้าคลาสชน) | `cn("bg-blue-600", className)` (ลบคลาสเก่าออกอัตโนมัติ) |
+| **เงื่อนไขเปิด/ปิด** | `` `${isActive ? 'block' : 'hidden'} ${isError ? 'text-red-500' : ''}` `` | `cn({ "block": isActive, "hidden": !isActive, "text-red-500": isError })` |
+| **ค่า falsy ใน DOM** | มักมีคำว่า `"undefined"` หรือ `"null"` หลุดเข้าไปใน DOM | ค่า `false`, `null`, `undefined` ถูกกรองทิ้งอย่างปลอดภัย 100% |
+
+---
+
+## 5. ผิด vs ถูก
+
+### จุดที่ 1: การใช้ Template Literal ต่อสตริงคลาสเพื่อ Override สไตล์
+```tsx
+// ❌ ผิด: เมื่อผู้ใช้ส่ง className="bg-red-500" เข้ามา สไตล์จะชนกับ bg-blue-600 และอาจไม่เปลี่ยนสี!
+export function Card({ className, children }: { className?: string; children: React.ReactNode }) {
+  return <div className={`p-6 bg-blue-600 text-white ${className}`}>{children}</div>;
+}
+
+// ✅ ถูก: ห่อด้วย cn() เสมอ เพื่อให้ tailwind-merge ขจัดคลาสที่ขัดแย้ง
+export function Card({ className, children }: { className?: string; children: React.ReactNode }) {
+  return <div className={cn("p-6 bg-blue-600 text-white", className)}>{children}</div>;
+}
+```
+*เหตุผล*: การใช้ `cn()` รับประกันว่าหากพร็อพส์ส่งค่า `p-8` หรือ `bg-red-500` เข้ามา ค่าเดิม `p-6` และ `bg-blue-600` จะถูกถอดออกทันที ไม่ให้เกิดปัญหาคลาสทับซ้อน
+
+### จุดที่ 2: ใช้ `clsx` เพียงตัวเดียวโดยไม่มี `tailwind-merge`
+```tsx
+// ❌ ผิด: clsx แค่ช่วยต่อสตริงแบบมีเงื่อนไข แต่ไม่มีความรู้เรื่อง Tailwind Classes จึงแก้ปัญหา Class Collision ไม่ได้
+import { clsx } from "clsx";
+const classes = clsx("p-4", "p-8"); // ผลลัพธ์คือ "p-4 p-8" (ยังคงชนกันอยู่)
+
+// ✅ ถูก: ใช้ twMerge ครอบ clsx (ผ่านฟังก์ชัน cn)
+import { twMerge } from "tailwind-merge";
+import { clsx } from "clsx";
+const classes = twMerge(clsx("p-4", "p-8")); // ผลลัพธ์เหลือเพียง "p-8"
+```
+*เหตุผล*: `clsx` ไม่รู้ว่า `p-4` กับ `p-8` คือเรื่องเดียวกัน ต้องมี `tailwind-merge` มาทำหน้าที่ De-duplication
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้
+- ฟังก์ชัน `cn()` ควรเป็นหัวใจหลักในทุก UI Component ที่ต้องรับพร็อพส์ `className` จากภายนอก
+- ใช้ `cva` เมื่อต้องสร้าง Component ที่มีตัวเลือกหลากหลาย เช่น Button (Variants + Sizes), Badge, Alert, Modal
+
+### ไม่ควรใช้
+- หากเป็น Element โดดๆ ภายในคอมโพเนนต์ที่ไม่ได้เปิดรับการ override จากภายนอก และไม่มีเงื่อนไขใดๆ สามารถเขียนสตริงธรรมดา `className="flex items-center gap-2"` ได้โดยตรง ไม่จำเป็นต้องเรียก `cn()` ให้เปลือง CPU cycles โดยใช่เหตุ
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการใช้ Template Literals เช่น `` `${baseClass} ${props.className}` `` จึงก่อให้เกิดบั๊กสไตล์ไม่ยอม Override ใน Tailwind CSS?
+**แนวทางคำตอบ**: 
+เนื่องจากเบราว์เซอร์ไม่ได้ตัดสินความสำคัญของ CSS Class จากตำแหน่งซ้ายขวาใน Attribute `class` ของ HTML แต่ตัดสินจาก **ลำดับที่กฎเหล่านั้นถูกประกาศในไฟล์ CSS (Source Order Specificity)** หากคลาสใน `baseClass` บังเอิญถูกประกาศอยู่หลังคลาสใน `props.className` ในไฟล์รวม CSS เบราว์เซอร์ก็จะเลือกใช้กฎของ `baseClass` อยู่ดี ทำให้การส่งคลาสมา Override ล้มเหลว จึงจำเป็นต้องใช้ `tailwind-merge` เพื่อตรวจสอบ Semantic และลบคลาสเก่าออกไปก่อนที่จะส่งค่าเข้า DOM
+
+### Q2: ไลบรารี `cva` (Class Variance Authority) ช่วยยกระดับ Developer Experience และ Type Safety ใน React ได้อย่างไร?
+**แนวทางคำตอบ**: 
+`cva` ช่วยแยกตรรกะของการเลือกคลาส (Styling Logic) ออกจากโครงสร้าง JSX ของคอมโพเนนต์อย่างเป็นระบบ โดยทำงานร่วมกับ TypeScript ได้อย่างสมบูรณ์ผ่านยูทิลิตี้ไทป์ `VariantProps<typeof ...>` ทำให้นักพัฒนาที่เรียกใช้คอมโพเนนต์จะได้รับการแนะนำโค้ด (IntelliSense) ใน IDE ว่ามีตัวเลือก Variant หรือ Size อะไรบ้างที่ถูกต้อง ป้องกันการพิมพ์ผิด และยังรองรับการจัดการ `compoundVariants` เมื่อตัวเลือกหลายตัวส่งผลต่อกันได้อย่างเป็นระเบียบ

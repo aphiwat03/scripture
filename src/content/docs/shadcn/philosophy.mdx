@@ -1,0 +1,220 @@
+---
+title: Philosophy & Copy-Paste
+category: Frontend
+parentTitle: shadcn/ui
+version: shadcn/ui & Radix UI
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**shadcn/ui** สร้างขึ้นบนปรัชญาที่ท้าทายความเชื่อเดิมของวงการพัฒนาเว็บแอปพลิเคชันอย่างสิ้นเชิง:
+
+> **"Not a component library. It's a collection of re-usable components that you can copy and paste into your apps."**
+
+ตลอดทศวรรษที่ผ่านมา เมื่อนักพัฒนาต้องการสร้าง UI สวยงามและรวดเร็ว วิธีการมาตรฐานคือการติดตั้งไลบรารีสำเร็จรูปผ่าน NPM เช่น Material UI (MUI), Ant Design (AntD), หรือ Chakra UI ซึ่งทำงานในรูปแบบ **"Black Box Package"** โดยซ่อนโค้ดและตรรกะทั้งหมดไว้ข้างในโฟลเดอร์ `node_modules`
+
+แต่ shadcn/ui เลือกเส้นทางที่ต่างออกไป:
+1. **คุณเป็นเจ้าของโค้ดอย่างแท้จริง (Code Ownership)**: คอมโพเนนต์ไม่ได้อยู่ใน `node_modules` แต่อยู่ในโฟลเดอร์ `components/ui/*` ภายในซอร์สโค้ดโปรเจกต์ของคุณเอง
+2. **การแจกจ่ายแบบ Copy-Paste**: คุณคัดลอกเฉพาะคอมโพเนนต์ที่ต้องการใช้จริง (ผ่าน CLI หรือก๊อปปี้จากหน้าเว็บ) ไม่ต้องแบกรับคอมโพเนนต์นับร้อยตัวที่คุณไม่ได้แตะต้อง
+3. **ปรับแต่งได้ไม่จำกัด (Ultimate Customizability)**: ไม่ต้องต่อสู้กับการ override คลาสด้วย `!important`, ไม่ต้องปวดหัวกับ CSS-in-JS runtime หรือ theme tokens แปลกๆ หากต้องการเปลี่ยนพฤติกรรมหรือดีไซน์ คุณเพียงเปิดไฟล์ `.tsx` นั้นแล้วแก้ไขได้ทันที
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ทำไมการติดตั้งผ่าน NPM จึงกลายเป็นหนี้ทางเทคนิค (Technical Debt)?
+
+เมื่อใช้ Component Library แบบ NPM ทั่วไป:
+- **Version Lock & Breaking Changes**: เมื่อไลบรารีอัปเดตเวอร์ชันใหญ่ คุณต้องลุ้นว่าหน้าจอที่มีอยู่จะพังหรือไม่ หรือเมื่อ Next.js อัปเกรด (เช่น จาก Pages Router สู่ App Router หรือ Next.js 16) คุณมักต้องรอให้ผู้พัฒนาไลบรารีปล่อยเวอร์ชันที่รองรับ React Server Components
+- **The Abstraction Trap**: ยิ่งไลบรารีพยายามครอบจักรวาล API ของคอมโพเนนต์ก็ยิ่งซับซ้อน เช่น ต้องส่ง `slotProps`, `sx`, หรือ `styled()` ซ้อนกันหลายชั้นเพื่อแก้สีขอบปุ่มเพียงจุดเดียว
+- **Bundle Size Bloat**: แม้จะมี Tree-shaking แต่โครงสร้างภายในของ Monolithic UI Library มักลากเอา Utilities, Runtime Engines, และ Icons ที่ไม่ได้ใช้ติดมาด้วยเสมอ
+
+### shadcn CLI ทำงานอย่างไร?
+
+shadcn CLI (`pnpm dlx shadcn@latest add <component>`) ไม่ได้ทำหน้าที่ดาวน์โหลด Binary หรือ compiled package แต่ทำหน้าที่:
+1. **Registry Fetching**: เชื่อมต่อไปยัง Registry ของ shadcn เพื่อดึง Source Code ดิบของคอมโพเนนต์ที่เป็นภาษา TypeScript
+2. **AST Transformation & Path Resolution**: อ่านการตั้งค่าจาก `components.json` ในโปรเจกต์ของคุณ เพื่อแปลง Import path (เช่น `@/lib/utils`, `@/components/ui`) ให้ตรงกับโครงสร้างไดเรกทอรีของคุณ
+3. **Dependency Injection**: ตรวจสอบว่าคอมโพเนนต์นั้นต้องการ Primitive ภายนอกหรือไม่ (เช่น `@radix-ui/react-dialog` หรือ `lucide-react`) แล้วสั่งให้ Package Manager ติดตั้งเฉพาะสิ่งที่จำเป็นนั้นลงในโปรเจกต์ของคุณ
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### เปรียบเทียบ: Monolithic MUI vs shadcn/ui ในการสร้าง Delete Account Button
+
+#### วิธีที่ 1: การฝืนปรับแต่งใน Material UI (MUI) แบบดั้งเดิม
+```tsx filename="components/MuiDeleteButton.tsx"
+import Button from "@mui/material/Button";
+import DeleteIcon from "@mui/icons-material/Delete";
+
+// ต้องเรียนรู้ API เฉพาะตัว เช่น sx prop, theme overrides
+export function MuiDeleteButton({ isPending }: { isPending: boolean }) {
+  return (
+    <Button
+      variant="contained"
+      color="error"
+      disabled={isPending}
+      startIcon={<DeleteIcon />}
+      sx={{
+        borderRadius: "12px",
+        textTransform: "none",
+        padding: "10px 20px",
+        boxShadow: "none",
+        "&:hover": {
+          boxShadow: "0 4px 12px rgba(239, 68, 68, 0.2)",
+          backgroundColor: "#dc2626", // ต้องระบุ hex หรือ override palette
+        },
+      }}
+    >
+      {isPending ? "กำลังลบบัญชี..." : "ลบบัญชีผู้ใช้"}
+    </Button>
+  );
+}
+```
+
+#### วิธีที่ 2: โค้ดที่สะอาดและควบคุมได้ 100% ใน shadcn/ui
+```tsx filename="components/ui/button.tsx"
+// ไฟล์นี้อยู่ในโปรเจกต์ของคุณโดยตรง (components/ui/button.tsx)
+import * as React from "react";
+import { Slot } from "@radix-ui/react-slot";
+import { cva, type VariantProps } from "class-variance-authority";
+import { cn } from "@/lib/utils";
+
+const buttonVariants = cva(
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
+  {
+    variants: {
+      variant: {
+        default: "bg-primary text-primary-foreground shadow-xs hover:bg-primary/90",
+        destructive: "bg-destructive text-white shadow-xs hover:bg-destructive/90 focus-visible:ring-destructive/20",
+        outline: "border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground",
+      },
+      size: {
+        default: "h-9 px-4 py-2",
+        sm: "h-8 rounded-md px-3 text-xs",
+        lg: "h-10 rounded-md px-8",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+      size: "default",
+    },
+  }
+);
+
+export interface ButtonProps
+  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+    VariantProps<typeof buttonVariants> {
+  asChild?: boolean;
+}
+
+export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant, size, asChild = false, ...props }, ref) => {
+    const Comp = asChild ? Slot : "button";
+    return (
+      <Comp
+        className={cn(buttonVariants({ variant, size, className }))}
+        ref={ref}
+        {...props}
+      />
+    );
+  }
+);
+Button.displayName = "Button";
+```
+
+#### นำไปใช้งานจริงในหน้า Account Settings:
+```tsx filename="app/settings/DeleteAccountSection.tsx"
+"use client";
+
+import { useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Trash2, Loader2 } from "lucide-react";
+
+export function DeleteAccountSection() {
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  async function handleDelete() {
+    setIsDeleting(true);
+    // จำลองการเรียก API
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    setIsDeleting(false);
+  }
+
+  return (
+    <div className="flex items-center justify-between p-6 border border-destructive/20 rounded-xl bg-destructive/5">
+      <div>
+        <h3 className="text-base font-semibold text-destructive">เขตอันตราย (Danger Zone)</h3>
+        <p className="text-sm text-muted-foreground mt-1">
+          การลบบัญชีจะทำให้ข้อมูลโปรเจกต์และประวัติการเงินทั้งหมดของคุณถูกลบอย่างถาวร
+        </p>
+      </div>
+
+      <Button
+        variant="destructive"
+        disabled={isDeleting}
+        onClick={handleDelete}
+        className="rounded-xl shadow-xs hover:shadow-md transition-all"
+      >
+        {isDeleting ? (
+          <>
+            <Loader2 className="w-4 h-4 animate-spin" />
+            <span>กำลังลบบัญชี...</span>
+          </>
+        ) : (
+          <>
+            <Trash2 className="w-4 h-4" />
+            <span>ลบบัญชีผู้ใช้</span>
+          </>
+        )}
+      </Button>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **พยายามรัน `npm install shadcn-ui`**<br/>เข้าใจผิดว่า shadcn เป็นแพ็กเกจ NPM ทั่วไป ทำให้เกิด error หาแพ็กเกจไม่เจอ | **ใช้ CLI เพิ่มเฉพาะคอมโพเนนต์ที่ต้องการ**<br/>`pnpm dlx shadcn@latest add button dialog` เพื่อดึงซอร์สโค้ดเข้าโปรเจกต์ |
+| **กลัวการแก้ไขไฟล์ใน `components/ui/*`**<br/>พยายามสร้าง wrapper ทับซ้อนหลายชั้น หรือเขียน inline style ขัดแย้งกับดีไซน์หลัก | **แก้ไขไฟล์ใน `components/ui/*` ได้ทันที**<br/>เพราะคุณเป็นเจ้าของโค้ด หากต้องการเปลี่ยน default font, border-radius หรือ animation ให้แก้ในไฟล์คอมโพเนนต์ได้เลย |
+| **คัดลอกคอมโพเนนต์มาทั้งหมด 50 ตัวทั้งที่ใช้แค่ 3 ตัว**<br/>ทำให้โปรเจกต์รกตาและเพิ่มโค้ดที่ต้องดูแลรักษาโดยไม่จำเป็น | **เพิ่มทีละตัวเมื่อต้องใช้งานจริง (On-Demand)**<br/>เพิ่มเฉพาะสิ่งที่หน้าจอของคุณต้องการในแต่ละ Sprint |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้เมื่อ:
+- **ต้องการ Custom Design สูง**: เว็บไซต์ต้องการเอกลักษณ์เฉพาะตัว (Custom Brand Identity) ไม่ต้องการให้ดูเหมือนเทมเพลตมาตรฐานทั่วไป
+- **ใช้งาน Next.js (App Router) และ Tailwind CSS**: สถาปัตยกรรมของ shadcn ถูกออกแบบมาให้ทำงานสอดคล้องกับ Server Components และ Tailwind v4 ได้อย่างไร้รอยต่อ
+- **ต้องการควบคุมความปลอดภัยและโค้ดอย่างเข้มงวด**: องค์กรที่เคร่งครัดเรื่อง Third-party dependencies เสี่ยงต่อ Supply Chain Attack การมีโค้ดอยู่ภายในโปรเจกต์ทำให้ตรวจสอบความปลอดภัยได้ง่าย
+
+### ไม่ควรใช้เมื่อ:
+- **ระบบ Internal Backoffice ด่วนพิเศษที่ไม่แคร์หน้าตา**: หากคุณต้องการสร้างหน้าจัดการหลังบ้านภายใน 1 วัน โดยโยน JSON เข้าไปแล้วมีตารางและฟอร์ม CRUD สำเร็จรูปพร้อมใช้ ไลบรารีอย่าง Ant Design หรือ Refine อาจตอบโจทย์ความเร็วได้ดีกว่า
+- **โปรเจกต์ที่ใช้ CSS-in-JS แบบเดิม**: หากโปรเจกต์ของคุณยึดติดกับ Emotion, Styled-components และไม่ได้ใช้ Tailwind CSS การนำ shadcn/ui เข้าไปผสมจะสร้างความสับสนในทิศทางสไตล์ของทีม
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไม shadcn/ui ถึงเลือกแนวทางแจกจ่ายโค้ดแบบ "Copy-Paste" แทนการเผยแพร่เป็นไลบรารีบน NPM Registry เหมือน UI Libraries ส่วนใหญ่?
+**แนวทางตอบ:**
+การเลือกแนวทาง Copy-Paste เกิดจากการแก้ปัญหาพื้นฐานของการใช้ NPM UI libraries:
+1. **แก้ปัญหา Abstraction Leakage**: เมื่อใช้ไลบรารีแบบ NPM หากเราต้องการดีไซน์ที่อยู่นอกเหนือสิ่งที่ผู้สร้างเตรียมไว้ เราต้องเขียนโค้ดที่ซับซ้อน เช่น `!important` หรือ wrapper แปลกๆ เพื่อเจาะเข้าไปแก้ไข แต่เมื่อโค้ดอยู่ในโปรเจกต์ เราแก้ไข JSX และ Tailwind classes ได้โดยตรง 100%
+2. **ขจัดปัญหา Version Mismatch**: เมื่อ Next.js หรือ React ออกฟีเจอร์ใหม่ (เช่น Server Actions หรือ React 19) โปรเจกต์ที่ใช้ shadcn ไม่ต้องรอให้ผู้ดูแลไลบรารีอัปเดต เพราะเราสามารถปรับโค้ดในโปรเจกต์ให้เข้ากับ React เวอร์ชันใหม่ได้ทันที
+3. **ลดปัญหา Bundle Size**: เราเลือกใช้งานเฉพาะคอมโพเนนต์ที่จำเป็นเท่านั้น และไม่มี overhead ของ runtime library อื่นๆ แอบแฝงเข้ามาใน node_modules
+
+### Q2: ข้อเสียและความเสี่ยงที่สำคัญที่สุดของแนวทาง Copy-Paste ใน shadcn/ui คืออะไร และทีมระดับ Enterprise มีวิธีจัดการอย่างไร?
+**แนวทางตอบ:**
+ข้อเสียหลักคือ **"การขาดการอัปเดตอัตโนมัติ (Maintenance Burden)"**:
+- เมื่อคอมโพเนนต์ต้นทางของ shadcn มีการแก้ไขบั๊กความปลอดภัย หรือเพิ่มฟีเจอร์ Accessibility ใหม่ๆ โปรเจกต์ของเราจะไม่ได้รับการอัปเดตอัตโนมัติเหมือนการสั่ง `npm update`
+- หากทีมเผลอรัน `shadcn add button --overwrite` ทับไฟล์เดิม โค้ดที่เราเคยปรับแต่งไว้ (Customizations) อาจถูกเขียนทับและสูญหาย
+
+**วิธีรับมือระดับ Enterprise**:
+1. ผูกคอมโพเนนต์เข้ากับ Git Version Control อย่างเคร่งครัด ตรวจสอบ `git diff` ทุกครั้งก่อนยอมรับการเปลี่ยนแปลง
+2. สร้าง Core UI Guidelines ประจำองค์กร เช่น ตกลงกันว่าไฟล์ใน `components/ui` จะแก้ไขเฉพาะดีไซน์ระดับ Global ส่วน Business Logic จะเขียนในระดับ Wrapper หรือ Feature component
+3. ติดตาม Release Note ของ shadcn และ Radix UI เพื่อ Pull เฉพาะจุดแก้ไขที่สำคัญมาปรับใช้ในโค้ดของทีมอย่างปลอดภัย

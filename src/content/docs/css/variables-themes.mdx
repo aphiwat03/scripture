@@ -1,0 +1,130 @@
+---
+title: Variables & Themes
+category: Frontend
+parentTitle: CSS
+version: CSS3 / Modern CSS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**CSS Custom Properties (หรือเรียกทั่วไปว่า CSS Variables)** คือหนึ่งในคุณสมบัติที่ทรงพลังที่สุดของ CSS ยุคใหม่ 
+
+สิ่งที่ทำให้ CSS Variables แตกต่างจากตัวแปรใน SASS/SCSS อย่างสิ้นเชิงคือ:
+- **Runtime & Dynamic**: ตัวแปร CSS ยังคงมีชีวิตอยู่ในเบราว์เซอร์จริง ไม่ได้ถูกคอมไพล์หายไป สามารถเปลี่ยนค่าแบบเรียลไทม์ได้ด้วย JavaScript
+- **Cascade & Scope**: ตัวแปรสามารถสืบทอดลงไปยังลูกหลาน และสามารถถูก Override เฉพาะบางจุดของหน้าจอได้
+- **Theming & Dark Mode**: เป็นรากฐานสำคัญในการสลับระหว่างโหมดสว่าง (Light Mode) และโหมดมืด (Dark Mode) ได้ในระดับพริบตาเดียว
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+1. **`:root` Pseudo-class**: คือระดับสูงสุดของเอกสาร (เทียบเท่าแท็ก `<html>` แต่มี Specificity สูงกว่า) ใช้สำหรับประกาศตัวแปรระดับสากล (Global Scope)
+2. **Fallback Value**: ฟังก์ชัน `var()` สามารถรับค่าสำรองตัวที่สองได้ เช่น `var(--brand-color, #0071e3)` ในกรณีที่ตัวแปรหลักยังไม่ได้ถูกประกาศ
+3. **Dark Mode กลยุทธ์ 2 รูปแบบ**:
+   - **System Preference**: อิงตามระบบเครื่องผู้ใช้ด้วย `@media (prefers-color-scheme: dark)`
+   - **User Toggle (Class-based)**: สลับผ่านการเติมคลาส `.dark` ลงบนแท็ก `<html>` (ทำงานร่วมกับไลบรารีอย่าง `next-themes`)
+
+---
+
+## 3. ตัวอย่างโค้ด (Modern CSS)
+
+### ตัวอย่างที่ 1: ระบบจัดการธีม Light & Dark Mode ที่สมบูรณ์แบบ
+
+```css filename="theme.css"
+/* 1. ตัวแปรสำหรับ Light Mode (ค่าเริ่มต้น) */
+:root {
+  --bg-canvas: #ffffff;
+  --text-primary: #0f172a;
+  --text-muted: #64748b;
+  --border-hairline: #e2e8f0;
+  --accent: #0071e3;
+  --accent-soft: rgba(0, 113, 227, 0.1);
+}
+
+/* 2. สลับตัวแปรสำหรับ Dark Mode เมื่อมีคลาส .dark */
+html.dark {
+  --bg-canvas: #0b0f19;
+  --text-primary: #f8fafc;
+  --text-muted: #94a3b8;
+  --border-hairline: #1e293b;
+  --accent: #38bdf8;
+  --accent-soft: rgba(56, 189, 248, 0.15);
+}
+
+/* 3. Component ไม่ต้องเขียนโค้ดแยก Dark Mode ทุกตัว แค่เรียกใช้ตัวแปร! */
+.dashboard-card {
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  border: 1px solid var(--border-hairline);
+  padding: 24px;
+  border-radius: 12px;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+```
+
+### ตัวอย่างที่ 2: การเปลี่ยนค่าตัวแปรแบบเรียลไทม์ด้วย JavaScript
+
+```typescript filename="theme-switcher.ts"
+// ผู้ใช้เลือกสี Accent ประจำตัวในหน้า Settings
+export function updateUserAccentColor(hexColor: string) {
+  // สั่งเปลี่ยนค่าตัวแปร CSS ทันทีทั้งหน้าจอ โดยไม่ต้อง Reload!
+  document.documentElement.style.setProperty('--accent', hexColor);
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: เขียน CSS ซ้ำซ้อนแยกทุกคลาสสำหรับ Dark Mode
+
+```css
+/* ผิด: ต้องคอยเขียนดัก .dark ทุก Component โค้ดบวมและแก้ไขยาก */
+.card { background: white; color: black; }
+html.dark .card { background: black; color: white; }
+
+.button { background: blue; border-color: gray; }
+html.dark .button { background: cyan; border-color: dimgray; }
+```
+
+### ✅ โค้ดที่ถูกต้อง: รวมตัวแปรไว้ที่ต้นตอ
+
+```css
+/* ถูกต้อง: Component เขียนรอบเดียว อัปเดตเฉพาะตัวแปร */
+:root { --card-bg: white; --card-color: black; }
+html.dark { --card-bg: #1e293b; --card-color: white; }
+
+.card {
+  background-color: var(--card-bg);
+  color: var(--card-color);
+}
+```
+
+---
+
+## 5. เทียบกับ Tailwind CSS v4
+
+ใน Tailwind CSS v4 การกำหนดตัวแปรของธีมจะทำผ่าน Directive `@theme` ในไฟล์ `globals.css`:
+
+```css filename="globals.css"
+@import "tailwindcss";
+
+@theme {
+  --color-brand-primary: #0071e3;
+  --color-brand-secondary: #f59e0b;
+}
+```
+และสามารถเรียกใช้งานเป็น Utility Class ได้ทันที: `bg-brand-primary` หรือ `text-brand-secondary`!
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: CSS Custom Properties แตกต่างจากตัวแปรใน CSS Preprocessors (เช่น SASS Variables `$color`) อย่างไร?
+**แนวทางคำตอบ**: 
+- **SASS Variables (`$var`)**: ทำงานในขั้นตอน **Compile-time** เท่านั้น ตัวแปรจะถูกแทนที่ด้วยค่าคงที่ตายตัวเมื่อบิลด์เป็นไฟล์ CSS ทำให้ไม่สามารถเปลี่ยนแปลงค่าขณะที่หน้าเว็บกำลังทำงานอยู่ในเบราว์เซอร์ได้ และไม่สามารถสืบทอดตามโครงสร้าง DOM
+- **CSS Custom Properties (`--var`)**: ทำงานในขั้นตอน **Runtime** ภายในเบราว์เซอร์จริง สามารถสืบทอด (Inherit) ค่าจากแม่ไปหาลูกตาม DOM Tree ได้, สามารถเขียนทับเฉพาะบาง Section ได้, และสามารถอัปเดตค่าได้แบบไดนามิกผ่าน JavaScript ทันที เหมาะอย่างยิ่งสำหรับระบบ Theming และ Dark Mode
+
+### Q2: ในการทำ Dark Mode ทำไมการสลับค่าตัวแปรในระดับ `:root / .dark` จึงมีประสิทธิภาพเหนือกว่าการเขียนกฎสไตล์แยกสำหรับทุก Element?
+**แนวทางคำตอบ**: เพราะช่วยลดความซ้ำซ้อนของโค้ดสไตล์ (Code Duplication) ลงอย่างมหาศาล คอมโพเนนต์ในหน้าเว็บทั้งหมดจะผูกค่าสีไว้กับ Semantic Variables (เช่น `--bg-surface`, `--text-main`) เมื่อมีการสลับธีม เบราว์เซอร์เพียงแค่เปลี่ยนค่าของตัวแปรที่ Node ต้นทาง (`html.dark`) แล้วปล่อยให้ค่าใหม่กระจายตัวไปยังคอมโพเนนต์ต่างๆ ตามธรรมชาติ ไม่จำเป็นต้องโหลดไฟล์ CSS ใหม่หรือเขียน Selector ทับซ้อนกันนับร้อยบรรทัด

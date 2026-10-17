@@ -1,0 +1,275 @@
+---
+title: Testing & DevTools
+category: Frontend
+parentTitle: Zustand v5
+version: Zustand v5.0
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การเขียน Unit Test และการ Debug State ถือเป็นหัวใจสำคัญของซอฟต์แวร์ระดับมืออาชีพ:
+1. **ปัญหา State Pollution ระหว่างเคสทดสอบ**: เนื่องจาก Zustand Store มีลักษณะเป็น Singleton ในระดับโมดูล หากการทดสอบชุดที่ 1 มีการเพิ่มสินค้าลงในตะกร้า แล้วชุดที่ 2 รันต่อโดยไม่รีเซ็ตค่า สินค้าที่ค้างอยู่จะทำให้ชุดทดสอบที่ 2 ล้มเหลวทันที
+2. **การทำ Store Reset Pattern**: Zustand v5 สนับสนุนรูปแบบการบันทึก `initialState` และสร้างฟังก์ชันรีเซ็ตเพื่อนำไปรันใน `beforeEach()` ของ Vitest / Jest อย่างเป็นระบบ
+3. **Redux DevTools Integration**: เชื่อมต่อผ่าน Middleware `devtools` เพื่อให้สามารถดู Action Name, ตรวจสอบ Diff ของ State และทำ **Time-travel Debugging** (ย้อนอดีตสภาวะของแอปพลิเคชัน) ได้โดยตรงผ่าน DevTools Panel ของเบราว์เซอร์
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+กลไกการรีเซ็ต Store และการจำลองสถานะในการทดสอบ:
+
+```mermaid
+flowchart TD
+    subgraph TestSuite ["Unit Test Runner (Vitest / Jest)"]
+        BeforeEach["beforeEach(() => { resetStore() })"]
+        Test1["it('ควรเพิ่มสินค้าลงตะกร้าได้')"]
+        Test2["it('ควรคำนวณส่วนลดถูกต้อง')"]
+    end
+
+    subgraph ZustandStore ["Zustand Store Instance"]
+        InitialState[("Initial State Snapshot")]
+        CurrentState[("Current Working State")]
+        ResetFn["useStore.setState(initialState, true)"]
+    end
+
+    BeforeEach --> ResetFn
+    ResetFn -->|ทับ State ปัจจุบันด้วย Initial State (replace = true)| CurrentState
+    Test1 -->|รันบน State สะอาด| CurrentState
+    Test2 -->|รันบน State สะอาด| CurrentState
+```
+
+- การส่งพารามิเตอร์ `true` ใน `setState(initialState, true)` เป็นการสั่ง **Replace All** ซึ่งจะกวาดล้างข้อมูลเก่าทั้งหมดและเขียนทับด้วย `initialState` เริ่มต้นอย่างสมบูรณ์
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+ตัวอย่างจริง: ระบบทดสอบ **Cart Store และ Redux DevTools Integration** ด้วย Vitest / Jest และ React Testing Library
+
+### 1. Store ที่รองรับทั้ง DevTools และ Auto-Reset สำหรับ Unit Test
+
+```tsx filename="store/cart-testable-store.ts"
+import { create } from 'zustand';
+import { devtools } from 'zustand/middleware';
+
+export interface CartItem {
+  id: string;
+  name: string;
+  price: number;
+}
+
+export interface CartState {
+  items: CartItem[];
+  totalPrice: number;
+}
+
+export interface CartActions {
+  addItem: (item: CartItem) => void;
+  removeItem: (id: string) => void;
+  reset: () => void;
+}
+
+export type CartStore = CartState & CartActions;
+
+export const initialCartState: CartState = {
+  items: [],
+  totalPrice: 0,
+};
+
+export const useCartStore = create<CartStore>()(
+  devtools(
+    (set) => ({
+      ...initialCartState,
+
+      addItem: (item) =>
+        set(
+          (state) => {
+            const nextItems = [...state.items, item];
+            return {
+              items: nextItems,
+              totalPrice: nextItems.reduce((acc, i) => acc + i.price, 0),
+            };
+          },
+          false,
+          'cart/addItem' // ชื่อ Action ที่แสดงใน Redux DevTools
+        ),
+
+      removeItem: (id) =>
+        set(
+          (state) => {
+            const nextItems = state.items.filter((i) => i.id !== id);
+            return {
+              items: nextItems,
+              totalPrice: nextItems.reduce((acc, i) => acc + i.price, 0),
+            };
+          },
+          false,
+          'cart/removeItem'
+        ),
+
+      reset: () => set(initialCartState, false, 'cart/reset'),
+    }),
+    { name: 'ShoppingCartStore', enabled: process.env.NODE_ENV !== 'production' }
+  )
+);
+```
+
+### 2. ชุดการทดสอบ Unit Test ด้วย Vitest
+
+```tsx filename="store/__tests__/cart-store.test.ts"
+import { describe, it, expect, beforeEach } from 'vitest';
+import { useCartStore, initialCartState } from '../cart-testable-store';
+
+describe('useCartStore Unit Tests', () => {
+  // สำคัญที่สุด: รีเซ็ต Store กลับสู่ Initial State ก่อนเริ่มแต่ละ Test เสมอ
+  beforeEach(() => {
+    useCartStore.setState(initialCartState, true);
+  });
+
+  it('ควรเริ่มต้นด้วยตะกร้าว่างเปล่าและยอดเงินเป็น 0', () => {
+    const state = useCartStore.getState();
+    expect(state.items).toHaveLength(0);
+    expect(state.totalPrice).toBe(0);
+  });
+
+  it('ควรเพิ่มสินค้าและคำนวณยอดเงินรวมได้อย่างถูกต้อง', () => {
+    const { addItem } = useCartStore.getState();
+
+    // จำลองการเพิ่มสินค้าชิ้นที่ 1
+    addItem({ id: 'item-1', name: 'เมาส์เกมมิ่ง', price: 1200 });
+
+    let state = useCartStore.getState();
+    expect(state.items).toHaveLength(1);
+    expect(state.totalPrice).toBe(1200);
+
+    // จำลองการเพิ่มสินค้าชิ้นที่ 2
+    addItem({ id: 'item-2', name: 'แผ่นรองเมาส์', price: 300 });
+
+    state = useCartStore.getState();
+    expect(state.items).toHaveLength(2);
+    expect(state.totalPrice).toBe(1500);
+  });
+
+  it('ควรลบสินค้าและคำนวณยอดเงินใหม่ถูกต้อง', () => {
+    const { addItem, removeItem } = useCartStore.getState();
+
+    addItem({ id: 'item-1', name: 'เมาส์เกมมิ่ง', price: 1200 });
+    addItem({ id: 'item-2', name: 'แผ่นรองเมาส์', price: 300 });
+
+    removeItem('item-1');
+
+    const state = useCartStore.getState();
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0].id).toBe('item-2');
+    expect(state.totalPrice).toBe(300);
+  });
+});
+```
+
+### 3. การทดสอบ Component ที่เรียกใช้ Store ด้วย React Testing Library
+
+```tsx filename="components/__tests__/CartBadge.test.tsx"
+import { render, screen, act } from '@testing-library/react';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { useCartStore, initialCartState } from '@/store/cart-testable-store';
+
+function CartBadge() {
+  const count = useCartStore((s) => s.items.length);
+  return <div>ตะกร้า: {count} ชิ้น</div>;
+}
+
+describe('<CartBadge /> Component Integration Test', () => {
+  beforeEach(() => {
+    useCartStore.setState(initialCartState, true);
+  });
+
+  it('ควรแสดงตัวเลข 0 เมื่อเริ่มต้น', () => {
+    render(<CartBadge />);
+    expect(screen.getByText('ตะกร้า: 0 ชิ้น')).toBeInTheDocument();
+  });
+
+  it('ควรอัปเดตตัวเลขทันทีเมื่อมีการเพิ่มสินค้าใน Store', () => {
+    render(<CartBadge />);
+
+    // จำลองการอัปเดต State ภายนอก Component
+    act(() => {
+      useCartStore.getState().addItem({ id: '1', name: 'หนังสือ', price: 250 });
+    });
+
+    expect(screen.getByText('ตะกร้า: 1 ชิ้น')).toBeInTheDocument();
+  });
+});
+```
+
+---
+
+## 4. เทียบกับวิธีอื่น (Context / Redux vs Zustand)
+
+| เกณฑ์การทดสอบ | React Context API | Redux Toolkit | Zustand v5 |
+| :--- | :--- | :--- | :--- |
+| **การทดสอบ Store โดดเดี่ยว** | ต้องเรนเดอร์ React Hook Wrapper เสมอ | ทดสอบ Reducer เพียวๆ ได้ แต่ Dispatch ซับซ้อน | **ทดสอบ Vanilla Function ได้โดยตรงผ่าน `getState()` และ Actions** |
+| **ความง่ายในการรีเซ็ต State** | สร้าง Provider ใหม่ทุกรอบ | ต้องสร้าง Root Store Instance ใหม่ | **เรียกคำสั่งบรรทัดเดียว: `useStore.setState(initialState, true)`** |
+| **การ Mock State ใน Component Test** | ต้องเขียน Mock Provider ครอบ JSX | ต้องใช้ `configureMockStore` | **สั่ง `useStore.setState({ ...mockData })` ได้โดยตรง** |
+
+---
+
+## 5. ผิด vs ถูก
+
+### กรณีที่ 1: ลืมส่ง `replace = true` เมื่อสั่งรีเซ็ต State ใน `beforeEach`
+
+```tsx
+// ❌ เสี่ยงบั๊ก: ไม่ได้ส่ง replace = true ทำให้เป็นการทำ Shallow Merge
+beforeEach(() => {
+  useCartStore.setState(initialCartState); // ฟิลด์แปลกปลอมที่เพิ่มขึ้นมาระหว่างเทสต์จะไม่ถูกลบ!
+});
+
+// ✅ ถูก: ส่ง replace = true เพื่อกวาดล้างและแทนที่ State เดิมทั้งหมด
+beforeEach(() => {
+  useCartStore.setState(initialCartState, true);
+});
+```
+
+### กรณีที่ 2: ลืมตั้งชื่อ Action Name ในฟังก์ชัน `set` เมื่อใช้ `devtools`
+
+```tsx
+// ❌ ใน DevTools จะขึ้นเป็น Action "anonymous" ไม่สามารถบอกได้ว่าเกิดจากฟังก์ชันใด
+addItem: (item) => set((s) => ({ items: [...s.items, item] })),
+
+// ✅ ระบุชื่อ Action กำกับเป็นพารามิเตอร์ที่สามเสมอ
+addItem: (item) =>
+  set(
+    (s) => ({ items: [...s.items, item] }),
+    false,
+    'cart/addItem' // จะปรากฏอย่างสวยงามใน Redux DevTools Panel
+  ),
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้:
+- **`beforeEach(() => store.setState(init, true))`**: ทุกครั้งที่เขียนชุดทดสอบไม่ว่าจะเป็น Vitest, Jest, หรือ Cypress
+- **`devtools` middleware**: ในสภาพแวดล้อม Development เพื่อใช้ประโยชน์จาก Action Logging และ Time-travel Debugging
+
+### ไม่ควรใช้:
+- เปิด `devtools` ใน Production Mode เพราะจะส่งผลต่อ Memory และประสิทธิภาพการทำงานของเบราว์เซอร์ผู้ใช้ทั่วไป
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ในการเขียน Unit Test ให้กับ Zustand Store เราจะจัดการกับปัญหา "State Leakage ระหว่าง Test Cases" ได้อย่างไร?
+**แนวทางคำตอบ**:
+เนื่องจาก Zustand Store ถูกประกาศเป็น Singleton ในระดับ Module Scope ตัวแปร State จะคงอยู่ตลอดทั้งกระบวนการรันเทสต์ 
+
+วิธีป้องกัน State Leakage ที่ได้มาตรฐานคือการแยก Object `initialState` ออกมาให้ชัดเจน และเรียกใช้ฟังก์ชัน `useStore.setState(initialState, true)` ในฮุก `beforeEach()` ของเทสต์รันเนอร์ การใส่พารามิเตอร์ตัวที่สองเป็น `true` (Replace Flag) จะสั่งให้ Zustand แทนที่ State ทั้งหมดด้วยค่าเริ่มต้น และล้างค่าแปลกปลอมที่เกิดจากการทดสอบเคสก่อนหน้าทิ้งไปอย่างหมดจด
+
+### Q2: Redux DevTools ช่วยเหลือนักพัฒนาในการ Debug แอปพลิเคชันที่ใช้ Zustand อย่างไร และมีขั้นตอนการเปิดใช้งานอย่างไร?
+**แนวทางคำตอบ**:
+Redux DevTools ช่วยให้นักพัฒนาสามารถ:
+1. **ดู Timeline การทำงาน**: เห็นประวัติของ Actions ที่เกิดขึ้นตามลำดับเวลา พร้อมชื่อ Action ที่ระบุไว้ชัดเจน
+2. **State Diff**: ดูว่า Action แต่ละตัวเปลี่ยนแปลง Property ใดใน Store บ้าง
+3. **Time-travel**: สามารถคลิก Jump เพื่อย้อนเวลาแอปพลิเคชันกลับไปยัง State ในอดีตเพื่อสังเกตพฤติกรรม UI
+การเปิดใช้งานทำได้ง่ายๆ เพียงนำ Middleware `devtools` จาก `'zustand/middleware'` มาหุ้มรอบ Store Initializer และส่งชื่อ Action เป็นอาร์กิวเมนต์ที่ 3 ของฟังก์ชัน `set()`

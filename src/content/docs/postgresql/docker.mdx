@@ -1,0 +1,101 @@
+---
+title: Docker
+category: Database
+parentTitle: PostgreSQL 16
+version: v16.4
+updatedAt: 2026-10-17
+---
+
+## 1. คืออะไร และแก้ปัญหาอะไร
+
+การรัน **PostgreSQL 16 บน Docker** คือการบรรจุฐานข้อมูล PostgreSQL ให้อยู่ในรูปแบบซอฟต์แวร์คอนเทนเนอร์ (Containerized Database) ที่มีสภาพแวดล้อมระบบปฏิบัติการ การตั้งค่า และ Library พร้อมใช้งานครบถ้วนในตัว
+
+แนวทางนี้เข้ามาแก้ปัญหาคลาสสิกของนักพัฒนาเรื่อง **"Works on my machine"** ซึ่งเกิดจากการที่สมาชิกในทีมแต่ละคนใช้ระบบปฏิบัติการต่างกัน (macOS, Windows, Ubuntu) หรือติดตั้งเวอร์ชันของ PostgreSQL ไม่ตรงกัน ส่งผลให้เกิดข้อผิดพลาดในการรัน Migration หรือการทดสอบ การใช้งาน Docker ผ่านไฟล์ `docker-compose.yml` ทำให้ทุกคนในทีมสามารถเปิดฐานข้อมูลเวอร์ชัน 16 ที่มีสเปกเหมือนกันทุกประการได้ด้วยคำสั่งเดียวในเวลาไม่กี่วินาที
+
+## 2. Module และ Feature หลัก
+
+ในการคอนฟิก PostgreSQL 16 บน Docker Compose มีพารามิเตอร์และกลไกหลักที่จำเป็นต้องเข้าใจดังนี้:
+
+| ส่วนประกอบ / คอนฟิก | ใช้ทำอะไร |
+| --- | --- |
+| `postgres:16-alpine` | Base Image สำหรับรันคอนเทนเนอร์ โดยเลือกใช้รุ่น Alpine ซึ่งมีขนาดกะทัดรัดและปลอดภัยสูง |
+| `POSTGRES_USER` & `POSTGRES_PASSWORD` | กำหนด Superuser และรหัสผ่านเริ่มต้นสำหรับการเชื่อมต่อเข้าฐานข้อมูล |
+| `POSTGRES_DB` | ชื่อฐานข้อมูลตั้งต้นที่จะถูกสร้างขึ้นอัตโนมัติเมื่อคอนเทนเนอร์เริ่มทำงานครั้งแรก |
+| `volumes: pgdata:/var/lib/postgresql/data` | การทำ Persistent Volume เพื่อให้ข้อมูลตารางคงอยู่ถาวร แม้คอนเทนเนอร์จะถูกสั่งปิดหรือรีสตาร์ท |
+| `ports: "5432:5432"` | เปิดพอร์ต 5432 จากเครื่อง Host เข้าไปยังคอนเทนเนอร์ เพื่อให้ Backend (NestJS/Prisma) หรือ DBeaver เชื่อมต่อได้ |
+| `healthcheck` | ตรวจสอบความพร้อมของฐานข้อมูลด้วยคำสั่ง `pg_isready` เพื่อให้ Container อื่นรอจน DB บูตเสร็จก่อนเริ่มทำงาน |
+
+## 3. ตัวอย่างโค้ดการใช้งาน
+
+### ไฟล์ `docker-compose.yml` มาตรฐานสำหรับการพัฒนา
+
+โครงสร้างคอนฟิกพร้อม Volume และ Healthcheck สำหรับรันคู่กับ NestJS หรือ Full-Stack Project:
+
+```yaml filename="docker-compose.yml"
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: scripture-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgrespassword}
+      POSTGRES_DB: ${DB_NAME:-scripture_db}
+    ports:
+      - '5432:5432'
+    volumes:
+      # เก็บข้อมูลลง Named Volume เพื่อป้องกันข้อมูลหายเมื่อลบคอนเทนเนอร์
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-scripture_db}']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+    driver: local
+```
+
+### คำสั่งจัดการคอนเทนเนอร์ผ่าน Terminal
+
+```bash
+# 1. สั่งเปิดฐานข้อมูลในโหมด Background (-d)
+docker compose up -d postgres
+
+# 2. ตรวจสอบสถานะการทำงานและความพร้อม (Health status)
+docker compose ps
+
+# 3. เข้าสู่คอนโซล psql ภายในคอนเทนเนอร์โดยตรง
+docker exec -it scripture-postgres psql -U postgres -d scripture_db
+
+# 4. หยุดการทำงานคอนเทนเนอร์ (ข้อมูลใน Volume ยังคงอยู่ปลอดภัย)
+docker compose down
+```
+
+## 4. Callout สำคัญที่ควรรู้
+
+<Callout type="tip" title="เลือกใช้ Tag 'alpine' เสมอสำหรับสภาพแวดล้อมพัฒนา">
+Image ปกติของ `postgres:16` มีขนาดประมาณ 400 MB ขึ้นไป แต่หากเลือกใช้ `postgres:16-alpine` ขนาดจะลดลงเหลือเพียงไม่ถึง 90 MB ช่วยประหยัดพื้นที่ดิสก์และดาวน์โหลดได้รวดเร็วกว่าอย่างมาก
+</Callout>
+
+<Callout type="note" title="การรัน Migration สคริปต์อัตโนมัติตอนเริ่มต้น">
+หากต้องการให้ฐานข้อมูลรันไฟล์ SQL ตั้งต้นโดยอัตโนมัติ (เช่น สร้าง Table หรือ Extension `uuid-ossp`) สามารถ Mount โฟลเดอร์ที่มีไฟล์ `.sql` เข้าไปยัง `/docker-entrypoint-initdb.d/` ในคอนเทนเนอร์ได้
+</Callout>
+
+<Callout type="warning" title="ระวังการใช้คำสั่ง docker compose down -v">
+การเติมแฟล็ก `-v` (Volume) ต่อท้ายคำสั่ง `docker compose down` จะเป็นการลบ Named Volume ทั้งหมดทิ้งถาวร ส่งผลให้ข้อมูลทั้งหมดในตารางถูกล้างหายไปทันที จึงควรระมัดระวังในการใช้งาน
+</Callout>
+
+## 5. ข้อควรระวังและ Best Practices
+
+- **แยกไฟล์ `.env` และเพิ่มลงใน `.gitignore` เสมอ**: ห้าม Hardcode รหัสผ่านฐานข้อมูลลงในไฟล์ `docker-compose.yml` โดยตรง ให้ดึงค่าผ่านตัวแปรสภาพแวดล้อม และห้ามคอมมิตไฟล์ `.env` ขึ้นสู่ระบบควบคุมเวอร์ชัน (Git Repository)
+- **ตั้งค่า Healthcheck เพื่อป้องกัน Dependency Race Condition**: ในกรณีที่มี Service หลังบ้าน (เช่น NestJS API) รันอยู่ใน Compose เดียวกัน ต้องตั้งค่า `depends_on: postgres: condition: service_healthy` เพื่อให้ NestJS รอจน PostgreSQL ตอบสนองคำสั่ง `pg_isready` เรียบร้อยก่อน มิเช่นนั้น API จะแครชจากการต่อ DB ไม่ติด
+- **สำรองข้อมูลสม่ำเสมอด้วย `pg_dump`**: แม้จะมีการผูก Volume ไว้แล้ว แต่ก่อนทำการ Migrate ครั้งใหญ่หรืออัปเกรดเวอร์ชัน ควร Export ข้อมูลสำรองไว้เสมอด้วยคำสั่ง `docker exec scripture-postgres pg_dump -U postgres scripture_db > backup.sql`
+- **จำกัดการเปิดพอร์ตในระบบ Production**: สำหรับการ Deploy สู่เซิร์ฟเวอร์จริง ไม่ควรเปิดพอร์ต `5432:5432` ออกสู่อินเทอร์เน็ตสาธารณะ ให้เชื่อมต่อผ่าน Docker Internal Network หรือผูกเฉพาะกับ Localhost (`127.0.0.1:5432:5432`) เพื่อความปลอดภัยสูงสุด
+
+## 6. แหล่งอ้างอิง (Official Documentation)
+
+- [Official PostgreSQL Docker Image Documentation](https://hub.docker.com/_/postgres) — เอกสารทางการบน Docker Hub แสดงตัวแปร Environment Variables ทั้งหมด
+- [Docker Compose Specification](https://docs.docker.com/compose/) — คู่มือการกำหนดค่าคอนเทนเนอร์หลายตัวด้วย Docker Compose
+- [Prisma Deployment with Docker](https://www.prisma.io/docs/orm/more/development-environment/docker-compose) — ตัวอย่างการจัดเตรียม PostgreSQL บน Docker สำหรับโปรเจกต์ Prisma

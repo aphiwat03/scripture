@@ -1,0 +1,152 @@
+---
+title: Responsive Design
+category: Frontend
+parentTitle: CSS
+version: CSS3 / Modern CSS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**Responsive Web Design (RWD)** คือศาสตร์และศิลป์ในการทำให้หน้าเว็บสามารถแสดงผลได้อย่างลงตัวในทุกขนาดหน้าจอ ตั้งแต่ Apple Watch, สมาร์ตโฟน, แท็บเล็ต, ไปจนถึงหน้าจอ 4K Ultra-wide
+
+หัวใจสำคัญ:
+- **Mobile-First Approach**: เขียนสไตล์เริ่มต้นสำหรับหน้าจอมือถือ แล้วใช้ **`@media (min-width: ...)`** ขยายสไตล์สำหรับหน้าจอที่กว้างขึ้น
+- **Breakpoints ยอดนิยม**: `640px` (sm), `768px` (md), `1024px` (lg), `1280px` (xl)
+- **Container Queries (`@container`)**: นวัตกรรมพลิกวงการ! ปรับเปลี่ยนหน้าตาของ Component โดยอิงจาก **"ความกว้างของกล่องแม่ (Container)"** แทนที่จะอิงจากขนาดหน้าจอทั้งจอ (Viewport)
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ทำไมต้อง Mobile-First แทนที่จะเป็น Desktop-First?
+1. **Performance**: อุปกรณ์มือถือมีทรัพยากร CPU และเครือข่ายจำกัดที่สุด การโหลดสไตล์พื้นฐานที่เบาและกระชับก่อน ช่วยให้หน้าเกรดความเร็วบนมือถือสูงขึ้น
+2. **Mental Model**: ง่ายต่อการดูแล เพราะการขยายชิ้นส่วนจากคอลัมน์เดี่ยวในแนวตั้ง (`1 column`) ไปสู่หลายคอลัมน์ในแนวนอน (`3 columns`) มีความซับซ้อนน้อยกว่าการเขียนโค้ดเพื่อบีบยุบหน้าจอใหญ่ลงมา
+
+### Container Queries vs Media Queries
+- **Media Query**: สนใจแค่ขนาดของหน้าต่างเบราว์เซอร์ (`@media (min-width: 768px)`)
+- **Container Query**: สนใจขนาดของกล่องที่ Component นั้นสิงสถิตอยู่ (`@container (min-width: 400px)`) ทำให้เราสามารถนำการ์ดใบเดียวกันไปวางได้ทั้งใน **แถบข้าง Sidebar แคบๆ** (แสดงเป็นการ์ดแนวตั้ง) หรือใน **เนื้อหาหลักกว้างๆ** (กลายเป็นการ์ดแนวนอน) โดยการ์ดจะปรับหน้าตาตัวเองได้อย่างอิสระ!
+
+---
+
+## 3. ตัวอย่างโค้ด (Modern CSS)
+
+### ตัวอย่างที่ 1: การใช้ Container Queries สร้าง Reusable Card Component
+
+```css filename="card.css"
+/* 1. กำหนดให้กล่องแม่เป็น Container Context */
+.card-wrapper {
+  container-type: inline-size;
+  container-name: product-card;
+}
+
+/* 2. สไตล์เริ่มต้นสำหรับการ์ด (เมื่ออยู่ในพื้นที่แคบ เช่น Sidebar) */
+.product-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 3. เมื่อ Container กว้างเกิน 480px ให้สลับเป็นการ์ดแนวนอนอัตโนมัติ */
+@container product-card (min-width: 480px) {
+  .product-card {
+    flex-direction: row;
+    align-items: center;
+  }
+  .product-card img {
+    width: 140px;
+    height: 140px;
+    object-fit: cover;
+  }
+}
+```
+
+### ตัวอย่างที่ 2: Mobile-First Media Query แบบคลาสสิก
+
+```css filename="navigation.css"
+/* เริ่มต้น: เมนูมือถือซ่อนไว้ และเปิดเป็นแบบ Dropdown */
+.nav-menu {
+  display: none;
+  flex-direction: column;
+}
+
+.nav-menu.open {
+  display: flex;
+}
+
+/* หน้าจอแท็บเล็ต/เดสก์ท็อป (768px ขึ้นไป): แสดงเมนูแนวนอนถาวร */
+@media (min-width: 768px) {
+  .nav-menu {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 24px;
+  }
+  .hamburger-btn {
+    display: none; /* ซ่อนปุ่มแฮมเบอร์เกอร์บนจอใหญ่ */
+  }
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ใช้ Desktop-First และเขียน `max-width` ซ้อนทับไปมา
+
+```css
+/* ผิด: Desktop-first แก้ทับไปมาจน Overrides ตีกัน */
+.hero {
+  display: flex;
+}
+@media (max-width: 1024px) {
+  .hero { font-size: 20px; }
+}
+@media (max-width: 640px) {
+  .hero { display: block; font-size: 16px; }
+}
+```
+
+### ✅ โค้ดที่ถูกต้อง: Mobile-First ด้วย `min-width`
+
+```css
+/* ถูกต้อง: เขียนค่าเริ่มต้นสำหรับจอมือถือ แล้วค่อยๆ ขยายตาม Breakpoint */
+.hero {
+  display: block;
+  font-size: 16px;
+}
+@media (min-width: 768px) {
+  .hero {
+    display: flex;
+    font-size: 20px;
+  }
+}
+```
+
+---
+
+## 5. เทียบกับ Tailwind CSS v4
+
+Tailwind ออกแบบมาเป็น Mobile-First 100%:
+
+| CSS Media / Container Query | Tailwind CSS v4 Utility |
+| :--- | :--- |
+| `@media (min-width: 640px)` | `sm:flex-row` |
+| `@media (min-width: 768px)` | `md:grid-cols-2` |
+| `@media (min-width: 1024px)` | `lg:p-8` |
+| `container-type: inline-size;` | `@container` |
+| `@container (min-width: 28rem)` | `@md:flex-row` |
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมแนวทาง Mobile-First ถึงได้รับการยอมรับว่าเป็น Best Practice สากลเหนือกว่า Desktop-First?
+**แนวทางคำตอบ**:
+1. **ลำดับการประมวลผล (Performance)**: อุปกรณ์พกพามีขีดความสามารถต่ำกว่าเดสก์ท็อป การเขียนสไตล์หลักให้ตรงกับมือถือตั้งแต่แรกช่วยให้อุปกรณ์มือถือไม่ต้องเสียเวลา Parse สไตล์ที่ซับซ้อนของเดสก์ท็อปแล้วค่อยมาเขียนทับด้วย `max-width` ทีหลัง
+2. **สถาปัตยกรรมโค้ดที่สะอาดกว่า (Cleaner Code)**: การเริ่มจากโครงสร้างเรียบง่ายในแนวตั้ง (Single Column) แล้วค่อยๆ ขยายออกเป็น Multi-column ด้วย `min-width` จะลดปัญหาการชนกันของ Specificity และการ Reset สไตล์เดิมทิ้ง
+3. **พฤติกรรมผู้บริโภค**: ทราฟฟิกของผู้ใช้ส่วนใหญ่ในโลกปัจจุบัน (>60%) มาจากสมาร์ตโฟน การให้ความสำคัญกับหน้าจอมือถือเป็นอันดับแรกจึงสอดคล้องกับพฤติกรรมจริงของผู้ใช้และข้อกำหนด Mobile-first Indexing ของ Google
+
+### Q2: Container Queries มีข้อได้เปรียบเหนือ Media Queries ทั่วไปอย่างไรในการสร้าง Component-Driven Architecture?
+**แนวทางคำตอบ**: Media Queries อิงกับขนาด Viewport ทั้งจอเท่านั้น ทำให้ Component เดียวกัน (เช่น การ์ดบทความ) ไม่สามารถนำไปรียูสในบริบทที่ต่างกันได้ หากการ์ดถูกนำไปวางใน Sidebar แคบๆ มันก็จะยังคงคิดว่าหน้าจอใหญ่และแสดงผลเป็นการ์ดแนวนอนจนล้นจอ 
+ในทางกลับกัน Container Queries ช่วยให้ Component ปรับเปลี่ยน Layout ของตัวเองตาม **ขนาดความกว้างจริงของกล่องแม่ที่มันถูกนำไปวาง** ทำให้เกิด Truly Modular & Reusable Components อย่างแท้จริง

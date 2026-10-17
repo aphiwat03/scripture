@@ -1,0 +1,337 @@
+---
+title: Pitfalls & Senior Q&A
+category: Frontend
+parentTitle: Recharts
+version: Recharts v3 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การสร้าง Data Visualization ในระบบระดับ Enterprise เปรียบเสมือนสะพานเชื่อมระหว่าง **วิศวกรรมซอฟต์แวร์ (Software Engineering)** และ **จิตวิทยาการรับรู้ข้อมูล (Cognitive Psychology)** 
+
+ข้อผิดพลาดที่เกิดขึ้นในการทำงานจริงจึงมักจำแนกออกเป็น 2 มิติใหญ่:
+1. **Engineering Anti-patterns**: ข้อผิดพลาดเชิงสถาปัตยกรรม เช่น การทำให้อัตราเฟรมเรตตก (Frame Drop), การเกิด Hydration Mismatch ใน Next.js 16, อาการกราฟยุบหายไปจากหน้าจอ (Zero Height Collapse), หรือการกระตุ้น Animation วนลูปไม่รู้จบ
+2. **Visual & Cognitive Anti-patterns**: ข้อผิดพลาดที่ทำให้ผู้ใช้ตีความข้อมูลผิดพลาด เช่น การใช้ Pie Chart แสดงข้อมูล 25 หมวดหมู่จนกลายเป็น "วงล้อสีรุ้ง (Rainbow Wheel)", การไม่มีหน่วยวัดกำกับบนแกน, หรือการ Hardcode สีจนกราฟจมหายไปกับพื้นหลังเมื่อเปิด Dark Mode
+
+เอกสารนี้รวบรวม 7 ข้อผิดพลาดคลาสสิก, Production Readiness Checklist 8 ประการ, และคำถามสัมภาษณ์งานระดับ Senior เพื่อเป็นแนวทางปฏิบัติที่ดีที่สุด
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ทำไมข้อผิดพลาดเหล่านี้จึงเกิดขึ้นในระดับเอนจิน?
+
+* **Height 0px Collapse**: `ResponsiveContainer` ทำงานโดยการอ่านมิติของ Parent DOM ผ่าน `clientWidth` และ `clientHeight` หากเราไม่กำหนดความสูงใน Parent ให้ชัดเจน และ Parent มี `height: auto` ตามค่าเริ่มต้นของ CSS ตัวเบราว์เซอร์จะไม่สามารถประเมินความสูงได้ ส่งผลให้ `clientHeight = 0` และ Recharts จะไม่เรนเดอร์ SVG หรือเรนเดอร์ด้วยความสูง 0 พิกเซล
+* **Animation Thrashing**: เมื่อประกาศอาเรย์ข้อมูลไว้ใน Body ของฟังก์ชันคอมโพเนนต์ (`const data = [...]`) React จะสร้าง Object Memory Reference ใหม่ทุกรอบการเรนเดอร์ แม้ค่าข้างในจะเหมือนเดิมทุกประการ Recharts จะเข้าใจว่าข้อมูลชุดนี้เป็น "ข้อมูลใหม่" และจะสั่งเริ่มเล่น CSS/SVG Animation ใหม่ตั้งแต่ต้น ส่งผลให้กราฟขยับเต้นตลอดเวลาเมื่อผู้ใช้ขยับเมาส์หรือพิมพ์ข้อความในหน้าเว็บ
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่างที่ 1: Refactoring โค้ดที่มีข้อผิดพลาดสู่มาตรฐาน Production
+
+เปรียบเทียบการแก้ไขปัญหา Height Collapse, Unstable References, และ Dark Mode Theming ในคอมโพเนนต์เดียว
+
+```tsx filename="src/components/dashboard/production-line-chart.tsx"
+'use client';
+
+import * as React from 'react';
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+
+interface PerformancePoint {
+  time: string;
+  throughput: number;
+}
+
+// 1. นำข้อมูลคงที่ออกจาก Component Scope เพื่อรักษา Object Reference
+const BASELINE_DATA: PerformancePoint[] = [
+  { time: '00:00', throughput: 1200 },
+  { time: '04:00', throughput: 850 },
+  { time: '08:00', throughput: 3400 },
+  { time: '12:00', throughput: 4800 },
+  { time: '16:00', throughput: 5100 },
+  { time: '20:00', throughput: 3900 },
+];
+
+export function ProductionLineChart() {
+  // ฟอร์แมตตัวเลขพร้อมหน่วยกำกับชัดเจน
+  const formatThroughput = React.useCallback((value: number) => {
+    return `${value.toLocaleString()} req/s`;
+  }, []);
+
+  return (
+    <div className="w-full rounded-2xl border border-border bg-card p-6 shadow-sm">
+      <div className="mb-4">
+        <h3 className="text-base font-bold text-card-foreground">
+          ปริมาณทราฟฟิกขาเข้าระบบ (API Throughput)
+        </h3>
+        <p className="text-xs text-muted-foreground">หน่วยวัด: คำขอต่อวินาที (Requests per Second)</p>
+      </div>
+
+      {/* กำหนดความสูงที่แน่นอนให้ Parent เสมอ ป้องกันกราฟยุบ 0px */}
+      <div className="h-[320px] w-full min-w-0">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={BASELINE_DATA} margin={{ top: 10, right: 10, left: 10, bottom: 0 }}>
+            {/* ใช้ CSS Variables แทนรหัสสี HEX */}
+            <CartesianGrid strokeDasharray="3 3" vertical={false} className="stroke-border/60" />
+            
+            <XAxis
+              dataKey="time"
+              tickLine={false}
+              axisLine={false}
+              tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }}
+            />
+            
+            {/* ระบุหน่วยชัดเจนใน Tick */}
+            <YAxis
+              tickLine={false}
+              axisLine={false}
+              tickFormatter={(v) => `${(v / 1000).toFixed(1)}k`}
+              tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }}
+            />
+
+            <Tooltip
+              content={({ active, payload, label }) => {
+                if (!active || !payload?.length) return null;
+                return (
+                  <div className="rounded-lg border border-border bg-popover p-2.5 text-xs shadow-md">
+                    <p className="font-semibold text-popover-foreground">{label}</p>
+                    <p className="text-muted-foreground">
+                      ทราฟฟิก: <span className="font-bold text-foreground">{formatThroughput(Number(payload[0].value))}</span>
+                    </p>
+                  </div>
+                );
+              }}
+            />
+
+            <Line
+              type="monotone"
+              dataKey="throughput"
+              stroke="hsl(var(--primary))"
+              strokeWidth={2.5}
+              dot={{ r: 4, fill: 'hsl(var(--primary))' }}
+              activeDot={{ r: 6 }}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: แก้วงล้อสีรุ้ง (Rainbow Pie Chart) ด้วยเทคนิค Top 5 + "อื่นๆ (Others)"
+
+เมื่อมีหมวดหมู่สินค้า 20+ กลุ่ม การใช้ Pie Chart จะทำให้ชิ้นพายแคบจนอ่านไม่ออก ตัวอย่างนี้แสดงฟังก์ชันจัดระเบียบข้อมูลให้เหลือ Top 5 กลุ่มใหญ่ และยุบที่เหลือเป็นก้อน "อื่นๆ" พร้อมแสดงผลแบบ Horizontal BarChart
+
+```tsx filename="src/components/dashboard/consolidated-category-chart.tsx"
+'use client';
+
+import * as React from 'react';
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+
+export interface RawCategorySales {
+  category: string;
+  revenue: number;
+}
+
+// จำลองข้อมูลดิบ 15 หมวดหมู่
+const rawCategories: RawCategorySales[] = [
+  { category: 'สมาร์ตโฟน', revenue: 4500000 },
+  { category: 'คอมพิวเตอร์พกพา', revenue: 3800000 },
+  { category: 'แท็บเล็ต', revenue: 2100000 },
+  { category: 'หูฟังไร้สาย', revenue: 1500000 },
+  { category: 'สมาร์ตวอตช์', revenue: 1200000 },
+  { category: 'เคสมือถือ', revenue: 450000 },
+  { category: 'ฟิล์มกระจก', revenue: 320000 },
+  { category: 'สายชาร์จ', revenue: 280000 },
+  { category: 'อะแดปเตอร์', revenue: 260000 },
+  { category: 'พาวเวอร์แบงก์', revenue: 210000 },
+  { category: 'ขาตั้งมือถือ', revenue: 140000 },
+  { category: 'กระเป๋าโน้ตบุ๊ก', revenue: 95000 },
+];
+
+/**
+ * ฟังก์ชันยุบหมวดหมู่: รักษา Top N หมวด และรวมส่วนที่เหลือเป็น "อื่นๆ"
+ */
+function consolidateTopCategories(data: RawCategorySales[], topN = 5) {
+  // 1. เรียงลำดับจากยอดมากไปน้อย
+  const sorted = [...data].sort((a, b) => b.revenue - a.revenue);
+
+  // 2. สกัด Top N
+  const topCategories = sorted.slice(0, topN);
+
+  // 3. รวมยอดส่วนที่เหลือ
+  const others = sorted.slice(topN);
+  const othersTotal = others.reduce((acc, curr) => acc + curr.revenue, 0);
+
+  if (othersTotal > 0) {
+    topCategories.push({
+      category: `อื่นๆ (${others.length} หมวดหมู่)`,
+      revenue: othersTotal,
+    });
+  }
+
+  return topCategories;
+}
+
+export function ConsolidatedCategoryChart() {
+  const chartData = React.useMemo(() => {
+    return consolidateTopCategories(rawCategories, 5);
+  }, []);
+
+  return (
+    <div className="w-full rounded-2xl border border-border bg-card p-6 shadow-sm">
+      <div className="mb-4">
+        <h3 className="text-base font-bold text-card-foreground">
+          หมวดหมู่สินค้าสร้างรายได้สูงสุด (Top 5 + อื่นๆ)
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          แก้ไขปัญหาวงล้อสีรุ้งด้วยการจัดกลุ่มข้อมูลย่อยให้กระชับและอ่านง่าย
+        </p>
+      </div>
+
+      <div className="h-[300px] w-full min-w-0">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart
+            layout="vertical"
+            data={chartData}
+            margin={{ top: 10, right: 30, left: 40, bottom: 0 }}
+          >
+            <CartesianGrid horizontal={false} strokeDasharray="3 3" className="stroke-border/60" />
+            <XAxis
+              type="number"
+              tickFormatter={(v) => `฿${(v / 1e6).toFixed(1)}M`}
+              tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
+            />
+            <YAxis
+              type="category"
+              dataKey="category"
+              width={140}
+              tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
+            />
+            <Tooltip
+              formatter={(val: number) => [`฿${val.toLocaleString()}`, 'ยอดขาย']}
+            />
+            <Bar
+              dataKey="revenue"
+              fill="hsl(var(--chart-1, 220 70% 50%))"
+              radius={[0, 4, 4, 0]}
+              barSize={20}
+            />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีอื่น (Recharts vs Canvas/Chart.js/D3)
+
+| มิติความเสี่ยง | Recharts (React SVG) | Chart.js (HTML5 Canvas) | D3.js (Raw Imperative SVG) |
+| :--- | :--- | :--- | :--- |
+| **ความเสี่ยงเรื่อง Zero Height Collapse** | **สูงมาก** หาก Parent ไม่มีมิติความสูงชัดเจน | ปานกลาง Canvas กำหนดความกว้างผ่าน width/height attribute | ต่ำ มักคำนวณผ่าน SVG viewBox |
+| **ความเสี่ยง Hydration Mismatch ใน Next.js** | **สูง** ต้องการ DOM measurement จึงต้องใช้ Dynamic Import หรือ Mount Guard | **สูง** ต้องการ `<canvas>` ref บน Client | **สูง** หากนำมาผูกกับ React Tree |
+| **Memory Leak จาก Animation Loop** | ปานกลาง หากสร้าง Data Reference ซ้ำๆ ใน render | ต่ำ แต่ต้องระวังการลืม `.destroy()` instance | สูง หาก bind event listeners โดยไม่ clean up |
+| **ความง่ายในการแก้ไข Visual Anti-patterns** | **ง่ายที่สุด** มีระบบ Declarative Props ปรับเปลี่ยน Layout ได้เร็ว | ปานกลาง ต้องแก้ผ่าน Nested Config Object | ซับซ้อน ต้องเขียน D3 Scale และ Axis ใหม่ |
+
+---
+
+## 5. ผิด vs ถูก (7 Anti-patterns vs Best Practices)
+
+### 1) ลืมกำหนดความสูงให้ ResponsiveContainer จนกราฟยุบหาย (0px Height)
+* ❌ **ผิด**: ครอบ `<ResponsiveContainer width="100%" height="100%">` ไว้ใน `<div>` เปล่าๆ ที่ไม่มีคลาสความสูง กราฟจะหายวับไปจากหน้าจอ
+* ✅ **ถูก**: กำหนดสไตล์ความสูงให้ Parent เสมอ เช่น `<div className="h-[350px] w-full min-w-0">`
+
+### 2) ลืมใส่ `'use client'` ใน Next.js App Router
+* ❌ **ผิด**: พยายาม import Recharts ในไฟล์ Server Component โดยไม่มี directive ผลลัพธ์คือเซิร์ฟเวอร์จะโยนข้อผิดพลาดทันที
+* ✅ **ถูก**: ใส่ `'use client'` ไว้บรรทัดแรกสุดของไฟล์ชาร์ต หรือโหลดผ่าน `next/dynamic(() => import(...), { ssr: false })`
+
+### 3) ประกาศ Data Array ซ้อนใน Component Body
+* ❌ **ผิด**: `const data = [{ a: 1 }, { a: 2 }];` ข้างใน Body ของฟังก์ชันคอมโพเนนต์ ทุกครั้งที่ Parent re-render กราฟจะเริ่มเล่น Animation ใหม่ซ้ำๆ
+* ✅ **ถูก**: ย้ายอาเรย์ข้อมูลออกไปไว้นอกฟังก์ชัน หรือใช้ `useMemo` หากข้อมูลมาจาก Props/State
+
+### 4) ใช้ PieChart กับข้อมูล 20+ หมวดหมู่จนกลายเป็นวงล้อสีรุ้ง
+* ❌ **ผิด**: เรนเดอร์ Pie/Donut Chart ที่มีชิ้นพาย 25 ชิ้น ผู้ใช้ไม่สามารถแยกแยะสี และ Label จะซ้อนกันจนเละ
+* ✅ **ถูก**: กฎสากลของ Pie Chart คือไม่ควรเกิน **5-7 หมวดหมู่** หากมีมากกว่านั้นให้รวมกลุ่มย่อยเป็น "อื่นๆ" หรือเปลี่ยนไปใช้ **Horizontal BarChart** แทน
+
+### 5) กราฟที่ไม่มีแกน ไม่มีหน่วยวัดกำกับ
+* ❌ **ผิด**: แสดงตัวเลขบนแกน Y เป็น `10, 20, 30` โดยไม่บอกว่าเป็น "กิโลกรัม", "ล้านบาท", หรือ "จำนวนคน"
+* ✅ **ถูก**: กำหนด `unit`, `tickFormatter`, และใส่ Subtitle ระบุหน่วยวัดอย่างชัดเจน
+
+### 6) Hardcode สี HEX ใน SVG Fill
+* ❌ **ผิด**: ใส่ `<Bar fill="#1e293b" />` เมื่อผู้ใช้สลับเป็น Dark Mode แท่งกราฟจะกลืนไปกับพื้นหลังสีเข้ม
+* ✅ **ถูก**: ใช้ CSS Variables เช่น `fill="var(--color-sales)"` หรือ `fill="hsl(var(--primary))"`
+
+### 7) ลืมใส่ Unique `key` ใน Custom Legend หรือ Cell
+* ❌ **ผิด**: `{data.map((entry, index) => <Cell fill={colors[index]} />)}` โดยไม่มี `key`
+* ✅ **ถูก**: ใส่ Key ที่มีความเสถียรเสมอ เช่น `<Cell key={`cell-${entry.id}`} fill={...} />` เพื่อให้ React Reconciliation ทำงานได้อย่างถูกต้อง
+
+---
+
+## 6. Production Readiness Checklist (8 ข้อปฏิบัติก่อนขึ้นระบบจริง)
+
+ก่อนนำชาร์ตขึ้นสู่ Production บน Next.js 16 ให้ตรวจสอบเช็กลิสต์ทั้ง 8 ข้อนี้:
+
+- [ ] **1. Container Dimension**: Parent Element ของ `ResponsiveContainer` มีการกำหนด `height` ชัดเจน และมีคลาส `min-w-0` เพื่อป้องกัน Flex overflow
+- [ ] **2. SSR & Hydration Guard**: มีการใส่ `'use client'` หรือโหลดผ่าน `next/dynamic(..., { ssr: false })` พร้อมโครงร่าง Skeleton
+- [ ] **3. Reference Stability**: ตัวแปร Data Array และ Functions ส่งเข้า Props ถูกห่อหุ้มด้วย `useMemo` และ `useCallback` เรียบร้อยแล้ว
+- [ ] **4. Full Theme Support**: ปราศจากการ Hardcode สี HEX ทุกสีผูกกับ Semantic CSS Variables เพื่อรองรับ Light/Dark Mode
+- [ ] **5. Responsive Density**: ทดสอบบนหน้าจอมือถือ (Viewport 375px) แกน X ไม่ทับซ้อนกัน และสลับเป็น Horizontal Bar ในหมวดหมู่ชื่อยาว
+- [ ] **6. Accessibility (a11y)**: ระบุ `aria-hidden="true"` สำหรับ SVG และมี Accessible Table/Summary ซ่อนไว้ในคลาส `sr-only`
+- [ ] **7. Empty & Error States**: มี UI รองรับกรณีข้อมูลเป็นอาร์เรย์ว่าง `[]` (Empty State) และมี Error Boundary ครอบ
+- [ ] **8. High Density Safeguard**: กรณีข้อมูลเกิน 300 จุด มีการปิด Animation (`isAnimationActive={false}`) หรือผ่านอัลกอริทึม Downsampling
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Senior Interview Questions & Answers)
+
+### Q1: หากพบปัญหาว่าหน้าจอ Dashboard มีอาการกระตุกรุนแรง (Jank) เมื่อผู้ใช้เลื่อนเมาส์ผ่านกราฟ Recharts คุณจะใช้เครื่องมือและขั้นตอนอย่างไรในการวิเคราะห์หาสาเหตุและแก้ไข?
+**แนวทางตอบแบบ Senior Developer**:
+1. **Profiling ผ่าน Chrome DevTools**:
+   - เปิดแท็บ **Performance** เพื่อบันทึก Frame Rate ระหว่างการ Hover เมาส์ หากพบแถบสีแดงยาวใน Main Thread และเกิด **Layout Thrashing** หรือ **Recalculate Style** ซ้ำๆ แสดงว่ามีปัญหาเรื่อง Re-render หรือ ResizeObserver
+   - ตรวจสอบแท็บ **React DevTools Profiler** เพื่อดูว่าคอมโพเนนต์ใดที่ถูก Re-render ซ้ำขณะที่ขยับเมาส์
+2. **วิเคราะห์สาเหตุและวิธีแก้**:
+   - **Tooltip Re-render**: ตรวจสอบว่า Custom Tooltip ส่งผลกระทบทำให้ Parent Re-render หรือไม่ โดยแยก Tooltip State ออกมาให้แคบที่สุด
+   - **SVG Animation**: ตรวจสอบว่ามี State ใดใน Parent กำลังเปลี่ยนจนทำให้ Data Array ถูกสร้างใหม่หรือไม่ หากมี ให้ตรึงด้วย `useMemo` หรือปิด Animation ด้วย `isAnimationActive={false}`
+   - **DOM Node Count**: หากมี Data Points มากกว่า 1,000 จุด ให้ทำ LTTB Downsampling เพื่อลดจำนวน SVG Elements ใน DOM Tree ทันที
+
+### Q2: ในฐานะ Fullstack / Lead Frontend ทำไมคุณถึงแนะนำหรือคัดค้านการใช้ Pie Chart / Donut Chart สำหรับรายงานทางการเงินของผู้บริหาร?
+**แนวทางตอบแบบ Senior Developer**:
+- **คัดค้านในกรณี**: ข้อมูลมีสัดส่วนใกล้เคียงกัน (เช่น 23% vs 21% vs 19%) หรือมีหมวดหมู่มากกว่า 5-7 กลุ่ม เพราะสมองมนุษย์ประเมิน "พื้นที่มุมองศา (Angular Area)" ได้แย่กว่า "ความยาวของแท่ง (Linear Length)" อย่างมีนัยสำคัญ
+- **ข้อแนะนำเชิงทดแทน**: หากต้องการเปรียบเทียบสัดส่วนอย่างแม่นยำ ควรเปลี่ยนไปใช้ **Horizontal BarChart** เรียงตามลำดับยอดเงิน ซึ่งจะทำให้อ่านง่ายกว่ามาก
+- **ยินยอมให้ใช้ได้เฉพาะ**: ต้องการเน้นสัดส่วนที่แตกต่างกันชัดเจนและมีหมวดหมู่ไม่เกิน 3-4 กลุ่ม (เช่น ยอดขายในประเทศ 80% vs ต่างประเทศ 20%)
+
+### Q3: อธิบายแนวทางการออกแบบ Error Boundary และ Empty State สำเร็จรูปสำหรับ Chart Widget ในระบบระดับ Enterprise
+**แนวทางตอบแบบ Senior Developer**:
+เราไม่ควรปล่อยให้ชาร์ตพังแล้วดึงหน้า Dashboard ทั้งหน้าล่มไปด้วย (Blast Radius Containment):
+1. **Granular Error Boundary**: ห่อ Chart แต่ละตัวด้วย Error Boundary เฉพาะจุด เมื่อเกิด Error ทางเรขาคณิต (เช่น ข้อมูลมีค่า NaN หรือพิกัดไม่สมบูรณ์) วิดเจ็ตนั้นจะแสดงการ์ดแจ้งเตือนพร้อมปุ่ม "ลองใหม่อีกครั้ง (Retry)" ขณะที่วิดเจ็ตอื่นยังทำงานได้ตามปกติ
+2. **Explicit Empty State**: เมื่อ API คืนค่าเป็นอาเรย์ว่าง `[]` แทนที่จะแสดงกราฟที่มีแต่แกนว่างเปล่า ให้สลับไปแสดง UI Illustration พร้อมข้อความ เช่น *"ยังไม่มีข้อมูลการขายในช่วงเวลานี้"* เพื่อให้ผู้ใช้ไม่สับสนว่าระบบโหลดค้างหรือไม่
+
+### Q4: ทำไมการใช้ `key` ใน SVG List Rendering (เช่น `<Cell />` ใน Recharts) จึงมีความสำคัญอย่างยิ่งต่อประสิทธิภาพและบั๊กการแสดงผลสี?
+**แนวทางตอบแบบ Senior Developer**:
+เมื่อชุดข้อมูลของชาร์ตมีการเปลี่ยนแปลง (เช่น การสลับฟิลเตอร์หรือการลบหมวดหมู่บางตัว):
+- หากเราใช้ `index` เป็น key (`key={index}`) หรือไม่ใส่ key เลย React Reconciliation Algorithm จะนำ DOM Node เดิมกลับมาใช้ซ้ำโดยยึดตามลำดับ Index ซึ่งอาจทำให้ Attribute `fill` ของสีเก่าตกค้างอยู่บนแท่งข้อมูลใหม่ หรือทำให้ Animation การสลับตำแหน่งแท่งทำงานผิดเพี้ยน
+- การใช้ Stable Unique Identifier เช่น `key={`cell-${entry.categoryId}`}` จะช่วยให้ React ทราบอย่างแท้จริงว่า Node ใดถูกเพิ่ม ย้าย หรือลบออก ส่งผลให้การเปลี่ยนผ่านของสีและการแสดงผล SVG สอดคล้องกับข้อมูลจริงอย่างแม่นยำ 100%

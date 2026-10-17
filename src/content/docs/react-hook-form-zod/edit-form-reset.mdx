@@ -1,0 +1,424 @@
+---
+title: Edit Form & State Reset
+category: Frontend
+parentTitle: React Hook Form + Zod
+version: RHF v7 & Zod v4 (Next.js 16)
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+วงจรชีวิตของ **แบบฟอร์มแก้ไขข้อมูลเดิม (Edit Mode Form)** มีความซับซ้อนกว่าแบบฟอร์มสร้างใหม่ (Create Mode) อย่างมาก เนื่องจากข้อมูลตั้งต้นไม่ได้มีอยู่ทันทีตอนที่คอมโพเนนต์ถูกเรนเดอร์ครั้งแรก แต่ต้องรอการดึงข้อมูลแบบ Asynchronous จากเซิร์ฟเวอร์ (เช่น การยิง `useQuery` ของ TanStack Query v5)
+
+ปัญหาคลาสสิกที่นักพัฒนามักพบเจอในขั้นตอนนี้:
+1. **ช่องอินพุตว่างเปล่า (Empty Form Bug)**: การส่ง `defaultValues: query.data` ตรงๆ จะไม่ได้ผล เพราะในเรนเดอร์แรกสุด ค่า `query.data` จะยังเป็น `undefined` และ RHF จะแคชค่าเริ่มต้นนั้นไว้โดยไม่สนใจข้อมูลที่โหลดเสร็จในภายหลัง
+2. **การถูกเขียนทับข้อมูลกลางคัน (Data Overwrite Glitch)**: หากมี Background Revalidation จาก TanStack Query ขณะที่ผู้ใช้กำลังพิมพ์แก้ไขข้อมูลอยู่ การสั่ง `form.reset(data)` แบบทื่อๆ จะไปลบสิ่งที่ผู้ใช้พิมพ์ทิ้งทั้งหมด
+3. **การสูญหายของข้อมูลที่แก้ไข (Unsaved Changes)**: หากผู้ใช้เผลอกดปิดแท็บเบราว์เซอร์, รีเฟรชหน้า, หรือคลิกลิงก์เปลี่ยนหน้าใน Next.js โดยไม่ได้กดบันทึก ข้อมูลที่อุตส่าห์พิมพ์ไว้อาจสูญหายไปทันทีหากไม่มีการดักจับสถานะ **`isDirty`**
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 วงจรชีวิตของ `defaultValues` และการทำงานของ `reset()`
+
+ใน React Hook Form ตัวแปร **`defaultValues`** ไม่ใช่แค่ "ค่าที่แสดงในช่อง" แต่มันคือ **"จุดอ้างอิงฐาน (Baseline Reference)"** สำหรับการคำนวณ:
+- **`formState.isDirty`**: ตรวจสอบว่ามีค่าใดแตกต่างจาก Baseline หรือไม่ (`deepEqual(currentValues, defaultValues)`)
+- **`fieldState.isDirty`**: ตรวจสอบสถานะการแก้ไขของฟิลด์รายช่อง
+
+```
+[ Initial Component Mount ]
+   └── defaultValues: { ... }  <--- RHF จดจำค่านี้เป็น Baseline ตลอดไป
+         │
+         ▼
+[ Asynchronous API Data Loaded ]
+   └── useQuery คืนค่า { title: "New Title" }
+         │
+         ▼
+   ❌ หากไม่เรียก reset(): Form จะยังคงยึด defaultValues เดิม
+   ✅ เมื่อเรียก form.reset(newData): RHF จะทำ 2 อย่างพร้อมกัน:
+        1. เปลี่ยนค่าในฟิลด์ปัจจุบันทั้งหมดเป็น newData
+        2. กำหนด Baseline defaultValues ใหม่ให้เท่ากับ newData (ทำให้ isDirty กลายเป็น false)
+```
+
+### 2.2 การป้องกันการทับข้อมูลด้วย `keepDirtyValues: true`
+
+หากในหน้าจอเปิดฟังก์ชัน Polling หรือ TanStack Query มีการ Refetch เมื่อผู้ใช้สลับหน้าต่างกลับมา (`refetchOnWindowFocus: true`) ข้อมูลใหม่จาก API อาจส่งเข้ามาใน `useEffect`:
+
+```tsx
+// ❌ ทำลายสิ่งที่ผู้ใช้พิมพ์:
+form.reset(data);
+
+// ✅ ปลอดภัยสูงสุด:
+form.reset(data, {
+  keepDirtyValues: true, // ช่องไหนที่ผู้ใช้พิมพ์แก้ไขแล้ว ให้คงค่าที่พิมพ์ไว้ ห้ามทับ!
+  keepErrors: true,      // รักษาข้อความแจ้งเตือนข้อผิดพลาดไว้
+});
+```
+
+ด้วย Option `keepDirtyValues: true` ตัว RHF จะตรวจสอบว่าฟิลด์ใดที่ `isDirty === true` แล้วจะข้ามการ Reset ฟิลด์นั้นไป และจะอัปเดตเฉพาะฟิลด์ที่ผู้ใช้ยังไม่ได้แตะต้องเท่านั้น
+
+### 2.3 สถาปัตยกรรมป้องกันข้อมูลสูญหาย (Unsaved Changes Interception)
+
+การแจ้งเตือน Unsaved Changes มี 2 ระดับ:
+1. **Browser-level (ปิดแท็บ / ปิดเบราว์เซอร์ / รีเฟรช)**: ดักจับผ่าน Native DOM Event `beforeunload` เมื่อ `isDirty === true`
+2. **In-app Navigation (คลิกลิงก์ภายใน Next.js)**: ใน Next.js 16 App Router เราสามารถดักจับการเปลี่ยนเส้นทางด้วย Custom Dialog หรือ Custom Router wrapper ร่วมกับ `isDirty`
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+ตัวอย่างระบบแก้ไขสัญญาว่าจ้างพนักงาน (`EmployeeContractEditForm.tsx`) ที่เชื่อมต่อกับ TanStack Query v5, Zod v4, มีระบบดักจับ Unsaved Changes, และปุ่มย้อนคืนค่าเดิม:
+
+```tsx filename="src/features/employees/components/EmployeeContractEditForm.tsx"
+'use client';
+
+import React, { useEffect } from 'react';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { AlertTriangle, Check, Loader2, RotateCcw } from 'lucide-react';
+
+// ==========================================
+// 1. Zod v4 Schema
+// ==========================================
+const contractSchema = z.object({
+  employeeId: z.string(),
+  fullName: z.string().min(3, 'ชื่อต้องมีความยาวอย่างน้อย 3 ตัวอักษร'),
+  positionTitle: z.string().min(2, 'กรุณาระบุตำแหน่งงาน'),
+  baseSalary: z.number().min(15000, 'ฐานเงินเดือนต้องไม่ต่ำกว่า 15,000 บาท'),
+  contractType: z.enum(['FULL_TIME', 'PROBATION', 'CONTRACTOR']),
+  effectiveDate: z.string().min(1, 'กรุณาระบุวันที่มีผลบังคับใช้'),
+  internalNotes: z.string().max(500, 'บันทึกเพิ่มเติมต้องไม่เกิน 500 ตัวอักษร').optional(),
+});
+
+type ContractFormValues = z.infer<typeof contractSchema>;
+
+// Mock API Functions
+async function fetchEmployeeContract(employeeId: string): Promise<ContractFormValues> {
+  const res = await fetch(`/api/employees/${employeeId}/contract`);
+  if (!res.ok) throw new Error('ไม่สามารถโหลดข้อมูลสัญญาจ้างได้');
+  return res.json();
+}
+
+async function updateEmployeeContract(payload: ContractFormValues): Promise<void> {
+  const res = await fetch(`/api/employees/${payload.employeeId}/contract`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error('เกิดข้อผิดพลาดในการบันทึกข้อมูล');
+}
+
+// ==========================================
+// 2. Custom Hook ดักจับ Browser Navigation (Unsaved Changes)
+// ==========================================
+function usePromptOnUnsavedChanges(isDirty: boolean) {
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isDirty) {
+        e.preventDefault();
+        e.returnValue = ''; // มาตรฐานเบราว์เซอร์สำหรับการแสดง Dialog ยืนยัน
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [isDirty]);
+}
+
+// ==========================================
+// 3. Main Edit Form Component
+// ==========================================
+interface EmployeeContractEditFormProps {
+  employeeId: string;
+}
+
+export function EmployeeContractEditForm({ employeeId }: EmployeeContractEditFormProps) {
+  const queryClient = useQueryClient();
+
+  // 1. ดึงข้อมูลสัญญาเดิมผ่าน TanStack Query v5
+  const {
+    data: contractData,
+    isPending,
+    isError,
+    error,
+  } = useQuery({
+    queryKey: ['employee-contract', employeeId],
+    queryFn: () => fetchEmployeeContract(employeeId),
+    staleTime: 1000 * 60 * 5, // แคช 5 นาที
+  });
+
+  // 2. ประกาศ React Hook Form
+  const {
+    register,
+    handleSubmit,
+    reset,
+    formState: { errors, isDirty, isSubmitting },
+  } = useForm<ContractFormValues>({
+    resolver: zodResolver(contractSchema),
+    defaultValues: {
+      employeeId,
+      fullName: '',
+      positionTitle: '',
+      baseSalary: 15000,
+      contractType: 'FULL_TIME',
+      effectiveDate: '',
+      internalNotes: '',
+    },
+  });
+
+  // 3. ซิงค์ข้อมูลจาก Query เข้าสู่ Form อย่างปลอดภัยเมื่อโหลดเสร็จ
+  useEffect(() => {
+    if (contractData) {
+      // ✅ ใช้ keepDirtyValues เพื่อไม่ให้ทับข้อมูลที่ผู้ใช้เริ่มพิมพ์ไปแล้ว
+      reset(contractData, { keepDirtyValues: true });
+    }
+  }, [contractData, reset]);
+
+  // 4. เปิดใช้งานการแจ้งเตือนเมื่อออกจากหน้าจอ
+  usePromptOnUnsavedChanges(isDirty);
+
+  // 5. Mutation สำหรับบันทึกข้อมูล
+  const mutation = useMutation({
+    mutationFn: updateEmployeeContract,
+    onSuccess: (_, variables) => {
+      // อัปเดตแคช และรีเซ็ต Baseline defaultValues ใหม่ให้ isDirty กลายเป็น false
+      queryClient.setQueryData(['employee-contract', employeeId], variables);
+      reset(variables);
+      alert('บันทึกการแก้ไขสัญญาจ้างเรียบร้อยแล้ว');
+    },
+  });
+
+  const onSubmit = (values: ContractFormValues) => {
+    mutation.mutate(values);
+  };
+
+  // จัดการกรณี Loading และ Error
+  if (isPending) {
+    return (
+      <div className="flex flex-col items-center justify-center p-12 space-y-3 bg-slate-50 dark:bg-slate-900 rounded-xl border">
+        <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+        <p className="text-sm text-slate-500 font-medium">กำลังโหลดข้อมูลสัญญาจ้างจากฐานข้อมูล...</p>
+      </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <div className="p-6 bg-red-50 text-red-700 rounded-xl border border-red-200">
+        <h3 className="font-bold">เกิดข้อผิดพลาดในการโหลดข้อมูล</h3>
+        <p className="text-sm mt-1">{error?.message || 'ไม่สามารถติดต่อเซิร์ฟเวอร์ได้'}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-2xl mx-auto p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm space-y-6">
+      {/* Header พร้อมสถานะ Unsaved Warning */}
+      <div className="flex items-center justify-between border-b pb-4">
+        <div>
+          <h2 className="text-lg font-bold text-slate-900 dark:text-white">แก้ไขสัญญาจ้างพนักงาน</h2>
+          <p className="text-xs text-slate-500">รหัสพนักงาน: {employeeId}</p>
+        </div>
+        {isDirty && (
+          <span className="flex items-center space-x-1.5 text-xs font-semibold px-2.5 py-1 bg-amber-100 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 rounded-full border border-amber-300">
+            <AlertTriangle className="w-3.5 h-3.5" />
+            <span>มีข้อมูลที่ยังไม่บันทึก</span>
+          </span>
+        )}
+      </div>
+
+      <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+        {/* Full Name */}
+        <div>
+          <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">ชื่อ-นามสกุลพนักงาน</label>
+          <input
+            {...register('fullName')}
+            className="w-full mt-1 px-3 py-2 text-sm border rounded-md dark:bg-slate-800"
+          />
+          {errors.fullName && <p className="text-xs text-red-500 mt-1">{errors.fullName.message}</p>}
+        </div>
+
+        {/* Position Title & Salary */}
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">ตำแหน่งงาน</label>
+            <input
+              {...register('positionTitle')}
+              className="w-full mt-1 px-3 py-2 text-sm border rounded-md dark:bg-slate-800"
+            />
+            {errors.positionTitle && <p className="text-xs text-red-500 mt-1">{errors.positionTitle.message}</p>}
+          </div>
+
+          <div>
+            <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">ฐานเงินเดือน (บาท/เดือน)</label>
+            <input
+              type="number"
+              {...register('baseSalary', { valueAsNumber: true })}
+              className="w-full mt-1 px-3 py-2 text-sm border rounded-md dark:bg-slate-800"
+            />
+            {errors.baseSalary && <p className="text-xs text-red-500 mt-1">{errors.baseSalary.message}</p>}
+          </div>
+        </div>
+
+        {/* Contract Type & Effective Date */}
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">ประเภทสัญญา</label>
+            <select
+              {...register('contractType')}
+              className="w-full mt-1 px-3 py-2 text-sm border rounded-md dark:bg-slate-800"
+            >
+              <option value="FULL_TIME">พนักงานประจำ (Full-time Employee)</option>
+              <option value="PROBATION">ทดลองงาน (Probationary Period)</option>
+              <option value="CONTRACTOR">สัญญาจ้างโครงการ (Fixed-term Contractor)</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">วันที่มีผลบังคับใช้</label>
+            <input
+              type="date"
+              {...register('effectiveDate')}
+              className="w-full mt-1 px-3 py-2 text-sm border rounded-md dark:bg-slate-800"
+            />
+            {errors.effectiveDate && <p className="text-xs text-red-500 mt-1">{errors.effectiveDate.message}</p>}
+          </div>
+        </div>
+
+        {/* Internal Notes */}
+        <div>
+          <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">หมายเหตุภายในฝ่ายบุคคล</label>
+          <textarea
+            rows={3}
+            {...register('internalNotes')}
+            placeholder="รายละเอียดการปรับเงินเดือนหรือข้อตกลงพิเศษ..."
+            className="w-full mt-1 px-3 py-2 text-sm border rounded-md dark:bg-slate-800"
+          />
+          {errors.internalNotes && <p className="text-xs text-red-500 mt-1">{errors.internalNotes.message}</p>}
+        </div>
+
+        {/* Action Controls */}
+        <div className="flex items-center justify-between pt-4 border-t">
+          <button
+            type="button"
+            onClick={() => reset(contractData)}
+            disabled={!isDirty || isSubmitting || mutation.isPending}
+            className="flex items-center space-x-1.5 text-xs text-slate-600 hover:text-slate-900 disabled:opacity-40"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>คืนค่าเดิมจากเซิร์ฟเวอร์ (Discard Changes)</span>
+          </button>
+
+          <button
+            type="submit"
+            disabled={!isDirty || isSubmitting || mutation.isPending}
+            className="flex items-center space-x-2 px-5 py-2 text-sm font-semibold text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50 transition-colors shadow-sm"
+          >
+            {mutation.isPending ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>กำลังบันทึก...</span>
+              </>
+            ) : (
+              <>
+                <Check className="w-4 h-4" />
+                <span>บันทึกการแก้ไข</span>
+              </>
+            )}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม
+
+| มิติการเปรียบเทียบ | วิธีเดิม: สั่ง Remount ด้วย `key={data?.id}` | วิธีเดิม: ฝืนยัด `data` ใน `defaultValues` | วิธีโมเดิร์น: `form.reset(data, { keepDirtyValues: true })` |
+| :--- | :--- | :--- | :--- |
+| **พฤติกรรม DOM** | หน้าจอกระพริบ (Flicker) และ DOM ถูกทำลายสร้างใหม่ทั้งหมด | ช่องอินพุตว่างเปล่าตลอดไป เพราะ data ยังไม่มาตอน mount | DOM ไม่ถูกทำลาย ข้อมูลอัปเดตอย่างราบรื่นแบบ In-place |
+| **การปกป้องสิ่งที่กำลังพิมพ์** | หากมี background sync ขณะกำลังพิมพ์ ข้อมูลที่พิมพ์จะสูญหายทันที | ไม่สามารถจัดการข้อมูลที่อัปเดตแบบ Asynchronous ได้ | ปลอดภัย 100% รักษาเฉพาะช่องที่ `isDirty: true` ไว้ |
+| **สถานะ `isDirty`** | สับสน เพราะ Form State ถูกล้างใหม่หมดทุกครั้งที่ Remount | ค่า `isDirty` เป็น `true` ทันทีตั้งแต่โหลดเสร็จ (เพราะเทียบกับค่าว่าง) | ค่า `isDirty` จะเป็น `false` ทันทีหลังโหลดเสร็จถูกต้องตามตรรกะ |
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practices)
+
+### 5.1 ผิด ❌: ใส่ `form.reset(data)` โดยไม่มี Flag ป้องกันการทับข้อมูล
+
+```tsx
+// ❌ ผิด: เมื่อ TanStack Query ดึงข้อมูลใหม่เบื้องหลัง (Background Revalidation)
+// สิ่งที่ผู้ใช้กำลังนั่งพิมพ์อยู่จะถูกเขียนทับด้วยข้อมูลเก่าจากเซิร์ฟเวอร์ทันที!
+useEffect(() => {
+  if (data) {
+    form.reset(data);
+  }
+}, [data, form]);
+```
+
+```tsx
+// ✅ ถูกต้อง: ส่ง { keepDirtyValues: true } เสมอ
+useEffect(() => {
+  if (data) {
+    form.reset(data, { keepDirtyValues: true });
+  }
+}, [data, form]);
+```
+
+### 5.2 ผิด ❌: สั่ง Remount คอมโพเนนต์ทั้งตัวเพื่อยัด `defaultValues`
+
+```tsx
+// ❌ ผิด: ใช้ key เพื่อบังคับ Remount ทั้งคอมโพเนนต์
+// ส่งผลต่อ Performance, Focus กระโดด, และ Animation สะดุด
+export function EditPage({ id }: { id: string }) {
+  const { data } = useQuery(...);
+  return <ContractForm key={data?.updatedAt} defaultValues={data} />;
+}
+```
+
+```tsx
+// ✅ ถูกต้อง: แสดง Loading Skeleton จนกว่าข้อมูลรอบแรกจะมา แล้ว Mount เพียงครั้งเดียว
+export function EditPage({ id }: { id: string }) {
+  const { data, isPending } = useQuery(...);
+  if (isPending) return <SkeletonLoader />;
+  return <ContractForm initialData={data} />;
+}
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ `form.reset()` ใน Edit Mode เมื่อ:
+- หน้าเว็บที่มีการแก้ไข Entity เดิมในระบบ (เช่น แก้ไขข้อมูลสินค้า, ปรับปรุงโปรไฟล์, อัปเดตการตั้งค่า)
+- ระบบที่มีปุ่ม "ยกเลิกการเปลี่ยนแปลง (Discard / Reset Changes)" เพื่อคืนค่าเดิมจาก API
+- เมื่อ Mutation บันทึกสำเร็จ และต้องการตั้งค่า Payload ล่าสุดเป็น Baseline `defaultValues` ใหม่
+
+### ไม่ควรใช้ `form.reset()` เมื่อ:
+- หน้าจอ Create New ทั่วไปที่ไม่มีข้อมูลจาก API มาเกี่ยวข้อง
+- ระหว่างที่ผู้ใช้กำลังพิมพ์แบบ Real-time โดยไม่มีเงื่อนไขควบคุม (อาจทำให้ State หลุดโฟกัส)
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการส่งข้อมูล Asynchronous จาก `useQuery` เข้า `defaultValues` ของ `useForm({ defaultValues: query.data })` ถึงทำให้ฟอร์มว่างเปล่า และเราแก้ปัญหานี้อย่างไร?
+**แนวทางตอบแบบ Senior**:
+"`defaultValues` ใน React Hook Form ถูกออกแบบมาเพื่ออ่านค่าเพียง **ครั้งเดียวในจังหวะ Initial Render (Mounting)** ครับ ในจังหวะนั้นตัว `useQuery` ยังอยู่ในสถานะ `isPending` ทำให้ `query.data` คืนค่าเป็น `undefined` ตัว RHF จึงบันทึกว่าค่าเริ่มต้นคือความว่างเปล่า และจะไม่ทำการ Sync ข้อมูลใหม่อัตโนมัติแม้ว่า `query.data` จะโหลดเสร็จในเรนเดอร์ถัดมาก็ตาม
+
+**วิธีแก้ไขมาตรฐานระดับ Senior มี 2 วิธี**:
+1. **Conditional Rendering**: แสดง Loading Skeleton หรือ Spinner ในขณะที่ `isPending === true` และจะยอมให้ Form Component ถูก Mount ก็ต่อเมื่อ `data` พร้อมใช้งานแล้วเท่านั้น จึงส่ง `data` เข้าเป็น `defaultValues` ได้อย่างถูกต้องสมบูรณ์
+2. **การใช้ `form.reset(data, { keepDirtyValues: true })` ใน `useEffect`**: ให้ฟอร์ม Mount ไปก่อนด้วย Fallback ค่าว่าง แล้วใช้ Effect ดักจับเมื่อ `data` ถูก Resolve กลับมา จึงสั่ง `reset()` เพื่อปรับปรุง Form Values และตั้งค่า Baseline ใหม่อย่างราบรื่นครับ"
+
+### Q2: ในการทำระบบ Unsaved Changes Warning หากผู้ใช้กำลังพิมพ์ข้อมูลอยู่ แล้วเกิด Background Auto-refetch ใน TanStack Query เราจะการันตีได้อย่างไรว่าข้อความของผู้ใช้จะไม่ถูกลบหายไป?
+**แนวทางตอบแบบ Senior**:
+"เราแก้ไขด้วยการระบุ Option **`keepDirtyValues: true`** ภายในคำสั่ง `form.reset(data, { keepDirtyValues: true })` ครับ
+
+โดยหลักการทำงาน RHF จะนำ State ปัจจุบันไปเทียบกับ Baseline เดิม หากฟิลด์ใดมีสถานะ `isDirty === true` (ผู้ใช้มีการพิมพ์เปลี่ยนแปลงค่าไปแล้ว) RHF จะละเว้นฟิลด์นั้นไว้ ไม่ยอมให้ค่าใหม่จาก API เขียนทับ ในขณะที่ฟิลด์อื่นๆ ที่ผู้ใช้ยังไม่ได้แตะต้อง (`isDirty === false`) จะได้รับการอัปเดตเป็นข้อมูลล่าสุดจากเซิร์ฟเวอร์ตามปกติ ทำให้ผู้ใช้สามารถพิมพ์ต่อได้อย่างต่อเนื่องโดยไม่สูญเสียความคืบหน้าของงานครับ"

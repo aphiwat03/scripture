@@ -1,0 +1,237 @@
+---
+title: Query Keys Factory
+category: Frontend
+parentTitle: TanStack Query v5
+version: TanStack Query v5.x
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ใน **TanStack Query v5** ตัว **Query Key** ทำหน้าที่เปรียบเสมือน **Primary Key หรือที่อยู่ (Cache Address)** ของข้อมูลในระบบแคชส่วนกลาง หากไม่มี Query Key ที่เป็นเอกลักษณ์ ระบบจะไม่สามารถแยกแยะได้ว่าข้อมูลที่ดึงมาเป็นของรายการสินค้า, โปรไฟล์ผู้ใช้ หรือประวัติคำสั่งซื้อ
+
+หลักการสำคัญของ Query Key ใน v5:
+1. **ต้องเป็น Array เสมอ**: รูปแบบ String เดี่ยว (เช่น `'products'`) ถูกยกเลิกแล้ว ต้องใช้ `['products']`
+2. **จัดโครงสร้างแบบลำดับชั้น (Hierarchical Structure)**: จากข้อมูลกว้างที่สุดไปยังแคบที่สุด เช่น จาก Entity หลัก -> ประเภทย่อย -> Parameter กรอง -> ID เฉพาะเจาะจง
+3. **Deterministic Hash**: วัตถุ (Object) ที่อยู่ใน Array จะถูกแปลงเป็นสตริงด้วยการเรียงลำดับ Key อัตโนมัติ ทำให้ `{ page: 1, sort: 'asc' }` กับ `{ sort: 'asc', page: 1 }` ได้แคชตัวเดียวกัน 100%
+
+เมื่อโปรเจกต์เติบโตขึ้น การเขียน Key แบบกระจายตัวตามคอมโพเนนต์ต่างๆ (เช่น ฮาร์ดโค้ด `['products', 'list']` ใน 15 ไฟล์) จะนำไปสู่ปัญหาพิมพ์ตกหล่น (Typo) และยากต่อการ Refactor จึงเกิดแนวทาง **Query Key Factory Pattern** เพื่อรวมศูนย์การประกาศ Key ไว้ที่เดียว
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. ระบบ Fuzzy Matching (Partial Matching) ในการค้นหาแคช
+
+เมื่อเราสั่ง Invalidate หรือดึงข้อมูลจากแคช TanStack Query จะเปรียบเทียบ Key แบบ Prefix Matching จากซ้ายไปขวา:
+
+```
+[Query Keys ในแคช]
+├── ['products', 'all']
+├── ['products', 'list', { category: 'shoes', page: 1 }]
+├── ['products', 'list', { category: 'shoes', page: 2 }]
+├── ['products', 'detail', 'prod-001']
+└── ['orders', 'list']
+
+[คำสั่งที่เรียก]
+queryClient.invalidateQueries({ queryKey: ['products'] })
+=> จะกระทบทุกตัวที่ขึ้นต้นด้วย 'products' ทั้งหมด (all, list, detail)
+
+queryClient.invalidateQueries({ queryKey: ['products', 'list'] })
+=> จะกระทบเฉพาะ list ทุกหน้า ทุกหมวดหมู่ แต่ไม่กระทบ 'detail' หรือ 'orders'
+
+queryClient.invalidateQueries({ queryKey: ['products', 'detail', 'prod-001'], exact: true })
+=> กระทบเฉพาะสินค้า 'prod-001' ชิ้นเดียวเท่านั้น
+```
+
+### 2. กลไก Deterministic Key Serialization
+
+เบื้องหลัง TanStack Query ใช้ฟังก์ชัน `hashKey` ในการแปลง Array ให้เป็น String เอกลักษณ์:
+```ts
+// ภายใน TanStack Query:
+hashKey(['products', { b: 2, a: 1 }]) === hashKey(['products', { a: 1, b: 2 }]) // => true!
+```
+ระบบจะ Sort keys ของ Object ด้านในก่อนทำ JSON Serialization เสมอ ดังนั้น ลำดับของ property ใน Object จึงไม่มีผลต่อการสร้าง Key แต่อย่างใด
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+การสร้าง **Query Key Factory** สำหรับระบบ E-Commerce จัดการสินค้าและออเดอร์:
+
+### ไฟล์ที่ 1: การนิยาม Query Key Factory
+
+```ts filename="src/features/products/product-keys.ts"
+export interface ProductListFilter {
+  category?: string;
+  minPrice?: number;
+  maxPrice?: number;
+  sortBy?: 'price_asc' | 'price_desc' | 'latest';
+  page?: number;
+}
+
+// Query Key Factory Pattern: ลำดับชั้นจากกว้างไปแคบ
+export const productKeys = {
+  // 1. Root Key สำหรับสินค้าทั้งหมด
+  all: ['products'] as const,
+
+  // 2. ขอบเขตของรายการสินค้า (Lists)
+  lists: () => [...productKeys.all, 'list'] as const,
+  list: (filter: ProductListFilter) => [...productKeys.lists(), filter] as const,
+
+  // 3. ขอบเขตของรายละเอียดสินค้าชิ้นเดียว (Details)
+  details: () => [...productKeys.all, 'detail'] as const,
+  detail: (id: string) => [...productKeys.details(), id] as const,
+
+  // 4. ขอบเขตของสต็อกสินค้า
+  stocks: () => [...productKeys.all, 'stock'] as const,
+  stock: (id: string) => [...productKeys.stocks(), id] as const,
+};
+```
+
+### ไฟล์ที่ 2: การนำ Key Factory ไปใช้งานใน Component & Hook
+
+```tsx filename="src/features/products/components/ProductCatalog.tsx"
+'use client';
+
+import React, { useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { productKeys, ProductListFilter } from '../product-keys';
+
+interface ProductItem {
+  id: string;
+  name: string;
+  price: number;
+}
+
+async function fetchProducts(filter: ProductListFilter): Promise<ProductItem[]> {
+  const params = new URLSearchParams();
+  if (filter.category) params.set('category', filter.category);
+  if (filter.sortBy) params.set('sortBy', filter.sortBy);
+  if (filter.page) params.set('page', String(filter.page));
+
+  const res = await fetch(`/api/products?${params.toString()}`);
+  if (!res.ok) throw new Error('โหลดรายการสินค้าไม่สำเร็จ');
+  return res.json();
+}
+
+export function ProductCatalog() {
+  const [filter, setFilter] = useState<ProductListFilter>({
+    category: 'electronics',
+    sortBy: 'latest',
+    page: 1,
+  });
+
+  const queryClient = useQueryClient();
+
+  // 1. เรียกใช้ useQuery โดยผูกกับ Key Factory
+  const { data: products, isPending } = useQuery({
+    queryKey: productKeys.list(filter),
+    queryFn: () => fetchProducts(filter),
+  });
+
+  // ฟังก์ชัน Refresh เฉพาะหมวดหมู่นี้
+  const handleRefreshCategory = () => {
+    // Invalidate เฉพาะรายการสินค้าทั้งหมดในระบบ
+    queryClient.invalidateQueries({
+      queryKey: productKeys.lists(),
+    });
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <h2 className="text-xl font-bold">รายการสินค้าอุปกรณ์อิเล็กทรอนิกส์</h2>
+        <button
+          onClick={handleRefreshCategory}
+          className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-sm rounded-lg"
+        >
+          รีเฟรชรายการ
+        </button>
+      </div>
+
+      {isPending ? (
+        <div className="h-40 bg-gray-100 rounded-lg animate-pulse" />
+      ) : (
+        <ul className="divide-y border rounded-lg">
+          {products?.map((item) => (
+            <li key={item.id} className="p-4 flex justify-between">
+              <span>{item.name}</span>
+              <span className="font-bold text-emerald-600">฿{item.price.toLocaleString()}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม (useEffect vs TanStack Query)
+
+| มุมมอง | การสร้าง Key แบบเดิม (Ad-hoc String) | การใช้ Query Key Factory (v5 Pattern) |
+| :--- | :--- | :--- |
+| **โครงสร้าง Key** | `['products-' + category + '-' + page]` | `['products', 'list', { category, page }]` |
+| **การ Invalidate บางส่วน** | ทำไม่ได้ หรือต้องเขียน Regular Expression ซับซ้อน | ทำได้ทันทีผ่าน Hierarchical Partial Matching เช่น `['products', 'list']` |
+| **Type Safety** | ไม่มีพิมพ์ผิด เช่น `'prodcut'` โดยไม่มีเตือน | ปลอดภัยด้วย TypeScript `as const` และ Autocomplete ครบถ้วน |
+| **การเปลี่ยนชื่อ Entity** | ต้องค้นหาและแก้ไขข้อความฮาร์ดโค้ดทุกไฟล์ | แก้ไขที่ตัวแปรใน Factory ไฟล์เดียว มีผลครอบคลุมทั้งโปรเจกต์ |
+
+---
+
+## 5. ผิด vs ถูก
+
+### แบบที่ผิด ❌: ส่งฟังก์ชัน, Date instance หรือฮาร์ดโค้ดข้อความสุ่มใน queryKey
+
+```tsx
+// ❌ ผิด: ใส่ Non-serializable หรือ Unstable Reference ลงใน queryKey
+export function BadComponent({ productId }: { productId: string }) {
+  const { data } = useQuery({
+    // ❌ Anti-pattern 1: new Date() ทำให้ Key เปลี่ยนทุกครั้งที่ Component Re-render -> ยิงลูปนรก!
+    // ❌ Anti-pattern 2: ส่ง Callback function ลงใน Key
+    queryKey: ['products', productId, new Date(), () => {}],
+    queryFn: () => fetchProduct(productId),
+  });
+}
+```
+
+### แบบที่ถูก ✅: ใช้เฉพาะ Plain Serializable Values และดึง Key จาก Factory
+
+```tsx
+// ✅ ถูกต้อง: ใช้ Key ที่เป็น Serializable Data และอ้างอิงจาก Factory
+export function GoodComponent({ productId }: { productId: string }) {
+  const { data } = useQuery({
+    queryKey: productKeys.detail(productId),
+    queryFn: () => fetchProduct(productId),
+  });
+}
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Query Key Factory เมื่อ:
+- แอปพลิเคชันมีขนาดปานกลางถึงขนาดใหญ่ (Enterprise Architecture) ที่มี Entity มากกว่า 2-3 ตัว
+- มีการ Invalidate แคชข้ามคอมโพเนนต์บ่อยครั้ง (เช่น กดยืนยันออเดอร์ในหน้า Cart แล้วต้องเคลียร์แคชในหน้า Dashboard และ OrderHistory)
+- ทีมมีนักพัฒนาหลายคน เพื่อบังคับมาตรฐานการตั้งชื่อ Key ให้เป็นหนึ่งเดียว
+
+### ไม่จำเป็นต้องสร้าง Factory ซับซ้อนเมื่อ:
+- โปรเจกต์ขนาดเล็กมาก (Micro-apps หรือสคริปต์หน้าเดียว) ที่มี Query เพียง 1-2 ตัว สามารถใช้ `['todoList']` ตรงๆ ได้
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไม TanStack Query จึงแนะนำให้ใส่ Dependencies ทั้งหมดที่ใช้ใน `queryFn` ลงใน `queryKey` ด้วยเสมอ?
+**แนวทางตอบ**:
+เพราะ Query Key ทำหน้าที่เป็น **Cache Dependency** เช่นเดียวกับ Dependency Array ของ `useEffect` หากค่าตัวแปร (เช่น `page`, `filter`, `sort`) มีการเปลี่ยนแปลง TanStack Query จะตรวจจับว่า Key ได้เปลี่ยนไป และจะทำการดึงข้อมูลใหม่ที่ตรงกับค่านั้นทันที พร้อมทั้งจัดเก็บข้อมูลแยกลงในแต่ละช่องแคช หากเราลืมใส่ค่าเหล่านั้นลงใน Key เมื่อผู้ใช้เปลี่ยนหน้า ข้อมูลบนหน้าจอจะไม่ยอมโหลดใหม่เพราะ Query มองว่าเป็น Key เดิมที่แคชไว้แล้ว
+
+### Q2: Partial Invalidation ใน TanStack Query ทำงานอย่างไร ยกตัวอย่างการใช้งานร่วมกับ Hierarchical Keys?
+**แนวทางตอบ**:
+TanStack Query ตรวจสอบความเข้ากันของ Key แบบซับเซตเริ่มต้น (Prefix Match) หากเรามี Key ในแคชดังนี้:
+1. `['products', 'list', { category: 'it' }]`
+2. `['products', 'detail', '123']`
+
+เมื่อเราเรียก `queryClient.invalidateQueries({ queryKey: ['products'] })` ระบบจะมองว่าทั้ง 1 และ 2 มี `'products'` เป็นรากเริ่มต้นเหมือนกัน จึงถูก Invalidate พร้อมกันทั้งหมด แต่ถ้าเราระบุ `['products', 'list']` ระบบจะเลือก Invalidate เฉพาะข้อ 1 โดยไม่กระทบข้อ 2 ช่วยให้เราควบคุมขอบเขตของการรีเฟรชข้อมูลได้อย่างแม่นยำและประหยัดทรัพยากรเครือข่าย

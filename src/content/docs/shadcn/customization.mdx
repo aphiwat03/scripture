@@ -1,0 +1,223 @@
+---
+title: Component Customization
+category: Frontend
+parentTitle: shadcn/ui
+version: shadcn/ui & Radix UI
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+จุดเด่นที่สุดของ shadcn/ui คือ **"การไม่มีกำแพงของไลบรารีภายนอกขวางกั้น"** เมื่อคุณต้องการปรับแต่งคอมโพเนนต์ คุณมีกลยุทธ์หลัก 3 ระดับ:
+
+1. **ระดับที่ 1: แก้ไข Source Code ใน `components/ui/*` โดยตรง (Direct Modification)**:
+   - เหมาะสำหรับการเปลี่ยนดีไซน์มาตรฐานของทั้งองค์กร เช่น เพิ่ม `variant` ใหม่ใน `buttonVariants`, เปลี่ยน default border-radius หรือแก้ transition
+2. **ระดับที่ 2: การสร้าง Wrapper Component (Composition Pattern)**:
+   - เหมาะสำหรับการสร้างคอมโพเนนต์เฉพาะทางสำหรับฟีเจอร์ธุรกิจ โดยนำคอมโพเนนต์พื้นฐานของ shadcn มาต่อยอด เช่น สร้าง `PasswordInput` ที่มีปุ่มคลิกดูรหัสผ่าน หรือ `SearchableCombobox`
+3. **ระดับที่ 3: การจัดการ Lifecycle และการอัปเดต (Maintenance & Upgrades)**:
+   - เนื่องจากโค้ดอยู่ในโปรเจกต์ของคุณ การอัปเดตเวอร์ชันใหม่ของ shadcn ต้องทำอย่างมีสติผ่าน Git Diff เพื่อไม่ให้ทับโค้ดที่ทีมงานเคย Custom ไว้
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### กลไกเมื่อสั่ง `shadcn add <component> --overwrite`
+- เมื่อคุณรันคำสั่งโดยมีธง `--overwrite`: CLI จะลบไฟล์เดิมใน `components/ui/` ทิ้ง และเขียนทับด้วยเวอร์ชันล่าสุดจาก Registry
+- **ความเสี่ยง**: หากคุณเคยเพิ่ม Variants หรือแก้ไขโค้ดใดๆ ไว้ โค้ดเหล่านั้นจะหายไปทันที
+- **วิธีรับมือระดับมืออาชีพ**:
+  1. ให้แน่ใจว่า Git Working Tree สะอาด (`git status` ไม่มี Uncommitted Changes) ก่อนรัน CLI
+  2. รันคำสั่งอัปเดต
+  3. ใช้คำสั่ง `git diff components/ui/` เพื่อตรวจสอบทีละบรรทัดว่ามีจุดใดที่เป็นฟีเจอร์ใหม่จากต้นทาง และจุดใดเป็น Custom code ของทีม แล้วค่อยทำ Stage ทีละส่วน (Partial staging via `git add -p`)
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### 1. การแก้ไข CVA เพื่อเพิ่ม Variant ใหม่ใน `components/ui/button.tsx`
+
+```tsx filename="components/ui/button.tsx"
+import * as React from "react";
+import { Slot } from "@radix-ui/react-slot";
+import { cva, type VariantProps } from "class-variance-authority";
+import { cn } from "@/lib/utils";
+
+const buttonVariants = cva(
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl text-sm font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
+  {
+    variants: {
+      variant: {
+        default: "bg-primary text-primary-foreground shadow-xs hover:bg-primary/90",
+        destructive: "bg-destructive text-destructive-foreground shadow-xs hover:bg-destructive/90",
+        outline: "border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground",
+        secondary: "bg-secondary text-secondary-foreground shadow-xs hover:bg-secondary/80",
+        ghost: "hover:bg-accent hover:text-accent-foreground",
+        link: "text-primary underline-offset-4 hover:underline",
+        
+        // ✨ เพิ่ม Variant พิเศษเฉพาะของแบรนด์: Gradient Glow
+        glow: "bg-gradient-to-r from-violet-600 via-indigo-600 to-blue-600 text-white shadow-lg shadow-indigo-500/25 hover:shadow-indigo-500/40 hover:scale-[1.02] active:scale-[0.98]",
+        
+        // ✨ เพิ่ม Variant สำหรับปุ่มกระจกใส (Glassmorphism)
+        glass: "bg-white/10 backdrop-blur-md border border-white/20 text-foreground hover:bg-white/20 shadow-xs",
+      },
+      size: {
+        default: "h-9 px-4 py-2",
+        sm: "h-8 rounded-lg px-3 text-xs",
+        lg: "h-11 rounded-xl px-8 text-base",
+        icon: "h-9 w-9",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+      size: "default",
+    },
+  }
+);
+
+export interface ButtonProps
+  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+    VariantProps<typeof buttonVariants> {
+  asChild?: boolean;
+}
+
+export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant, size, asChild = false, ...props }, ref) => {
+    const Comp = asChild ? Slot : "button";
+    return (
+      <Comp
+        className={cn(buttonVariants({ variant, size, className }))}
+        ref={ref}
+        {...props}
+      />
+    );
+  }
+);
+Button.displayName = "Button";
+```
+
+### 2. การสร้าง Wrapper Component: `PasswordInput` ต่อยอดจาก `Input` ปกติ
+
+```tsx filename="components/ui/password-input.tsx"
+"use client";
+
+import * as React from "react";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Eye, EyeOff } from "lucide-react";
+import { cn } from "@/lib/utils";
+
+export interface PasswordInputProps
+  extends React.InputHTMLAttributes<HTMLInputElement> {}
+
+export const PasswordInput = React.forwardRef<HTMLInputElement, PasswordInputProps>(
+  ({ className, ...props }, ref) => {
+    const [showPassword, setShowPassword] = React.useState(false);
+
+    return (
+      <div className="relative">
+        <Input
+          type={showPassword ? "text" : "password"}
+          className={cn("pr-10", className)}
+          ref={ref}
+          {...props}
+        />
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="absolute right-0 top-0 h-full px-3 py-2 hover:bg-transparent text-muted-foreground hover:text-foreground"
+          onClick={() => setShowPassword((prev) => !prev)}
+          tabIndex={-1} // ป้องกันการติดแท็บขณะผู้ใช้กดกรอกฟอร์ม
+          aria-label={showPassword ? "ซ่อนรหัสผ่าน" : "แสดงรหัสผ่าน"}
+        >
+          {showPassword ? (
+            <EyeOff className="h-4 w-4" aria-hidden="true" />
+          ) : (
+            <Eye className="h-4 w-4" aria-hidden="true" />
+          )}
+          <span className="sr-only">
+            {showPassword ? "ซ่อนรหัสผ่าน" : "แสดงรหัสผ่าน"}
+          </span>
+        </Button>
+      </div>
+    );
+  }
+);
+PasswordInput.displayName = "PasswordInput";
+```
+
+### การนำไปใช้จริงในหน้าเปลี่ยนรหัสผ่าน (Change Password Screen)
+```tsx filename="app/security/ChangePasswordCard.tsx"
+"use client";
+
+import { PasswordInput } from "@/components/ui/password-input";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { Sparkles } from "lucide-react";
+
+export function ChangePasswordCard() {
+  return (
+    <div className="max-w-md mx-auto p-6 border rounded-2xl bg-card space-y-4">
+      <h3 className="text-base font-semibold">เปลี่ยนรหัสผ่านบัญชี</h3>
+
+      <div className="space-y-2">
+        <Label htmlFor="old-password">รหัสผ่านปัจจุบัน</Label>
+        <PasswordInput id="old-password" placeholder="กรอกรหัสผ่านเดิม" />
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="new-password">รหัสผ่านใหม่</Label>
+        <PasswordInput id="new-password" placeholder="อย่างน้อย 8 ตัวอักษร" />
+      </div>
+
+      <div className="pt-2 flex justify-end gap-2">
+        <Button variant="outline">ยกเลิก</Button>
+        {/* เรียกใช้ Variant ใหม่ที่เพิ่ง Custom */}
+        <Button variant="glow" className="gap-2">
+          <Sparkles className="w-4 h-4" />
+          อัปเดตรหัสผ่าน
+        </Button>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **สร้าง Wrapper ซ้อน Wrapper 5 ชั้นเพื่อเปลี่ยนแค่ขนาดตัวหนังสือ**<br/>สร้างความซับซ้อนเกินจำเป็นและทำให้ TypeScript Type หลุด | **แก้ไข CVA ใน `components/ui/button.tsx` โดยตรง**<br/>สำหรับการเปลี่ยนแปลงระดับ Design System ของทั้งโปรเจกต์ |
+| **รัน `shadcn add <comp> --overwrite` โดยไม่ได้ Commit Git ไว้ก่อน**<br/>โค้ดที่เคย Custom ไว้ถูกเขียนทับหายไปทั้งหมดโดยไม่สามารถกู้คืนได้ | **Commit Git เสมอก่อนรันคำสั่ง CLI**<br/>แล้วใช้ `git diff` ตรวจสอบและ Merge เฉพาะส่วนที่ต้องการอย่างรอบคอบ |
+| **ไปลบ Radix Primitives ออกจากคอมโพเนนต์เพราะไม่เข้าใจ**<br/>ทำให้เสีย Accessibility, Focus trap และ Keyboard navigation | **ปรับแต่งเฉพาะเลเยอร์สไตล์ (Tailwind & CVA)**<br/>และรักษาโครงสร้างของ Radix UI Primitives ไว้ |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้เมื่อ:
+- **สร้าง Design System เฉพาะของบริษัท**: เมื่อมีเอกลักษณ์ของแบรนด์ เช่น สไตล์ปุ่มแบบพิเศษ, มุมโค้งมนเฉพาะทาง
+- **คอมโพเนนต์ทางธุรกิจที่มีฟังก์ชันเฉพาะ**: เช่น Input สำหรับเลขบัตรประชาชน, ฟิลด์กรอกเบอร์โทรศัพท์พร้อมแปลงรูปแบบอัตโนมัติ
+
+### ไม่ควรใช้เมื่อ:
+- **คอมโพเนนต์นั้นใช้เพียงครั้งเดียวในหน้าเดียว**: ให้ส่ง `className="..."` ปรับเฉพาะจุดนั้น ไม่จำเป็นต้องแก้ไฟล์หลักใน `components/ui` ให้กระทบหน้าอื่น
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: หากทีมของคุณต้องการเพิ่ม Variant ใหม่ให้กับ Button ของ shadcn (เช่น `variant="brand-gradient"`) มีขั้นตอนการทำอย่างไร และข้อดีของการทำผ่าน CVA คืออะไร?
+**แนวทางตอบ:**
+1. **ขั้นตอนการทำ**:
+   - เปิดไฟล์ `components/ui/button.tsx`
+   - เพิ่มคีย์ใหม่ในอ็อบเจกต์ `buttonVariants` ภายใต้ `variants.variant` เช่น `brand-gradient: "bg-gradient-to-r from-blue-600 to-indigo-600 text-white ..."`
+2. **ข้อดีของการทำผ่าน CVA**:
+   - **Type Safety**: TypeScript จะเพิ่ม `"brand-gradient"` เข้าไปใน Type ของ Button ทันที ทำให้นักพัฒนาในทีมเห็น Autocomplete และคอมไพล์เช็กได้ทันที
+   - **No Runtime Overhead**: ไม่มีการสร้าง Style Tag ใหม่ในหน่วยความจำ ทุกอย่างรันด้วย Static Class Names
+
+### Q2: ในฐานะ Tech Lead คุณมีกลยุทธ์อย่างไรในการจัดการ "Upstream Updates" เมื่อ shadcn/ui มีการปล่อยอัปเดตแก้บั๊กหรือเพิ่มฟีเจอร์ใหม่ ให้กับคอมโพเนนต์ที่ทีมเคยแก้ไขไปแล้ว?
+**แนวทางตอบ:**
+1. **ใช้พลังของ Git Version Control**: กำหนดกฎในทีมว่าก่อนจะรันคำสั่งอัปเดต ต้องสร้าง Branch ใหม่และมั่นใจว่า Working Directory สะอาด
+2. **Selective Merging (Three-way merge)**: รัน `shadcn add <component> --overwrite` แล้วใช้ Git Diff หรือ VS Code Merge Editor เพื่อเปรียบเทียบดูว่า Upstream เปลี่ยนแปลงอะไรบ้าง (เช่น แก้บั๊ก Accessibility ใน Radix) แล้วนำเฉพาะโค้ดส่วนนั้นมารวมเข้ากับโค้ด Custom เดิมของทีม
+3. **Automated Component Testing**: รัน Vitest หรือ Playwright Component Test เพื่อตรวจสอบว่า Variant เดิมของบริษัทยังคงแสดงผลและทำงานได้ถูกต้อง 100% ก่อน Merge เข้า Main Branch

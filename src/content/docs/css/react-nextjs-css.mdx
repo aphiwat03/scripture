@@ -1,0 +1,137 @@
+---
+title: CSS in React/Next.js
+category: Frontend
+parentTitle: CSS
+version: React 19 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การจัดการสไตล์ใน React 19 และ Next.js 16 มีความท้าทายเฉพาะตัวที่ไม่มีในเว็บยุคดั้งเดิม:
+1. **Conditional Class Names**: การเปิด-ปิดสไตล์ตาม State (เช่น ปุ่ม Active, ฟอร์ม Error)
+2. **Class Collision (การชนกันของ Utility Class)**: เมื่อ Component รับ `className` เสริมมาจากภายนอก เช่น แม่ส่ง `p-4` มาทับลูกที่มี `p-2` คลาสไหนจะชนะ?
+3. **Theme Flash / Hydration Mismatch**: อาการที่หน้าจอกระพริบเป็นสีขาวก่อนจะสลับเป็นสีดำในฝั่ง Client เมื่อใช้ SSR
+
+เครื่องมือมาตรฐานที่วิศวกร Fullstack ทุกคนต้องมีในโปรเจกต์: **ฟังก์ชัน `cn()`** (การรวมพลังของ `clsx` และ `tailwind-merge`)
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ทำไมแค่ `clsx` อย่างเดียวถึงไม่พอ? ทำไมต้องมี `tailwind-merge`?
+สมมติว่าคุณมีคอมโพเนนต์ปุ่ม:
+```tsx
+function Button({ className }) {
+  // สไตล์ตั้งต้นของปุ่มคือ px-4
+  return <button className={`px-4 py-2 bg-blue-500 ${className}`}>คลิก</button>;
+}
+
+// ใช้งาน: ผู้ใช้ส่ง px-6 มาทับ
+<Button className="px-6" />
+```
+ผลลัพธ์ใน HTML คือ: `class="px-4 py-2 bg-blue-500 px-6"`
+- **ใน CSS ดั้งเดิม ใครชนะ?**: ไม่ใช่คลาสที่อยู่หลังสุดใน HTML! แต่คือ **คลาสที่ถูกประกาศอยู่หลังสุดในไฟล์ CSS Bundle รวม** ซึ่งอาจเป็น `px-4` ก็ได้! ทำให้การ Override ล้มเหลว
+- **`tailwind-merge` แก้ปัญหานี้**: มันเข้าใจไวยากรณ์ของ Tailwind และจะทำการ **ลบ `px-4` ออกไปอย่างชาญฉลาด** เหลือเพียง `px-6` ตัวเดียวเท่านั้น
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่างที่ 1: การสร้างฟังก์ชัน `cn()` สำหรับโปรเจกต์ React / Next.js
+
+```typescript filename="src/lib/utils.ts"
+import { clsx, type ClassValue } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+
+// ฟังก์ชันรวมคลาสระดับมาตรฐานอุตสาหกรรม (ใช้ใน shadcn/ui)
+export function cn(...inputs: ClassValue[]): string {
+  return twMerge(clsx(inputs));
+}
+```
+
+### ตัวอย่างที่ 2: คอมโพเนนต์ Button ที่รับ Class เสริมอย่างปลอดภัย 100%
+
+```tsx filename="components/ui/Button.tsx"
+import React from 'react';
+import { cn } from '@/lib/utils';
+
+interface ButtonProps extends React.ComponentProps<'button'> {
+  variant?: 'primary' | 'secondary' | 'danger';
+  isLoading?: boolean;
+}
+
+export function Button({
+  variant = 'primary',
+  isLoading = false,
+  className,
+  children,
+  disabled,
+  ...props
+}: ButtonProps) {
+  return (
+    <button
+      disabled={disabled || isLoading}
+      className={cn(
+        // 1. Base Styles
+        'inline-flex items-center justify-center font-medium transition-colors rounded-xl px-4 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 cursor-pointer',
+        
+        // 2. Conditional Variants
+        variant === 'primary' && 'bg-blue-600 text-white hover:bg-blue-700 focus-visible:ring-blue-500',
+        variant === 'secondary' && 'bg-slate-100 text-slate-900 hover:bg-slate-200 focus-visible:ring-slate-400',
+        variant === 'danger' && 'bg-red-600 text-white hover:bg-red-700 focus-visible:ring-red-500',
+        
+        // 3. State Modifier
+        (disabled || isLoading) && 'opacity-50 cursor-not-allowed pointer-events-none',
+        
+        // 4. External Class Overrides (ใครส่งอะไรมาทับ ชนะแน่นอน!)
+        className
+      )}
+      {...props}
+    >
+      {isLoading ? <span>กำลังโหลด...</span> : children}
+    </button>
+  );
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: รวมคลาสด้วย String Template ดื้อๆ
+
+```tsx
+// ผิด: เกิดปัญหา Class Collision สไตล์ชนกันและลบทับไม่ติด
+<button className={`p-2 bg-blue-500 ${isWide ? 'p-6' : ''} ${className}`}>
+```
+
+### ✅ โค้ดที่ถูกต้อง: ใช้ฟังก์ชัน `cn()`
+
+```tsx
+// ถูกต้อง: p-2 จะถูกแทนที่ด้วย p-6 อย่างสมบูรณ์แบบ
+<button className={cn('p-2 bg-blue-500', isWide && 'p-6', className)}>
+```
+
+---
+
+## 5. การแก้ปัญหา Theme Flash ใน Next.js SSR
+
+ในการทำ Dark Mode บน Next.js:
+1. ใส่ `suppressHydrationWarning` บนแท็ก `<html>` ใน `app/layout.tsx` เพื่อไม่ให้ React ฟ้อง Error เมื่อ `next-themes` ฉีดคลาส `dark` ลงใน DOM ก่อนการ Hydrate
+2. กำหนด `defaultTheme="system"` และ `enableSystem` ใน `ThemeProvider`
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ฟังก์ชัน `cn()` ที่นิยมใช้กันใน Next.js และ shadcn/ui มีหลักการทำงานอย่างไรข้างใน?
+**แนวทางคำตอบ**: ฟังก์ชัน `cn()` คือการผสานการทำงานของ 2 ไลบรารี:
+1. **`clsx`**: ทำหน้าที่ประมวลผลเงื่อนไข (Conditional Classes) ช่วยให้เราใส่เงื่อนไขแบบ Boolean, Object, หรือ Array ได้อย่างคล่องตัว และตัดค่าที่เป็น `falsy` (เช่น `false`, `null`, `undefined`) ทิ้งไป
+2. **`tailwind-merge`**: นำสตริงคลาสที่ได้จาก `clsx` มาวิเคราะห์และแก้ปัญหาความขัดแย้ง (Conflict Resolution) หากมี Utility ที่ควบคุม CSS Property เดียวกันซ้อนกันอยู่ (เช่น `text-sm` กับ `text-lg` หรือ `p-2` กับ `p-4`) มันจะทำการตัดคลาสตัวก่อนหน้าทิ้ง และคงไว้เฉพาะคลาสตัวล่าสุด ทำให้คอมโพเนนต์รองรับการรับ `className` จากภายนอกมา Override ได้อย่างแม่นยำ
+
+### Q2: ทำไมการใช้ Inline Style (`style={{ ... }}`) ถึงเป็นสิ่งที่ไม่แนะนำในโปรเจกต์ React ขนาดใหญ่?
+**แนวทางคำตอบ**:
+1. **Performance**: ใน React ทุกครั้งที่คอมโพเนนต์ Re-render การประกาศ `style={{ ... }}` จะเป็นการสร้าง JavaScript Object ตัวใหม่ในหน่วยความจำเสมอ ส่งผลต่อกระบวนการ Garbage Collection
+2. **ขาดความยืดหยุ่น**: ไม่สามารถเขียน Media Queries, ไม่รองรับ Pseudo-classes (`:hover`, `:focus`), และไม่สามารถใช้ Pseudo-elements (`::before`) ได้
+3. **ปัญหา Specificity**: Inline Style มีคะแนนความสำคัญสูงมาก ทำให้ไม่สามารถเขียนคลาส CSS หรือ Utility Class ทั่วไปมาเขียนทับได้ในภายหลัง

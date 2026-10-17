@@ -1,0 +1,444 @@
+---
+title: shadcn/ui Chart & Theming
+category: Frontend
+parentTitle: Recharts
+version: Recharts v3 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ในการพัฒนา Web Application ยุคใหม่ โดยเฉพาะระบบ Dashboard และ Analytics ของระบบระดับ Enterprise ความต้องการด้าน Data Visualization ไม่ได้จำกัดอยู่เพียงแค่การวาดแผนภูมิออกมาบนหน้าจอเท่านั้น แต่ยังครอบคลุมถึง:
+
+1. **สุนทรียภาพและความกลมกลืน (Design System Consistency)**: กราฟต้องใช้โทนสี, เส้นสาย, ความโค้งมน (Border Radius) และฟอนต์ที่ตรงกับส่วนอื่นๆ ของเว็บอย่างไร้รอยต่อ
+2. **การสลับโหมดการแสดงผล (Light / Dark Mode Theming)**: กราฟต้องเปลี่ยนชุดสีตาม `html.dark` หรือ Theme Provider ทันที โดยไม่ต้องรีโหลดหน้าเว็บ และไม่เกิดอาการสีเพี้ยนหรือตัวหนังสือจมหายไปกับพื้นหลัง
+3. **ความคล่องตัวในการพัฒนา (Developer Experience)**: ลดภาระการเขียน Boilerplate โค้ด เช่น การสร้าง Tooltip แบบกำหนดเอง (Custom Tooltip) หรือการดักจับค่า Responsive
+
+**shadcn/ui Chart** จึงถูกออกแบบขึ้นมาเพื่อทำหน้าที่เป็น **Abstraction Layer** ครอบทับ **Recharts v3** โดยไม่ได้เขียนเอนจินวาดกราฟขึ้นมาใหม่ แต่แก้ปัญหาจุดอ่อนดั้งเดิมของ Recharts ด้วยการรวมพลังของ **Tailwind CSS**, **CSS Variables** และ **React 19 Server/Client Patterns** เข้าด้วยกัน
+
+### องค์ประกอบหลัก 4 ชิ้นของ shadcn/ui Chart
+
+* **`ChartContainer`**: คอมโพเนนต์ครอบตัวนอกสุด ทำหน้าที่สร้าง Context และกำหนดขอบเขต CSS Variables ประจำชาร์ต พร้อมฝัง `ResponsiveContainer` ไว้ข้างใต้แบบอัตโนมัติ
+* **`ChartConfig`**: Type-safe Object ส่วนกลางสำหรับนิยามชื่อ Label, Icon และคู่สี (ทั้ง Light และ Dark mode) ประจำแต่ละ `dataKey` ในที่เดียว
+* **`ChartTooltip` และ `ChartTooltipContent`**: ตัวจัดการ Tooltip อัจฉริยะที่คำนวณตำแหน่ง, แสดง Indicator (จุดสี, แถบเส้น, หรือไอคอน), และจัด Format ตัวเลขให้สวยงามตามมาตรฐาน shadcn
+* **`ChartLegend` และ `ChartLegendContent`**: ตัวแสดงคำอธิบายสัญลักษณ์ข้อมูลที่ดึงชื่อและสีมาจาก `ChartConfig` โดยตรง
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### สถาปัตยกรรม Dynamic CSS Injection
+
+ความชาญฉลาดที่สุดของ `shadcn/ui Chart` อยู่ที่วิธีจัดการสี เมื่อเราส่ง `config: ChartConfig` เข้าไปใน `<ChartContainer config={chartConfig}>` ตัว Container จะแปลง config ก้อนนั้นให้กลายเป็น `<style>` element แบบ inline หรือฉีด CSS Custom Properties เข้าสู่ Element Style ดังนี้:
+
+```
+[ Developer ChartConfig ]
+  desktop: { label: "Desktop", color: "hsl(var(--chart-1))" }
+  mobile:  { label: "Mobile",  color: "hsl(var(--chart-2))" }
+                  │
+                  ▼
+[ ChartContainer (Client Component) ]
+  คำนวณและฉีด CSS Variables เข้าสู่ Scope ของ Chart DOM:
+  <div style={{
+    "--color-desktop": "hsl(var(--chart-1))",
+    "--color-mobile": "hsl(var(--chart-2))"
+  }}>
+                  │
+                  ▼
+[ Recharts SVG Elements ]
+  <Bar dataKey="desktop" fill="var(--color-desktop)" />
+  <Bar dataKey="mobile"  fill="var(--color-mobile)" />
+```
+
+### การจับคู่โทเคนกับ `globals.css`
+
+ใน Next.js 16 ร่วมกับ Tailwind CSS ธีมมาตรฐานของ shadcn จะประกาศโทเคนสีของกราฟไว้ในไฟล์ CSS ระดับโกลบอล (`app/globals.css`):
+
+```css
+@layer base {
+  :root {
+    --chart-1: 12 76% 61%;   /* ส้มอมแดง */
+    --chart-2: 173 58% 39%;  /* เขียวเทอร์คอยส์ */
+    --chart-3: 197 37% 24%;  /* น้ำเงินเข้ม */
+    --chart-4: 43 74% 66%;   /* เหลืองมัสตาร์ด */
+    --chart-5: 27 87% 67%;   /* ส้มแสด */
+  }
+
+  .dark {
+    --chart-1: 220 70% 50%;  /* น้ำเงินสว่าง */
+    --chart-2: 160 60% 45%;  /* เขียวมิ้นต์ */
+    --chart-3: 30 80% 55%;   /* ส้มอบอุ่น */
+    --chart-4: 280 65% 60%;  /* ม่วงสว่าง */
+    --chart-5: 340 75% 55%;  /* ชมพูสดใส */
+  }
+}
+```
+
+เมื่อผู้ใช้สลับ Theme จาก Light ไปเป็น Dark ผ่าน `next-themes` คลาส `.dark` จะถูกสลับที่ `<html>` element ค่าตัวแปร `--chart-1` ถึง `--chart-5` จะเปลี่ยนค่าความสว่างและความอิ่มตัวของสีทันที ส่งผลให้ SVG fill/stroke ของ Recharts เปลี่ยนสีตามในระดับฮาร์ดแวร์เรนเดอร์ โดยไม่ต้องสั่ง re-render กราฟทั้งต้นผ่าน React State
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่างที่ 1: SaaS Subscription Revenue AreaChart (เปรียบเทียบ Annual vs Monthly)
+
+ตัวอย่างนี้แสดงการใช้งาน `AreaChart` สองชั้นที่มี Linear Gradient โปร่งแสง พร้อมการจัดวาง `ChartTooltip` แบบมี indicator จุดสี (`indicator="dot"`) และดึงสีจาก CSS Variables
+
+```tsx filename="src/components/dashboard/revenue-area-chart.tsx"
+'use client';
+
+import * as React from 'react';
+import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from 'recharts';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import {
+  ChartConfig,
+  ChartContainer,
+  ChartLegend,
+  ChartLegendContent,
+  ChartTooltip,
+  ChartTooltipContent,
+} from '@/components/ui/chart';
+
+interface RevenuePoint {
+  month: string;
+  monthlyPlan: number;
+  annualPlan: number;
+}
+
+const revenueData: RevenuePoint[] = [
+  { month: 'ม.ค.', monthlyPlan: 18600, annualPlan: 80500 },
+  { month: 'ก.พ.', monthlyPlan: 30500, annualPlan: 120000 },
+  { month: 'มี.ค.', monthlyPlan: 23700, annualPlan: 115000 },
+  { month: 'เม.ย.', monthlyPlan: 27300, annualPlan: 140000 },
+  { month: 'พ.ค.', monthlyPlan: 30900, annualPlan: 165000 },
+  { month: 'มิ.ย.', monthlyPlan: 41400, annualPlan: 195000 },
+];
+
+// กำหนด Config นอก Component เพื่อป้องกัน Object Re-creation
+const chartConfig = {
+  monthlyPlan: {
+    label: 'แพ็กเกจรายเดือน',
+    color: 'hsl(var(--chart-1))',
+  },
+  annualPlan: {
+    label: 'แพ็กเกจรายปี',
+    color: 'hsl(var(--chart-2))',
+  },
+} satisfies ChartConfig;
+
+export function RevenueAreaChart() {
+  const formatCurrency = React.useCallback((value: number) => {
+    return new Intl.NumberFormat('th-TH', {
+      style: 'currency',
+      currency: 'THB',
+      maximumFractionDigits: 0,
+    }).format(value);
+  }, []);
+
+  return (
+    <Card className="w-full">
+      <CardHeader>
+        <CardTitle className="text-xl font-bold">โครงสร้างรายได้ SaaS (ARR & MRR)</CardTitle>
+        <CardDescription>
+          เปรียบเทียบสัดส่วนรายรับระหว่างผู้สมัครใช้งานแบบรายปีและรายเดือน
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <ChartContainer config={chartConfig} className="min-h-[320px] w-full">
+          <AreaChart
+            data={revenueData}
+            margin={{ top: 12, right: 12, left: 12, bottom: 0 }}
+          >
+            <defs>
+              <linearGradient id="fillMonthly" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="var(--color-monthlyPlan)" stopOpacity={0.8} />
+                <stop offset="95%" stopColor="var(--color-monthlyPlan)" stopOpacity={0.1} />
+              </linearGradient>
+              <linearGradient id="fillAnnual" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="var(--color-annualPlan)" stopOpacity={0.8} />
+                <stop offset="95%" stopColor="var(--color-annualPlan)" stopOpacity={0.1} />
+              </linearGradient>
+            </defs>
+
+            <CartesianGrid vertical={false} strokeDasharray="3 3" className="stroke-muted" />
+
+            <XAxis
+              dataKey="month"
+              tickLine={false}
+              axisLine={false}
+              tickMargin={8}
+              className="text-xs fill-muted-foreground"
+            />
+            <YAxis
+              tickLine={false}
+              axisLine={false}
+              tickMargin={8}
+              tickFormatter={(v: number) => `฿${(v / 1000).toFixed(0)}k`}
+              className="text-xs fill-muted-foreground"
+            />
+
+            <ChartTooltip
+              cursor={{ strokeDasharray: '3 3' }}
+              content={
+                <ChartTooltipContent
+                  indicator="dot"
+                  formatter={(value, name) => (
+                    <div className="flex w-full items-center justify-between gap-4">
+                      <span className="text-muted-foreground">{name}:</span>
+                      <span className="font-semibold">{formatCurrency(Number(value))}</span>
+                    </div>
+                  )}
+                />
+              }
+            />
+
+            <ChartLegend content={<ChartLegendContent />} />
+
+            <Area
+              type="monotone"
+              dataKey="annualPlan"
+              stroke="var(--color-annualPlan)"
+              fill="url(#fillAnnual)"
+              strokeWidth={2}
+            />
+            <Area
+              type="monotone"
+              dataKey="monthlyPlan"
+              stroke="var(--color-monthlyPlan)"
+              fill="url(#fillMonthly)"
+              strokeWidth={2}
+            />
+          </AreaChart>
+        </ChartContainer>
+      </CardContent>
+    </Card>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: Server Health Monitoring Multi-BarChart พร้อม Icons
+
+ตัวอย่างนี้สาธิตการใช้ `ChartConfig` ร่วมกับไอคอนจาก `lucide-react` เพื่อให้ Legend และ Tooltip แสดงไอคอนกำกับแต่ละชุดข้อมูล พร้อมการจัดกลุ่มข้อมูล 2 แท่งคู่กัน (Side-by-side BarChart)
+
+```tsx filename="src/components/dashboard/server-latency-chart.tsx"
+'use client';
+
+import * as React from 'react';
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts';
+import { Activity, AlertTriangle } from 'lucide-react';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import {
+  ChartConfig,
+  ChartContainer,
+  ChartLegend,
+  ChartLegendContent,
+  ChartTooltip,
+  ChartTooltipContent,
+} from '@/components/ui/chart';
+
+interface RegionMetric {
+  region: string;
+  latencyMs: number;
+  errorCount: number;
+}
+
+const serverMetrics: RegionMetric[] = [
+  { region: 'ap-southeast-1 (BKK)', latencyMs: 24, errorCount: 2 },
+  { region: 'ap-northeast-1 (TYO)', latencyMs: 78, errorCount: 6 },
+  { region: 'us-east-1 (N.VA)', latencyMs: 210, errorCount: 18 },
+  { region: 'eu-west-1 (DUB)', latencyMs: 185, errorCount: 12 },
+  { region: 'sa-east-1 (SAO)', latencyMs: 340, errorCount: 35 },
+];
+
+const chartConfig = {
+  latencyMs: {
+    label: 'ค่าเฉลี่ย Latency (ms)',
+    icon: Activity,
+    color: 'hsl(var(--chart-2))',
+  },
+  errorCount: {
+    label: 'จำนวน Error (req/s)',
+    icon: AlertTriangle,
+    color: 'hsl(var(--chart-5))',
+  },
+} satisfies ChartConfig;
+
+export function ServerLatencyChart() {
+  return (
+    <Card className="w-full">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-lg">
+          <Activity className="h-5 w-5 text-emerald-500" />
+          ประสิทธิภาพ Edge Clusters ทั่วโลก
+        </CardTitle>
+        <CardDescription>
+          เปรียบเทียบ Response Time และอัตราความผิดพลาดแยกตาม Cloud Region
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <ChartContainer config={chartConfig} className="min-h-[300px] w-full">
+          <BarChart
+            data={serverMetrics}
+            margin={{ top: 16, right: 16, left: 0, bottom: 20 }}
+          >
+            <CartesianGrid vertical={false} strokeDasharray="3 3" className="stroke-border" />
+            <XAxis
+              dataKey="region"
+              tickLine={false}
+              tickMargin={10}
+              axisLine={false}
+              className="text-xs fill-muted-foreground"
+            />
+            <YAxis
+              tickLine={false}
+              axisLine={false}
+              className="text-xs fill-muted-foreground"
+            />
+            <ChartTooltip
+              content={
+                <ChartTooltipContent
+                  indicator="line"
+                  labelClassName="font-bold text-foreground"
+                />
+              }
+            />
+            <ChartLegend content={<ChartLegendContent />} />
+            <Bar
+              dataKey="latencyMs"
+              fill="var(--color-latencyMs)"
+              radius={[6, 6, 0, 0]}
+              maxBarSize={48}
+            />
+            <Bar
+              dataKey="errorCount"
+              fill="var(--color-errorCount)"
+              radius={[6, 6, 0, 0]}
+              maxBarSize={48}
+            />
+          </BarChart>
+        </ChartContainer>
+      </CardContent>
+    </Card>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีอื่น (Recharts vs Raw Recharts vs Chart.js vs Tremor)
+
+| ปัจจัยการพิจารณา | Raw Recharts (ไม่ใช้ shadcn) | shadcn/ui Chart (บน Recharts v3) | Chart.js / react-chartjs-2 | Tremor (v3) |
+| :--- | :--- | :--- | :--- | :--- |
+| **สไตล์และการจัดการ Theme** | ต้องเขียน custom style เองทั้งหมด, Dark mode ต้องเขียนสลับสีแบบ manual | ใช้ CSS Variables อัตโนมัติ ซิงค์กับ Tailwind และ `next-themes` สมบูรณ์แบบ | Canvas-based ต้องคอย Destroy และสร้าง Chart instance ใหม่เมื่อ theme เปลี่ยน | มีธีมสำเร็จรูป แต่ปรับแต่งระดับลึกได้ยากกว่า |
+| **Tooltip & Legend** | UI ดูย้อนยุค ขาดสุนทรียภาพ ต้องเขียน Component เองหลายสิบบรรทัด | สวยงามระดับ Production ตั้งแต่วินาทีแรก มี Indicator แบบ `dot`, `line`, หรือ `dashed` | อาศัย HTML Tooltip plugin หรือ Canvas text ซึ่ง render ฟอนต์ภาษาไทยได้ไม่คมเท่า DOM | ออกแบบมาดี แต่ lock-in อยู่กับโครงสร้าง UI ของ Tremor |
+| **Bundle Size & Tree Shaking** | เล็ก-ปานกลางตามโมดูลที่ import | โค้ดคอมโพเนนต์อยู่ในโปรเจกต์เรา (`@/components/ui/chart`), ปรับแกะไส้ในได้อิสระ | ขนาดปานกลาง ดึง dependencies ของ Canvas engine เข้ามา | มี dependencies ค่อนข้างมาก |
+| **Accessibility (a11y)** | ต่ำหากไม่ตั้งค่าเพิ่ม | มีพื้นฐาน a11y ดีขึ้น รองรับ aria-labels ผ่านโครงสร้าง SVG | ตรวจสอบผ่าน Screen Reader ได้ยากมากเพราะเป็น Canvas bitmap | อยู่ในเกณฑ์ปานกลาง |
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practices)
+
+### ข้อผิดพลาดที่ 1: Hardcode สี HEX ใน SVG Fill
+
+```tsx
+// ❌ ผิด: กำหนดรหัสสีตายตัว ทำให้ไม่ตอบสนองต่อ Dark Mode
+<Bar dataKey="desktop" fill="#2563eb" />
+
+// ✅ ถูกต้อง: อ้างอิงผ่าน CSS Variable ที่ ChartContainer กำหนดให้
+<Bar dataKey="desktop" fill="var(--color-desktop)" />
+```
+
+### ข้อผิดพลาดที่ 2: ประกาศ `chartConfig` ไว้ใน Component Function Body
+
+```tsx
+// ❌ ผิด: ประกาศข้างในฟังก์ชัน ทำให้ config กลายเป็น Reference ใหม่ทุกครั้งที่ Component re-render
+export function RevenueChart() {
+  const chartConfig = {
+    revenue: { label: 'รายได้', color: 'hsl(var(--chart-1))' }
+  };
+  return <ChartContainer config={chartConfig}>...</ChartContainer>;
+}
+
+// ✅ ถูกต้อง: ย้ายไว้นอก Component หรือใช้ useMemo หากต้องขึ้นกับ Props
+const chartConfig = {
+  revenue: { label: 'รายได้', color: 'hsl(var(--chart-1))' }
+} satisfies ChartConfig;
+
+export function RevenueChart() {
+  return <ChartContainer config={chartConfig}>...</ChartContainer>;
+}
+```
+
+### ข้อผิดพลาดที่ 3: ลืมระบุความสูงขั้นต่ำ (`min-h`) ให้กับ Container
+
+```tsx
+// ❌ ผิด: ไม่ได้ระบุความสูง เมื่อหน้าเว็บโหลด ResponsiveContainer อาจคำนวณเป็น 0px ส่งผลให้กราฟยุบหายไป
+<ChartContainer config={chartConfig} className="w-full">
+  <LineChart ... />
+</ChartContainer>
+
+// ✅ ถูกต้อง: กำหนด min-h เสมอเพื่อให้มีมิติขั้นต่ำก่อนที่ JavaScript จะคำนวณ Responsive
+<ChartContainer config={chartConfig} className="min-h-[300px] w-full">
+  <LineChart ... />
+</ChartContainer>
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ shadcn/ui Chart เมื่อ:
+- สร้างระบบ **Admin Dashboard**, **SaaS Analytics**, หรือ **Financial Portal** ใน **Next.js 16 (App Router)**
+- ระบบมีฟีเจอร์ **Dark / Light Mode Toggle** และต้องการให้กราฟเปลี่ยนสีอย่างนุ่มนวล
+- ทีมออกแบบใช้ Design System อิงตาม Tailwind CSS และต้องการให้ Tooltip สอดคล้องกับ Popover/Dialog ตัวอื่นๆ ของเว็บ
+- ต้องการความยืดหยุ่นระดับ Declarative React โดยไม่ต้องการถูกตีกรอบด้วย Chart Library สำเร็จรูปที่ไม่สามารถ Customize Layout ได้
+
+### ไม่ควรใช้เมื่อ:
+- กราฟมีจุดข้อมูลหนาแน่นสูงมาก (High-frequency Real-time Data เช่น กราฟหุ้นแบบ Candlestick วินาทีต่อวินาที จำนวน 50,000+ จุด) ควรเปลี่ยนไปใช้ **Canvas** หรือ **WebGL** (เช่น Chart.js, PixiJS, หรือ TradingView Lightweight Charts)
+- โปรเจกต์ไม่ได้ใช้ Tailwind CSS และไม่ต้องการใช้งาน Radix / shadcn conventions
+- ต้องการกราฟภูมิศาสตร์ 3 มิติ (3D Geospatial) หรือกราฟเครือข่ายความสัมพันธ์ซับซ้อน (Network Topology Graph) ควรพิจารณา **Three.js** หรือ **Cytoscape.js**
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: `ChartContainer` ของ shadcn/ui มีกลไกส่งต่อค่าสีเข้าสู่ Recharts อย่างไร โดยที่ไม่ต้องส่งรหัสสี HEX เข้าไปคำนวณใน JavaScript?
+**แนวทางตอบแบบ Senior Developer**:
+1. `ChartContainer` นำก้อน `ChartConfig` ที่เรากำหนดไว้ มาประมวลผลเป็นชุดคู่ตัวแปร CSS Custom Properties ตามรูปแบบ `--color-${key}`
+2. จากนั้นจะสร้างแท็ก `<style>` เฉพาะ หรือแปะผ่าน Attribute `style` ของ Root Wrapper `<div>`
+3. ในคอมโพเนนต์ลูกของ Recharts เช่น `<Bar>`, `<Line>`, หรือ `<Area>` เราจะกำหนด `fill` หรือ `stroke` เป็นฟังก์ชัน CSS `var(--color-${dataKey})` แทนรหัสสีตรงๆ
+4. เมื่อ CSS Variable นั้นเชื่อมโยงกับโทเคนระดับโกลบอล เช่น `hsl(var(--chart-1))` การเปลี่ยนแปลงค่าสีใน `.dark` ที่เกิดขึ้นบนคลาสของแท็ก `<html>` จะทำให้เบราว์เซอร์เปลี่ยนสี SVG องค์ประกอบของกราฟทันที โดยอาศัย CSS Cascading Engine ทำให้ไม่ต้อง Re-render React Tree หรือคำนวณสีผ่าน JS ให้สิ้นเปลืองพลังงาน
+
+### Q2: หากข้อมูลที่นำมาวาดกราฟเป็น Dynamic Series ซึ่งผู้ใช้สามารถเพิ่ม/ลดหมวดหมู่ได้เองในระหว่างรันไทม์ เราจะจัดการ `ChartConfig` อย่างไรให้ยังคง Type-safe และรองรับ Palette สีอัตโนมัติ?
+**แนวทางตอบแบบ Senior Developer**:
+เราสามารถใช้ `useMemo` ในการสร้าง `ChartConfig` แบบไดนามิก โดยเตรียมอาร์เรย์ของโทเคนสีไว้ล่วงหน้า เช่น `['--chart-1', '--chart-2', '--chart-3', '--chart-4', '--chart-5']`:
+
+```tsx
+const dynamicConfig = React.useMemo(() => {
+  const config: ChartConfig = {};
+  categories.forEach((cat, index) => {
+    const colorToken = `--chart-${(index % 5) + 1}`;
+    config[cat.id] = {
+      label: cat.displayName,
+      color: `hsl(var(${colorToken}))`,
+    };
+  });
+  return config;
+}, [categories]);
+```
+
+จากนั้นส่ง `dynamicConfig` เข้า `<ChartContainer config={dynamicConfig}>` และ Render `<Bar>` หรือ `<Line>` แบบ Dynamic วนลูปตาม `categories` วิธีนี้ทำให้ Series ที่ผู้ใช้เพิ่มเข้ามาใหม่ ได้สีที่หมุนเวียน (Cyclic Color Palette) ที่ถูกนิยามไว้ใน Dark Mode เรียบร้อยแล้วอย่างสมบูรณ์

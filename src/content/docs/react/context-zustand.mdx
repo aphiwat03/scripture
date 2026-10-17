@@ -1,0 +1,130 @@
+---
+title: Context vs Zustand
+category: Frontend
+parentTitle: React 19
+version: v19.0
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+เมื่อข้อมูลต้องถูกใช้งานในหลายคอมโพเนนต์ที่อยู่คนละกิ่งก้าน (เช่น ข้อมูลธีม Dark/Light, ข้อมูลผู้ใช้ล็อกอิน, ตะกร้าสินค้า) การส่ง Props ผ่านคอมโพเนนต์ตัวกลางที่ไม่เกี่ยวข้องทีละชั้นเรียกว่า **Props Drilling**
+
+- **`useContext`**: เครื่องมือ Built-in ของ React เปรียบเหมือน "เสาสัญญาณวิทยุกระจายเสียง" ที่คอมโพเนนต์ลูกทุกตัวสามารถเปิดรับฟังข้อมูลได้โดยตรง
+- **`Zustand`**: ไลบรารีจัดการ State ระดับโกลบอลที่มีขนาดเล็กมาก (~1KB) เปรียบเหมือน "ตู้เซฟกลาง" ที่อยู่นอก React Tree โดยสามารถเลือกดึงข้อมูลเฉพาะบางฟิลด์ (Selective Subscriptions) ได้อย่างมีประสิทธิภาพสูงสุด
+
+---
+
+## 2. หลักการทำงานเบื้องหลังและการเปรียบเทียบ
+
+| ประเด็นเปรียบเทียบ | `useContext` (React Built-in) | `Zustand` (Global State Library) |
+| :--- | :--- | :--- |
+| **จุดประสงค์หลัก** | การกระจายข้อมูล (Dependency Injection) ที่ไม่เปลี่ยนบ่อย | การจัดการ State ที่มีการเปลี่ยนแปลงบ่อยและซับซ้อน |
+| **พฤติกรรม Re-render** | **Re-render คอมโพเนนต์ลูกทุกตัว** ที่เรียก `useContext` ทันทีที่ค่าใน Provider เปลี่ยนแปลง | **Re-render เฉพาะคอมโพเนนต์ที่ Subscribe** ค่าฟิลด์นั้นๆ เท่านั้น |
+| **Boilerplate Code** | ต้องสร้าง Context, Provider Component, และห่อหุ้มรอบ JSX Tree | สร้าง Store ได้ในคำสั่งเดียว ไม่ต้องใช้ Provider ครอบ Root |
+| **การทำงานนอก React** | ไม่สามารถอ่าน/เขียนค่านอก React Component ได้ | สามารถเรียกใช้ `useStore.getState()` ในฟังก์ชันธรรมดาได้ทันที |
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: การใช้ `createContext` และ `useContext` สำหรับ Theme
+
+```tsx filename="context/ThemeContext.tsx"
+'use client';
+
+import React, { createContext, useContext, useState } from 'react';
+
+type Theme = 'light' | 'dark';
+
+interface ThemeContextType {
+  theme: Theme;
+  toggleTheme: () => void;
+}
+
+const ThemeContext = createContext<ThemeContextType | null>(null);
+
+export function ThemeProvider({ children }: { children: React.ReactNode }) {
+  const [theme, setTheme] = useState<Theme>('light');
+
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
+  };
+
+  return (
+    <ThemeContext.Provider value={{ theme, toggleTheme }}>
+      {children}
+    </ThemeContext.Provider>
+  );
+}
+
+// Custom Hook เพื่อความสะดวกและความปลอดภัย
+export function useTheme() {
+  const context = useContext(ThemeContext);
+  if (!context) {
+    throw new Error('useTheme ต้องถูกใช้งานภายใต้ ThemeProvider เท่านั้น');
+  }
+  return context;
+}
+```
+
+### ตัวอย่างที่ 2: การใช้ `Zustand` จัดการตะกร้าสินค้า (Selective Re-render)
+
+```tsx filename="store/cart-store.ts"
+import { create } from 'zustand';
+
+interface CartItem {
+  id: string;
+  name: string;
+  price: number;
+}
+
+interface CartState {
+  items: CartItem[];
+  addItem: (item: CartItem) => void;
+  clearCart: () => void;
+}
+
+export const useCartStore = create<CartState>((set) => ({
+  items: [],
+  addItem: (item) => set((state) => ({ items: [...state.items, item] })),
+  clearCart: () => set({ items: [] }),
+}));
+```
+
+```tsx filename="components/CartBadge.tsx"
+'use client';
+
+import { useCartStore } from '@/store/cart-store';
+
+export function CartBadge() {
+  // เลือกอ่านเฉพาะ items.length -> คอมโพเนนต์นี้จะ Re-render เฉพาะเมื่อจำนวนเปลี่ยน!
+  const count = useCartStore((state) => state.items.length);
+
+  return (
+    <span className="px-2 py-0.5 rounded-full bg-red-500 text-white text-xs font-bold">
+      {count}
+    </span>
+  );
+}
+```
+
+---
+
+## 4. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- **`useContext`**:
+  - *ควรใช้*: สำหรับข้อมูลที่เปลี่ยนแปลงน้อยมาก เช่น ภาษา (i18n), ธีมสี (Theme), หรือการตั้งค่า UI ระดับระบบ
+  - *ไม่ควรใช้*: ข้อมูลที่มีการอัปเดตทุกๆ เสี้ยววินาที (เช่น Real-time chat, พิกัดเมาส์, ข้อมูลตระกร้าสินค้า) เพราะจะทำให้คอมโพเนนต์ทั้งหน้า Re-render ตามกันหมด
+- **`Zustand`**:
+  - *ควรใช้*: สำหรับ State หลักของธุรกิจ (Business State) เช่น ระบบตะกร้าสินค้า, ระบบฟอร์มหลายขั้นตอน, หรือการแชร์ State ข้ามหน้าจอ
+
+---
+
+## 5. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไม `useContext` จึงไม่ถือว่าเป็น State Management เต็มรูปแบบ?
+**แนวทางคำตอบ**: เพราะ Context ถูกออกแบบมาเพื่อแก้ปัญหา **Props Drilling** (การส่งผ่านข้อมูล) เท่านั้น ตัวมันเองไม่มีกลไกควบคุม Selector หรือ Selective Subscriptions หากค่าใน Context เปลี่ยน คอมโพเนนต์ลูกทุกตัวที่ `useContext` จะถูกบังคับ Re-render เสมอ ต่างจาก Redux หรือ Zustand ที่เลือก Subscribe เฉพาะส่วนย่อยได้
+
+### Q2: จุดเด่นของ Zustand เมื่อเทียบกับ Redux คืออะไร?
+**แนวทางคำตอบ**: Zustand มีขนาดเล็กมาก ไม่มี Boilerplate ที่ซับซ้อน (ไม่ต้องเขียน Actions, Reducers, Types แยกไฟล์), ไม่จำเป็นต้องครอบ Provider รอบ Root Component และรองรับ TypeScript ออกจากกล่องได้อย่างเรียบง่าย

@@ -1,0 +1,994 @@
+---
+title: File Upload
+category: BACKEND
+version: Multer + Supabase Storage
+updatedAt: 2026-10-17
+---
+
+# File Upload
+
+ในระบบอีคอมเมิร์ซระดับ Production อย่าง **Smart Butcher Marketplace** การจัดการไฟล์อัปโหลด (File Upload) เป็นองค์ประกอบสำคัญที่ต้องรองรับทั้งไฟล์สาธารณะ เช่น รูปภาพสินค้าเนื้อวากิว (`Product.imageUrl`) และไฟล์ที่มีความลับทางธุรกิจสูง เช่น สลิปโอนเงินของลูกค้า (`Payment.slipImageUrl`) การออกแบบระบบอัปโหลดไฟล์ที่ดีใน NestJS 11 จึงต้องคำนึงถึงความเสถียรของหน่วยความจำ ความปลอดภัยในการตรวจสอบไฟล์จริงระดับไบต์ (Magic Number) การแยกพื้นที่จัดเก็บบน Cloud Object Storage (Supabase Storage) และการจัดการไฟล์ขยะ (Orphaned Files) อย่างรัดกุม
+
+| หัวข้อในหน้านี้ | รายละเอียดหลัก |
+| :--- | :--- |
+| [1. สถาปัตยกรรม End-to-End File Upload Flow ด้วย Multer ใน NestJS 11](#1-สถาปัตยกรรม-end-to-end-file-upload-flow-ด้วย-multer-ใน-nestjs-11) | การทำงานของ `multipart/form-data`, `FileInterceptor` และการใช้ `memoryStorage` |
+| [2. การตรวจสอบความถูกต้องของไฟล์ด้วย ParseFilePipe และ Magic Number](#2-การตรวจสอบความถูกต้องของไฟล์ด้วย-parsefilepipe-และ-magic-number) | การจำกัดขนาดไฟล์และการตรวจจับ File Signature ระดับไบต์เพื่อป้องกันการปลอมนามสกุลไฟล์ |
+| [3. การอัปโหลดไฟล์ขึ้น Supabase Storage และการตั้งชื่อไฟล์ไม่ให้ซ้ำ](#3-การอัปโหลดไฟล์ขึ้น-supabase-storage-และการตั้งชื่อไฟล์ไม่ให้ซ้ำ) | การสร้าง `StorageService` ด้วย `@supabase/supabase-js` และการตั้งชื่อไฟล์ด้วย `crypto.randomUUID()` |
+| [4. Public vs Private Buckets, Signed URLs และการจัดการสลิปโอนเงินอย่างปลอดภัย](#4-public-vs-private-buckets-signed-urls-และการจัดการสลิปโอนเงินอย่างปลอดภัย) | การแยกระดับสิทธิ์ Bucket และการสร้าง Temporary Signed URL สำหรับตรวจสอบสลิปโอนเงิน |
+| [5. การซิงค์และลบไฟล์ขยะ (Orphaned Files Cleanup) เมื่อลบข้อมูลในฐานข้อมูล](#5-การซิงค์และลบไฟล์ขยะ-orphaned-files-cleanup-เมื่อลบข้อมูลในฐานข้อมูล) | กลยุทธ์การลบไฟล์เก่าเมื่อเปลี่ยนรูปสินค้าหรือเมื่อเกิด Rollback ในฐานข้อมูล |
+| [ข้อผิดพลาดที่พบบ่อย (Anti-patterns)](#ข้อผิดพลาดที่พบบ่อย-anti-patterns) | ข้อควรระวังในการจัดการไฟล์บน Containerized Backend |
+| [Checklist สรุป](#checklist-สรุป) | รายการตรวจสอบความพร้อมก่อนขึ้นระบบจริง |
+| [ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่](#ลำดับการเรียนที่แนะนำ-และ-ดูเพิ่มเติมที่) | เส้นทางการศึกษาต่อยอดในส่วน Backend และ Database |
+
+---
+
+## 1. สถาปัตยกรรม End-to-End File Upload Flow ด้วย Multer ใน NestJS 11
+
+### แนวคิด (Concept)
+การส่งไฟล์ผ่านโปรโตคอล HTTP ไม่สามารถส่งเป็น JSON ปกติที่มีประสิทธิภาพได้ (เพราะการแปลงเป็น Base64 จะทำให้ขนาดข้อมูลใหญ่ขึ้นประมาณ 33% และสิ้นเปลือง CPU ในการ Encode/Decode) มาตรฐานสากลจึงใช้ `multipart/form-data` ซึ่งแบ่งข้อมูลออกเป็นหลายส่วน (Parts) ทั้งข้อมูลข้อความและข้อมูลไบนารีของไฟล์ ใน NestJS 11 เราใช้แพ็กเกจ `@nestjs/platform-express` ซึ่งผสานการทำงานของ **Multer** เข้ากับระบบ Interceptor (`FileInterceptor`, `FilesInterceptor`) เพื่อดักจับและแปลง Stream ของไฟล์ให้กลายเป็นออบเจกต์ `Express.Multer.File` พร้อมใช้งานใน Controller
+
+### หลักการเบื้องหลัง (Under the Hood)
+เมื่อ Client ส่ง HTTP Request ที่มี Header `Content-Type: multipart/form-data; boundary=---WebKitFormBoundary...` เข้ามายัง NestJS:
+1. **Multer Middleware / Interceptor** จะใช้ไลบรารี `busboy` เบื้องหลังในการอ่าน HTTP Request Stream ทีละ Chunk โดยแยกแยะแต่ละฟิลด์ด้วยตัวคั่น `boundary`
+2. หากกำหนดโหมดการจัดเก็บเป็น `memoryStorage()` (ค่าเริ่มต้นของ NestJS เมื่อไม่ระบุ `dest`) Multer จะนำ Chunk ไบนารีมาประกอบรวมกันในหน่วยความจำ RAM ของโพรเซส Node.js ในรูปแบบออบเจกต์ `Buffer` (`file.buffer`)
+3. เมื่ออ่าน Stream จนจบ Interceptor จะแนบออบเจกต์ไฟล์ไว้ที่ `req.file` และส่งต่อไปยังตัวแปรที่ตกแต่งด้วย `@UploadedFile()` ในเมธอดของ Controller เพื่อส่งขึ้น Cloud Storage ต่อไป
+
+<Callout type="note" title="ทำไมต้องใช้ Memory Storage ร่วมกับ Cloud Storage">
+ในสถาปัตยกรรมยุคใหม่ที่รันแอปพลิเคชันบน Docker Container หรือ Serverless ระบบไฟล์ในเครื่อง (Local Disk) มีสถานะเป็นชั่วคราว (Ephemeral) หาก Container ถูกรีสตาร์ทหรือขยายจำนวน (Horizontal Scaling) ไฟล์ที่เก็บในดิสก์จะสูญหายหรือมองไม่เห็นข้ามเครื่อง การพักไฟล์ขนาดเล็กถึงกลางไว้ใน `memoryStorage` ชั่วคราวแล้วส่งต่อขึ้น Supabase Storage ทันทีจึงลดภาระ I/O ของดิสก์และทำให้ระบบเป็น Stateless อย่างแท้จริง
+</Callout>
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การตั้งค่า `MulterModule` เบื้องต้นและสร้าง Endpoint รับรูปภาพสินค้า (`Product`) แบบพื้นฐานด้วย `FileInterceptor`
+
+```typescript filename="src/modules/products/product-upload.controller.ts"
+import {
+  Controller,
+  Post,
+  Param,
+  ParseUUIDPipe,
+  UseInterceptors,
+  UploadedFile,
+  BadRequestException,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
+
+@Controller('products')
+export class ProductUploadController {
+  @Post(':id/image')
+  @UseInterceptors(
+    FileInterceptor('image', {
+      storage: memoryStorage(),
+      limits: {
+        fileSize: 5 * 1024 * 1024, // จำกัดขนาดระดับ Multer ที่ 5MB
+        files: 1,
+      },
+    }),
+  )
+  async uploadProductImage(
+    @Param('id', new ParseUUIDPipe({ version: '4' })) productId: string,
+    @UploadedFile() file: Express.Multer.File | undefined,
+  ): Promise<{ productId: string; originalName: string; size: number }> {
+    if (!file) {
+      throw new BadRequestException('กรุณาแนบไฟล์รูปภาพสินค้าในฟิลด์ "image"');
+    }
+
+    return {
+      productId,
+      originalName: file.originalname,
+      size: file.size,
+    };
+  }
+}
+```
+
+ตัวอย่างที่ 2: การรับข้อมูล `multipart/form-data` ที่ประกอบด้วยทั้งข้อมูลข้อความ (DTO สำหรับสร้างสินค้าเนื้อพรีเมียมใหม่) และไฟล์รูปภาพพร้อมกันใน Request เดียว
+
+```typescript filename="src/modules/products/dto/create-product-with-image.dto.ts"
+import { IsString, IsNotEmpty, IsNumber, Min, IsUUID } from 'class-validator';
+import { Type } from 'class-transformer';
+
+export class CreateProductWithImageDto {
+  @IsString()
+  @IsNotEmpty()
+  name!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  sku!: string;
+
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(1)
+  pricePerKg!: number;
+
+  @IsUUID('4')
+  categoryId!: string;
+}
+```
+
+```typescript filename="src/modules/products/products.controller.ts"
+import {
+  Controller,
+  Post,
+  Body,
+  UseInterceptors,
+  UploadedFile,
+  BadRequestException,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
+import { CreateProductWithImageDto } from './dto/create-product-with-image.dto';
+import { ProductsService } from './products.service';
+
+@Controller('products')
+export class ProductsController {
+  constructor(private readonly productsService: ProductsService) {}
+
+  @Post()
+  @UseInterceptors(
+    FileInterceptor('image', {
+      storage: memoryStorage(),
+      limits: {
+        fileSize: 5 * 1024 * 1024, // 5MB
+        fieldSize: 1024 * 100, // จำกัดขนาด Text field ไม่เกิน 100KB
+      },
+    }),
+  )
+  async createProductWithImage(
+    @Body() dto: CreateProductWithImageDto,
+    @UploadedFile() file: Express.Multer.File | undefined,
+  ) {
+    if (!file) {
+      throw new BadRequestException('ต้องอัปโหลดรูปภาพตัวอย่างเนื้อสินค้าเสมอ');
+    }
+
+    // ส่งทั้ง DTO ที่ผ่านการแปลงชนิดข้อมูลแล้ว และ Buffer ของไฟล์ไปยัง Service
+    return this.productsService.createWithImage(dto, file);
+  }
+}
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **วิธีการส่งไฟล์** | แปลงไฟล์เป็น Base64 String แล้วส่งใน JSON Body ทำให้ Payload บวมขึ้น 33% และ `JSON.parse()` บล็อก Event Loop | ใช้ `multipart/form-data` ร่วมกับ `FileInterceptor` เพื่ออ่านข้อมูลแบบ Stream |
+| **การจำกัดขนาดที่ Multer** | ไม่ตั้งค่า `limits.fileSize` ใน `FileInterceptor` ทำให้ผู้โจมตีส่งไฟล์ขนาด 2GB เข้ามาจน Node.js เกิด Out-Of-Memory (OOM) | กำหนด `limits.fileSize` ตั้งแต่ระดับ Multer Options เพื่อตัดการเชื่อมต่อทันทีที่ Stream เกินขนาดที่กำหนด |
+| **การจัดเก็บไฟล์ถาวร** | ใช้ `diskStorage({ destination: './uploads' })` เพื่อเก็บไฟล์ถาวรในโฟลเดอร์ของเซิร์ฟเวอร์ | ใช้ `memoryStorage()` สำหรับไฟล์ขนาดเล็ก-กลาง แล้วอัปโหลดขึ้น Cloud Object Storage ทันที |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: อัปโหลดไฟล์รูปภาพสินค้า (`Product`), รูปหมวดหมู่ (`Category`), หรือสลิปโอนเงิน (`Payment`) ที่มีขนาดตั้งแต่ไม่กี่ KB จนถึง ~10 MB และต้องการตรวจสอบหรือประมวลผลที่ฝั่ง Backend ก่อนบันทึก
+- **ไม่ควรใช้เมื่อ**: อัปโหลดไฟล์วิดีโอความละเอียดสูงหรือไฟล์ขนาดใหญ่ระดับหลายร้อย MB ถึงหลาย GB ผ่าน `memoryStorage()` ของ Backend เพราะจะทำให้ RAM ของเซิร์ฟเวอร์เต็มอย่างรวดเร็ว กรณีนั้นควรใช้ **Presigned Upload URL** ให้ Client อัปโหลดตรงไปยัง Cloud Storage แทน
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมการรับไฟล์ใน `multipart/form-data` ร่วมกับ `@Body()` DTO จึงต้องใส่ `@Type(() => Number)` ของ `class-transformer` ในฟิลด์ตัวเลขเสมอ?
+   - **แนวคำตอบ**: เพราะในโปรโตคอล `multipart/form-data` ทุกฟิลด์ที่เป็นข้อความจะถูกแยกส่วนออกมาเป็น `string` ทั้งหมด ต่างจาก JSON ที่มีชนิดข้อมูล `number` หรือ `boolean` ในตัว ดังนั้นหากไม่ใช้ `@Type(() => Number)` หรือเปิด `enableImplicitConversion` ตัว `ValidationPipe` (`@IsNumber()`) จะมองว่าค่า `"1500"` เป็น `string` และตีกลับด้วยสถานะ `400 Bad Request`
+2. **คำถาม**: หากตั้งค่า `limits.fileSize` ใน `FileInterceptor` ต่างจากการตรวจขนาดไฟล์ใน `ParseFilePipe` อย่างไร?
+   - **แนวคำตอบ**: `limits.fileSize` ใน Multer ทำงานในระดับ Stream ขณะกำลังอ่านข้อมูลจาก Network หากจำนวนไบต์ที่ส่งมาเกินกำหนด `busboy` จะหยุดรับข้อมูลทันที ช่วยป้องกัน RAM เต็มตั้งแต่ต้นทาง ส่วน `ParseFilePipe` จะทำงานหลังจาก Multer อ่านไฟล์เสร็จสมบูรณ์และเก็บเข้า `req.file` แล้ว ดังนั้นจึงควรตั้ง `limits.fileSize` ควบคู่กับ `ParseFilePipe` เสมอ
+
+---
+
+## 2. การตรวจสอบความถูกต้องของไฟล์ด้วย ParseFilePipe และ Magic Number
+
+### แนวคิด (Concept)
+การตรวจสอบความถูกต้องของไฟล์ (File Validation) ไม่สามารถเชื่อถือค่า `file.mimetype` หรือนามสกุลไฟล์ใน `file.originalname` ที่ส่งมาจาก Client ได้เพียงอย่างเดียว เพราะค่าเหล่านี้ถูกสร้างขึ้นจาก HTTP Header ของฝั่งผู้ส่ง ซึ่งแฮกเกอร์สามารถนำไฟล์สคริปต์อันตราย (`.html`, `.svg` ที่ฝัง XSS หรือ `.exe`) มาเปลี่ยนชื่อเป็น `wagyu-slip.jpg` เพื่อหลอกระบบได้ การตรวจสอบระดับ Production ใน NestJS 11 จึงใช้ `ParseFilePipe` ร่วมกับการตรวจสอบ **Magic Number (File Signature)** คือการอ่านไบต์แรกๆ ของ `file.buffer` เพื่อพิสูจน์โครงสร้างไบนารีที่แท้จริงของไฟล์
+
+### หลักการเบื้องหลัง (Under the Hood)
+ไฟล์ไบนารีแต่ละชนิดมีลำดับเลขฐานสิบหก (Hexadecimal Signature) เฉพาะตัวอยู่ที่ส่วนหัวของไฟล์ (Header Bytes):
+- **JPEG (`image/jpeg`)**: ขึ้นต้นด้วยไบต์ `FF D8 FF`
+- **PNG (`image/png`)**: ขึ้นต้นด้วย 8 ไบต์ `89 50 4E 47 0D 0A 1A 0A`
+- **WebP (`image/webp`)**: ไบต์ที่ 0-3 คือ `52 49 46 46` (`"RIFF"`) และไบต์ที่ 8-11 คือ `57 45 42 50` (`"WEBP"`)
+
+เมื่อเราสร้าง Custom `FileValidator` สำหรับ `ParseFilePipe` ใน NestJS เราสามารถเข้าถึง `file.buffer` เพื่อตรวจสอบไบต์เหล่านี้ได้โดยตรงในระดับหน่วยความจำ (`Buffer.subarray()`) โดยใช้เวลาระดับไมโครวินาที และป้องกันการปลอมแปลงนามสกุลไฟล์ได้อย่างเด็ดขาด
+
+<Callout type="warning" title="ข้อควรระวังในการอนุญาตไฟล์ SVG">
+หลีกเลี่ยงการอนุญาตให้ผู้ใช้งานทั่วไปอัปโหลดไฟล์ `.svg` (`image/svg+xml`) สำหรับรูปโปรไฟล์หรือสลิปโอนเงิน เนื่องจากไฟล์ SVG มีโครงสร้างเป็น XML ที่สามารถฝังแท็ก `<script>` ได้ หากถูกเปิดดูโดยตรงบนเบราว์เซอร์จะนำไปสู่ช่องโหว่ Stored Cross-Site Scripting (Stored XSS) ทันที ควรจำกัดเฉพาะ `image/jpeg`, `image/png` และ `image/webp` เท่านั้น
+</Callout>
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การใช้ `ParseFilePipe` มาตรฐานร่วมกับ `MaxFileSizeValidator` และ `FileTypeValidator` สำหรับตรวจสอบเบื้องต้น
+
+```typescript filename="src/modules/categories/categories.controller.ts"
+import {
+  Controller,
+  Post,
+  Param,
+  ParseUUIDPipe,
+  UploadedFile,
+  UseInterceptors,
+  ParseFilePipe,
+  MaxFileSizeValidator,
+  FileTypeValidator,
+  HttpStatus,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+
+@Controller('categories')
+export class CategoriesController {
+  @Post(':id/banner')
+  @UseInterceptors(
+    FileInterceptor('banner', {
+      limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
+    }),
+  )
+  async uploadCategoryBanner(
+    @Param('id', new ParseUUIDPipe({ version: '4' })) categoryId: string,
+    @UploadedFile(
+      new ParseFilePipe({
+        validators: [
+          new MaxFileSizeValidator({
+            maxSize: 2 * 1024 * 1024,
+            message: 'ขนาดไฟล์แบนเนอร์หมวดหมู่เนื้อต้องไม่เกิน 2MB',
+          }),
+          new FileTypeValidator({
+            fileType: /^image\/(jpeg|png|webp)$/,
+          }),
+        ],
+        errorHttpStatusCode: HttpStatus.UNPROCESSABLE_ENTITY,
+        fileIsRequired: true,
+      }),
+    )
+    file: Express.Multer.File,
+  ) {
+    return {
+      categoryId,
+      mimeType: file.mimetype,
+      size: file.size,
+    };
+  }
+}
+```
+
+ตัวอย่างที่ 2: การสร้าง Custom `MagicNumberImageValidator` เพื่อตรวจพิสูจน์ File Signature (`JPEG`, `PNG`, `WebP`) ระดับไบต์จาก `Buffer` สำหรับตรวจสอบสลิปโอนเงิน (`Payment`) และรูปสินค้า (`Product`)
+
+```typescript filename="src/common/validators/magic-number-image.validator.ts"
+import { FileValidator } from '@nestjs/common';
+
+export interface MagicNumberValidatorOptions {
+  allowedMimeTypes: Array<'image/jpeg' | 'image/png' | 'image/webp'>;
+}
+
+export class MagicNumberImageValidator extends FileValidator<
+  MagicNumberValidatorOptions,
+  Express.Multer.File
+> {
+  constructor(protected readonly validationOptions: MagicNumberValidatorOptions) {
+    super(validationOptions);
+  }
+
+  public isValid(file?: Express.Multer.File): boolean {
+    if (!file || !file.buffer || file.buffer.length < 12) {
+      return false;
+    }
+
+    const detectedMime = this.detectMimeTypeFromBuffer(file.buffer);
+    if (!detectedMime) {
+      return false;
+    }
+
+    // ต้องตรงกับรายการที่อนุญาต และตรงกับ MIME type ที่ประกาศมา
+    return this.validationOptions.allowedMimeTypes.includes(detectedMime);
+  }
+
+  public buildErrorMessage(): string {
+    const allowed = this.validationOptions.allowedMimeTypes.join(', ');
+    return `โครงสร้างไฟล์ไบนารีไม่ถูกต้อง (Magic Number Mismatch) อนุญาตเฉพาะไฟล์รูปภาพจริงประเภท: ${allowed}`;
+  }
+
+  private detectMimeTypeFromBuffer(
+    buffer: Buffer,
+  ): 'image/jpeg' | 'image/png' | 'image/webp' | null {
+    // 1. ตรวจ JPEG: FF D8 FF
+    if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+      return 'image/jpeg';
+    }
+
+    // 2. ตรวจ PNG: 89 50 4E 47 0D 0A 1A 0A
+    const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    const isPng = pngSignature.every((byte, index) => buffer[index] === byte);
+    if (isPng) {
+      return 'image/png';
+    }
+
+    // 3. ตรวจ WebP: "RIFF" (0..3) และ "WEBP" (8..11)
+    const riffHeader = buffer.subarray(0, 4).toString('ascii');
+    const webpHeader = buffer.subarray(8, 12).toString('ascii');
+    if (riffHeader === 'RIFF' && webpHeader === 'WEBP') {
+      return 'image/webp';
+    }
+
+    return null;
+  }
+}
+```
+
+```typescript filename="src/common/pipes/image-upload.pipe.ts"
+import {
+  ParseFilePipe,
+  MaxFileSizeValidator,
+  HttpStatus,
+} from '@nestjs/common';
+import { MagicNumberImageValidator } from '../validators/magic-number-image.validator';
+
+export function createStrictImageParsePipe(maxSizeBytes = 5 * 1024 * 1024): ParseFilePipe {
+  return new ParseFilePipe({
+    validators: [
+      new MaxFileSizeValidator({
+        maxSize: maxSizeBytes,
+        message: (maxSize) =>
+          `ไฟล์มีขนาดใหญ่เกินกำหนด (สูงสุดไม่เกิน ${(maxSize / (1024 * 1024)).toFixed(1)} MB)`,
+      }),
+      new MagicNumberImageValidator({
+        allowedMimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
+      }),
+    ],
+    errorHttpStatusCode: HttpStatus.UNPROCESSABLE_ENTITY,
+    fileIsRequired: true,
+  });
+}
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การตรวจสอบชนิดไฟล์** | เช็คเพียง `file.originalname.endsWith('.jpg')` หรือ `file.mimetype === 'image/jpeg'` ซึ่งปลอมแปลงได้ง่ายผ่านเครื่องมืออย่าง Postman หรือ `curl` | ใช้ Custom `FileValidator` ใน `ParseFilePipe` เพื่ออ่านไบต์แรกของ `file.buffer` (Magic Number) |
+| **HTTP Status เมื่อไฟล์ผิดรูปแบบ** | โยน `500 Internal Server Error` หรือไม่กำหนดสถานะที่ชัดเจน | กำหนด `errorHttpStatusCode: HttpStatus.UNPROCESSABLE_ENTITY` (`422`) หรือ `400 Bad Request` พร้อมข้อความที่ชัดเจน |
+| **การทำซ้ำโค้ด Validation** | เขียน `if (file.size > ...)` ซ้ำๆ ในทุกเมธอดของ Controller หรือ Service | สร้าง Factory Function เช่น `createStrictImageParsePipe()` เพื่อนำกลับมาใช้ซ้ำได้ในทุก Endpoint |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: ทุก Endpoint ที่เปิดรับไฟล์จากผู้ใช้งานภายนอก ไม่ว่าจะเป็นลูกค้าที่อัปโหลดสลิปโอนเงิน (`Payment`) หรือแอดมินที่อัปโหลดรูปภาพเนื้อพรีเมียม (`Product`)
+- **ไม่ควรใช้เมื่อ**: ไม่ควรพึ่งพาเฉพาะการตรวจ Magic Number เพียงอย่างเดียวหากระบบต้องการควบคุมขนาดมิติภาพ (Width x Height) หรือลบข้อมูลพิกัด GPS (EXIF Metadata) ออกจากภาพถ่ายสลิปหรือภาพถ่ายสินค้า ซึ่งควรใช้ไลบรารีอย่าง `sharp` ประมวลผลเพิ่มเติมในชั้น Service
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: Magic Number ของไฟล์คืออะไร และช่วยป้องกันช่องโหว่ความปลอดภัยใดได้บ้าง?
+   - **แนวคำตอบ**: Magic Number คือลำดับไบต์คงที่บริเวณส่วนหัวของไฟล์ไบนารีที่ระบุรูปแบบไฟล์จริง (เช่น `FF D8 FF` สำหรับ JPEG) การตรวจสอบค่านี้ช่วยป้องกันการโจมตีแบบ Unrestricted File Upload ที่ผู้โจมตีเปลี่ยนนามสกุลไฟล์สคริปต์หรือมัลแวร์เป็น `.jpg` หรือแก้ไข `Content-Type` Header ใน HTTP Request เพื่อหลอกให้เซิร์ฟเวอร์จัดเก็บและเผยแพร่ไฟล์อันตราย
+2. **คำถาม**: หากต้องการทำ Endpoint ที่ไฟล์รูปภาพเป็น Optional (เช่น ตอนแก้ไขข้อมูล `Product` ที่อาจไม่ได้เปลี่ยนรูป) ต้องตั้งค่า `ParseFilePipe` อย่างไร?
+   - **แนวคำตอบ**: กำหนดออปชัน `fileIsRequired: false` ใน `new ParseFilePipe({ fileIsRequired: false, validators: [...] })` เมื่อไม่มีไฟล์แนบมา Pipe จะข้ามการทำงานของ `validators` และคืนค่า `undefined` ให้กับพารามิเตอร์ใน Controller โดยไม่โยน Error
+
+---
+
+## 3. การอัปโหลดไฟล์ขึ้น Supabase Storage และการตั้งชื่อไฟล์ไม่ให้ซ้ำ
+
+### แนวคิด (Concept)
+เมื่อไฟล์ผ่านการตรวจสอบจาก `ParseFilePipe` แล้ว ขั้นตอนต่อไปคือการส่ง `file.buffer` ขึ้นไปจัดเก็บบน **Supabase Storage** (ซึ่งทำงานอยู่บนสถาปัตยกรรม S3-compatible Object Storage) โดยหัวใจสำคัญของการจัดเก็บไฟล์ในระบบจริงคือ **ห้ามใช้ชื่อไฟล์ต้นฉบับจากผู้ใช้ (`file.originalname`) เป็นชื่อไฟล์บน Storage โดยตรง** เพราะอาจเกิดปัญหาชื่อไฟล์ซ้ำกันจนเขียนทับไฟล์ของลูกค้ารายอื่น (File Collision) หรือมีอักขระพิเศษ/ช่องว่าง/Path Traversal (`../../`) ที่ทำให้ URL พังหรือเกิดช่องโหว่ความปลอดภัย เราจึงต้องสร้างชื่อไฟล์ใหม่ด้วย UUID v4 (`crypto.randomUUID()`) และจัดโครงสร้างโฟลเดอร์ตามโดเมน
+
+### หลักการเบื้องหลัง (Under the Hood)
+การเชื่อมต่อระหว่าง NestJS Backend กับ Supabase Storage ใช้ `@supabase/supabase-js` โดย инициализировать Client ด้วย **`SUPABASE_SERVICE_ROLE_KEY`** (ซึ่งต้องเก็บรักษาไว้ที่ฝั่ง Backend เท่านั้น ห้ามหลุดไปที่ Frontend เด็ดขาด)
+- การใช้ Service Role Key ทำให้ Backend มีสิทธิ์ Bypass Row Level Security (RLS) ของ Supabase Storage เพื่อจัดการอัปโหลดและลบไฟล์ได้ภายใต้การควบคุมของ Business Logic ใน NestJS
+- ในการตั้งค่า Client บนฝั่งเซิร์ฟเวอร์ ต้องกำหนด `auth: { persistSession: false, autoRefreshToken: false }` เสมอ เพื่อป้องกันไม่ให้ Supabase SDK พยายามจำสถานะผู้ใช้ในหน่วยความจำของ Node.js Server ที่รับโหลดจากผู้ใช้หลายคนพร้อมกัน
+
+<Callout type="tip" title="การจัดโครงสร้าง Path ใน Object Storage">
+การตั้งชื่อ Key หรือ Path ในรูปแบบ `<entity>/<entityId>/<timestamp>-<uuid>.<ext>` เช่น `products/a8098c1a-f86e-11da-bd1a-00112444be1e/1760678400000-4b2c...webp` ช่วยให้เราสามารถค้นหา ตรวจสอบ หรือไล่ลบไฟล์ทั้งหมดที่ผูกกับสินค้ารายการนั้นได้ง่ายและเป็นระเบียบ
+</Callout>
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การสร้าง `StorageService` สำหรับเชื่อมต่อ Supabase Storage พร้อมฟังก์ชันสร้างชื่อไฟล์ปลอดภัยด้วย `crypto.randomUUID()`
+
+```typescript filename="src/modules/storage/storage.service.ts"
+import {
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { randomUUID } from 'node:crypto';
+
+export interface UploadResult {
+  bucket: string;
+  path: string;
+  publicUrl: string | null;
+}
+
+@Injectable()
+export class StorageService {
+  private readonly logger = new Logger(StorageService.name);
+  private readonly supabase: SupabaseClient;
+
+  constructor(private readonly configService: ConfigService) {
+    const supabaseUrl = this.configService.getOrThrow<string>('SUPABASE_URL');
+    const serviceRoleKey = this.configService.getOrThrow<string>(
+      'SUPABASE_SERVICE_ROLE_KEY',
+    );
+
+    this.supabase = createClient(supabaseUrl, serviceRoleKey, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+      },
+    });
+  }
+
+  private resolveExtensionFromMime(mimeType: string): string {
+    const mimeMap: Record<string, string> = {
+      'image/jpeg': 'jpg',
+      'image/png': 'png',
+      'image/webp': 'webp',
+    };
+    return mimeMap[mimeType] ?? 'bin';
+  }
+
+  public buildSafeStoragePath(
+    folderPrefix: string,
+    entityId: string,
+    mimeType: string,
+  ): string {
+    const ext = this.resolveExtensionFromMime(mimeType);
+    const uniqueFileName = `${Date.now()}-${randomUUID()}.${ext}`;
+    return `${folderPrefix}/${entityId}/${uniqueFileName}`;
+  }
+
+  async uploadPublicFile(params: {
+    bucket: string;
+    folderPrefix: string;
+    entityId: string;
+    file: Express.Multer.File;
+  }): Promise<UploadResult> {
+    const storagePath = this.buildSafeStoragePath(
+      params.folderPrefix,
+      params.entityId,
+      params.file.mimetype,
+    );
+
+    const { error } = await this.supabase.storage
+      .from(params.bucket)
+      .upload(storagePath, params.file.buffer, {
+        contentType: params.file.mimetype,
+        cacheControl: '31536000', // Cache 1 ปี เพราะชื่อไฟล์เปลี่ยนใหม่ทุกครั้งที่อัปโหลด
+        upsert: false, // ป้องกันการเขียนทับไฟล์เดิมโดยไม่ตั้งใจ
+      });
+
+    if (error) {
+      this.logger.error(
+        `Failed to upload file to ${params.bucket}/${storagePath}: ${error.message}`,
+      );
+      throw new InternalServerErrorException(
+        'ไม่สามารถอัปโหลดไฟล์ไปยังระบบจัดเก็บข้อมูลได้',
+      );
+    }
+
+    const { data: publicUrlData } = this.supabase.storage
+      .from(params.bucket)
+      .getPublicUrl(storagePath);
+
+    return {
+      bucket: params.bucket,
+      path: storagePath,
+      publicUrl: publicUrlData.publicUrl,
+    };
+  }
+}
+```
+
+ตัวอย่างที่ 2: การนำ `StorageService` ไปใช้งานใน `ProductsService` เพื่ออัปโหลดรูปภาพเนื้อวากิวและบันทึก `imageUrl` พร้อม `imagePath` ลงฐานข้อมูลผ่าน Prisma
+
+```typescript filename="src/modules/products/products.service.ts"
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
+
+@Injectable()
+export class ProductsService {
+  private readonly PRODUCT_BUCKET = 'butcher-public-assets';
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storageService: StorageService,
+  ) {}
+
+  async updateProductImage(
+    productId: string,
+    file: Express.Multer.File,
+  ): Promise<{ id: string; name: string; imageUrl: string | null }> {
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+      select: { id: true, name: true },
+    });
+
+    if (!product) {
+      throw new NotFoundException(`ไม่พบสินค้าเนื้อรหัส ${productId}`);
+    }
+
+    const uploadResult = await this.storageService.uploadPublicFile({
+      bucket: this.PRODUCT_BUCKET,
+      folderPrefix: 'products',
+      entityId: product.id,
+      file,
+    });
+
+    return this.prisma.product.update({
+      where: { id: product.id },
+      data: {
+        imageUrl: uploadResult.publicUrl,
+        imageStoragePath: uploadResult.path,
+      },
+      select: {
+        id: true,
+        name: true,
+        imageUrl: true,
+      },
+    });
+  }
+}
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การตั้งชื่อไฟล์** | ใช้ `file.originalname` เช่น `uploads/${file.originalname}` ซึ่งเสี่ยงต่อการชนกันของชื่อไฟล์และปัญหา Encoding ภาษาไทยใน URL | สร้างชื่อไฟล์ใหม่ด้วย `crypto.randomUUID()` และกำหนดนามสกุลไฟล์จาก MIME type ที่ตรวจผ่านแล้ว |
+| **การตั้งค่า `upsert`** | เปิด `upsert: true` กับชื่อไฟล์คงที่ เช่น `products/${productId}.jpg` ทำให้ CDN แคชรูปเก่าและลูกค้าไม่เห็นรูปสินค้าที่อัปเดตใหม่ | ตั้ง `upsert: false` และใช้ชื่อไฟล์ที่ไม่ซ้ำกันทุกครั้ง (Immutable File Name) เพื่อให้ใช้ CDN Cache ระยะยาวได้เต็มประสิทธิภาพ |
+| **การดึงนามสกุลไฟล์** | ใช้ `path.extname(file.originalname)` ซึ่งผู้ใช้อาจตั้งชื่อไฟล์แปลกๆ เช่น `meat.jpg.php` | แปลงนามสกุลจาก `file.mimetype` ที่ผ่านการตรวจ Magic Number แล้วด้วย Mapping Table ที่กำหนดไว้ชัดเจน |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้เมื่อ**: ต้องการอัปโหลดไฟล์ที่ผ่านการตรวจสอบความถูกต้องและสิทธิ์ผู้ใช้งาน (Authorization) จากฝั่ง NestJS Backend เรียบร้อยแล้ว เช่น เฉพาะ Admin หรือ Butcher Shop Manager เท่านั้นที่มีสิทธิ์เปลี่ยนรูปสินค้า
+- **ไม่ควรใช้เมื่อ**: ไม่ควรนำ `SUPABASE_SERVICE_ROLE_KEY` ไปใช้ในโค้ดฝั่ง Frontend (Next.js Client Component) เด็ดขาด เพราะผู้ใช้งานสามารถแกะ Key ไปลบไฟล์ทั้งหมดในทุก Bucket ได้ทันที
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ทำไมการตั้งชื่อไฟล์ใหม่ที่ไม่ซ้ำกันเลย (เช่น ใส่ `timestamp` + `UUID`) ถึงดีกว่าการใช้ชื่อไฟล์คงที่ตามรหัสสินค้า (`products/{productId}.jpg`) แล้วเขียนทับ (`upsert: true`)?
+   - **แนวคำตอบ**: หากใช้ชื่อไฟล์คงที่แล้วเขียนทับ เมื่อแอดมินเปลี่ยนรูปเนื้อริบอายใหม่ URL ของรูปจะยังเป็นค่าเดิม ทำให้ทั้ง Browser Cache ของลูกค้าและ CDN ของ Supabase Storage แสดงรูปเก่าต่อไปจนกว่า TTL ของ Cache จะหมดอายุ ในขณะที่การสร้างชื่อไฟล์ใหม่ทุกครั้งจะทำให้ได้ URL ใหม่ทันที ลูกค้าเห็นรูปใหม่ได้ทันที และเราสามารถตั้งค่า `Cache-Control: max-age=31536000, immutable` เพื่อประหยัด Bandwidth ได้สูงสุด
+2. **คำถาม**: ทำไมตอนสร้าง `SupabaseClient` บน NestJS Backend จึงต้องตั้งค่า `persistSession: false`?
+   - **แนวคำตอบ**: เพราะ NestJS Service มี Lifecycle แบบ Singleton (อินสแตนซ์เดียวใช้ร่วมกันทุก Request) หากเปิด `persistSession: true` อาจเกิดสภาวะที่ข้อมูล Session ตกค้างหรือปะปนกันในหน่วยความจำของเซิร์ฟเวอร์และสิ้นเปลืองทรัพยากรในการทำ `autoRefreshToken` ที่ไม่จำเป็นสำหรับการทำงานด้วย Service Role Key
+
+---
+
+## 4. Public vs Private Buckets, Signed URLs และการจัดการสลิปโอนเงินอย่างปลอดภัย
+
+### แนวคิด (Concept)
+ในระบบ **Smart Butcher Marketplace** ไฟล์ที่อัปโหลดเข้ามามีระดับความลับของข้อมูล (Data Classification) แตกต่างกันอย่างชัดเจน:
+1. **Public Bucket (`butcher-public-assets`)**: ใช้เก็บรูปภาพสินค้า (`Product`) และรูปหมวดหมู่ (`Category`) ซึ่งทุกคนต้องเข้าถึงได้โดยไม่ต้องล็อกอิน כדיให้หน้าเว็บโหลดเร็วและรองรับ SEO
+2. **Private Bucket (`butcher-payment-slips`)**: ใช้เก็บสลิปการโอนเงินของลูกค้า (`Payment`) ซึ่งมีทั้งชื่อ-นามสกุลจริง เลขบัญชีบางส่วน และเวลาโอนเงิน ข้อมูลนี้จัดเป็นข้อมูลส่วนบุคคล (PII) และหลักฐานทางการเงิน **ห้ามเก็บใน Public Bucket เด็ดขาด** เมื่อลูกค้าเจ้าของออเดอร์หรือแอดมินต้องการเปิดดูสลิป ระบบจะสร้าง **Signed URL** ที่มีอายุการใช้งานจำกัด (เช่น 60–300 วินาที) ให้เฉพาะผู้มีสิทธิ์เท่านั้น
+
+### หลักการเบื้องหลัง (Under the Hood)
+สำหรับ **Private Bucket** ใน Supabase Storage:
+- การเรียกไปยัง Public URL ปกติจะถูกปฏิเสธด้วยสถานะ `400/403` ทันที
+- ในฐานข้อมูลตาราง `Payment` เราจะไม่เก็บ URL เต็ม แต่จะเก็บเฉพาะ **Storage Object Path** (เช่น `slips/order-991/1760679000-uuid.jpg`) ไว้ในคอลัมน์ `slipStoragePath`
+- เมื่อมี Request ขอดูข้อมูลการชำระเงิน NestJS จะตรวจสอบสิทธิ์ก่อนว่าผู้เรียกเป็นเจ้าของ `Order` (`order.userId === currentUser.id`) หรือเป็น `ADMIN` หากผ่านเงื่อนไข จึงเรียก `supabase.storage.from('butcher-payment-slips').createSignedUrl(path, expiresInSeconds)` ซึ่งจะสร้าง URL ที่มี Cryptographic Token แนบอยู่ใน Query Parameter และหมดอายุอัตโนมัติเมื่อครบเวลา
+
+<Callout type="warning" title="ห้ามบันทึก Signed URL ลงในฐานข้อมูลถาวร">
+Signed URL มีอายุสั้นตามค่า `expiresIn` (เช่น 5 นาที) หากคุณบันทึก Signed URL ลงในคอลัมน์ของตาราง `Payment` หลังจากผ่านไป 5 นาที ลิงก์ในฐานข้อมูลจะใช้งานไม่ได้อีกต่อไป สิ่งที่ต้องบันทึกลงฐานข้อมูลคือ `slipStoragePath` (Path ภายใน Bucket) เท่านั้น แล้วจึงสร้าง Signed URL สดใหม่ตอนที่ดึงข้อมูลออกไปแสดงผล
+</Callout>
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: การเพิ่มเมธอด `uploadPrivateFile` และ `createSignedViewUrl` ใน `StorageService` สำหรับจัดการไฟล์ความลับสูง
+
+```typescript filename="src/modules/storage/storage.service.ts"
+import {
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+} from '@nestjs/common';
+import { SupabaseClient } from '@supabase/supabase-js';
+
+@Injectable()
+export class PrivateStorageHelper {
+  private readonly logger = new Logger(PrivateStorageHelper.name);
+
+  constructor(private readonly supabase: SupabaseClient) {}
+
+  async uploadPrivateFile(params: {
+    bucket: string;
+    storagePath: string;
+    file: Express.Multer.File;
+  }): Promise<{ bucket: string; path: string }> {
+    const { error } = await this.supabase.storage
+      .from(params.bucket)
+      .upload(params.storagePath, params.file.buffer, {
+        contentType: params.file.mimetype,
+        cacheControl: '3600',
+        upsert: false,
+      });
+
+    if (error) {
+      this.logger.error(
+        `Private upload error [${params.bucket}/${params.storagePath}]: ${error.message}`,
+      );
+      throw new InternalServerErrorException(
+        'ไม่สามารถบันทึกไฟล์หลักฐานการชำระเงินได้',
+      );
+    }
+
+    return {
+      bucket: params.bucket,
+      path: params.storagePath,
+    };
+  }
+
+  async createSignedViewUrl(
+    bucket: string,
+    storagePath: string,
+    expiresInSeconds = 300, // ค่าเริ่มต้น 5 นาที
+  ): Promise<string> {
+    const { data, error } = await this.supabase.storage
+      .from(bucket)
+      .createSignedUrl(storagePath, expiresInSeconds);
+
+    if (error || !data?.signedUrl) {
+      this.logger.error(
+        `Failed to generate signed URL for ${bucket}/${storagePath}: ${error?.message}`,
+      );
+      throw new InternalServerErrorException(
+        'ไม่สามารถสร้างลิงก์เข้าถึงไฟล์ชั่วคราวได้',
+      );
+    }
+
+    return data.signedUrl;
+  }
+}
+```
+
+ตัวอย่างที่ 2: การอัปโหลดสลิปโอนเงินของ `Order` และการตรวจสอบสิทธิ์เจ้าของออเดอร์ก่อนสร้าง Signed URL ใน `PaymentsService`
+
+```typescript filename="src/modules/payments/payments.service.ts"
+import {
+  Injectable,
+  NotFoundException,
+  ForbiddenException,
+  ConflictException,
+} from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
+import { PrivateStorageHelper } from '../storage/private-storage.helper';
+
+export interface AuthenticatedUser {
+  id: string;
+  role: 'CUSTOMER' | 'ADMIN';
+}
+
+@Injectable()
+export class PaymentsService {
+  private readonly SLIP_BUCKET = 'butcher-payment-slips';
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storageService: StorageService,
+    private readonly privateStorage: PrivateStorageHelper,
+  ) {}
+
+  async uploadPaymentSlip(params: {
+    orderId: string;
+    user: AuthenticatedUser;
+    file: Express.Multer.File;
+    paidAmount: number;
+  }) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: params.orderId },
+      include: { payment: true },
+    });
+
+    if (!order) {
+      throw new NotFoundException(`ไม่พบคำสั่งซื้อรหัส ${params.orderId}`);
+    }
+
+    if (order.userId !== params.user.id) {
+      throw new ForbiddenException('คุณไม่มีสิทธิ์แจ้งชำระเงินสำหรับคำสั่งซื้อของผู้อื่น');
+    }
+
+    if (order.payment?.status === 'VERIFIED') {
+      throw new ConflictException('คำสั่งซื้อนี้ได้รับการยืนยันยอดชำระเงินเรียบร้อยแล้ว');
+    }
+
+    const storagePath = this.storageService.buildSafeStoragePath(
+      'slips',
+      order.id,
+      params.file.mimetype,
+    );
+
+    // อัปโหลดขึ้น Private Bucket
+    await this.privateStorage.uploadPrivateFile({
+      bucket: this.SLIP_BUCKET,
+      storagePath,
+      file: params.file,
+    });
+
+    // บันทึกเฉพาะ storagePath ลงในตาราง Payment
+    const payment = await this.prisma.payment.upsert({
+      where: { orderId: order.id },
+      create: {
+        orderId: order.id,
+        amount: params.paidAmount,
+        slipStoragePath: storagePath,
+        status: 'PENDING_VERIFICATION',
+        uploadedAt: new Date(),
+      },
+      update: {
+        amount: params.paidAmount,
+        slipStoragePath: storagePath,
+        status: 'PENDING_VERIFICATION',
+        uploadedAt: new Date(),
+      },
+    });
+
+    return {
+      paymentId: payment.id,
+      orderId: payment.orderId,
+      status: payment.status,
+      uploadedAt: payment.uploadedAt,
+    };
+  }
+
+  async getPaymentSlipSignedUrl(paymentId: string, user: AuthenticatedUser) {
+    const payment = await this.prisma.payment.findUnique({
+      where: { id: paymentId },
+      include: {
+        order: {
+          select: { id: true, userId: true },
+        },
+      },
+    });
+
+    if (!payment || !payment.slipStoragePath) {
+      throw new NotFoundException('ไม่พบข้อมูลสลิปการโอนเงิน');
+    }
+
+    const isOwner = payment.order.userId === user.id;
+    const isAdmin = user.role === 'ADMIN';
+
+    if (!isOwner && !isAdmin) {
+      throw new ForbiddenException('คุณไม่มีสิทธิ์เข้าถึงหลักฐานการโอนเงินรายการนี้');
+    }
+
+    // สร้าง Signed URL ที่มีอายุเพียง 120 วินาที (2 นาที)
+    const signedUrl = await this.privateStorage.createSignedViewUrl(
+      this.SLIP_BUCKET,
+      payment.slipStoragePath,
+      120,
+    );
+
+    return {
+      paymentId: payment.id,
+      orderId: payment.order.id,
+      signedUrl,
+      expiresInSeconds: 120,
+    };
+  }
+}
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **การจัดเก็บสลิปโอนเงิน** | เก็บสลิปโอนเงินไว้ใน Public Bucket เดียวกับรูปสินค้า ทำให้ใครก็ตามที่รู้หรือสุ่ม URL เจอสามารถดูข้อมูลการเงินของลูกค้าได้ | แยกเก็บสลิปไว้ใน Private Bucket (`butcher-payment-slips`) เสมอ |
+| **การตรวจสอบสิทธิ์ก่อนดูสลิป** | เปิด Endpoint `/payments/:id/slip` โดยเช็คแค่ว่าล็อกอินแล้ว (`JwtAuthGuard`) แต่ไม่เช็คว่าเป็นเจ้าของ `Order` หรือไม่ (เกิดช่องโหว่ IDOR) | ตรวจสอบ Ownership (`payment.order.userId === user.id`) หรือสิทธิ์ `ADMIN` ก่อนออก Signed URL ทุกครั้ง |
+| **อายุของ Signed URL** | ตั้งค่า `expiresIn` นานระดับหลายเดือนหรือหลายปี เช่น `31536000` วินาที จนไม่ต่างอะไรกับ Public URL | ตั้งค่า `expiresIn` ให้สั้นเท่าที่จำเป็นต่อการเปิดดู เช่น `60` ถึง `300` วินาที |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ Public Bucket เมื่อ**: ไฟล์นั้นเป็นข้อมูลสาธารณะที่ต้องการแสดงผลบนหน้าเว็บไซต์ให้ผู้ชมทุกคนเห็นได้อย่างรวดเร็วผ่าน CDN เช่น รูปภาพเนื้อวากิว (`Product`), รูปไอคอนหมวดหมู่ (`Category`)
+- **ควรใช้ Private Bucket + Signed URL เมื่อ**: ไฟล์มีข้อมูลส่วนบุคคล (PII), ข้อมูลทางการเงิน หรือเอกสารทางธุรกิจ เช่น สลิปโอนเงิน (`Payment`), ใบกำกับภาษีเต็มรูปแบบ หรือเอกสารรับรองฟาร์มเนื้อสำหรับผู้ค้าส่งเฉพาะราย
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: ช่องโหว่ IDOR (Insecure Direct Object References) ในระบบดูสลิปโอนเงินเกิดขึ้นได้อย่างไร และป้องกันอย่างไร?
+   - **แนวคำตอบ**: เกิดขึ้นเมื่อระบบตรวจสอบเพียงแค่การยืนยันตัวตน (Authentication) ว่ามี JWT Token ที่ถูกต้อง แต่ไม่ได้ตรวจสอบสิทธิ์ความเป็นเจ้าของ (Authorization) ทำให้ลูกค้า A สามารถเปลี่ยนพารามิเตอร์ `paymentId` ใน URL เป็นของลูกค้า B เพื่อขอดูสลิปโอนเงินได้ วิธีป้องกันคือต้อง Query ข้อมูล `Payment` พร้อม `Order` มาเช็คเสมอว่า `payment.order.userId === currentUser.id` หรือผู้ใช้มี Role เป็น `ADMIN` ก่อนสร้าง Signed URL
+2. **คำถาม**: ทำไมเราควรเก็บค่า `slipStoragePath` (เช่น `slips/order-1/file.jpg`) ในฐานข้อมูล แทนการเก็บ URL เต็มของ Supabase?
+   - **แนวคำตอบ**: ประการแรก สำหรับ Private Bucket เราต้องใช้ `slipStoragePath` ในการเรียก `createSignedUrl()` ทุกครั้งที่ต้องการเข้าถึง ประการที่สอง หากในอนาคตมีการเปลี่ยน Custom Domain ของ Supabase หรือย้ายผู้ให้บริการ Storage (เช่น ย้ายไป AWS S3 หรือ Cloudflare R2) เราไม่จำเป็นต้องรันสคริปต์แก้ URL ในฐานข้อมูลหลายแสนแถว เพียงแค่ใช้ `storagePath` เดิมประกอบกับ Base URL หรือ SDK ใหม่ได้ทันที
+
+---
+
+## 5. การซิงค์และลบไฟล์ขยะ (Orphaned Files Cleanup) เมื่อลบข้อมูลในฐานข้อมูล
+
+### แนวคิด (Concept)
+ปัญหาคลาสสิกของระบบที่แยกฐานข้อมูลเชิงสัมพันธ์ (PostgreSQL) ออกจากระบบจัดเก็บไฟล์ (Supabase Storage) คือทั้งสองระบบไม่ได้อยู่ใน Database Transaction เดียวกัน ทำให้เกิด **Orphaned Files (ไฟล์กำพร้า/ไฟล์ขยะ)** ได้ใน 3 กรณีหลัก:
+1. **การอัปโหลดสำเร็จแต่บันทึก DB ล้มเหลว**: อัปโหลดไฟล์ขึ้น Supabase Storage สำเร็จแล้ว แต่จังหวะที่สั่ง `prisma.product.update()` เกิด Error (เช่น Foreign Key ผิด หรือ Unique Constraint ชน) ทำให้ไฟล์ค้างอยู่บน Cloud โดยไม่มีแถวในฐานข้อมูลอ้างอิงถึง
+2. **การอัปเดตรูปภาพใหม่ทับรูปเดิม**: เมื่อแอดมินเปลี่ยนรูปสินค้า `Product` หรือลูกค้าอัปโหลดสลิป `Payment` ใบใหม่แทนใบเดิมที่ถ่ายไม่ชัด หากไม่ออกคำสั่งลบไฟล์เก่า ไฟล์เก่าจะค้างสะสมและคิดค่าใช้จ่ายพื้นที่จัดเก็บไปเรื่อยๆ
+3. **การลบข้อมูลหลัก (Hard Delete)**: เมื่อลบ `Product` ออกจากฐานข้อมูลแล้วไม่ได้ลบไฟล์ใน Storage ตาม
+
+### หลักการเบื้องหลัง (Under the Hood)
+เพื่อรักษาความสอดคล้องของข้อมูล (Eventual Consistency) ระหว่าง PostgreSQL และ Supabase Storage เราใช้รูปแบบ **Compensating Action (การกระทำชดเชย)** และ **Safe Post-Commit Cleanup**:
+- **กรณีอัปโหลดแล้วบันทึก DB พัง**: ใช้บล็อก `try / catch` หุ้มส่วนการบันทึกฐานข้อมูล หากเกิดข้อผิดพลาดในขั้นตอน DB ให้สั่งลบไฟล์ที่เพิ่งอัปโหลดขึ้นไปในบล็อก `catch` ทันที (Compensating Rollback) ก่อนโยน Error กลับไปหาผู้ใช้
+- **กรณีเปลี่ยนรูปใหม่หรือลบแถวข้อมูล**: ต้องอัปโหลดรูปใหม่และอัปเดตฐานข้อมูลให้สำเร็จก่อนเสมอ แล้วจึงนำ `oldStoragePath` ไปสั่งลบออกจาก Supabase Storage เป็นขั้นตอนสุดท้าย (หากลบไฟล์เก่าก่อนแล้วอัปเดต DB พัง ข้อมูลเดิมใน DB จะชี้ไปหาไฟล์ที่ถูกลบไปแล้ว ทำให้รูปหน้าเว็บพังทันที)
+
+<Callout type="tip" title="ทำไมต้องลบไฟล์เก่าหลังจากอัปเดตฐานข้อมูลสำเร็จแล้วเท่านั้น">
+อย่าสั่งลบไฟล์เก่าบน Storage ก่อนที่คำสั่ง `prisma.product.update()` จะสำเร็จ เพราะหากเกิดปัญหาที่ฐานข้อมูลและเกิดการ Rollback แถวข้อมูลในตาราง `Product` จะยังคงชี้ไปที่ `imageStoragePath` เดิม ซึ่งถ้าเราเผลอลบไฟล์นั้นไปแล้ว หน้าเว็บไซต์จะแสดงรูปภาพที่แตก (404 Broken Image) ทันที
+</Callout>
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ตัวอย่างที่ 1: เมธอด `removeFiles` แบบปลอดภัยใน `StorageService` ที่ไม่ทำให้ Request หลักพังหากการลบไฟล์ขยะล้มเหลวชั่วคราว (แต่บันทึก Log ไว้สำหรับตรวจสอบ)
+
+```typescript filename="src/modules/storage/storage.service.ts"
+import { Injectable, Logger } from '@nestjs/common';
+import { SupabaseClient } from '@supabase/supabase-js';
+
+@Injectable()
+export class StorageCleanupService {
+  private readonly logger = new Logger(StorageCleanupService.name);
+
+  constructor(private readonly supabase: SupabaseClient) {}
+
+  async removeFileSafely(bucket: string, storagePath: string | null | undefined): Promise<void> {
+    if (!storagePath) {
+      return;
+    }
+
+    const { error } = await this.supabase.storage
+      .from(bucket)
+      .remove([storagePath]);
+
+    if (error) {
+      // บันทึก Structured Warning Log เพื่อให้ระบบ Cron Job เก็บกวาดภายหลังได้ โดยไม่ทำให้ Request ของผู้ใช้ล้มเหลว
+      this.logger.warn(
+        JSON.stringify({
+          event: 'ORPHAN_FILE_CLEANUP_FAILED',
+          bucket,
+          storagePath,
+          reason: error.message,
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    }
+  }
+}
+```
+
+ตัวอย่างที่ 2: การจัดการ Lifecycle การเปลี่ยนรูปสินค้าและการลบสินค้าใน `ProductsService` พร้อม Compensating Rollback เมื่อ DB ล้มเหลว
+
+```typescript filename="src/modules/products/products.service.ts"
+import {
+  Injectable,
+  NotFoundException,
+  ConflictException,
+} from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
+import { StorageCleanupService } from '../storage/storage-cleanup.service';
+
+@Injectable()
+export class ProductsLifecycleService {
+  private readonly PRODUCT_BUCKET = 'butcher-public-assets';
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storageService: StorageService,
+    private readonly storageCleanup: StorageCleanupService,
+  ) {}
+
+  async replaceProductImage(productId: string, newFile: Express.Multer.File) {
+    const existingProduct = await this.prisma.product.findUnique({
+      where: { id: productId },
+      select: { id: true, imageStoragePath: true },
+    });
+
+    if (!existingProduct) {
+      throw new NotFoundException(`ไม่พบสินค้าเนื้อรหัส ${productId}`);
+    }
+
+    const oldStoragePath = existingProduct.imageStoragePath;
+
+    // 1. อัปโหลดไฟล์ใหม่ขึ้น Supabase Storage ก่อน
+    const uploaded = await this.storageService.uploadPublicFile({
+      bucket: this.PRODUCT_BUCKET,
+      folderPrefix: 'products',
+      entityId: existingProduct.id,
+      file: newFile,
+    });
+
+    try {
+      // 2. อัปเดต Path และ URL ใหม่ลงในฐานข้อมูล PostgreSQL
+      const updatedProduct = await this.prisma.product.update({
+        where: { id: existingProduct.id },
+        data: {
+          imageUrl: uploaded.publicUrl,
+          imageStoragePath: uploaded.path,
+        },
+      });
+
+      // 3. เมื่อ DB อัปเดตสำเร็จแล้ว จึงค่อยลบไฟล์เก่าออกจาก Storage (ถ้ามี)
+      if (oldStoragePath && oldStoragePath !== uploaded.path) {
+        await this.storageCleanup.removeFileSafely(
+          this.PRODUCT_BUCKET,
+          oldStoragePath,
+        );
+      }
+
+      return updatedProduct;
+    } catch (dbError) {
+      // Compensating Action: หากบันทึก DB ล้มเหลว ต้องลบไฟล์ใหม่ที่เพิ่งอัปโหลดขึ้นไปทันทีเพื่อไม่ให้เป็นไฟล์ขยะ
+      await this.storageCleanup.removeFileSafely(
+        this.PRODUCT_BUCKET,
+        uploaded.path,
+      );
+      throw dbError;
+    }
+  }
+
+  async deleteProductAndCleanupImage(productId: string): Promise<{ deletedId: string }> {
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+      include: {
+        _count: {
+          select: { orderItems: true },
+        },
+      },
+    });
+
+    if (!product) {
+      throw new NotFoundException(`ไม่พบสินค้าเนื้อรหัส ${productId}`);
+    }
+
+    // ป้องกันการลบสินค้าที่มีประวัติการสั่งซื้อแล้วใน OrderItem
+    if (product._count.orderItems > 0) {
+      throw new ConflictException(
+        'ไม่สามารถลบสินค้าที่มีประวัติการสั่งซื้อแล้วได้ กรุณาเปลี่ยนสถานะเป็นยกเลิกการขาย (Soft Delete / isActive: false) แทน',
+      );
+    }
+
+    // 1. ลบข้อมูลในฐานข้อมูลให้สำเร็จก่อน
+    await this.prisma.product.delete({
+      where: { id: product.id },
+    });
+
+    // 2. ลบไฟล์รูปภาพออกจาก Supabase Storage
+    await this.storageCleanup.removeFileSafely(
+      this.PRODUCT_BUCKET,
+      product.imageStoragePath,
+    );
+
+    return { deletedId: product.id };
+  }
+}
+```
+
+### ผิด vs ถูก (Anti-pattern vs Best Practice)
+
+| มิติการเปรียบเทียบ | ผิด (Anti-pattern) | ถูก (Best Practice) |
+| :--- | :--- | :--- |
+| **ลำดับการลบไฟล์เก่า** | สั่งลบไฟล์รูปเก่าออกจาก Storage ก่อน แล้วค่อยสั่งอัปเดตฐานข้อมูล หาก DB พัง ข้อมูลเดิมจะชี้ไปหาไฟล์ที่หายไปแล้ว | อัปโหลดไฟล์ใหม่ -> อัปเดต DB ให้สำเร็จ -> ลบไฟล์เก่าออกจาก Storage |
+| **เมื่ออัปเดต DB ล้มเหลว** | ปล่อยให้ Error เด้งออกเลยโดยไม่สนใจไฟล์ที่เพิ่งอัปโหลดขึ้นไป ทำให้เกิด Orphaned File ทันที | ใช้ `try / catch` เพื่อทำ Compensating Delete ลบไฟล์ใหม่ที่เพิ่งอัปโหลดทิ้งหากขั้นตอน DB ล้มเหลว |
+| **การลบสินค้าที่มีออเดอร์แล้ว** | สั่ง Hard Delete ลบทั้งแถว `Product` และลบรูปภาพทิ้ง ทำให้หน้าประวัติคำสั่งซื้อ (`OrderItem`) ของลูกค้าพัง | เช็คความสัมพันธ์กับ `OrderItem` ก่อน หากมีการสั่งซื้อแล้วให้ใช้ Soft Delete (`isActive: false`) และเก็บไฟล์รูปภาพไว้ |
+
+### ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+- **ควรใช้การลบไฟล์จริง (Hard Cleanup) เมื่อ**: เป็นการเปลี่ยนรูปภาพใหม่แทนที่รูปเดิมของ `Product` หรือ `Category` หรือเมื่อลบสินค้าที่เพิ่งสร้างผิดและยังไม่เคยถูกนำไปผูกกับ `OrderItem` ใดๆ
+- **ไม่ควรใช้การลบไฟล์จริงเมื่อ**: เป็นหลักฐานการชำระเงิน (`Payment`) ที่ได้รับการตรวจสอบแล้ว หรือรูปภาพของสินค้าที่เคยถูกซื้อไปแล้วในอดีตและธุรกิจต้องการเก็บภาพอ้างอิงตามสภาพสินค้าขณะซื้อขาย
+
+### คำถามสัมภาษณ์ (Interview Q&A)
+1. **คำถาม**: เนื่องจาก PostgreSQL และ Supabase Storage ไม่สามารถทำ ACID Transaction ร่วมกันได้โดยตรง คุณมีวิธีแก้ปัญหา Orphaned Files อย่างไรในระดับ Production?
+   - **แนวคำตอบ**: ใช้การป้องกัน 2 ชั้น ชั้นแรกคือ **Synchronous Compensating Action** ในโค้ด: อัปโหลดไฟล์ใหม่ก่อน แล้วหุ้มการบันทึก DB ด้วย `try / catch` หาก DB ล้มเหลวจะสั่งลบไฟล์ที่เพิ่งอัปโหลดทันที และจะลบไฟล์เก่าก็ต่อเมื่อการบันทึก DB สำเร็จแล้วเท่านั้น ชั้นที่สองสำหรับระบบขนาดใหญ่คือ **Asynchronous Reconciliation Job (Cron Job)**: รันงานเบื้องหลัง (เช่น สัปดาห์ละครั้ง) เพื่อดึงรายการไฟล์ใน Storage ที่มีอายุมากกว่า 24 ชั่วโมงมาเทียบกับคอลัมน์ `imageStoragePath` / `slipStoragePath` ในฐานข้อมูล หากไฟล์ใดไม่มีการอ้างอิงเลยจึงทำการลบออก
+2. **คำถาม**: ทำไมในเมธอด `removeFileSafely()` เมื่อการลบไฟล์เก่าในขั้นตอนสุดท้ายล้มเหลว เราจึงเลือกทำ `logger.warn()` แทนที่จะ `throw InternalServerErrorException`?
+   - **แนวคำตอบ**: เพราะในจุดนั้น ข้อมูลในฐานข้อมูล PostgreSQL ได้ถูก Commit เปลี่ยนไปใช้รูปภาพใหม่สำเร็จเรียบร้อยแล้ว หากเราโยน HTTP 500 กลับไปหาผู้ใช้เพราะแค่ลบไฟล์เก่าไม่สำเร็จ ผู้ใช้จะเข้าใจผิดว่าการเปลี่ยนรูปสินค้าล้มเหลวและกดอัปโหลดซ้ำอีก ทั้งที่ความจริงการเปลี่ยนรูปสำเร็จแล้ว ส่วนไฟล์เก่าที่ตกค้างสามารถตามเก็บกวาดภายหลังผ่าน Log หรือ Scheduled Cleanup Job ได้โดยไม่กระทบประสบการณ์ของผู้ใช้
+
+---
+
+## ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+1. **การอ่านไฟล์ขนาดใหญ่เข้า `memoryStorage` โดยไม่จำกัดขนาด (`limits.fileSize`)**:
+   หากปล่อยให้ผู้ใช้ส่งไฟล์ขนาดหลายร้อย MB เข้ามาพร้อมกันเพียงไม่กี่คน หน่วยความจำ Heap และ Buffer ของ Node.js จะเต็มอย่างรวดเร็วจน Container ถูก Kubernetes หรือ Docker สั่ง Kill ด้วยสถานะ `OOMKilled (Exit Code 137)`
+2. **การเก็บไฟล์อัปโหลดไว้ในโฟลเดอร์ `./uploads` ภายใน Docker Container**:
+   เมื่อทำการ Deploy เวอร์ชันใหม่หรือ Restart Container ข้อมูลที่ไม่อยู่ใน Persistent Volume จะถูกล้างทิ้งทั้งหมด และเมื่อขยายระบบเป็นหลาย Container (Load Balanced) เครื่องที่ 2 จะไม่สามารถเปิดไฟล์ที่ถูกอัปโหลดไว้ในเครื่องที่ 1 ได้
+3. **การเชื่อค่า `file.mimetype` โดยไม่ตรวจ Magic Number**:
+   ค่า `file.mimetype` มาจาก Header ของ Request ที่ฝั่ง Client กำหนดเองได้ การไม่ตรวจไบต์จริงของไฟล์เปิดช่องให้ผู้ไม่หวังดีอัปโหลดไฟล์ HTML/SVG/Script เข้ามาในระบบได้
+4. **การเปิดสลิปโอนเงิน (`Payment`) เป็น Public Bucket**:
+   ถือเป็นความเสี่ยงด้านข้อมูลส่วนบุคคล (PDPA/PII) อย่างร้ายแรง เพราะสลิปธนาคารมีข้อมูลชื่อจริงและเลขบัญชี ต้องใช้ Private Bucket ร่วมกับ Signed URL ที่ตรวจสอบสิทธิ์ความเป็นเจ้าของออเดอร์แล้วเท่านั้น
+5. **การเก็บเฉพาะ Public URL ลงฐานข้อมูลโดยไม่เก็บ `storagePath`**:
+   ทำให้เวลาต้องการลบไฟล์ (`storage.from(bucket).remove([path])`) หรือสร้าง Signed URL ต้องมาเขียนโค้ดตัด String จาก URL เอง ซึ่งเปราะบางและพังง่ายเมื่อโครงสร้าง URL เปลี่ยน
+
+---
+
+## Checklist สรุป
+
+- [ ] ตั้งค่า `limits.fileSize` และ `limits.files` ใน `FileInterceptor` ทุกจุดเพื่อปกป้องหน่วยความจำของเซิร์ฟเวอร์
+- [ ] ใช้ `ParseFilePipe` ร่วมกับ Validator ที่ตรวจสอบ **Magic Number** (`FF D8 FF` สำหรับ JPEG, `89 50 4E 47` สำหรับ PNG, `RIFF...WEBP` สำหรับ WebP) เสมอ
+- [ ] ห้ามใช้ `file.originalname` เป็นชื่อไฟล์บน Storage ให้สร้างชื่อไฟล์ใหม่ด้วย `crypto.randomUUID()` และกำหนดนามสกุลจาก MIME type ที่ตรวจสอบแล้ว
+- [ ] แยก Bucket ชัดเจนระหว่าง **Public Bucket** (รูป `Product`, `Category`) และ **Private Bucket** (สลิปโอนเงิน `Payment`)
+- [ ] บันทึกค่า `storagePath` ลงในตารางฐานข้อมูลเสมอ เพื่อใช้สร้าง Signed URL และใช้ลบไฟล์เมื่อมีการอัปเดตหรือลบข้อมูล
+- [ ] ตรวจสอบสิทธิ์ Ownership (`order.userId === currentUser.id`) หรือ Role `ADMIN` ก่อนเรียก `createSignedUrl()` สำหรับดูสลิปโอนเงินทุกครั้ง
+- [ ] จัดการลบไฟล์ขยะ (Orphaned Files) ด้วย `try / catch` Compensating Delete เมื่อบันทึก DB ล้มเหลว และลบไฟล์เก่าหลังจากอัปเดต DB สำเร็จแล้ว
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เมื่อเข้าใจการจัดการไฟล์อัปโหลดอย่างปลอดภัยด้วย Multer และ Supabase Storage แล้ว แนะนำให้ศึกษาต่อในหัวข้อต่อไปนี้เพื่อให้ระบบ Backend ของ Smart Butcher Marketplace สมบูรณ์แบบ:
+
+1. **พื้นฐานและการตั้งค่า Supabase เชิงลึก**: ศึกษาการจัดการฐานข้อมูลและโครงสร้างของ Supabase เพิ่มเติมที่ [Supabase](/docs/database/supabase)
+2. **การตรวจสอบข้อมูลขาเข้าและการรักษาความปลอดภัย**: ทบทวนการทำ Input Validation และแนวทางป้องกันช่องโหว่ระดับแอปพลิเคชันที่ [Validation](/docs/backend/validation), [Authentication](/docs/backend/authentication) และ [Security](/docs/backend/security)
+3. **การจัดการฐานข้อมูลด้วย Prisma ORM และ Transactions**: ดูวิธีผูกข้อมูลไฟล์เข้ากับโมเดลฐานข้อมูลอย่างปลอดภัยที่ [Prisma ORM](/docs/backend/prisma-orm) และ [Transactions](/docs/database/transactions)
+4. **การนำระบบขึ้น Production และการทำเอกสาร API**: ศึกษาการบรรจุแอปพลิเคชันลง Container และการทำเอกสารสำหรับ `multipart/form-data` ต่อได้ที่ [Docker](/docs/backend/docker) และ [Swagger](/docs/backend/swagger)
+5. **การเขียนชุดทดสอบสำหรับระบบอัปโหลดไฟล์**: ศึกษาการจำลอง (Mock) `StorageService` และทดสอบ Endpoint อัปโหลดไฟล์ด้วย Supertest ที่ [Backend Testing](/docs/testing/backend-testing)

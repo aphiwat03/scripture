@@ -1,0 +1,274 @@
+---
+title: NestJS Auth Integration
+category: Frontend
+parentTitle: TanStack Query v5
+version: TanStack Query v5.x
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การเชื่อมต่อระบบยืนยันตัวตน (Authentication) ระหว่าง **Next.js 16** และ **NestJS Backend** ที่ใช้มาตรฐาน **JWT (Access Token + Refresh Token)** มีจุดวิกฤตที่ต้องจัดการให้รัดกุม 3 ด้าน:
+
+1. **Silent Refresh Token Rotation**: เมื่อ Access Token หมดอายุและเซิร์ฟเวอร์ NestJS ตอบกลับด้วยรหัส `401 Unauthorized` หน้าบ้านต้องทำการขอ Token ชุดใหม่แบบเงียบๆ เบื้องหลัง โดยที่ผู้ใช้ไม่ถูกเตะออกจากระบบ
+2. **Mutex Lock ป้องกันการยิง Refresh ซ้ำซ้อน**: หากเปิดหน้าแดชบอร์ดที่มี 5 Query ทำงานพร้อมกันแล้วเกิด 401 พร้อมกันทั้ง 5 ตัว ระบบจะต้องส่งคำขอ Refresh Token **เพียงครั้งเดียวเท่านั้น** ส่วนคำขอที่เหลือต้องเข้าคิวรอ จนกว่า Token ใหม่จะมา แล้วจึงยิง Retry ต่อ
+3. **การล้างแคชเมื่อออกจากระบบ (Logout)**: ต้องเรียก **`queryClient.clear()`** ทันที เพื่อป้องกันไม่ให้ข้อมูลส่วนบุคคล (โปรไฟล์, ยอดเงิน, ตะกร้าสินค้า) ค้างอยู่ใน RAM และรั่วไหลไปยังผู้ใช้คนถัดไป
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### กลไก Mutex Lock ในการรับมือ 401 Concurrency
+
+```
+[Query 1] ──(401)──┐
+[Query 2] ──(401)──┼──► ตรวจสอบ: isRefreshing === false หรือไม่?
+[Query 3] ──(401)──┘       │
+                           ├───► [Query 1 เริ่มยิง Refresh Token] (isRefreshing = true)
+                           │        │
+                           │        ▼
+                           └───► [Query 2 และ 3 เข้าแถวรอใน Queue Array]
+                                    │
+[NestJS ตอบกลับ Access Token ใหม่] <──┘
+   │
+   ├─► แจกจ่าย Token ใหม่ให้ทุกคำขอใน Queue
+   ├─► รันคำขอ Query 1, 2, 3 ซ้ำอีกครั้ง (Retry)
+   └─► ปลดสถานะ isRefreshing = false
+```
+
+หากไม่มีการทำ Mutex Lock คำขอทั้ง 5 ตัวจะยิง Refresh Token ไปยัง NestJS พร้อมกัน ซึ่งจะไปละเมิดกฎ **Refresh Token Reuse Detection** ของ NestJS และทำให้บัญชีของผู้ใช้ถูกระงับสิทธิ์ทันที
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+ระบบจัดการ Session และ API Client เชื่อมต่อกับ NestJS:
+
+### ไฟล์ที่ 1: HTTP Client พร้อม Mutex Lock จัดการ Refresh Token
+
+```ts filename="src/lib/auth-api-client.ts"
+let isRefreshing = false;
+let failedQueue: Array<{
+  resolve: (value?: unknown) => void;
+  reject: (reason?: unknown) => void;
+}> = [];
+
+const processQueue = (error: Error | null) => {
+  failedQueue.forEach((promise) => {
+    if (error) {
+      promise.reject(error);
+    } else {
+      promise.resolve();
+    }
+  });
+  failedQueue = [];
+};
+
+export async function authFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
+  // ใช้ credentials: 'include' สำหรับ HttpOnly Cookies
+  const defaultOptions: RequestInit = {
+    ...options,
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  };
+
+  let response = await fetch(url, defaultOptions);
+
+  // ตรวจจับ 401 Unauthorized จาก NestJS
+  if (response.status === 401) {
+    if (isRefreshing) {
+      // หากมีกระบวนการ Refresh กำลังทำงานอยู่ ให้เข้าคิวรอ
+      await new Promise((resolve, reject) => {
+        failedQueue.push({ resolve, reject });
+      });
+      // เมื่อ Refresh สำเร็จแล้ว ให้ยิง Request เดิมซ้ำอีกครั้ง
+      return authFetch<T>(url, options);
+    }
+
+    isRefreshing = true;
+
+    try {
+      // ยิง Refresh Token ไปยัง NestJS Endpoint
+      const refreshRes = await fetch('/api/auth/refresh', {
+        method: 'POST',
+        credentials: 'include',
+      });
+
+      if (!refreshRes.ok) {
+        throw new Error('Session หมดอายุ กรุณาเข้าสู่ระบบใหม่');
+      }
+
+      // ปลดคิวที่รออยู่ทั้งหมดให้ทำงานต่อ
+      processQueue(null);
+      // ยิงคำขอเดิมซ้ำด้วย Token ใหม่
+      response = await fetch(url, defaultOptions);
+    } catch (refreshError) {
+      processQueue(refreshError as Error);
+      // ส่งสัญญาณให้ระบบทราบว่า Session หลุด
+      window.dispatchEvent(new Event('auth:unauthorized'));
+      throw refreshError;
+    } finally {
+      isRefreshing = false;
+    }
+  }
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null);
+    throw new Error(errorBody?.message || `HTTP Error: ${response.status}`);
+  }
+
+  return response.json();
+}
+```
+
+### ไฟล์ที่ 2: Custom Hooks จัดการข้อมูลผู้ใช้และ Logout
+
+```tsx filename="src/features/auth/hooks/useAuth.ts"
+'use client';
+
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useRouter } from 'next/navigation';
+import { authFetch } from '@/lib/auth-api-client';
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  role: 'admin' | 'customer';
+  displayName: string;
+}
+
+// 1. ดึงข้อมูลผู้ใช้ปัจจุบัน (Current Session)
+export function useCurrentUser() {
+  return useQuery<AuthUser>({
+    queryKey: ['auth', 'user'],
+    queryFn: () => authFetch<AuthUser>('/api/auth/profile'),
+    staleTime: 5 * 60 * 1000, // แคช 5 นาที
+    retry: false, // หากไม่มีสิทธิ์ไม่ต้อง retry ให้เสียเวลา
+  });
+}
+
+// 2. Hook สำหรับ Logout และล้างแคชทิ้งอย่างสมบูรณ์
+export function useLogout() {
+  const queryClient = useQueryClient();
+  const router = useRouter();
+
+  return useMutation({
+    mutationFn: async () => {
+      await authFetch('/api/auth/logout', { method: 'POST' });
+    },
+    onSuccess: () => {
+      // ❌ ห้ามลืม: ล้างข้อมูลแคชทั้งหมดในระบบทันที ป้องกันข้อมูลตกค้าง!
+      queryClient.clear();
+      router.push('/login');
+    },
+  });
+}
+```
+
+### ไฟล์ที่ 3: คอมโพเนนต์แถบเมนูแสดงสถานะเข้าสู่ระบบ
+
+```tsx filename="src/features/auth/components/UserNav.tsx"
+'use client';
+
+import React from 'react';
+import { useCurrentUser, useLogout } from '../hooks/useAuth';
+
+export function UserNav() {
+  const { data: user, isPending } = useCurrentUser();
+  const logoutMutation = useLogout();
+
+  if (isPending) return <div className="h-8 w-24 bg-gray-100 rounded animate-pulse" />;
+
+  if (!user) {
+    return (
+      <a href="/login" className="px-4 py-2 text-sm font-medium text-blue-600 border border-blue-600 rounded-lg">
+        เข้าสู่ระบบ
+      </a>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-4">
+      <div className="text-right">
+        <p className="text-sm font-semibold text-gray-800">{user.displayName}</p>
+        <span className="text-xs text-gray-400">{user.role}</span>
+      </div>
+
+      <button
+        onClick={() => logoutMutation.mutate()}
+        disabled={logoutMutation.isPending}
+        className="px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg"
+      >
+        {logoutMutation.isPending ? 'กำลังออก...' : 'ออกจากระบบ'}
+      </button>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม (useEffect vs TanStack Query)
+
+| ปัญหา | วิธีเดิม (ดักในคอมโพเนนต์ด้วย `useEffect`) | TanStack Query + Interceptor Mutex |
+| :--- | :--- | :--- |
+| **การจัดการ 401** | แต่ละคอมโพเนนต์ตรวจเช็คเอง เด้งไปหน้า Login ซ้ำๆ กันหลายรอบ | ดักจับที่ศูนย์กลางระดับ Client ทำ Silent Refresh อัตโนมัติ |
+| **Concurrent Requests** | ยิง Refresh ซ้ำตามจำนวน Component ที่ Mount บนหน้าจอ | Mutex Lock กักคิวไว้ ส่ง Refresh เพียง 1 ครั้งอย่างปลอดภัย |
+| **การสลับบัญชีผู้ใช้** | ข้อมูลผู้ใช้คนเก่าอาจค้างอยู่ใน Redux/Zustand จนกว่าจะรีเฟรชหน้า | `queryClient.clear()` เคลียร์หน่วยความจำ RAM ของทุกแคชใน 0ms |
+
+---
+
+## 5. ผิด vs ถูก
+
+### แบบที่ผิด ❌: ออกจากระบบโดยไม่ล้าง QueryCache
+
+```tsx
+// ❌ ผิดมหันต์: สั่ง Redirect ไปหน้า Login อย่างเดียวโดยไม่ล้างแคช
+const handleBadLogout = async () => {
+  await fetch('/api/auth/logout', { method: 'POST' });
+  router.push('/login');
+  // ❌ ข้อผิดพลาด: ข้อมูลบัตรเครดิต, โปรไฟล์ และออเดอร์ของผู้ใช้คนนี้
+  // ยังคงค้างอยู่ใน QueryCache หากมีผู้ใช้คนอื่นมาล็อกอินต่อในเบราว์เซอร์เดียวกันจะเห็นข้อมูลทันที!
+};
+```
+
+### แบบที่ถูก ✅: เรียก `queryClient.clear()` ทุกครั้งที่ Logout
+
+```tsx
+// ✅ ถูกต้อง: ทำลายแคชทั้งหมดในระบบทิ้งอย่างสมบูรณ์
+const handleGoodLogout = async () => {
+  await fetch('/api/auth/logout', { method: 'POST' });
+  queryClient.clear(); // ✅ ล้างแคชทุกตัวใน RAM ป้องกัน Data Leak 100%
+  router.push('/login');
+};
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้การรวมศูนย์ Auth Client ร่วมกับ TanStack Query เมื่อ:
+- แอปมีระบบสมาชิกที่มีสิทธิ์เข้าถึงหลายระดับ (Role-based Access Control)
+- Backend มีกระบวนการหมุนเวียน Token (Token Rotation) ที่เข้มงวด
+
+### ไม่ควรเปิด Auto-retry สำหรับ Auth Queries เมื่อ:
+- คำขอเช็คสิทธิ์ `fetchProfile` หากตอบ 401 แสดงว่าผู้ใช้ไม่ได้ล็อกอินจริง ไม่ควรสั่ง `retry: 3` เพราะจะทำให้เสียเวลาและยิงเซิร์ฟเวอร์โดยเปล่าประโยชน์
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: หากเปิดหน้าเว็บแล้วมี 5 Query เกิดข้อผิดพลาด 401 พร้อมกัน คุณจะออกแบบระบบอย่างไรไม่ให้หน้าบ้านยิงขอ Refresh Token ซ้ำกัน 5 ครั้ง?
+**แนวทางตอบ**:
+เราจะใช้แพทเทิร์น **Mutex / Request Queueing Pattern** ใน HTTP Interceptor:
+1. สร้างตัวแปรแฟล็ก `isRefreshing = false` และคิวอาร์เรย์ `failedQueue = []`
+2. เมื่อ Query แรกพบ 401 และพบว่า `isRefreshing === false` ให้ปรับเป็น `true` และเริ่มยิงขอ Refresh Token ไปยังเซิร์ฟเวอร์
+3. หากมี Query อีก 4 ตัวพบ 401 ในระหว่างนั้น ให้สร้าง Promise ดักรอไว้แล้วนำ Callback ไปต่อท้ายใน `failedQueue`
+4. เมื่อ Query แรกได้รับ Token ใหม่สำเร็จ ให้สั่งรัน Callback ใน `failedQueue` เพื่อให้คำขอที่เหลือยิงซ้ำด้วย Token ใหม่ จากนั้นรีเซ็ต `isRefreshing = false` วิธีนี้จะรับประกันว่ามีการยิง Refresh Token เพียงครั้งเดียวเสมอ
+
+### Q2: ทำไมการเรียก `queryClient.clear()` จึงเป็นคำสั่งที่จำเป็นต้องมีเมื่อผู้ใช้กด Logout?
+**แนวทางตอบ**:
+เพราะ TanStack Query จัดเก็บข้อมูลเซิร์ฟเวอร์ไว้ในหน่วยความจำ RAM (In-Memory QueryCache) หากผู้ใช้กด Logout แล้วเราเพียงแค่สั่งเปลี่ยนหน้าหรือลบ Cookie ตัวข้อมูลแคชเก่าจะยังคงค้างอยู่ในหน่วยความจำของหน้า Single Page Application หากผู้ใช้คนถัดไปเข้าสู่ระบบด้วยบัญชีอื่นโดยไม่มีการ Refresh หน้าเว็บ เขาอาจเห็นข้อมูลส่วนตัวของผู้ใช้คนก่อนหน้า (เช่น ข้อมูลโปรไฟล์ ยอดเงินในบัญชี หรือรายการในตะกร้า) การเรียก `queryClient.clear()` จะทำลายแคชทุกช่องทิ้งทันที จึงป้องกันปัญหาช่องโหว่ด้านความปลอดภัยและความเป็นส่วนตัวได้อย่างสมบูรณ์

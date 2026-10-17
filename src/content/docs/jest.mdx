@@ -1,0 +1,104 @@
+---
+title: Jest
+category: Testing
+version: v29.7
+updatedAt: 2026-10-17
+---
+
+## 1. คืออะไร และแก้ปัญหาอะไร
+
+**Jest** คือ JavaScript และ TypeScript Testing Framework ครบวงจรที่ได้รับความนิยมสูงที่สุด พัฒนาขึ้นโดยทีมวิศวกรของ Meta (Facebook) เพื่อให้การเขียนชุดทดสอบซอฟต์แวร์เป็นเรื่องง่าย รวดเร็ว และไม่ต้องเสียเวลากับการคอนฟิกที่ซับซ้อน
+
+ในอดีต การสร้างระบบทดสอบในโปรเจกต์ Node.js นักพัฒนาต้องติดตั้งหลายไลบรารีแยกชิ้นกัน เช่น ใช้ Mocha เป็น Test Runner, ใช้ Chai เป็น Assertion Library, และติดตั้ง Sinon สำหรับการทำ Mocking ซึ่งมักเกิดปัญหาความเข้ากันไม่ได้ของเวอร์ชัน Jest เข้ามาแก้ปัญหานี้ด้วยแนวคิด **"All-in-One Solution"** ที่รวมตัวรันเทส, ระบบตรวจสอบผลลัพธ์ (Matchers), เครื่องมือจำลองข้อมูล (Mocking Toolkit) และตัววัดผลความครอบคลุมของโค้ด (Code Coverage) ไว้ในแพ็กเกจเดียว
+
+<InteractiveFlowDiagram variant="auth" title="วงจรการทดสอบซอฟต์แวร์ด้วย Jest (Test Suite ➔ Mocking ➔ Assertions ➔ Coverage Report)" subtitle="แสดงกระบวนการรันชุดทดสอบแบบแยกส่วนและสรุปผลความครอบคลุมของฟังก์ชันและเงื่อนไขทั้งหมดในระบบ" />
+
+## 2. Module และ Feature หลัก
+
+Jest มีเครื่องมือในตัวที่ช่วยให้นักพัฒนาเขียนการทดสอบได้ทุกระดับตั้งแต่ระดับฟังก์ชันไปจนถึงระดับโมดูล:
+
+| เครื่องมือ / ฟีเจอร์หลัก | ใช้ทำอะไร |
+| --- | --- |
+| `describe()` & `it() / test()` | บล็อกโครงสร้างสำหรับจัดกลุ่มชุดทดสอบ (Test Suites) และระบุกรณีทดสอบแต่ละเคส (Test Cases) |
+| `expect()` & Matchers | เมธอดตรวจสอบผลลัพธ์ เช่น `toBe()` (ค่าดั้งเดิม), `toEqual()` (อ็อบเจกต์), และ `toThrow()` (ดักจับ Error) |
+| `jest.fn()` & `jest.spyOn()` | สร้างฟังก์ชันจำลอง (Mock Function) เพื่อดักจับว่าถูกเรียกกี่ครั้ง ด้วยพารามิเตอร์ใด และบังคับค่า Return ล่วงหน้า |
+| `jest.mock()` | จำลองการทำงานของโมดูลหรือ Third-party Libraries ทั้งโมดูล เช่น จำลองการยิง HTTP หรือการต่อ Database |
+| `Lifecycle Hooks` | ฟังก์ชันกำหนดค่าก่อน-หลังการรันเทส ได้แก่ `beforeAll`, `afterAll`, `beforeEach`, และ `afterEach` |
+| `Code Coverage Tool` | วิเคราะห์ความครอบคลุมของโค้ด (Statements, Branches, Functions, Lines) ผ่านคำสั่ง `jest --coverage` |
+
+## 3. ตัวอย่างโค้ดการใช้งาน
+
+### การกำหนดค่า `jest.config.ts` สำหรับ TypeScript
+
+```typescript filename="jest.config.ts"
+import type { Config } from 'jest';
+
+const config: Config = {
+  moduleFileExtensions: ['js', 'json', 'ts'],
+  rootDir: 'src',
+  testRegex: '.*\\.spec\\.ts$',
+  transform: {
+    '^.+\\.(t|j)s$': 'ts-jest', // หรือใช้ '@swc/jest' เพื่อความเร็วระดับมิลลิวินาที
+  },
+  collectCoverageFrom: ['**/*.(t|j)s', '!**/node_modules/**', '!**/*.interface.ts'],
+  coverageDirectory: '../coverage',
+  testEnvironment: 'node',
+  clearMocks: true, // เคลียร์สถานะการจำลองของ Mock ทุกครั้งหลังจบรอบเทส
+};
+
+export default config;
+```
+
+### การเขียน Test Suite ตรวจสอบฟังก์ชันคำนวณส่วนลด
+
+```typescript filename="src/utils/pricing.spec.ts"
+export function calculateDiscount(price: number, discountPercent: number): number {
+  if (price < 0 || discountPercent < 0 || discountPercent > 100) {
+    throw new Error('พารามิเตอร์ราคาหรือส่วนลดไม่ถูกต้อง');
+  }
+  return price - (price * discountPercent) / 100;
+}
+
+describe('Pricing Utils - calculateDiscount()', () => {
+  it('ควรคำนวณส่วนลด 10% จากราคา 1,000 บาท ได้ผลลัพธ์เป็น 900 บาท', () => {
+    const result = calculateDiscount(1000, 10);
+    expect(result).toBe(900);
+  });
+
+  it('ควรส่งค่าเดิมกลับมาเมื่อส่วนลดเป็น 0%', () => {
+    const result = calculateDiscount(500, 0);
+    expect(result).toBe(500);
+  });
+
+  it('ควรโยน Error ออกมาเมื่อส่งค่าส่วนลดติดลบเข้ามา', () => {
+    expect(() => calculateDiscount(100, -5)).toThrow('พารามิเตอร์ราคาหรือส่วนลดไม่ถูกต้อง');
+  });
+});
+```
+
+## 4. Callout สำคัญที่ควรรู้
+
+<Callout type="tip" title="ใช้ Watch Mode ในขณะเขียนโค้ด">
+สั่งรัน `jest --watch` ในระหว่างการพัฒนา ตัว Jest จะฉลาดพอที่จะตรวจสอบการเปลี่ยนแปลงจาก Git และเลือกสั่งรันเฉพาะชุดทดสอบของไฟล์ที่ถูกแก้ไขเท่านั้น ทำให้ได้รับฟีดแบ็กทันทีโดยไม่ต้องรันเทสทั้งโปรเจกต์ซ้ำ
+</Callout>
+
+<Callout type="note" title="ความแตกต่างระหว่าง toBe() กับ toEqual()">
+ใช้ `toBe()` เมื่อเปรียบเทียบค่าชนิดพื้นฐาน (Primitive Types เช่น number, string, boolean) เพราะเป็นการตรวจเทียบ Memory Reference แต่หากต้องการเปรียบเทียบเนื้อหาภายใน Object หรือ Array ต้องใช้ `toEqual()` หรือ `toStrictEqual()` เสมอ
+</Callout>
+
+<Callout type="warning" title="ระวังผลข้างเคียงระหว่างเคสทดสอบ (Test Pollution)">
+หากมีการใช้ `jest.spyOn()` หรือดัดแปลง State ของตัวแปร Global ในเคสหนึ่ง อาจส่งผลกระทบต่อเคสถัดไปโดยไม่รู้ตัว ให้ใส่ `clearMocks: true` ในคอนฟิก หรือเรียก `jest.clearAllMocks()` ในบล็อก `afterEach` เสมอ
+</Callout>
+
+## 5. ข้อควรระวังและ Best Practices
+
+- **ยึดรูปแบบ AAA (Arrange - Act - Assert)**: จัดระเบียบในแต่ละ Test Case เป็น 3 ท่อนชัดเจน ได้แก่ ท่อนเตรียมข้อมูล (Arrange), ท่อนเรียกใช้งานฟังก์ชัน (Act), และท่อนตรวจสอบผลลัพธ์ (Assert) เพื่อให้อ่านง่ายและบำรุงรักษาได้สะดวก
+- **ทดสอบพฤติกรรม ไม่ใช่ทดสอบ Implementation Detail**: โฟกัสที่ผลลัพธ์ที่ได้รับ (Output) จาก Input ที่ส่งเข้าไป หลีกเลี่ยงการพยายามตรวจสอบตัวแปรภายในฟังก์ชันแบบ Private เพราะจะทำให้ชุดทดสอบพังบ่อยทุกครั้งที่มีการ Refactor โค้ด
+- **หลีกเลี่ยงการเชื่อมต่อ External Services ใน Unit Test**: ชุดทดสอบ Unit Test ต้องรันได้รวดเร็วและเป็นอิสระ ห้ามยิง HTTP Request จริงไปยังผู้ให้บริการภายนอก หรือต่อ Database จริง ให้ใช้ Mock หรือ In-memory Stubs เสมอ
+- **ตั้งเป้าหมาย Coverage อย่างสมเหตุสมผล**: การทำ Code Coverage 100% ไม่ได้รับประกันว่าระบบจะปราศจากบั๊ก ควรให้ความสำคัญกับความครอบคลุมของกรณีขอบเขต (Edge Cases) และตรรกะทางธุรกิจที่สำคัญเป็นอันดับแรก
+
+## 6. แหล่งอ้างอิง (Official Documentation)
+
+- [Jest Official Documentation](https://jestjs.io/docs/getting-started) — เอกสารและคู่มือเริ่มต้นใช้งาน Jest อย่างเป็นทางการ
+- [Jest Expect API Reference](https://jestjs.io/docs/expect) — รวม Matchers ทั้งหมดของ `expect()`
+- [Mock Functions Guide in Jest](https://jestjs.io/docs/mock-functions) — วิธีใช้งาน Mock Functions และ Spies อย่างละเอียด

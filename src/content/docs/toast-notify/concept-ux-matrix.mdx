@@ -1,0 +1,409 @@
+---
+title: Toast Philosophy & UX Matrix
+category: Frontend
+parentTitle: Toast Notify
+version: Sonner & React Toastify (Next.js 16)
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**Toast** (หรือ SnackBar / Floating Notification) คือระบบการแจ้งเตือนแบบชั่วคราวที่ไม่ขัดจังหวะการทำงานของผู้ใช้ (Temporary Non-blocking / Non-intrusive Feedback) โดยมีที่มาจากพฤติกรรมของ "ขนมปังปิ้งที่เด้งขึ้นมาจากเตาปิ้ง (Toaster)" ที่โผล่ขึ้นมาให้เห็นสักครู่ ส่งสัญญาณสั้นๆ ว่างานเสร็จแล้ว แล้วก็พร้อมรับประทานหรือจางหายไปเอง
+
+ในยุคของสถาปัตยกรรมเว็บสมัยใหม่ เช่น **Next.js 16 (App Router)** และ **React 19** การปฏิสัมพันธ์ของผู้ใช้เกิดขึ้นแบบอะซิงโครนัส (Asynchronous) ตลอดเวลาผ่าน Server Actions, Optimistic UI Updates และ Real-time Subscriptions ความท้าทายที่แท้จริงของนักพัฒนาจึงไม่ใช่แค่ "จะยิงการแจ้งเตือนอย่างไร" แต่เป็น **"สถาปัตยกรรมข้อมูลใดควรใช้การแจ้งเตือนระดับใด"**
+
+```
+ระดับการรบกวน (Interruption Level):
+[ ต่ำสุด: Toast ] --------------> [ ปานกลาง: Banner / Inline ] --------------> [ สูงสุด: AlertDialog ]
+- แจ้งผลสำเร็จสั้นๆ                 - ข้อมูลระบบภาพรวม / เตือนฟอร์ม                - ยืนยันการกระทำที่อันตราย
+- จางหายไปเองใน 3-5 วิ               - คงอยู่จนกว่าจะแก้ไขหรือกดปิด                   - บล็อกหน้าจอ (Focus Trap)
+```
+
+### บทบาทหลักของ Toast ใน User Experience (UX)
+1. **การยืนยันผลลัพธ์ (System State Acknowledgment)**: ยืนยันว่าการกระทำที่ผู้ใช้เพิ่งทำสำเร็จลุล่วง เช่น "คัดลอกลิงก์สำเร็จ", "บันทึกแบบร่างแล้ว", "ส่งคำสั่งซื้อเรียบร้อย"
+2. **การทำงานที่ไม่บล็อก UI (Non-blocking)**: ผู้ใช้สามารถพิมพ์ข้อความต่อ คลิกปุ่มอื่น หรือเปลี่ยนหน้าได้ทันทีโดยไม่ต้องเอื้อมมือไปกดปุ่มปิด (Dismiss)
+3. **การให้โอกาสย้อนกลับ (Reversibility with Undo)**: มอบทางเลือกในการเลิกทำ (Undo) ชั่วขณะหนึ่ง สำหรับการกระทำแบบ Soft Delete หรือ Archive
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. Event-Driven Observer Pattern
+ไลบรารี Toast สมัยใหม่ (เช่น Sonner และ React Toastify) ทำงานแยกขาดระหว่าง **State Dispatcher** กับ **Presentation Layer**:
+- เมื่อคุณสั่ง `toast.success("บันทึกสำเร็จ")` โค้ดส่วนนั้นไม่ได้เรนเดอร์ DOM node โดยตรง แต่จะส่ง Event ผ่าน Observer / Pub-Sub pattern ไปยัง State Store กลาง
+- ส่วนประกอบแสดงผล `<Toaster />` หรือ `<ToastContainer />` ที่ติดตั้งไว้เพียงจุดเดียวที่ระดับ Root Layout จะคอย Subscribe ข้อมูลนี้ แล้วเรนเดอร์ผ่าน **React Portal** ลอยออกไปที่ชั้นนอกสุด (`document.body`)
+- โครงสร้างนี้ช่วยให้ Toast ไม่ถูกบดบังด้วย `overflow: hidden`, CSS clipping path หรือ `z-index` stacking context ของคอมโพเนนต์ลูก
+
+### 2. Cognitive Load Theory & Alert Fatigue
+ตามหลักจิตวิทยาการรู้คิด (Cognitive Psychology):
+- สมองมนุษย์มีขีดจำกัดในการประมวลผลข้อมูล (Working Memory Limit ตามทฤษฎีของ George Miller)
+- หากระบบใช้ **AlertDialog/Modal** พร่ำเพรื่อกับทุกเหตุการณ์ ผู้ใช้จะเกิดภาวะ **Alert Fatigue (ความล้าจากการแจ้งเตือน)** จนสมองสั่งให้กดปุ่ม "ตกลง" หรือ "ปิด" โดยไม่อ่านข้อความ ส่งผลให้เมื่อเกิดข้อผิดพลาดร้ายแรงขึ้นจริงๆ ผู้ใช้จะกดผ่านไปโดยไม่รู้ตัว
+- ในทางกลับกัน หากนำ **Toast** ไปใช้กับข้อผิดพลาดร้ายแรง (เช่น การตัดเงินไม่สำเร็จ หรือเซสชันหมดอายุ) ผู้ใช้อาจมองไม่ทันก่อนที่ Toast จะเลือนหายไป ทำให้เข้าใจผิดว่าระบบทำงานสำเร็จ
+
+### 3. WAI-ARIA Semantics & Accessibility Architecture
+ตามมาตรฐาน W3C WAI-ARIA ระบบ Toast มีกลไกการทำงานระดับเบราว์เซอร์ดังนี้:
+- **`role="status"` ควบคู่กับ `aria-live="polite"`**: เหมาะสำหรับ Toast แจ้งความสำเร็จทั่วไป โดย Screen Reader จะรอให้อ่านประโยคปัจจุบันที่ผู้ใช้กำลังฟังจบก่อน จึงจะอ่านข้อความ Toast เพื่อไม่ให้เสียงแทรกขัดจังหวะ
+- **`role="alert"` ควบคู่กับ `aria-live="assertive"`**: เหมาะสำหรับข้อผิดพลาดเร่งด่วน โดย Screen Reader จะตัดเสียงทันทีเพื่อประกาศข้อความเตือนภัย
+- **Focus Management**: Toast จะต้อง **ไม่ขโมย Keyboard Focus** ไปจากสิ่งที่ผู้ใช้กำลังทำอยู่ ยกเว้นเมื่อมี Interactive Action ที่เปิดโอกาสให้ใช้คีย์ลัดกระโดดเข้าไปได้
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่างที่ 1: ระบบจำแนกและส่งต่อการแจ้งเตือนตามระดับความรุนแรง (UX Notification Router)
+
+ตัวอย่างนี้จำลองระบบ E-Commerce Checkout ที่แยกประเภทเหตุการณ์และเลือกใช้ UI Component ที่ถูกต้องตามระดับ Cognitive Load
+
+```tsx filename="src/services/notification-router.ts"
+import { toast } from "sonner";
+
+export type FeedbackSeverity = "info" | "success" | "warning" | "critical";
+
+export interface FeedbackPayload {
+  title: string;
+  description?: string;
+  severity: FeedbackSeverity;
+  action?: {
+    label: string;
+    onClick: () => void;
+  };
+}
+
+/**
+ * Service กลางสำหรับตัดสินใจเลือก UI Component ตามระดับความสำคัญของเหตุการณ์
+ */
+export class NotificationRouter {
+  static dispatch(payload: FeedbackPayload): void {
+    const { title, description, severity, action } = payload;
+
+    switch (severity) {
+      case "info":
+        toast.info(title, {
+          description,
+          duration: 4000,
+        });
+        break;
+
+      case "success":
+        toast.success(title, {
+          description,
+          duration: 4000,
+          action: action
+            ? {
+                label: action.label,
+                onClick: action.onClick,
+              }
+            : undefined,
+        });
+        break;
+
+      case "warning":
+        // แจ้งเตือนที่ไม่วิกฤตแต่ควรระวัง เช่น ยอดสต็อกเหลือชิ้นสุดท้าย
+        toast.warning(title, {
+          description,
+          duration: 6000, // ให้เวลาอ่านนานขึ้น
+        });
+        break;
+
+      case "critical":
+        // ข้อผิดพลาดวิกฤต: ไม่ควรใช้ Toast ลอยๆ
+        // ในระบบจริงควร Trigger Global Modal หรือ State Store เพื่อเปิด AlertDialog
+        console.error(`[CRITICAL ALERT] ${title}: ${description}`);
+        toast.error(title, {
+          description: `${description} (โปรดตรวจสอบรายละเอียดในกล่องแจ้งเตือน)`,
+          duration: Infinity, // ไม่ให้จางหายไปเอง ต้องให้ผู้ใช้กดปิด
+          closeButton: true,
+        });
+        break;
+    }
+  }
+}
+```
+
+```tsx filename="src/components/checkout/PaymentPanel.tsx"
+"use client";
+
+import * as React from "react";
+import { NotificationRouter } from "@/services/notification-router";
+
+export function PaymentPanel() {
+  const [isProcessing, setIsProcessing] = React.useState(false);
+
+  async function handleApplyPromoCode(code: string) {
+    if (!code) {
+      NotificationRouter.dispatch({
+        title: "กรุณาระบุโค้ดส่วนลด",
+        description: "ช่องกรอกโค้ดว่างเปล่า",
+        severity: "warning",
+      });
+      return;
+    }
+
+    NotificationRouter.dispatch({
+      title: "ใช้โค้ดส่วนลดสำเร็จ",
+      description: `คุณได้รับส่วนลด 10% จากโค้ด "${code}"`,
+      severity: "success",
+      action: {
+        label: "ยกเลิกโค้ด",
+        onClick: () => {
+          NotificationRouter.dispatch({
+            title: "ยกเลิกโค้ดส่วนลดแล้ว",
+            severity: "info",
+          });
+        },
+      },
+    });
+  }
+
+  return (
+    <div className="rounded-xl border border-border bg-card p-6 shadow-sm">
+      <h3 className="text-lg font-semibold text-card-foreground">ชำระเงิน</h3>
+      <p className="mt-1 text-sm text-muted-foreground">
+        กรอกโค้ดส่วนลดและตรวจสอบรายการสั่งซื้อของคุณ
+      </p>
+
+      <div className="mt-4 flex gap-2">
+        <input
+          id="promo"
+          type="text"
+          placeholder="ใส่โค้ด SUMMER2026"
+          className="flex-1 rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+        />
+        <button
+          type="button"
+          onClick={() => {
+            const input = document.getElementById("promo") as HTMLInputElement;
+            handleApplyPromoCode(input?.value);
+          }}
+          className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+        >
+          ใช้โค้ด
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: React 19 Server Action กับการแบ่งแยกระหว่าง Inline Error และ Toast Feedback
+
+ตัวอย่างนี้แสดงการจัดการฟอร์มอัปเดตโปรไฟล์ใน Next.js 16 โดยแยกชัดเจน:
+- **ความผิดพลาดรายช่องข้อมูล (Validation Error)** -> แสดงเป็น **Inline Message ใต้ช่อง input**
+- **ความสำเร็จของภาพรวมธุรกรรม (Mutation Success)** -> ยิง **Toast Notification**
+
+```tsx filename="src/app/profile/actions.ts"
+"use server";
+
+export interface ProfileFormState {
+  success: boolean;
+  message: string;
+  errors?: {
+    displayName?: string[];
+    email?: string[];
+  };
+}
+
+export async function updateProfileServerAction(
+  prevState: ProfileFormState,
+  formData: FormData
+): Promise<ProfileFormState> {
+  const displayName = formData.get("displayName") as string;
+  const email = formData.get("email") as string;
+
+  const errors: ProfileFormState["errors"] = {};
+
+  if (!displayName || displayName.trim().length < 3) {
+    errors.displayName = ["ชื่อที่แสดงต้องมีความยาวอย่างน้อย 3 ตัวอักษร"];
+  }
+
+  if (!email || !email.includes("@")) {
+    errors.email = ["รูปแบบอีเมลไม่ถูกต้อง"];
+  }
+
+  if (Object.keys(errors).length > 0) {
+    return {
+      success: false,
+      message: "ข้อมูลที่กรอกไม่ถูกต้อง กรุณาตรวจสอบช่องที่มีข้อผิดพลาด",
+      errors,
+    };
+  }
+
+  // จำลองบันทึกข้อมูลลงฐานข้อมูล
+  await new Promise((resolve) => setTimeout(resolve, 800));
+
+  return {
+    success: true,
+    message: "อัปเดตข้อมูลโปรไฟล์เรียบร้อยแล้ว",
+  };
+}
+```
+
+```tsx filename="src/app/profile/ProfileForm.tsx"
+"use client";
+
+import * as React from "react";
+import { useActionState, useEffect } from "react";
+import { toast } from "sonner";
+import { updateProfileServerAction, type ProfileFormState } from "./actions";
+
+const initialState: ProfileFormState = {
+  success: false,
+  message: "",
+};
+
+export function ProfileForm() {
+  const [state, formAction, isPending] = useActionState(
+    updateProfileServerAction,
+    initialState
+  );
+
+  useEffect(() => {
+    if (!state.message) return;
+
+    if (state.success) {
+      toast.success(state.message, {
+        description: "การเปลี่ยนแปลงของคุณมีผลทันทีในทุกระบบ",
+      });
+    } else if (state.errors) {
+      // แจ้งสรุปว่ามีข้อผิดพลาด แต่รายละเอียดจะแสดง Inline ใต้ช่องนั้นๆ
+      toast.error("บันทึกไม่สำเร็จ", {
+        description: state.message,
+      });
+    }
+  }, [state]);
+
+  return (
+    <form action={formAction} className="space-y-4 max-w-md">
+      <div>
+        <label htmlFor="displayName" className="block text-sm font-medium text-foreground">
+          ชื่อแสดงผล (Display Name)
+        </label>
+        <input
+          id="displayName"
+          name="displayName"
+          type="text"
+          defaultValue="Somchai Developer"
+          className="mt-1 block w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+        />
+        {/* Inline Error: ผู้ใช้เห็นทันทีข้างช่องที่ผิดพลาด */}
+        {state.errors?.displayName && (
+          <p className="mt-1 text-xs text-destructive font-medium">
+            {state.errors.displayName[0]}
+          </p>
+        )}
+      </div>
+
+      <div>
+        <label htmlFor="email" className="block text-sm font-medium text-foreground">
+          อีเมลติดต่อ
+        </label>
+        <input
+          id="email"
+          name="email"
+          type="email"
+          defaultValue="somchai@example.com"
+          className="mt-1 block w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+        />
+        {/* Inline Error */}
+        {state.errors?.email && (
+          <p className="mt-1 text-xs text-destructive font-medium">
+            {state.errors.email[0]}
+          </p>
+        )}
+      </div>
+
+      <button
+        type="submit"
+        disabled={isPending}
+        className="inline-flex justify-center rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm hover:bg-primary/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:opacity-50"
+      >
+        {isPending ? "กำลังบันทึก..." : "บันทึกข้อมูล"}
+      </button>
+    </form>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีอื่น (Toast vs Dialog vs Inline Error vs Sticky Banner)
+
+| มิติการพิจารณา | Toast (SnackBar) | AlertDialog / Modal | Inline Form Message | Sticky Global Banner |
+| :--- | :--- | :--- | :--- | :--- |
+| **ระดับการรบกวน (Interruption)** | **ต่ำมาก** (Non-intrusive) | **สูงสุด** (Modal / Blocking) | **เฉพาะจุด** (Contextual) | **ปานกลาง** (Persistent notice) |
+| **การบล็อกการทำงาน (Blocking)** | ไม่บล็อก ผู้ใช้ทำงานต่อได้ทันที | บล็อกทั้งหน้าจอ ติด Focus Trap | ไม่บล็อก บล็อกเฉพาะการ Submit | ไม่บล็อก กินพื้นที่ส่วนหัวของหน้า |
+| **อายุการแสดงผล (Duration)** | 3 - 5 วินาทีแล้วจางหายไปเอง | คงอยู่จนกว่าผู้ใช้จะกดเลือก Action | คงอยู่จนกว่าผู้ใช้จะพิมพ์แก้ข้อมูล | คงอยู่จนกว่าแอดมินปิด หรือกด Dismiss |
+| **ตำแหน่งบนหน้าจอ (Position)** | มุมหน้าจอ (เช่น top-right, bottom-right) | กลางหน้าจอ ลอยทับฉากหลังทึบ | ใต้ช่อง Input หรือข้างปุ่มที่มีปัญหา | แถบคาดยาวบนสุดของหน้าเว็บ |
+| **การตอบสนองที่ต้องการ** | ไม่ต้องการ (Optional Undo action) | ต้องการการยืนยันทันที (Confirm/Cancel) | ต้องการการแก้ไขข้อความใน Input | รับทราบข่าวสาร (เช่น ยืนยันอีเมล) |
+| **Accessibility (Screen Reader)** | `aria-live="polite"` (ไม่อ่านแทรก) | Focus ย้ายเข้าไปใน Modal ทันที | ผูกกับ `aria-describedby` ของ Input | `role="region"` หรือ `role="banner"` |
+
+### ผังการตัดสินใจเลือกประเภทการแจ้งเตือน (Decision Flowchart)
+
+```
+เหตุการณ์เกิดขึ้นในระบบ (Event Occurred)
+   │
+   ├──> ผู้ใช้ต้อง "ตัดสินใจหรือยืนยัน" ก่อนระบบดำเนินการต่อหรือไม่?
+   │      ├── ใช่ ──> [ AlertDialog / Modal ] (เช่น ยืนยันการลบบัญชี, ยืนยันการจ่ายเงิน)
+   │      └── ไม่ ──┐
+   │
+   ├──> เป็นข้อผิดพลาดของ "ช่องข้อมูลเฉพาะในฟอร์ม" หรือไม่?
+   │      ├── ใช่ ──> [ Inline Form Error ] (เช่น รหัสผ่านสั้นเกินไป, อีเมลซ้ำ)
+   │      └── ไม่ ──┐
+   │
+   ├──> มีผลกระทบต่อ "ทั้งระบบหรือการใช้งานภาพรวม" หรือไม่?
+   │      ├── ใช่ ──> [ Sticky Global Banner ] (เช่น ระบบจะปิดปรับปรุงคืนนี้, บัญชีค้างชำระ)
+   │      └── ไม่ ──┐
+   │
+   └──> เป็นการแจ้ง "ผลลัพธ์สั้นๆ ของการกระทำที่เพิ่งเสร็จ" ──> [ Toast Notification ]
+          (เช่น คัดลอกลิงก์สำเร็จ, บันทึกแบบร่างแล้ว, เพิ่มสินค้าลงตะกร้า)
+```
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practices)
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **ใช้ Toast ถามยืนยันการลบข้อมูลสำคัญ**<br/>เช่น เด้ง Toast ขึ้นมาว่า "คุณต้องการลบฐานข้อมูลนี้หรือไม่? [ยืนยัน]"<br/>*ผลลัพธ์:* Toast จะหมดเวลาและจางหายไปเอง ผู้ใช้กดยืนยันไม่ทัน หรือตกใจว่าระบบทำอะไรลงไป | **ใช้ `AlertDialog` สำหรับการยืนยันการกระทำที่ย้อนกลับไม่ได้**<br/>และใช้ Toast แจ้งเตือนหลังจากลบสำเร็จพร้อมปุ่ม "เลิกทำ (Undo)" หากระบบรองรับ Soft Delete |
+| **ยัดข้อความยาว 3-4 บรรทัดหรือ Error Stack Trace ลงใน Toast**<br/>ทำให้ Toast กลายเป็นกล่องใหญ่บังพื้นที่ทำงาน และไม่มีใครอ่านทันภายใน 4 วินาที | **เขียนข้อความหัวเรื่องสั้น 1 บรรทัด และรายละเอียดกระชับ**<br/>หากมีรายละเอียดทางเทคนิค ให้ทำปุ่ม "ดูรายละเอียด" เพื่อเปิด Modal หรือไปหน้า Log |
+| **ใช้ Toast แจ้งข้อผิดพลาดในการกรอกฟอร์มทีละช่อง**<br/>ผู้ใช้กด Submit แล้วมี Toast เด้งเรียงกัน 5 อัน: "กรุณากรอกชื่อ", "กรุณากรอกอีเมล", "กรุณากรอกเบอร์โทร" | **ใช้ Inline Form Messages ใต้แต่ละช่อง**<br/>และยิง Toast รวมเพียง 1 ตัวเพื่อบอกภาพรวมว่า "ข้อมูลไม่ครบถ้วน กรุณาตรวจสอบฟอร์ม" |
+| **ยิง Toast รัวๆ หลายอันพร้อมกันจากการวนลูป (Toast Avalanche)**<br/>เช่น อัปโหลดไฟล์ 20 ไฟล์ แล้วยิง `toast.success` 20 ครั้งซ้อนกันจนล้นจอ | **รวมผลลัพธ์เป็นชิ้นเดียว (Batching / Aggregation)**<br/>เช่น "อัปโหลดไฟล์สำเร็จ 20/20 ไฟล์" หรือใช้ Progress Toast เพียงชิ้นเดียว |
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Toast เมื่อ:
+- **ผลลัพธ์ของการกระทำแบบ Background / Optimistic**: เช่น "บันทึกแบบร่างอัตโนมัติแล้ว", "คัดลอกโทเคนลงคลิปบอร์ดแล้ว"
+- **การแจ้งสถานะที่มีทางเลือก Undo**: เช่น "ย้ายอีเมล 5 ฉบับไปที่ถังขยะแล้ว [เลิกทำ]"
+- **การเปลี่ยนแปลงสถานะเครือข่ายชั่วคราว**: เช่น "กลับมาเชื่อมต่ออินเทอร์เน็ตแล้ว"
+- **การดำเนินการ Asynchronous ที่มีจุดสิ้นสุดชัดเจน**: เช่น ดาวน์โหลดรายงานเสร็จสิ้นผ่าน `toast.promise`
+
+### ไม่ควรใช้ Toast เมื่อ:
+- **ข้อผิดพลาดร้ายแรงของระบบ (Fatal System Outage)**: เช่น Database Connection Timeout หรือเซิร์ฟเวอร์ล่ม 500 (ควรใช้ Next.js `error.tsx` หรือ Error Boundary)
+- **การยืนยันตัวตนและการเข้าถึง (Authentication / Authorization)**: เช่น เซสชันหมดอายุต้องล็อกอินใหม่ (ควร Redirect หรือเปิด Re-authentication Dialog)
+- **การตรวจสอบความถูกต้องของฟอร์ม (Form Field Validation)**: ควรใช้ Inline Validation เสมอ เพื่อให้สายตาของผู้ใช้อยู่กับช่องข้อมูลที่ต้องแก้ไข
+- **ข้อมูลสำคัญที่ต้องอ่านซ้ำหรือเก็บเป็นหลักฐาน**: ข้อมูลประเภทนี้ควรอยู่ใน Notification Center (กระดิ่งแจ้งเตือน) ไม่ใช่ Toast ชั่วคราว
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: อธิบายความแตกต่างของ Cognitive Load ระหว่าง Toast, Inline Form Error และ AlertDialog และคุณมีเกณฑ์อย่างไรในการเลือกใช้ในระบบขนาดใหญ่?
+**แนวทางตอบแบบ Senior Developer:**
+"Cognitive Load แบ่งออกเป็น 3 ระดับตามเจตนาของ Interaction:
+1. **Toast (Low Cognitive Load)**: ส่งสัญญาณยืนยันผลลัพธ์แบบ Peripheral awareness (การรับรู้รอบขอบสายตา) ไม่เรียกร้องการตัดสินใจ และไม่รบกวน Task flow หลักของผู้ใช้ ใช้สำหรับสถานะที่ปลอดภัยและผู้ใช้คาดหมายไว้อยู่แล้ว
+2. **Inline Error (Medium/Contextual Load)**: วางข้อมูลข้อผิดพลาดไว้ ณ จุดเกิดเหตุ (Locality of Context) ทำให้ผู้ใช้ไม่ต้องสลับสายตาไปมาระหว่างขอบหน้าจอกับช่องกรอกข้อมูล ช่วยลด Visual search cost ได้ดีที่สุดสำหรับฟอร์ม
+3. **AlertDialog (High Cognitive Load)**: เป็นการจงใจสร้าง Interruption เพื่อบังคับให้ผู้ใช้หยุดคิด (Friction by Design) เหมาะอย่างยิ่งสำหรับการกระทำที่มีความเสี่ยงสูง (Destructive action) เช่น การลบทีม หรือการย้าย Domain
+
+เกณฑ์ในการตัดสินใจของทีมเราจะพิจารณาจาก 3 ปัจจัย: **ความสามารถในการย้อนกลับได้ (Reversibility)**, **ผลกระทบต่อข้อมูล (Impact)**, และ **ความต้องการการตอบสนองจากผู้ใช้ (Action Required)** หากเป็นการกระทำที่ Reversible ได้ เราจะเลี่ยง Modal แล้วใช้ Toast + Undo เสมอเพื่อเพิ่มความเร็วในการใช้งาน (Flow state)"
+
+---
+
+### Q2: ในมุมมองของ WAI-ARIA และ Web Accessibility การใช้ `role="alert"` กับ `role="status"` บน Toast แตกต่างกันอย่างไร และส่งผลต่อผู้ใช้ Screen Reader อย่างไร?
+**แนวทางตอบแบบ Senior Developer:**
+"ความแตกต่างสำคัญอยู่ที่ระดับของ **Politeness ใน ARIA Live Regions**:
+- **`role="status"` (เทียบเท่ากับ `aria-live="polite"` และ `aria-atomic="true"`)**: ถูกออกแบบมาสำหรับข้อความแจ้งสถานะทั่วไป เบราว์เซอร์จะสั่งให้เครื่อง Screen Reader รอจนกว่าจะอ่านคำหรือประโยคปัจจุบันที่ผู้ใช้กำลังฟังอยู่ให้จบก่อน แล้วจึงอ่านข้อความของ Toast ซึ่งเป็นพฤติกรรมมาตรฐานที่เหมาะสมสำหรับ Toast ส่วนใหญ่ เพื่อไม่ให้ทำลายสมาธิของผู้พิการทางสายตา
+- **`role="alert"` (เทียบเท่ากับ `aria-live="assertive"` และ `aria-atomic="true"`)**: เป็นระดับความสำคัญสูงสุด เบราว์เซอร์จะสั่งให้ Screen Reader **หยุดอ่านสิ่งเดิมทันที** แล้วสลับมาอ่านข้อความใน Alert นี้ทันควัน หากเราใช้ `role="alert"` กับ Toast ความสำเร็จทั่วไป ทุกครั้งที่ผู้ใช้กดเซฟ ข้อมูลที่กำลังฟังจะถูกตัดตอนทันที ซึ่งสร้างประสบการณ์ที่แย่มาก ดังนั้น `role="alert"` ควรสงวนไว้สำหรับข้อผิดพลาดเร่งด่วนที่ส่งผลต่อระบบเท่านั้น"

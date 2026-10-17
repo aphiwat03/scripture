@@ -1,0 +1,145 @@
+---
+title: Doc Structure
+category: Frontend
+parentTitle: HTML5
+version: HTML Living Standard
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+เอกสาร HTML ทุกหน้าเปรียบเสมือน **"โฉนดและพิมพ์เขียวของอาคาร"** ก่อนที่จะตกแต่งความสวยงามด้วย CSS หรือติดตั้งระบบไฟฟ้าด้วย JavaScript เบราว์เซอร์จำเป็นต้องมีโครงสร้างหลักที่สมบูรณ์เพื่อทำความเข้าใจว่า เอกสารนี้เขียนด้วยมาตรฐานใด ใช้ภาษาอะไร และควรจัดวางขนาดบนหน้าจออย่างไร
+
+การแยกแยะระหว่าง **Tag**, **Element**, และ **Attribute**:
+- **Tag**: คือเครื่องหมายกำกับ เช่น `<p>` (Opening tag) หรือ `</p>` (Closing tag)
+- **Element**: คือองค์ประกอบทั้งหมดตั้งแต่แท็กเปิด เนื้อหาข้างใน ไปจนถึงแท็กปิด เช่น `<p>ยินดีต้อนรับ</p>`
+- **Attribute**: คือคุณสมบัติเสริมที่อยู่ภายในแท็กเปิด เช่น `<html lang="th">` หรือ `<meta charset="UTF-8">`
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+เมื่อ Browser เริ่มต้นอ่านไฟล์ HTML:
+1. **`<!DOCTYPE html>`**: แจ้ง Rendering Engine ของเบราว์เซอร์ให้ประมวลผลในโหมด **Standards Mode** (หากไม่มี จะตกไปอยู่ใน *Quirks Mode* ซึ่งจะเลียนแบบพฤติกรรมเก่าของเบราว์เซอร์ยุค 90s ทำให้ CSS และ Layout เพี้ยน)
+2. **`lang="th"`**: สำคัญมากต่อ **Accessibility Tree** เพราะ Screen Reader จะเปลี่ยนเอนจินออกเสียงเป็นภาษาไทย และช่วยให้ Search Engine ทราบกลุ่มเป้าหมายทางภาษา
+3. **`<meta charset="UTF-8">`**: ต้องอยู่แถวบนสุดของ `<head>` เพื่อให้ Browser รู้จักวิธีแปลง Byte ข้อมูลเป็นตัวอักษรทันทีก่อนจะเรนเดอร์อักษรภาษาไทยกลายเป็นตัวต่างดาว (``)
+4. **`<meta name="viewport" content="width=device-width, initial-scale=1.0">`**: กำหนดขนาด Viewport ของเสมือนให้ตรงกับความกว้างจริงของอุปกรณ์มือถือ ป้องกันไม่ให้เบราว์เซอร์ซูมหน้าเว็บออกเป็นขนาดเดสก์ท็อปขนาดจิ๋ว
+
+---
+
+## 3. ตัวอย่างโค้ด (HTML5)
+
+### ตัวอย่างที่ 1: โครงสร้างเอกสารหน้าแรกของร้านค้าออนไลน์ (E-Commerce)
+
+```html filename="index.html"
+<!DOCTYPE html>
+<!-- กำหนดภาษาหลักของเอกสารเพื่อ Screen Reader และการทำ SEO -->
+<html lang="th">
+<head>
+  <!-- 1. การเข้ารหัสอักขระสากล (รองรับภาษาไทย 100%) -->
+  <meta charset="UTF-8">
+
+  <!-- 2. การควบคุมสเกลหน้าจอสำหรับ Mobile-First Responsive Design -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- 3. หัวข้อหน้าเว็บที่แสดงบนแท็บของเบราว์เซอร์และผลการค้นหา Google -->
+  <title>ร้านค้าไอทีออนไลน์ — Scripture Store</title>
+</head>
+<body>
+  <!-- เนื้อหาที่ผู้ใช้มองเห็นจริงบนหน้าจอ -->
+  <header>
+    <h1>Scripture Store ศูนย์รวมอุปกรณ์คอมพิวเตอร์</h1>
+  </header>
+  <main>
+    <p>ยินดีต้อนรับสู่ระบบสั่งซื้ออุปกรณ์ไอทีคุณภาพสูง</p>
+  </main>
+</body>
+</html>
+```
+
+### ตัวอย่างที่ 2: โครงสร้างแบบสมบูรณ์พร้อม Resource Hints และ Open Graph
+
+```html filename="product-detail.html"
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  
+  <title>คีย์บอร์ดกลไกไร้สาย Pro Max — Scripture Store</title>
+  <meta name="description" content="สั่งซื้อคีย์บอร์ดกลไกไร้สายสวิตช์เงียบ แบตเตอรี่อึด 40 ชั่วโมง ส่งด่วนทั่วประเทศ">
+
+  <!-- Open Graph สำหรับแชร์ลงโซเชียลมีเดีย -->
+  <meta property="og:title" content="คีย์บอร์ดกลไกไร้สาย Pro Max">
+  <meta property="og:type" content="product">
+  <meta property="og:image" content="https://store.example.com/images/keyboard.jpg">
+</head>
+<body>
+  <div id="root">
+    <!-- หน้าเว็บเรนเดอร์ผ่าน React / Next.js -->
+  </div>
+</body>
+</html>
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ลืม DOCTYPE, ลืม Viewport และวาง charset ไว้ท้ายสุด
+
+```html
+<!-- ผิด: ไม่มี <!DOCTYPE html> ทำให้ Browser เข้าสู่ Quirks Mode -->
+<html>
+<head>
+  <title>หน้าเข้าสู่ระบบ</title>
+  <!-- ผิด: วาง title ก่อน charset หาก title มีภาษาไทยอาจแสดงผลเพี้ยนได้ -->
+  <!-- ผิด: ขาด meta viewport ทำให้หน้าเว็บบนมือถือมีขนาดตัวอักษรเล็กจิ๋ว -->
+</head>
+<body>
+  <h1>ยินดีต้อนรับ</h1>
+</body>
+</html>
+```
+
+### ✅ โค้ดที่ถูกต้อง: มี DOCTYPE, กำหนด lang, charset บรรทัดแรก และ viewport ครบถ้วน
+
+```html
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>เข้าสู่ระบบ — บัญชีผู้ใช้งาน</title>
+</head>
+<body>
+  <main>
+    <h1>เข้าสู่ระบบบัญชีผู้ใช้งาน</h1>
+  </main>
+</body>
+</html>
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรทำเสมอ (Mandatory)
+- ประกาศ `<!DOCTYPE html>` ไว้ที่บรรทัดที่ 1 ของทุกไฟล์ HTML เสมอ
+- ระบุ `lang` attribute ที่แท็ก `<html>` ทุกครั้ง เพื่อรองรับ Screen Reader และ SEO
+- ระบุ `<meta charset="UTF-8">` เป็นแท็กแรกๆ ภายใต้ `<head>`
+
+### ไม่ควรทำ
+- ห้ามใส่ `user-scalable=no` หรือ `maximum-scale=1.0` ใน meta viewport เพราะเป็นการตัดสิทธิ์ผู้บกพร่องทางสายตาไม่ให้ซูมขยายตัวหนังสือ (ขัดต่อเกณฑ์ WCAG 2.1)
+- ห้ามมีแท็กแสดงผล (เช่น `<h1>`, `<div>`, `<p>`) เข้าไปอยู่ในส่วน `<head>`
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: `<!DOCTYPE html>` มีหน้าที่อะไร หากไม่ใส่ในไฟล์ HTML จะเกิดผลกระทบอย่างไร?
+**แนวทางคำตอบ**: `<!DOCTYPE html>` คือ Document Type Declaration ที่บอกเบราว์เซอร์ให้เปิดโหมดการเรนเดอร์แบบ **Standards Mode** ตามข้อกำหนด HTML5 หากไม่ใส่ เบราว์เซอร์จะสลับไปทำงานในโหมด **Quirks Mode** ซึ่งจะพยายามเรนเดอร์หน้าเว็บด้วยกฎเก่าของเบราว์เซอร์ยุค Netscape/IE ทำให้ Box Model ของ CSS คำนวณขนาดผิดเพี้ยน และส่งผลให้เลย์เอาต์พังได้
+
+### Q2: แท็ก `<meta name="viewport" content="width=device-width, initial-scale=1.0">` มีความสำคัญอย่างไรต่อ Responsive Web Design?
+**แนวทางคำตอบ**: แท็ก Viewport บอกเบราว์เซอร์บนอุปกรณ์พกพา (Smartphones/Tablets) ว่าให้กำหนดขนาดความกว้างของหน้าจอจำลอง (Virtual Viewport) ให้เท่ากับความกว้างพิกเซลจริงของอุปกรณ์ (`width=device-width`) และตั้งสเกลเริ่มต้นที่ 100% (`initial-scale=1.0`) หากไม่มีแท็กนี้ มือถือจะสมมติว่าหน้าเว็บมีขนาดกว้าง 980px เสมือนเปิดบนคอมพิวเตอร์ แล้วย่อขนาดหน้าจอทั้งหมดลงมาทำให้ผู้ใช้ต้องคอยซูมเข้าออกด้วยตนเอง

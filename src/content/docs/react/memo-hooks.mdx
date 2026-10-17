@@ -1,0 +1,175 @@
+---
+title: Hooks & Memo
+category: Frontend
+parentTitle: React 19
+version: v19.0
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+เมื่อแอปพลิเคชันมีขนาดใหญ่ขึ้น การคำนวณซ้ำซ้อนหรือการ Re-render ของคอมโพเนนต์ลูกที่ไม่เกี่ยวข้องอาจทำให้ UI หน่วงได้ React จึงเตรียมเครื่องมือมาช่วยจัดการ:
+
+- **`useRef`**: กล่องเก็บค่าที่ไม่ทำให้เกิด Re-render เมื่อค่าข้างในเปลี่ยน (เหมือนกล่องใส่ของส่วนตัว) หรือใช้ถืออ้างอิง DOM Node จริง
+- **`useMemo`**: แคชผลลัพธ์ของการคำนวณที่ใช้ CPU หนักๆ (Expensive Calculation)
+- **`useCallback`**: แคชตัวฟังก์ชันเดิมไว้ระหว่างรอบการ Render เพื่อรักษา Function Reference ให้คงที่
+- **`React.memo`**: ป้องกันไม่ให้คอมโพเนนต์ลูก Re-render หาก Props ของมันไม่มีการเปลี่ยนแปลง
+
+---
+
+## 2. หลักการทำงานเบื้องหลัง (Under the Hood)
+
+ใน JavaScript ทุกครั้งที่คอมโพเนนต์รันฟังก์ชันใหม่:
+- ฟังก์ชันใหม่ เช่น `const onClick = () => {}` จะได้ **Memory Address ใหม่เสมอ** แม้โค้ดจะเหมือนเดิมทุกตัวอักษร!
+- หากส่งฟังก์ชันนี้ไปเป็น Props ให้คอมโพเนนต์ลูกที่ครอบด้วย `React.memo` ตัวคอมโพเนนต์ลูกจะมองว่า Props เปลี่ยนค่า และยอม Re-render อยู่ดี
+- `useCallback` เข้ามาแก้ปัญหานี้โดยคืน Memory Address เดิมตราบใดที่ Dependency Array ยังไม่เปลี่ยน
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: การใช้ `useRef` สั่ง Focus ช่องพิมพ์ และเก็บค่าตัวนับโดยไม่ Re-render
+
+```tsx filename="components/SearchFocusInput.tsx"
+'use client';
+
+import React, { useRef } from 'react';
+
+export function SearchFocusInput() {
+  // 1. ถืออ้างอิง DOM Node จริง
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // 2. เก็บค่าตัวแปรที่ไม่ต้องการให้หน้าจอกระตุกเมื่อเปลี่ยนค่า
+  const clickCountRef = useRef<number>(0);
+
+  const handleFocus = () => {
+    clickCountRef.current += 1;
+    console.log(`กดปุ่มไปแล้ว ${clickCountRef.current} ครั้ง`);
+    inputRef.current?.focus();
+  };
+
+  return (
+    <div className="flex gap-2">
+      <input
+        ref={inputRef}
+        type="text"
+        placeholder="พิมพ์ค้นหา..."
+        className="px-3 py-1.5 border rounded-lg text-sm"
+      />
+      <button
+        type="button"
+        onClick={handleFocus}
+        className="px-3 py-1.5 bg-accent text-white rounded-lg text-xs"
+      >
+        โฟกัสช่องค้นหา
+      </button>
+    </div>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: การใช้ `useMemo` และ `useCallback` ร่วมกับ `React.memo`
+
+```tsx filename="components/ProductFilterView.tsx"
+'use client';
+
+import React, { useState, useMemo, useCallback } from 'react';
+
+interface Product {
+  id: string;
+  name: string;
+  price: number;
+}
+
+// คอมโพเนนต์ลูกที่ถูกครอบด้วย React.memo จะไม่ Re-render ถ้า props ไม่เปลี่ยน
+const ProductRow = React.memo(function ProductRow({
+  product,
+  onSelect,
+}: {
+  product: Product;
+  onSelect: (id: string) => void;
+}) {
+  console.log(`Render แถว: ${product.name}`);
+  return (
+    <div className="flex justify-between py-2 border-b">
+      <span>{product.name} (฿{product.price})</span>
+      <button onClick={() => onSelect(product.id)} className="text-xs text-blue-500">
+        เลือก
+      </button>
+    </div>
+  );
+});
+
+export function ProductFilterView({ products }: { products: Product[] }) {
+  const [query, setQuery] = useState('');
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // 1. useMemo: กรองข้อมูลเฉพาะเมื่อ query หรือ products เปลี่ยน
+  const filteredProducts = useMemo(() => {
+    return products.filter((p) =>
+      p.name.toLowerCase().includes(query.toLowerCase())
+    );
+  }, [products, query]);
+
+  // 2. useCallback: ล็อก Memory Address ของฟังก์ชัน onSelect ไว้
+  const handleSelect = useCallback((id: string) => {
+    setSelectedId(id);
+  }, []); // ฟังก์ชันนี้จะคงเดิมเสมอ ไม่สร้างใหม่ทุกรอบ Render
+
+  return (
+    <div className="p-4 border rounded-xl max-w-md">
+      <input
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="ค้นหาชื่อสินค้า..."
+        className="w-full p-2 border rounded mb-3 text-sm"
+      />
+      <p className="text-xs text-muted mb-2">รหัสที่เลือก: {selectedId || 'ยังไม่เลือก'}</p>
+      {filteredProducts.map((p) => (
+        <ProductRow key={p.id} product={p} onSelect={handleSelect} />
+      ))}
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก (Premature Optimization)
+
+### กรณีที่ 1: การห่อทุกฟังก์ชันด้วย `useCallback` แบบไม่จำเป็น
+```tsx
+// ❌ ผิด: ใส่ useCallback กับฟังก์ชันง่ายๆ ที่ส่งให้ native tag (<button>)
+const handleClick = useCallback(() => {
+  console.log('clicked');
+}, []);
+return <button onClick={handleClick}>กด</button>;
+
+// ✅ ถูก: เขียนฟังก์ชันธรรมดาได้เลย!
+const handleClick = () => {
+  console.log('clicked');
+};
+return <button onClick={handleClick}>กด</button>;
+```
+*เหตุผล*: แท็ก HTML ดั้งเดิม (`<button>`, `<div>`) ไม่ใช่ React.memo อยู่แล้ว การเรียก `useCallback` มีค่าใช้จ่ายของหน่วยความจำในการจำ Dependency Array มากกว่าประโยชน์ที่ได้รับ
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- **`useMemo`**:
+  - *ควรใช้*: การคำนวณข้อมูลระดับล้านแถว, การแปลงกราฟข้อมูลที่ใช้เวลาประมวลผลสูง
+  - *ไม่ควรใช้*: การคำนวณเบาๆ เช่น บวกเลข 2 ตัว หรือกรองอาเรย์ขนาดไม่เกิน 50 ชิ้น
+- **`useCallback`**:
+  - *ควรใช้*: เมื่อฟังก์ชันนั้นถูกส่งเป็น Prop ไปยังคอมโพเนนต์ลูกที่ครอบด้วย `React.memo` หรือฟังก์ชันนั้นถูกนำไปใส่ใน Dependency Array ของ Hook อื่น
+  - *ไม่ควรใช้*: กับ Event Handler ภายในคอมโพเนนต์ตัวเอง
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: `useMemo` กับ `useCallback` แตกต่างกันอย่างไร?
+**แนวทางคำตอบ**: `useMemo` แคช **ผลลัพธ์ (Value)** ของฟังก์ชัน (เช่น Object, Array, Number) ส่วน `useCallback` แคช **ตัวฟังก์ชัน (Function Reference)** นั้นเอง ทั้งนี้ `useCallback(fn, deps)` มีการทำงานเทียบเท่ากับ `useMemo(() => fn, deps)`
+
+### Q2: อาการ "Over-optimization" ใน React คืออะไรและส่งผลเสียอย่างไร?
+**แนวทางคำตอบ**: คือการพยายามใส่ `React.memo`, `useMemo`, `useCallback` ในทุกๆ บรรทัดโดยไม่มีหลักฐานด้านประสิทธิภาพชี้ชัด ส่งผลให้โค้ดอ่านยากขึ้น ซับซ้อน และสิ้นเปลืองหน่วยความจำในการเก็บ Dependency Array ส่งผลให้แอปอาจทำงานช้าลงกว่าเดิม

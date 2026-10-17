@@ -1,0 +1,164 @@
+---
+title: HTML in React
+category: Frontend
+parentTitle: HTML5
+version: React 19 & TSX
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+เมื่อเราเขียนโค้ดใน React หรือ Next.js ไวยากรณ์ที่เราเห็นไม่ใช่ HTML ดั้งเดิม แต่คือ **JSX (JavaScript XML)**
+
+แม้หน้าตาจะคล้าย HTML แต่ JSX คือ **JavaScript Syntax Extension** ซึ่งจะถูกคอมไพล์แปลงร่างเป็นฟังก์ชัน `React.createElement()` หรือ `_jsx()` ในที่สุด ด้วยเหตุนี้ กฎเกณฑ์และชื่อของแอตทริบิวต์หลายตัวจึงต้องปรับเปลี่ยนเพื่อไม่ให้ชนกับคำสงวน (Reserved Keywords) ของภาษา JavaScript:
+- `class` เปลี่ยนเป็น **`className`** (เพราะ `class` เป็นคำสงวนสร้าง Object ใน JS)
+- `for` เปลี่ยนเป็น **`htmlFor`** (เพราะ `for` เป็นคำสงวนของ for-loop ใน JS)
+- **Self-closing Tags**: ทุกแท็กที่ไม่มีลูก (เช่น `<img>`, `<input>`, `<br>`) **ต้องปิดตัวเองด้วย `/>` เสมอ**
+- **Inline Style**: ไม่ใช่สตริง แต่เป็น JavaScript Object ในรูปแบบ camelCase เช่น `style={{ backgroundColor: 'blue' }}`
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+1. **JSX Compilation Pipeline**:
+   ```tsx
+   // โค้ด JSX ที่เราเขียน:
+   <button className="btn" onClick={handleClick}>ตกลง</button>
+
+   // ผลลัพธ์เมื่อ Transpile เป็น JS จริง:
+   import { jsx as _jsx } from 'react/jsx-runtime';
+   _jsx('button', { className: 'btn', onClick: handleClick, children: 'ตกลง' });
+   ```
+2. **ทำไมถึงตั้งชื่อว่า `dangerouslySetInnerHTML`?**: ทีมผู้พัฒนา React จงใจตั้งชื่อฟังก์ชันนี้ให้ยาวและดูน่ากลัว เพื่อเตือนสติวิศวกรว่าการแปะ HTML ดิบลงใน DOM อาจเปิดประตูให้เกิดช่องโหว่ **Cross-Site Scripting (XSS)** ได้อย่างง่ายดาย
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่างที่ 1: ฟอร์มค้นหาพร้อมความถูกต้องตามหลัก Semantic และ a11y
+
+```tsx filename="components/SearchBar.tsx"
+'use client';
+
+import React, { useState } from 'react';
+
+export default function SearchBar() {
+  const [query, setQuery] = useState('');
+
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    console.log(`ค้นหาคำว่า: ${query}`);
+  };
+
+  return (
+    // ยังคงรักษา Semantic HTML (<form>, <label>, <input>, <button>) ใน JSX
+    <form onSubmit={handleSubmit} className="flex items-center gap-2 max-w-md mx-auto">
+      {/* ใช้ htmlFor ผูกกับ id ของ input */}
+      <label htmlFor="search-input" className="sr-only">
+        ค้นหาสินค้าหรือบทเรียน
+      </label>
+
+      {/* ใน JSX แท็ก input ต้อง self-close ด้วย /> เสมอ */}
+      <input
+        type="search"
+        id="search-input"
+        name="q"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="ค้นหาเรื่องที่สนใจ..."
+        autoComplete="off"
+        className="px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+      />
+
+      <button
+        type="submit"
+        className="px-4 py-2 text-white bg-blue-600 rounded-lg hover:bg-blue-700"
+      >
+        ค้นหา
+      </button>
+    </form>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: การแสดงผล Rich Text อย่างปลอดภัยร่วมกับ DOMPurify
+
+```tsx filename="components/SafeHtmlRenderer.tsx"
+import React from 'react';
+import DOMPurify from 'isomorphic-dompurify';
+
+interface SafeHtmlProps {
+  rawHtml: string;
+}
+
+export function SafeHtmlRenderer({ rawHtml }: SafeHtmlProps) {
+  // ฟอกขาวเนื้อหา กำจัดแท็ก <script> และ event handlers อันตรายออกให้หมด
+  const cleanHtml = DOMPurify.sanitize(rawHtml, {
+    ALLOWED_TAGS: ['b', 'i', 'em', 'strong', 'a', 'p', 'ul', 'li', 'h2', 'h3'],
+    ALLOWED_ATTR: ['href', 'target', 'rel'],
+  });
+
+  return (
+    <article
+      className="prose-content"
+      // ใช้ dangerouslySetInnerHTML เฉพาะเมื่อผ่านการ Sanitize แล้วเท่านั้น
+      dangerouslySetInnerHTML={{ __html: cleanHtml }}
+    />
+  );
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ใช้ไวยากรณ์ HTML ดั้งเดิมใน JSX
+
+```tsx
+// ผิด: ใน React ห้ามใช้ class, for และ inline style เป็น string
+function ProfileCard() {
+  return (
+    <div class="card" style="margin-top: 20px;">
+      <label for="username">ชื่อเล่น</label>
+      <input type="text"> {/* 💥 Compile Error: Unclosed tag */}
+    </div>
+  );
+}
+```
+
+### ✅ โค้ดที่ถูกต้อง: ใช้ JSX Properties ตามมาตรฐาน
+
+```tsx
+function ProfileCard() {
+  return (
+    // ถูกต้อง: className, style เป็น object, htmlFor, self-closing tag
+    <div className="card" style={{ marginTop: '20px' }}>
+      <label htmlFor="username">ชื่อเล่น</label>
+      <input type="text" id="username" />
+    </div>
+  );
+}
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรทำ
+- ใช้ Semantic Elements (`<header>`, `<main>`, `<article>`, `<button>`) ภายใน JSX Components เสมอ (อย่าเขียนแต่ `<div>` ครอบ `<div>`)
+- ใช้ boolean attributes ในรูปแบบย่อ เช่น `<input disabled required />` (เทียบเท่า `disabled={true}`)
+
+### ไม่ควรทำ
+- **ห้ามส่ง Raw User Input ตรงๆ เข้าสู่ `dangerouslySetInnerHTML`** เด็ดขาด
+- ห้ามเขียน style เป็น string แบบ HTML ดั้งเดิม
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมใน React/JSX จึงต้องใช้ `className` แทน `class` และ `htmlFor` แทน `for`?
+**แนวทางคำตอบ**: เพราะ JSX ไม่ใช่ภาษา HTML ดั้งเดิม แต่จะถูกคอมไพล์เป็นโค้ด JavaScript ปกติ ซึ่งในภาษา JavaScript นั้น คำว่า `class` เป็นคำสงวนที่ใช้สำหรับสร้าง Class ในรูปแบบเชิงวัตถุ (ES6 Classes) ส่วนคำว่า `for` เป็นคำสงวนที่ใช้สำหรับคำสั่งวนลูป (for-loop) ดังนั้น เพื่อหลีกเลี่ยงความกำกวมในการแปลความหมายของคอมไพเลอร์ React จึงเลือกใช้ Property Name ที่ตรงกับ DOM API ของเบราว์เซอร์ ซึ่งก็คือ `element.className` และ `label.htmlFor`
+
+### Q2: ใน JSX แท็ก Void Elements (เช่น `<img>`, `<input>`, `<br>`) แตกต่างจาก HTML ปกติอย่างไร?
+**แนวทางคำตอบ**: ในมาตรฐาน HTML5 แท็กกลุ่ม Void Elements สามารถเขียนเปิดทิ้งไว้ได้โดยไม่ต้องมีเครื่องหมายปิด เช่น `<img>` หรือ `<input>` 
+แต่ใน JSX กฎไวยากรณ์มีความเข้มงวดตามหลัก XML ทุก element ที่ไม่มี Children (ไม่มีเนื้อหาข้างใน) **จำเป็นต้องปิดตัวเองด้วยเครื่องหมาย Slash ท้ายแท็กเสมอ (Self-closing tag)** เช่น `<img src="..." alt="..." />` หรือ `<input type="text" />` หากไม่ปิด คอมไพเลอร์ Babel/TypeScript จะแจ้ง Syntax Error ทันที

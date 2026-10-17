@@ -1,0 +1,205 @@
+---
+title: การติดตั้งและโครงสร้างใน Next.js 16
+category: Frontend
+parentTitle: Tailwind CSS v4
+version: Tailwind v4.0 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+Tailwind CSS v4 ถูกออกแบบขึ้นใหม่จากรากฐานเพื่อรองรับยุค **CSS-First Architecture** และเว็บเฟรมเวิร์กสมัยใหม่อย่าง **Next.js 16 (React 19 + Turbopack)** 
+
+ในเวอร์ชันก่อนหน้า (Tailwind v3) นักพัฒนาจำเป็นต้องพึ่งพาไฟล์คอนฟิกูเรชัน JavaScript กลางอย่าง `tailwind.config.js` ซึ่งมีข้อจำกัด:
+- ต้องกำหนดพาธไฟล์ทั้งหมดในอาร์เรย์ `content: [...]` หากเขียน glob pattern พลาด สไตล์จะไม่ปรากฏ
+- ตัวประมวลผลอาศัย JavaScript-based PostCSS ซึ่งทำงานช้าเมื่อโปรเจกต์มีขนาดใหญ่
+- ต้องแยกเลเยอร์ดีไซน์โทเคนระหว่าง JS (`theme.extend`) กับ CSS variables
+
+Tailwind v4 แก้ปัญหาเหล่านี้ด้วยแนวทาง **Zero-Config by Default**:
+- คอนฟิกทั้งหมดถูกย้ายกลับมาอยู่ใน CSS โดยใช้มาตรฐานโมเดิร์น CSS (`@theme`, `@utility`, `@custom-variant`)
+- นำเสนอ **Automatic Content Detection** สแกนไฟล์ `.tsx`, `.ts`, `.jsx` ในโปรเจกต์ Next.js ได้เองโดยอัตโนมัติ
+- รวมเข้ากับ Next.js 16 ได้อย่างราบรื่นผ่าน `@tailwindcss/postcss` หรือการรองรับบน Turbopack
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### เครื่องยนต์คอมไพเลอร์ Rust (Oxide Engine)
+หัวใจของ Tailwind v4 คือ **Oxide Engine** ที่เขียนด้วยภาษา Rust ทั้งหมด:
+1. **Parallel Scanning**: ทำงานระดับ Multi-threading สแกนไฟล์ทั้งโปรเจกต์เพื่อค้นหา Utility Classes ได้เร็วกว่าคอมไพเลอร์ v3 เดิมถึง 10 เท่า และประหยัดหน่วยความจำมหาศาล
+2. **LightningCSS Integration**: ใช้ตัวแปลงและย่อขนาด CSS สมัยใหม่ (LightningCSS) แทน Babel/PostCSS plugins เก่า รองรับ CSS Nesting, Modern Color Functions (OKLCH) และ Cascade Layers แบบเนทีฟ
+3. **Automatic Content Tracking**: Oxide ตรวจจับโครงสร้างไดเรกทอรีของ Next.js 16 เช่น `src/app`, `src/components`, `src/lib` และไฟล์ `.gitignore` อัตโนมัติ โดยตัดโฟลเดอร์ที่ไม่จำเป็น เช่น `node_modules` และ `.next` ออกเองโดยไม่ต้องเขียน regex กรอง
+
+---
+
+## 3. ตัวอย่างโค้ด (Tailwind v4 & TSX)
+
+### ตัวอย่างที่ 1: การตั้งค่า Next.js 16 (PostCSS & Globals CSS)
+
+```javascript filename="postcss.config.mjs"
+export default {
+  plugins: {
+    "@tailwindcss/postcss": {},
+  },
+};
+```
+
+```css filename="src/app/globals.css"
+/* 1. นำเข้า Tailwind v4 ด้วยบรรทัดเดียว (แทนที่ @tailwind base, components, utilities) */
+@import "tailwindcss";
+
+/* 2. กำหนด Custom Theme และ Design Tokens ด้วย CSS เนทีฟ */
+@theme {
+  --font-display: var(--font-geist-sans), system-ui, sans-serif;
+  --color-brand-primary: oklch(0.55 0.22 260);
+  --color-brand-accent: oklch(0.75 0.18 150);
+}
+
+/* 3. กำหนดตัวแปรสำหรับ Dark Mode */
+@custom-variant dark (&:where(.dark, .dark *));
+```
+
+```tsx filename="src/app/layout.tsx"
+import type { Metadata } from "next";
+import { Geist, Geist_Mono } from "next/font/google";
+import "./globals.css";
+
+const geistSans = Geist({
+  variable: "--font-geist-sans",
+  subsets: ["latin"],
+});
+
+export const metadata: Metadata = {
+  title: "Next.js 16 with Tailwind v4",
+  description: "คู่มือระบบดีไซน์ระดับองค์กร",
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="th" className={`${geistSans.variable} antialiased`}>
+      <body className="min-h-screen bg-neutral-50 text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
+        {children}
+      </body>
+    </html>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: Dashboard Header Bar ใน Next.js App Router
+
+```tsx filename="src/components/DashboardHeader.tsx"
+import { Bell, Search, User } from "lucide-react";
+
+export function DashboardHeader() {
+  return (
+    <header className="sticky top-0 z-40 flex h-16 w-full items-center justify-between border-b border-neutral-200 bg-white/80 px-6 backdrop-blur-md dark:border-neutral-800 dark:bg-neutral-900/80">
+      <div className="flex items-center gap-4">
+        <span className="text-lg font-bold tracking-tight text-neutral-900 dark:text-white">
+          Enterprise Portal
+        </span>
+        <span className="rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+          v4.0 Live
+        </span>
+      </div>
+
+      <div className="flex items-center gap-3">
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-neutral-400" />
+          <input
+            type="text"
+            placeholder="ค้นหาข้อมูลโปรเจกต์..."
+            className="h-9 w-64 rounded-lg border border-neutral-300 bg-neutral-100/60 pl-9 pr-4 text-xs text-neutral-800 placeholder-neutral-400 transition-colors focus:border-brand-primary focus:bg-white focus:outline-none dark:border-neutral-700 dark:bg-neutral-800/80 dark:text-neutral-200"
+          />
+        </div>
+
+        <button
+          type="button"
+          aria-label="การแจ้งเตือน"
+          className="relative flex size-9 items-center justify-center rounded-lg border border-neutral-200 text-neutral-600 hover:bg-neutral-100 dark:border-neutral-800 dark:text-neutral-300 dark:hover:bg-neutral-800"
+        >
+          <Bell className="size-4" />
+          <span className="absolute right-1.5 top-1.5 size-2 rounded-full bg-rose-500" />
+        </button>
+
+        <div className="flex size-9 items-center justify-center rounded-full bg-neutral-200 font-semibold text-neutral-700 dark:bg-neutral-700 dark:text-neutral-200">
+          <User className="size-4" />
+        </div>
+      </div>
+    </header>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับ CSS ปกติ
+
+| งาน | Tailwind v4 (PostCSS/Next.js) | CSS ปกติแบบดั้งเดิม |
+| :--- | :--- | :--- |
+| **การเชื่อมต่อโครงระบบ** | `@import "tailwindcss";` | ต้องโหลด Reset CSS, Utility classes, Theme CSS แยกไฟล์ |
+| **การตรวจจับโค้ด** | สแกนหาคำและสร้าง CSS เฉพาะที่ใช้จริงแบบ JIT | ต้องโหลดกฎ CSS ทุกตัวเข้าเบราว์เซอร์ แม้จะใช้แค่ 1% |
+| **การตั้งค่าชุดสีและตัวแปร** | `@theme { --color-brand: #0070f3; }` | `:root { --color-brand: #0070f3; }` และต้องเขียนคลาสแมปปิ้งเพิ่มเอง |
+| **รองรับ Dark Mode** | `dark:bg-neutral-900` | `@media (prefers-color-scheme: dark)` หรือเขียน `.dark .component` ซ้ำซ้อน |
+
+---
+
+## 5. ผิด vs ถูก
+
+### จุดที่ 1: การนำเข้าในไฟล์ CSS หลัก
+```css
+/* ❌ ผิด (รูปแบบเดิมของ Tailwind v3) */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ✅ ถูก (รูปแบบ Tailwind v4) */
+@import "tailwindcss";
+```
+*เหตุผล*: ใน Tailwind v4 Directive `@tailwind` ถูกแทนที่ด้วยมาตรฐานสากล `@import "tailwindcss";` ซึ่งโหลดเอนจินทั้งหมดผ่าน Cascade Layers สมัยใหม่
+
+### จุดที่ 2: พยายามสร้าง `tailwind.config.js` เพื่อกำหนด content path
+```javascript
+/* ❌ ผิด: ฝืนสร้าง tailwind.config.js ในโปรเจกต์ Next.js 16 เพื่อเซ็ตพาธ */
+module.exports = {
+  content: ["./src/**/*.{js,ts,jsx,tsx}"],
+  theme: { extend: {} },
+};
+
+/* ✅ ถูก: ปล่อยให้ Oxide Engine สแกนอัตโนมัติ และเซ็ตตัวแปรที่ globals.css */
+/* ไม่ต้องสร้าง tailwind.config.js เลย */
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #2563eb;
+}
+```
+*เหตุผล*: Tailwind v4 ใช้ Automatic Content Detection ในระดับ Rust Engine การสร้างไฟล์ config เก่าอาจทำให้เครื่องมือเกิดความสับสนหรือลดประสิทธิภาพของ Turbopack
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้
+- เริ่มต้นโปรเจกต์ใหม่ด้วย **Next.js 16 + React 19** ที่ต้องการความเร็วสูงสุดในการคอมไพล์ (Turbopack)
+- ทีมที่ต้องการให้ Design Tokens อิงกับ **CSS Standard Variables** เป็นหลัก
+- โปรเจกต์ขนาดใหญ่ที่มีหน้าเว็บและคอมโพเนนต์จำนวนมาก เพราะ Oxide Engine ช่วยลดเวลา Build Time จากหลักวินาทีเหลือระดับมิลลิวินาที
+
+### ไม่ควรใช้
+- โปรเจกต์เก่าที่ผูกติดอย่างลึกซึ้งกับปลั๊กอิน JavaScript ของ Tailwind v3 ที่ยังไม่ได้ถูกพอร์ตมาเป็น CSS-based plugin
+- ระบบที่ยังจำเป็นต้องแชร์ Theme Object ให้กับ JavaScript runtime libraries แบบสองทิศทาง (หากจำเป็น ควรใช้การอ่านผ่าน `getComputedStyle` หรือไลบรารีสไตล์อื่น)
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: อะไรคือความแตกต่างเชิงสถาปัตยกรรมที่สำคัญที่สุดระหว่าง Tailwind CSS v3 และ v4 ในโปรเจกต์ Next.js?
+**แนวทางคำตอบ**: 
+จุดต่างที่สำคัญที่สุดคือ **สถาปัตยกรรม CSS-First และ Oxide Engine** ใน v3 Tailwind ทำงานด้วย JavaScript ผ่าน `tailwind.config.js` และต้องกำหนด glob pattern ใน `content: []` เพื่อให้ PostCSS ค้นหาคลาส แต่ใน v4 เอนจินถูกเขียนขึ้นใหม่ด้วยภาษา Rust (Oxide) สามารถตรวจจับการเรียกใช้คลาสในไดเรกทอรี Next.js ได้เองโดยอัตโนมัติ (Zero-config content detection) และย้ายการตั้งค่าธีมทั้งหมดเข้ามาอยู่ใน CSS ผ่าน `@theme` directive ส่งผลให้ความเร็วในการประมวลผลสูงขึ้นอย่างมหาศาล และโค้ดสะอาดตามมาตรฐาน Web Standards ยุคใหม่
+
+### Q2: หากในโปรเจกต์ Next.js มีการโหลด UI Components จากโมดูลภายนอก (ภายนอก root) Tailwind v4 จะตรวจจับคลาสได้อย่างไร?
+**แนวทางคำตอบ**: 
+ในกรณีที่มีคอมโพเนนต์จากภายนอกหรือแพ็กเกจที่ต้องการให้ Tailwind สแกนเพิ่มเติม Tailwind v4 จัดเตรียม Directive ใหม่ชื่อ `@source` เช่น `@source "../packages/ui/src";` ในไฟล์ CSS หลัก เพื่อสั่งให้ Rust Oxide Engine ขยายขอบเขตการสแกนไปยังพาธนั้นๆ โดยตรง โดยไม่จำเป็นต้องกลับไปสร้างคอนฟิกแบบ JavaScript ดั้งเดิม

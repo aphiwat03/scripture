@@ -1,0 +1,254 @@
+---
+title: Navigation & Layout
+category: Frontend
+parentTitle: shadcn/ui
+version: shadcn/ui & Radix UI
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การจัดวางโครงสร้างหน้าจอ (Layout) และระบบนำทาง (Navigation) ถือเป็นกระดูกสันหลังของเว็บแอปพลิเคชันยุคใหม่ shadcn/ui เตรียมคอมโพเนนต์ที่ครอบคลุมทุกมิติของการจัดระเบียบข้อมูล:
+
+1. **`Sidebar`**: ระบบเมนูด้านข้างที่สมบูรณ์แบบที่สุด รองรับการพับเก็บ (Collapsible), Floating mode, เมนูด้านในแบบจัดกลุ่ม (Groups & Sub-menus) และสลับเป็น Drawer บนสมาร์ตโฟนอัตโนมัติ
+2. **`Tabs`**: การสลับมุมมองเนื้อหาในหน้าเดียวโดยไม่ต้องเปลี่ยน URL เหมาะสำหรับแยกหมวดข้อมูล เช่น "ภาพรวม" กับ "การตั้งค่า"
+3. **`Accordion`**: รายการพับเก็บเนื้อหาเพื่อประหยัดพื้นที่หน้าจอ มักใช้ในหน้าคำถามที่พบบ่อย (FAQ) หรือตัวกรองขั้นสูง
+4. **`Breadcrumb`**: แถบระบุเส้นทางตำแหน่งปัจจุบัน ช่วยให้ผู้ใช้เข้าใจว่ากำลังอยู่ในระดับชั้นใดของระบบ (e.g. หน้าแรก > คลังสินค้า > รายละเอียดสินค้า)
+5. **`ScrollArea`**: แถบเลื่อน (Scrollbar) ที่ปรับแต่งสไตล์ได้ข้ามเบราว์เซอร์ ไม่บดบังเนื้อหา และดูเรียบหรูสม่ำเสมอกันทั้งบน Mac, Windows และ Linux
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. การทำงานของ shadcn `<SidebarProvider>`
+- ระบบ Sidebar ใน shadcn/ui ใช้ React Context (`SidebarProvider`) เพื่อจัดการสถานะเปิด/ปิด (Open/Collapsed state)
+- **Cookie Persistence**: เมื่อผู้ใช้กดปุ่มพับ Sidebar สถานะจะถูกบันทึกลงใน Browser Cookie ทำให้เมื่อรีเฟรชหน้าหรือย้ายหน้าใน Next.js เซิร์ฟเวอร์สามารถอ่านค่า Cookie นั้นและเรนเดอร์เลย์เอาต์ที่พับเก็บไว้ล่วงหน้าได้ทันที **ป้องกันปัญหาหน้าจอกระตุกขยายไปมา (Layout Shift on Hydration)**
+- **Keyboard Shortcut**: ฝังคีย์ลัดระดับสากล เช่น `Cmd + B` หรือ `Ctrl + B` เพื่อสลับการเปิด/ปิด Sidebar ได้ทันที
+
+### 2. Accessibility ใน `<Accordion>` และ `<Tabs>`
+- Radix UI จัดการ ARIA Attributes ทั้งหมด:
+  - `<TabsList>` มี `role="tablist"`
+  - `<TabsTrigger>` มี `role="tab"` พร้อม `aria-selected`
+  - รองรับการใช้แป้นพิมพ์ลูกศรซ้าย-ขวา เพื่อเลื่อนสลับแท็บโดยอัตโนมัติ (Arrow Navigation) ตามมาตรฐาน WAI-ARIA Tabs Design Pattern
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่าง: สถาปัตยกรรมหน้าแดชบอร์ดระดับองค์กร (Admin Dashboard Shell)
+
+```tsx filename="app/dashboard/DashboardLayoutClient.tsx"
+"use client";
+
+import * as React from "react";
+import Link from "next/link";
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+  SidebarTrigger,
+} from "@/components/ui/sidebar";
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Button } from "@/components/ui/button";
+import {
+  LayoutDashboard,
+  Server,
+  Shield,
+  HelpCircle,
+  LogOut,
+  ChevronRight,
+  TrendingUp,
+} from "lucide-react";
+
+export function DashboardLayoutClient() {
+  return (
+    <SidebarProvider defaultOpen={true}>
+      <div className="flex min-h-screen w-full bg-background">
+        {/* 1. เมนูด้านข้าง Sidebar */}
+        <Sidebar variant="inset" collapsible="icon">
+          <SidebarHeader className="border-b px-4 py-3">
+            <div className="flex items-center gap-2 font-semibold">
+              <Server className="w-5 h-5 text-primary" />
+              <span className="truncate">CloudOps Console</span>
+            </div>
+          </SidebarHeader>
+
+          <SidebarContent>
+            <SidebarGroup>
+              <SidebarGroupLabel>ระบบหลัก</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  <SidebarMenuItem>
+                    <SidebarMenuButton asChild isActive tooltip="ภาพรวม">
+                      <Link href="/dashboard">
+                        <LayoutDashboard className="w-4 h-4" />
+                        <span>ภาพรวมระบบ</span>
+                      </Link>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                  <SidebarMenuItem>
+                    <SidebarMenuButton asChild tooltip="ความปลอดภัย">
+                      <Link href="/dashboard/security">
+                        <Shield className="w-4 h-4" />
+                        <span>ความปลอดภัย</span>
+                      </Link>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          </SidebarContent>
+
+          <SidebarFooter className="border-t p-2">
+            <Button variant="ghost" size="sm" className="w-full justify-start gap-2 text-destructive">
+              <LogOut className="w-4 h-4" />
+              <span>ออกจากระบบ</span>
+            </Button>
+          </SidebarFooter>
+        </Sidebar>
+
+        {/* 2. คอนเทนต์หลัก Main Workspace */}
+        <div className="flex flex-1 flex-col min-w-0">
+          {/* Header Bar */}
+          <header className="flex h-14 items-center gap-4 border-b px-6 bg-card">
+            <SidebarTrigger />
+            <Breadcrumb>
+              <BreadcrumbList>
+                <BreadcrumbItem>
+                  <BreadcrumbLink href="/dashboard">หน้าหลัก</BreadcrumbLink>
+                </BreadcrumbItem>
+                <BreadcrumbSeparator />
+                <BreadcrumbItem>
+                  <BreadcrumbPage>คลัสเตอร์พระราม 9</BreadcrumbPage>
+                </BreadcrumbItem>
+              </BreadcrumbList>
+            </Breadcrumb>
+          </header>
+
+          {/* Scrollable Main Area */}
+          <ScrollArea className="flex-1 p-6">
+            <div className="max-w-5xl mx-auto space-y-6">
+              {/* Tabs Component สำหรับสลับแท็บ */}
+              <Tabs defaultValue="metrics" className="w-full">
+                <TabsList className="grid w-full max-w-md grid-cols-2">
+                  <TabsTrigger value="metrics">การใช้ทรัพยากร</TabsTrigger>
+                  <TabsTrigger value="faq">คู่มือและคำถามพบบ่อย</TabsTrigger>
+                </TabsList>
+
+                {/* แท็บที่ 1: Metrics */}
+                <TabsContent value="metrics" className="space-y-4 pt-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="p-6 border rounded-2xl bg-card space-y-2">
+                      <div className="flex items-center justify-between text-muted-foreground text-xs">
+                        <span>CPU Utilization</span>
+                        <TrendingUp className="w-4 h-4 text-emerald-500" />
+                      </div>
+                      <div className="text-3xl font-bold">42.8%</div>
+                      <p className="text-xs text-muted-foreground">คลัสเตอร์อยู่ในเกณฑ์ปกติ</p>
+                    </div>
+
+                    <div className="p-6 border rounded-2xl bg-card space-y-2">
+                      <div className="flex items-center justify-between text-muted-foreground text-xs">
+                        <span>Memory Usage</span>
+                        <TrendingUp className="w-4 h-4 text-amber-500" />
+                      </div>
+                      <div className="text-3xl font-bold">18.4 GB</div>
+                      <p className="text-xs text-muted-foreground">จากทั้งหมด 32 GB</p>
+                    </div>
+                  </div>
+                </TabsContent>
+
+                {/* แท็บที่ 2: FAQ Accordion */}
+                <TabsContent value="faq" className="pt-4">
+                  <div className="p-6 border rounded-2xl bg-card">
+                    <h3 className="text-base font-semibold mb-2">คำถามที่พบบ่อยเกี่ยวกับคลัสเตอร์</h3>
+                    <Accordion type="single" collapsible className="w-full">
+                      <AccordionItem value="item-1">
+                        <AccordionTrigger>วิธีการตั้งค่า Auto-scaling ทำอย่างไร?</AccordionTrigger>
+                        <AccordionContent className="text-muted-foreground text-sm">
+                          คุณสามารถกำหนดจำนวน Min/Max Replicas ได้ในหน้าการตั้งค่า Deployment
+                          ระบบจะปรับขนาด Pod อัตโนมัติเมื่อ CPU เกิน 80% ติดต่อกัน 5 นาที
+                        </AccordionContent>
+                      </AccordionItem>
+                      <AccordionItem value="item-2">
+                        <AccordionTrigger>นโยบายการสำรองข้อมูล (Data Backup) เป็นอย่างไร?</AccordionTrigger>
+                        <AccordionContent className="text-muted-foreground text-sm">
+                          ระบบทำการสำรอง Snapshot ทุกวันเวลา 02:00 น. และเก็บย้อนหลังเป็นเวลา 30 วัน
+                          บน Multi-region S3 Storage
+                        </AccordionContent>
+                      </AccordionItem>
+                    </Accordion>
+                  </div>
+                </TabsContent>
+              </Tabs>
+            </div>
+          </ScrollArea>
+        </div>
+      </div>
+    </SidebarProvider>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **ซ่อน Sidebar บนมือถือด้วยแค่ CSS `hidden md:flex`**<br/>ผลลัพธ์: ผู้ใช้บนมือถือไม่มีปุ่มเปิดเมนู หรือหากทำ Drawer เอง มักลืม Focus Trap ทำให้ผู้ใช้กดทะลุ | **ใช้ `<SidebarProvider>` ของ shadcn**<br/>ซึ่งมี Sheet Drawer สำหรับสมาร์ตโฟนในตัวโดยอัตโนมัติ และรองรับ a11y ครบถ้วน |
+| **เก็บสถานะเปิด/ปิด Sidebar ไว้ใน LocalStorage ฝั่ง Client เพียงอย่างเดียว**<br/>ส่งผลให้เกิด Layout Shift ตอนหน้าเว็บโหลด เพราะ Server ส่งสถานะหนึ่งมา แต่ Client สลับเป็นอีกสถานะ | **ผูกสถานะกับ Browser Cookie**<br/>เซิร์ฟเวอร์สามารถอ่าน Cookie ล่วงหน้าแล้วเรนเดอร์ขนาด Sidebar ได้ถูกต้องตั้งแต่เฟรมแรก |
+| **ใช้ Native `overflow-y-scroll` ที่มี Scrollbar สีเทาขนาดใหญ่ขัดตา**<br/>หน้าตาไม่สอดคล้องกับธีม โดยเฉพาะบนระบบ Windows | **ใช้ `<ScrollArea>`**<br/>แถบเลื่อนจะถูกซ่อนจนกว่าจะมีการเลื่อนเมาส์ และสีสันกลมกลืนกับ Theme Token |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้เมื่อ:
+- **แอปพลิเคชันระบบจัดการ (SaaS / Web App / Portal)**: ที่มีลำดับชั้นของหน้าและเมนูจำนวนมาก
+- **หน้าตั้งค่าที่มีข้อมูลหลายหมวด**: ใช้ `Tabs` เพื่อจัดกลุ่ม ช่วยให้ผู้ใช้ไม่ต้องเลื่อนหน้าจอยาวเกินไป
+- **Documentation & FAQ**: ใช้ `Accordion` เพื่อให้ผู้ใช้สามารถกวาดสายตาดูหัวข้อทั้งหมดได้ก่อนคลิกอ่านเนื้อหา
+
+### ไม่ควรใช้เมื่อ:
+- **Landing Page แบบหน้าเดียวสั้นๆ**: ที่มีปุ่มลิงก์เพียง 2-3 อัน ไม่จำเป็นต้องใช้ Sidebar หรือ Tabs ซับซ้อน
+- **เนื้อหาตารางข้อมูลที่ต้องขยายแนวกว้างมากๆ**: การเปิด Sidebar ตลอดเวลาอาจกินพื้นที่การดูตาราง ควรตั้งค่า Sidebar ให้เป็นโหมด Collapsible
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: Accordion ใน shadcn/ui มีคุณสมบัติ Accessibility อะไรบ้างที่ทำให้ผู้พิการทางสายตาสามารถเข้าถึงเนื้อหาที่ซ่อนอยู่ได้?
+**แนวทางตอบ:**
+1. **ARIA Roles & States**: หัวข้อคำถามถูกห่อหุ้มด้วยแท็ก `<button>` ภายใน Header พร้อมคุณลักษณะ `aria-expanded="true/false"` เพื่อบอกว่าเนื้อหากำลังกางออกหรือพับเก็บอยู่
+2. **`aria-controls` และ `id` Binding**: ตัวปุ่ม Trigger จะชี้ไปยัง ID ของเนื้อหา Panel ด้านล่างอย่างแม่นยำ
+3. **Keyboard Interactivity**: ผู้ใช้สามารถใช้ปุ่ม `Enter` หรือ `Space` เพื่อเปิด/ปิด และใช้ปุ่มลูกศรขึ้น-ลงเพื่อเลื่อนไปยังหัวข้อถัดไปได้ทันที
+
+### Q2: ในการสร้าง Dashboard ด้วย Next.js App Router ระบบ Sidebar ของ shadcn/ui ป้องกันปัญหา Layout Shift (CLS) ระหว่างการทำ Server-Side Rendering (SSR) อย่างไร?
+**แนวทางตอบ:**
+- shadcn Sidebar ใช้กลยุทธ์ **Cookie-based State Persistence**:
+  - เมื่อผู้ใช้กด Toggle ยุบหรือขยาย Sidebar สคริปต์จะบันทึกสถานะลงใน Cookie ของเบราว์เซอร์
+  - ในการร้องขอหน้าถัดไป Next.js Server Component ใน `layout.tsx` สามารถอ่านค่า Cookie นี้ผ่านฟังก์ชัน `cookies()` ของ Next.js
+  - เซิร์ฟเวอร์จึงสามารถส่ง HTML ที่มีคลาสขยายหรือยุบของ Sidebar ที่ถูกต้องมาตั้งแต่แรก ทำให้ React ไม่ต้องมาคำนวณสลับเลย์เอาต์ใหม่ฝั่งเบราว์เซอร์ จึงตัดปัญหา Layout Shift และ Hydration Mismatch ได้อย่างสมบูรณ์

@@ -1,0 +1,92 @@
+---
+title: Functions
+category: Frontend
+parentTitle: TypeScript
+version: v5.6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ฟังก์ชันคือหน่วยประมวลผลหลักของทุกภาษา ใน TypeScript เราสามารถกำหนด Type ให้กับทั้ง **พารามิเตอร์ขาเข้า (Input Parameters)** และ **ผลลัพธ์ที่ส่งกลับออกมา (Return Type)** เพื่อสร้างสัญญาการทำงานที่รัดกุม
+
+นอกจากนี้ยังรองรับการกำหนดพารามิเตอร์ทางเลือก (`?`), ค่าตั้งต้น (Default Value), การส่งผ่าน Callback Function, และเทคนิค **Function Overloading** สำหรับฟังก์ชันที่มีพฤติกรรมเปลี่ยนไปตามชนิดของข้อมูลที่ส่งเข้ามา
+
+---
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: Optional Params, Default Values, และ Function Types
+
+```typescript
+// 1. กำหนด Function Signature Type สำหรับ Callback
+type OnProgressCallback = (percent: number, statusText: string) => void;
+
+// 2. ฟังก์ชันพร้อม Optional และ Default Parameters
+function downloadFile(
+  url: string,
+  timeoutMs: number = 5000,           // Default param (TS รู้ว่าเป็น number)
+  onProgress?: OnProgressCallback     // Optional callback
+): Promise<Blob> {
+  if (onProgress) {
+    onProgress(50, 'กำลังดาวน์โหลด...');
+  }
+  return fetch(url).then((res) => res.blob());
+}
+```
+
+### ตัวอย่างที่ 2: Function Overloads ในสถานการณ์จริง
+
+```typescript
+interface UserProfile {
+  id: string;
+  name: string;
+}
+
+// 1. Overload Signatures: ประกาศสัญญารูปแบบที่ยอมรับ
+function getUser(id: string): UserProfile;
+function getUser(ids: string[]): UserProfile[];
+
+// 2. Implementation Signature: โค้ดที่รันจริง (ต้องรับ Type ที่ครอบคลุมทุก Overload)
+function getUser(idOrIds: string | string[]): UserProfile | UserProfile[] {
+  if (Array.isArray(idOrIds)) {
+    return idOrIds.map((id) => ({ id, name: `User ${id}` }));
+  }
+  return { id: idOrIds, name: `User ${idOrIds}` };
+}
+
+// การเรียกใช้งาน: TS จะทราบ Return Type ที่แม่นยำตาม Parameter!
+const single = getUser('usr-1');      // TS รู้ว่า single คือ UserProfile
+const list = getUser(['usr-1', 'usr-2']); // TS รู้ว่า list คือ UserProfile[]
+```
+
+---
+
+## 3. ผิด vs ถูก (Common Mistakes)
+
+### กรณีที่ 1: การใช้ `Function` เป็น Type สำหรับ Callback
+```typescript
+// ❌ ผิด: การพิมพ์ : Function ถือเป็น Type กว้างที่ไม่ปลอดภัยและปิดระบบตรวจสอบ
+function execute(cb: Function) {
+  cb('arg1', 'arg2'); // TS ไม่ตรวจจับพารามิเตอร์เลย
+}
+
+// ✅ ถูก: ระบุลายเซ็นฟังก์ชันให้ชัดเจน
+function execute(cb: (result: string) => void) {
+  cb('สำเร็จ');
+}
+```
+
+---
+
+## 4. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- *ควรใช้ Function Overloads*: เมื่อฟังก์ชันเดิมคืนค่าที่มี Type ต่างกันอย่างสิ้นเชิงขึ้นอยู่กับ Argument ที่ส่งเข้ามา
+- *ไม่ควรใช้ Function Overloads*: หากสามารถเขียนรวมด้วย Union Type หรือ Generics ได้ง่ายกว่า (Overloads ทำให้โค้ดอ่านยากขึ้น)
+
+---
+
+## 5. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: `void` กับ `undefined` ใน Return Type ของฟังก์ชันต่างกันอย่างไร?
+**แนวทางคำตอบ**: `undefined` บังคับให้ฟังก์ชันต้องมีคำสั่ง `return undefined;` หรือ `return;` จริงๆ ภายในฟังก์ชัน ส่วน `void` บอกว่า "ผู้เรียกใช้ไม่ต้องสนใจผลลัพธ์ที่ส่งกลับมา" (ฟังก์ชันอาจจะไม่ return อะไรเลย หรือ return ค่าออกมาแต่ TypeScript จะไม่อนุญาตให้นำค่านั้นไปใช้งานต่อ)

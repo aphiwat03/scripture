@@ -1,0 +1,411 @@
+---
+title: Performance & Accessibility
+category: Frontend
+parentTitle: Recharts
+version: Recharts v3 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+เมื่อระบบ Data Visualization ก้าวเข้าสู่ระดับองค์กร ความท้าทายจะเพิ่มขึ้นเป็นทวีคูณในสองมิติที่มักถูกละเลย:
+
+1. **คอขวดด้านประสิทธิภาพ (Performance Bottleneck)**:
+   * **SVG DOM Overhead**: Recharts วาดกราฟด้วย SVG ซึ่งทุกๆ จุดบนกราฟเส้น (Dot), ทุกแท่งกราฟ (Bar), และทุกเส้นกริด (Gridline) คือ **DOM Node จริง** บนหน้าเว็บ หากเราป้อนข้อมูล 5,000 จุด เบราว์เซอร์จะต้องแบกรับมากกว่า 15,000 DOM Elements ส่งผลให้เกิดอาการกระตุกรุนแรง (UI Lag, Frame Drop) โดยเฉพาะเมื่อมี Animation
+2. **การเข้าถึงได้อย่างเท่าเทียม (Accessibility - a11y)**:
+   * กราฟิก SVG มักเป็น **"หลุมดำ (Black Hole)"** สำหรับผู้พิการทางสายตา เพราะโปรแกรมอ่านหน้าจอ (Screen Reader) จะอ่านได้เพียงคำว่า *"Graphic"* หรือข้ามไปอย่างสิ้นเชิง
+   * การเลือกใช้สีที่ไม่คำนึงถึงผู้มีภาวะตาบอดสี (Color Vision Deficiency - เช่น ตาบอดสีแดง-เขียว Deuteranopia) จะทำให้ผู้ใช้ไม่สามารถแยกแยะชุดข้อมูลได้
+
+การสร้าง Data Visualization ระดับ Senior Engineer จึงต้องประสานเทคนิคการลดภาระ DOM (**Downsampling & Memoization**) เข้ากับมาตรฐานการเข้าถึงตามเกณฑ์ **WCAG 2.2 Level AA**
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. อัลกอริทึม Downsampling: Largest-Triangle-Three-Buckets (LTTB)
+
+เมื่อเรามีข้อมูล Time-series หลักพันถึงหลักหมื่นจุด การแสดงผลทุกจุดบนหน้าจอขนาด 1200px เป็นเรื่องที่สูญเปล่า เพราะจำนวนพิกเซลในแนวนอนมีน้อยกว่าจำนวนจุดข้อมูล (หลายจุดตกอยู่บนพิกเซลเดียวกัน)
+
+การลดจำนวนจุดด้วยการสุ่มเลือกทุกๆ $N$ จุด (Naive Nth-point Decimation) มักทำให้จุดสูงสุด (Peak) หรือจุดต่ำสุด (Valley) สำคัญหายไป อัลกอริทึม **LTTB (Largest-Triangle-Three-Buckets)** จึงถูกคิดค้นขึ้นเพื่อแบ่งข้อมูลออกเป็น Bucket และเลือกจุดที่สร้างรูปสามเหลี่ยมที่มีพื้นที่มากที่สุด เพื่อ **รักษารูปทรงและแนวโน้มการขึ้นลงของกราฟ (Visual Shape Retention)** ไว้ได้อย่างแม่นยำที่สุด
+
+```
+[ Raw Data: 5,000 Data Points ]
+               │
+               ▼  ผ่าน LTTB Algorithm (O(N) single-pass)
+[ Optimized Data: 300 Points ] (ประหยัด DOM ไปได้ถึง 94% โดยที่ตาเปล่าแทบไม่เห็นความต่าง)
+               │
+               ▼  isAnimationActive={false}
+[ Recharts SVG ] -> วาดเสร็จใน 4ms รันได้ 60 FPS อย่างลื่นไหล
+```
+
+### 2. accessibilityLayer และ Screen Reader Fallback
+
+Recharts v2.13+ และ v3 มาพร้อมพร็อพ **`accessibilityLayer`** ซึ่งจะฉีด Keyboard Focus Handling (`tabIndex={0}`) และ WAI-ARIA Attributes เข้าสู่ SVG กราฟ นอกจากนี้ การสร้าง **Accessible Alternative (ตาราง HTML ที่ซ่อนด้วยคลาส `sr-only`)** ยังช่วยให้ Screen Reader สามารถอ่านตัวเลขสรุปได้อย่างชัดเจน 100%
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่างที่ 1: LTTB Downsampling Pipeline สำหรับรับมือข้อมูล 5,000+ จุด
+
+ตัวอย่างนี้แสดงฟังก์ชันย่อขนาดข้อมูลตามหลักคณิตศาสตร์ LTTB และการนำไปใช้ร่วมกับ `isAnimationActive={false}` และ `React.memo` เพื่อให้กราฟทำงานลื่นไหลไร้รอยต่อ
+
+```tsx filename="src/lib/algorithms/lttb-downsample.ts"
+export interface DataPoint {
+  timestamp: number;
+  value: number;
+  formattedDate?: string;
+}
+
+/**
+ * อัลกอริทึม Largest-Triangle-Three-Buckets (LTTB)
+ * ย่อขนาดข้อมูล Time-series ให้เหลือตามจำนวน threshold ที่กำหนด
+ */
+export function lttbDownsample(data: DataPoint[], threshold: number): DataPoint[] {
+  const dataLength = data.length;
+  if (threshold >= dataLength || threshold === 0) {
+    return data; // ไม่ต้องย่อถ้าข้อมูลน้อยกว่าเกณฑ์
+  }
+
+  const sampled: DataPoint[] = [];
+  let sampledIndex = 0;
+
+  // ขนาดของแต่ละถัง (Bucket)
+  const every = (dataLength - 2) / (threshold - 2);
+
+  let a = 0; // จุดแรกเริ่มต้น
+  sampled[sampledIndex++] = data[a];
+
+  for (let i = 0; i < threshold - 2; i++) {
+    // 1. คำนวณจุดกึ่งกลางของถังถัดไป (Bucket C)
+    let avgX = 0;
+    let avgY = 0;
+    let avgRangeStart = Math.floor((i + 1) * every) + 1;
+    let avgRangeEnd = Math.floor((i + 2) * every) + 1;
+    avgRangeEnd = avgRangeEnd < dataLength ? avgRangeEnd : dataLength;
+
+    const avgRangeLength = avgRangeEnd - avgRangeStart;
+    for (let j = avgRangeStart; j < avgRangeEnd; j++) {
+      avgX += data[j].timestamp;
+      avgY += data[j].value;
+    }
+    avgX /= avgRangeLength;
+    avgY /= avgRangeLength;
+
+    // 2. ค้นหาจุดในถังปัจจุบัน (Bucket B) ที่สร้างพื้นที่สามเหลี่ยมใหญ่ที่สุดกับจุด A และ C
+    let rangeOfs = Math.floor((i + 0) * every) + 1;
+    const rangeTo = Math.floor((i + 1) * every) + 1;
+
+    const pointAX = data[a].timestamp;
+    const pointAY = data[a].value;
+
+    let maxArea = -1;
+    let maxAreaPoint = data[rangeOfs];
+    let nextA = rangeOfs;
+
+    for (let k = rangeOfs; k < rangeTo; k++) {
+      // คำนวณพื้นที่สามเหลี่ยม: 0.5 * |x1(y2 - y3) + x2(y3 - y1) + x3(y1 - y2)|
+      const area = Math.abs(
+        (pointAX - avgX) * (data[k].value - pointAY) -
+        (pointAX - data[k].timestamp) * (avgY - pointAY)
+      ) * 0.5;
+
+      if (area > maxArea) {
+        maxArea = area;
+        maxAreaPoint = data[k];
+        nextA = k;
+      }
+    }
+
+    sampled[sampledIndex++] = maxAreaPoint;
+    a = nextA;
+  }
+
+  // จุดสุดท้ายของชุดข้อมูล
+  sampled[sampledIndex++] = data[dataLength - 1];
+  return sampled;
+}
+```
+
+#### คอมโพเนนต์แสดงผลพร้อม Memoization
+
+```tsx filename="src/components/charts/high-density-line-chart.tsx"
+'use client';
+
+import * as React from 'react';
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import { DataPoint, lttbDownsample } from '@/lib/algorithms/lttb-downsample';
+
+interface Props {
+  rawData: DataPoint[];
+}
+
+export const HighDensityLineChart = React.memo(function HighDensityLineChart({ rawData }: Props) {
+  // ย่อข้อมูล 5,000 จุดเหลือ 300 จุด เพื่อความเร็วระดับ 60 FPS
+  const optimizedData = React.useMemo(() => {
+    return lttbDownsample(rawData, 300);
+  }, [rawData]);
+
+  return (
+    <div className="w-full rounded-2xl border border-border bg-card p-6 shadow-sm">
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <h3 className="text-base font-bold text-card-foreground">
+            การตรวจวัดคลื่นไฟฟ้าความถี่สูง (High-Frequency Sensor)
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            ลดทอนจาก {rawData.length.toLocaleString()} จุด เหลือ {optimizedData.length} จุดด้วย LTTB
+          </p>
+        </div>
+        <span className="rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+          60 FPS Mode
+        </span>
+      </div>
+
+      <div className="h-[320px] w-full min-w-0">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={optimizedData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" vertical={false} className="stroke-border/50" />
+            <XAxis
+              dataKey="timestamp"
+              domain={['dataMin', 'dataMax']}
+              tickFormatter={(ts) => new Date(ts).toLocaleTimeString('th-TH')}
+              tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
+            />
+            <YAxis tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }} />
+            <Tooltip
+              labelFormatter={(ts) => new Date(Number(ts)).toLocaleString('th-TH')}
+              formatter={(val: number) => [val.toFixed(2), 'ค่าสัญญาณ']}
+            />
+            {/* ปิด Animation และ Dot สำหรับชุดข้อมูลขนาดใหญ่เพื่อกำจัด DOM Overhead */}
+            <Line
+              type="monotone"
+              dataKey="value"
+              stroke="#2563eb"
+              strokeWidth={1.5}
+              dot={false}
+              isAnimationActive={false}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+});
+```
+
+---
+
+### ตัวอย่างที่ 2: Accessible Chart พร้อม `accessibilityLayer` และ Screen Reader Table
+
+ตัวอย่างนี้แสดงการใช้งาน `accessibilityLayer`, ชุดสีที่เป็นมิตรกับผู้ตาบอดสี (Color-blind Safe), และการทำตาราง HTML ทางเลือกสำหรับผู้ใช้ Screen Reader
+
+```tsx filename="src/components/charts/accessible-quarterly-chart.tsx"
+'use client';
+
+import * as React from 'react';
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+
+interface QuarterMetric {
+  quarter: string;
+  onlineSales: number;
+  offlineSales: number;
+}
+
+const quarterlyData: QuarterMetric[] = [
+  { quarter: 'Q1', onlineSales: 420000, offlineSales: 580000 },
+  { quarter: 'Q2', onlineSales: 510000, offlineSales: 490000 },
+  { quarter: 'Q3', onlineSales: 630000, offlineSales: 410000 },
+  { quarter: 'Q4', onlineSales: 780000, offlineSales: 350000 },
+];
+
+// โทนสี Color-blind Safe (Wong Palette) ที่มีค่าความสว่างต่างกันชัดเจน
+const ACCESSIBLE_COLORS = {
+  online: '#0072B2',  // สีน้ำเงินเข้ม (High Contrast)
+  offline: '#E69F00', // สีส้มอมทอง (ผู้ตาบอดสีแดง-เขียวแยกได้เด็ดขาด)
+};
+
+export function AccessibleQuarterlyChart() {
+  const chartId = React.useId();
+
+  return (
+    <div
+      role="region"
+      aria-labelledby={`${chartId}-title`}
+      className="w-full rounded-2xl border border-border bg-card p-6 shadow-sm"
+    >
+      <div className="mb-4">
+        <h3 id={`${chartId}-title`} className="text-base font-bold text-card-foreground">
+          เปรียบเทียบยอดขายออนไลน์และหน้าร้านรายไตรมาส
+        </h3>
+        <p id={`${chartId}-desc`} className="text-xs text-muted-foreground">
+          แสดงสัดส่วนการเติบโตของช่องทางจำหน่ายประจำปี 2026 (รองรับการเข้าถึงด้วยคีย์บอร์ดและ Screen Reader)
+        </p>
+      </div>
+
+      {/* 1. กราฟ Recharts พร้อมเปิด accessibilityLayer */}
+      <div className="h-[300px] w-full min-w-0" aria-hidden="true">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart
+            accessibilityLayer
+            data={quarterlyData}
+            margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
+          >
+            <CartesianGrid strokeDasharray="3 3" vertical={false} className="stroke-border/60" />
+            <XAxis dataKey="quarter" tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} />
+            <YAxis
+              tickFormatter={(v) => `฿${(v / 1000).toFixed(0)}k`}
+              tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }}
+            />
+            <Tooltip formatter={(v: number) => `฿${v.toLocaleString()}`} />
+            <Legend />
+            <Bar
+              dataKey="onlineSales"
+              name="ออนไลน์ (Online)"
+              fill={ACCESSIBLE_COLORS.online}
+              radius={[4, 4, 0, 0]}
+            />
+            <Bar
+              dataKey="offlineSales"
+              name="หน้าร้าน (Store)"
+              fill={ACCESSIBLE_COLORS.offline}
+              radius={[4, 4, 0, 0]}
+            />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* 2. Accessible Alternative: ตาราง HTML สำหรับ Screen Reader (ซ่อนจากสายตาด้วย sr-only) */}
+      <div className="sr-only">
+        <table aria-describedby={`${chartId}-desc`}>
+          <caption>ตารางข้อมูลสรุป: เปรียบเทียบยอดขายออนไลน์และหน้าร้านรายไตรมาส</caption>
+          <thead>
+            <tr>
+              <th scope="col">ไตรมาส</th>
+              <th scope="col">ยอดขายออนไลน์ (บาท)</th>
+              <th scope="col">ยอดขายหน้าร้าน (บาท)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {quarterlyData.map((row) => (
+              <tr key={row.quarter}>
+                <th scope="row">{row.quarter}</th>
+                <td>{row.onlineSales.toLocaleString()}</td>
+                <td>{row.offlineSales.toLocaleString()}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีอื่น (SVG Downsampling vs HTML5 Canvas vs WebGL)
+
+| มิติการเปรียบเทียบ | Recharts + LTTB Downsampling | HTML5 Canvas (Chart.js) | WebGL (Deck.gl / Three.js) |
+| :--- | :--- | :--- | :--- |
+| **ขีดจำกัดจำนวนจุดข้อมูล** | สูงสุดประมาณ **1,000 - 3,000 จุด** หลังย่อขนาด | **50,000 - 100,000 จุด** | **1,000,000+ จุด** |
+| **การทำ Accessibility (a11y)** | **ง่ายและสมบูรณ์ที่สุด** รองรับ aria attributes และ DOM fallback table | ยากมาก ต้องวาด offscreen DOM เลียนแบบ | ยากมากที่สุด ต้องทำ HTML overlay เสริมทั้งหมด |
+| **ความคมชัดและ Styling** | คมชัด 100% ปรับ CSS และ Dark mode ได้นุ่มนวล | ภาพอาจเบลอบนจอ HiDPI หากไม่ปรับ DPR | ควบคุม Canvas Shaders เอง |
+| **ความซับซ้อนในการพัฒนา** | **ต่ำ** เขียน JSX แบบคุ้นเคย | ปานกลาง | สูงมาก ต้องมีความรู้เรื่อง Matrix และ Shader |
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practices)
+
+### ข้อผิดพลาดที่ 1: ป้อนข้อมูลดิบหลายพันจุดโดยเปิด Animation ทิ้งไว้
+
+```tsx
+// ❌ ผิด: 5,000 จุดพร้อม Animation จะกระตุ้น requestAnimationFrame 
+// พยายามคำนวณ SVG Path Interpolation ทีละเฟรม ทำให้เครื่องผู้ใช้ค้างทันที
+<LineChart data={fiveThousandPoints}>
+  <Line dataKey="val" isAnimationActive={true} />
+</LineChart>
+
+// ✅ ถูกต้อง: ปิด Animation เมื่อข้อมูลเกิน 300 จุด และทำการย่อขนาดข้อมูล
+<LineChart data={downsampledData}>
+  <Line dataKey="val" isAnimationActive={false} dot={false} />
+</LineChart>
+```
+
+### ข้อผิดพลาดที่ 2: ใช้สีเขียวและสีแดงเพียวๆ เพื่อบอกสถานะ ผ่าน/ไม่ผ่าน
+
+```tsx
+// ❌ ผิด: ผู้มีภาวะตาบอดสีแดง-เขียว (มีสัดส่วนถึง 8% ของผู้ชายทั่วโลก) จะเห็นสองสีนี้เป็นสีน้ำตาลหม่นเหมือนกัน
+<Bar dataKey="passed" fill="#22c55e" /> {/* เขียว */}
+<Bar dataKey="failed" fill="#ef4444" /> {/* แดง */}
+
+// ✅ ถูกต้อง: ใช้สีที่มี Contrast ต่างกันชัดเจน หรือมีลวดลาย/ไอคอนประกอบ
+<Bar dataKey="passed" fill="#0072B2" /> {/* น้ำเงินเข้ม */}
+<Bar dataKey="failed" fill="#E69F00" /> {/* ส้มทอง */}
+```
+
+### ข้อผิดพลาดที่ 3: ปล่อยให้ผู้ใช้ Screen Reader สัมผัสแต่ความว่างเปล่า
+
+```tsx
+// ❌ ผิด: เรนเดอร์ SVG เพียวๆ ไม่มี aria-label หรือ alternative ใดๆ
+<ResponsiveContainer>
+  <PieChart ... />
+</ResponsiveContainer>
+
+// ✅ ถูกต้อง: ใส่ aria-hidden ให้กับ SVG และสร้าง semantic table ซ่อนไว้ใน .sr-only
+<div aria-hidden="true">
+  <ResponsiveContainer><PieChart ... /></ResponsiveContainer>
+</div>
+<div className="sr-only">
+  <table>...</table>
+</div>
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้เทคนิค Downsampling และ Accessibility เมื่อ:
+- ข้อมูลเป็น Time-series ที่มาจาก IoT Sensors, Server Logs, หรือ Tick-by-tick Financial Stream
+- พัฒนาเว็บแอปพลิเคชันให้กับหน่วยงานภาครัฐ, สถาบันการเงิน, หรือองค์กรระดับสากลที่มีข้อกำหนดกฎหมายเรื่อง **WCAG Compliance**
+- หน้าเว็บมีผู้ใช้งานสมาร์ตโฟนที่มีชิปประมวลผลระดับเริ่มต้น
+
+### ไม่ควรใช้เมื่อ:
+- ข้อมูลมีจำนวนน้อยอยู่แล้ว (`< 50` รายการ) เช่น กราฟเปรียบเทียบยอดขาย 12 เดือน การรัน LTTB จะเป็นการเสียรอบประมวลผลโดยไม่จำเป็น
+- การวิเคราะห์เชิงวิทยาศาสตร์ที่ห้ามสูญเสียจุดข้อมูลแม้แต่จุดเดียว (Lossless Precision Requirement) ในกรณีนี้ควรพิจารณาใช้ WebGL Canvas แทน Recharts
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: อธิบายหลักการทำงานของอัลกอริทึม Largest-Triangle-Three-Buckets (LTTB) และเหตุใดจึงเหนือกว่าการทำ Decimation หรือการหยิบข้อมูลทุกๆ จุดที่ $N$?
+**แนวทางตอบแบบ Senior Developer**:
+1. **ปัญหาของ Decimation**: การสุ่มเลือกทุกๆ จุดที่ $N$ (เช่น เลือกเรคอร์ดที่ $0, 10, 20, 30...$) อาจเกิดเหตุการณ์โชคร้ายที่จุดสูงสุด (Peak สไปก์ของราคาหุ้นหรือ CPU Load) ตกอยู่ในจุดที่ถูกทิ้ง ทำให้รูปทรงของกราฟบิดเบือนไปจากความเป็นจริงอย่างสิ้นเชิง
+2. **หลักการของ LTTB**:
+   - แบ่งชุดข้อมูลออกเป็นถัง (Buckets) ตามจำนวนจุดเป้าหมาย
+   - ในแต่ละถัง จะคำนวณจุดศูนย์กลางของถังถัดไปล่วงหน้า
+   - จากนั้นจะหาจุดในถังปัจจุบันที่สร้าง **"พื้นที่สามเหลี่ยมที่ใหญ่ที่สุด"** ร่วมกับจุดก่อนหน้าและจุดศูนย์กลางถัดไป
+3. **ผลลัพธ์**: จุดที่มีพื้นที่สามเหลี่ยมมากที่สุด คือจุดที่มีความผันผวนหรือจุดสูงสุด/ต่ำสุดสำคัญ อัลกอริทึมนี้จึงรักษาแนวโน้ม (Trend) และจุดวิกฤต (Outliers) ทางสถิติไว้ได้อย่างน่าทึ่งด้วย Time Complexity เพียง $O(N)$
+
+### Q2: ในการพัฒนา Dashboard ให้ผ่านมาตรฐานการเข้าถึง WCAG 2.2 ระดับ AA คุณมีเช็กลิสต์สำคัญอะไรบ้างสำหรับองค์ประกอบ Data Visualization?
+**แนวทางตอบแบบ Senior Developer**:
+1. **Non-text Contrast (SC 1.4.11)**: สีของเส้นกราฟ แท่งกราฟ และเส้นแบ่งแกน ต้องมี Contrast Ratio อย่างน้อย **3:1** เมื่อเทียบกับสีพื้นหลัง
+2. **Use of Color (SC 1.4.1) & Color Blindness**: ห้ามสื่อความหมายด้วยสีเพียงอย่างเดียว ต้องมีสัญลักษณ์เสริม เช่น ลวดลายเส้นประ (`strokeDasharray`), รูปร่างของจุด (วงกลม, สี่เหลี่ยม, สามเหลี่ยม), หรือข้อความระบุชัดเจน และใช้ชุดสี Color-blind Safe (เช่น Wong Palette หรือ Viridis)
+3. **Screen Reader Accessible Alternative**: ซ่อน SVG ไม่ให้รบกวนด้วย `aria-hidden="true"` แล้วเสริมด้วยโครงสร้าง HTML เชิงความหมาย เช่น `<table className="sr-only">` หรือ `<p>` สรุปประเด็นสำคัญของกราฟ เพื่อให้ผู้ใช้ที่พึ่งพาโปรแกรมอ่านหน้าจอสามารถรับรู้ข้อมูลชุดเดียวกันได้ครบถ้วน

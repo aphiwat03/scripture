@@ -1,0 +1,134 @@
+---
+title: Scripts & Link
+category: Frontend
+parentTitle: HTML5
+version: HTML Living Standard
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การเพิ่มความเร็วของหน้าเว็บ (Web Performance) มักตัดสินกันที่ **"ลำดับการโหลดไฟล์ (Resource Loading Waterfall)"**
+
+โดยค่าเริ่มต้น แท็ก `<script>` คือตัวการสำคัญที่ก่อให้เกิด **Parser-blocking (การหยุดชะงักของเบราว์เซอร์)** เมื่อเบราว์เซอร์อ่านเจอแท็ก Script มันจะหยุดอ่าน HTML ชั่วคราวเพื่อรอโหลดและรันไฟล์นั้นจนเสร็จ ทำให้เกิดอาการ **"จอขาว (White Screen)"**
+
+ทางออกของปัญหานี้:
+- **`defer`**: ดาวน์โหลดแบบคู่ขนาน และรันคำสั่ง **"หลังจากที่ HTML ถูกอ่านจนจบโครงสร้างแล้ว"** โดยยังคงรักษาลำดับก่อน-หลัง (ดีที่สุดสำหรับแอปทั่วไป)
+- **`async`**: ดาวน์โหลดแบบคู่ขนาน และรันคำสั่ง **"ทันทีที่โหลดเสร็จ"** โดยไม่สนลำดับและไม่รอ HTML (เหมาะกับ Analytics)
+- **`rel="preload"`**: บอกเบราว์เซอร์ให้ดึง Resource นี้มาทันทีด้วยความสำคัญสูงสุด
+- **`rel="preconnect"`**: ต่อสายเชื่อมโยงเครือข่าย (DNS + TCP + TLS) ไปยังโดเมนภายนอกล่วงหน้า
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+```
+HTML Parser:    ===[Parse HTML]=======[Blocked]=======[Resume Parse HTML]====
+Normal Script:                  [Download Script][Execute]
+
+HTML Parser:    ===[Parse HTML]========================================[Parse Finished]====
+async Script:          [Download Script]----->[Executeทันที (บล็อกสั้นๆ)]
+
+HTML Parser:    ===[Parse HTML]========================================[Parse Finished]====
+defer Script:          [Download Script]------------------------------>[Execute ตามลำดับ]
+```
+
+1. **`type="module"` ในยุคปัจจุบัน**: หากเราเขียน `<script type="module" src="...">` เบราว์เซอร์สมัยใหม่จะกำหนดให้มีพฤติกรรมเทียบเท่ากับ `defer` โดยอัตโนมัติ
+2. **Resource Hints**:
+   - `dns-prefetch`: แปลง IP Address ของโดเมนภายนอกล่วงหน้า
+   - `preconnect`: ทำครบทั้ง DNS lookup, TCP handshake และ TLS negotiation ล่วงหน้า (ประหยัดเวลาได้ 100-300ms)
+   - `preload`: บังคับดาวน์โหลดไฟล์สำคัญ (เช่น ฟอนต์ LCP หรือ Hero Image) ก่อนที่ Parser จะเดินไปเจอในไฟล์ CSS
+
+---
+
+## 3. ตัวอย่างโค้ด (HTML5)
+
+### ตัวอย่างที่ 1: การโหลดฟอนต์ภายนอกและความเร็วสูงด้วย Preconnect และ Preload
+
+```html filename="font-loading.html"
+<head>
+  <meta charset="UTF-8">
+  <title>ระบบคลังสินค้า — Scripture</title>
+
+  <!-- 1. ต่อสายเชื่อมต่อไปยัง Google Fonts CDN ล่วงหน้า -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+
+  <!-- 2. Preload ฟอนต์หลักที่ใช้กับหัวข้อหน้าจอ เพื่อกำจัดอาการตัวหนังสือกระตุก (FOIT/FOUT) -->
+  <link 
+    rel="preload" 
+    href="/fonts/sarabun-bold.woff2" 
+    as="font" 
+    type="font/woff2" 
+    crossorigin
+  >
+
+  <!-- 3. Stylesheet หลักของระบบ -->
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+```
+
+### ตัวอย่างที่ 2: การโหลด JavaScript แยกตามวัตถุประสงค์ (defer vs async)
+
+```html filename="scripts-optimization.html"
+<head>
+  <!-- 1. Google Analytics: เป็นอิสระ ไม่เกี่ยวกับ UI ใช้ async เพื่อไม่ให้หน่วงหน้าเว็บ -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXX"></script>
+
+  <!-- 2. Main Application Bundle: ต้องการ DOM ครบถ้วน และเรียงลำดับ ให้ใช้ defer -->
+  <script defer src="/js/vendor.js"></script>
+  <script defer src="/js/app.js"></script>
+</head>
+<body>
+  <div id="app"></div>
+</body>
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: วาง `<script>` ธรรมดาไว้ใน `<head>` บล็อกการเรนเดอร์
+
+```html
+<head>
+  <!-- ผิด: ทำให้ผู้ใช้เห็นจอขาวนานหลายวินาที เพราะต้องรอโหลด JS 2MB ให้เสร็จก่อนจึงจะเริ่มวาดหน้าจอ -->
+  <script src="/bundle.js"></script>
+</head>
+```
+
+### ✅ โค้ดที่ถูกต้อง: ใส่ `defer` หรือใช้ `type="module"`
+
+```html
+<head>
+  <!-- ถูกต้อง: ดาวน์โหลดเบื้องหลังแบบไม่บล็อก HTML และรันเมื่อ DOM พร้อม -->
+  <script defer src="/bundle.js"></script>
+</head>
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ `defer`
+- สคริปต์ของระบบแอปพลิเคชันหลัก (เช่น React, Vue, หรือโค้ด UI logic) ที่ต้องเข้าถึง DOM Elements
+- สคริปต์ที่มีความเกี่ยวพันกันเป็นลำดับขั้น (Script B ต้องรันหลังจาก Script A)
+
+### ควรใช้ `async`
+- Third-party tracking scripts เช่น Google Analytics, Facebook Pixel, Adsense
+- สคริปต์ที่เป็นอิสระโดยสมบูรณ์ ไม่จำเป็นต้องรอ DOM และไม่แคร์ลำดับการรัน
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: อธิบายความแตกต่างระหว่าง `<script async>` และ `<script defer>`?
+**แนวทางคำตอบ**:
+- ทั้งคู่ดาวน์โหลดไฟล์สคริปต์แบบคู่ขนาน (Asynchronously in background) โดยไม่หยุดการอ่าน HTML
+- **`async`**: เมื่อดาวน์โหลดเสร็จ จะหยุดการอ่าน HTML ชั่วคราวเพื่อทำการ Execute ทันที และไม่รับประกันลำดับการรัน (ไฟล์ไหนโหลดเสร็จก่อนจะรันก่อนทันที) เหมาะกับสคริปต์อิสระอย่าง Analytics
+- **`defer`**: เมื่อดาวน์โหลดเสร็จ จะรอจนกระทั่งเบราว์เซอร์อ่านและสร้าง DOM Tree จาก HTML เสร็จสิ้นสมบูรณ์ จึงค่อยรันคำสั่ง และรับประกันลำดับการรันตามลำดับที่เขียนไว้ในเอกสาร เหมาะกับโค้ดแอปพลิเคชันหลัก
+
+### Q2: แอตทริบิวต์ `rel="preload"` และ `rel="prefetch"` แตกต่างกันอย่างไร?
+**แนวทางคำตอบ**:
+- `preload`: บอกเบราว์เซอร์ให้ดาวน์โหลดทรัพยากรนั้น **สำหรับใช้ในหน้าปัจจุบันทันที** ด้วยลำดับความสำคัญระดับสูง (High Priority) เช่น ฟอนต์หลัก หรือภาพ Hero Banner
+- `prefetch`: บอกเบราว์เซอร์ให้ดาวน์โหลดทรัพยากรนั้นมาเก็บไว้ใน Cache ระหว่างที่เครื่องกำลังว่าง (Idle Time) **เพื่อเตรียมไว้สำหรับหน้าถัดไป** ที่คาดว่าผู้ใช้จะคลิกไปถึงในอนาคต

@@ -1,0 +1,163 @@
+---
+title: Selectors
+category: Frontend
+parentTitle: CSS
+version: CSS3 / Modern CSS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**Selectors** คือเครื่องมือนำทางที่ทรงพลังที่สุดของ CSS ในการเจาะจงเลือก Element บนหน้าจอโดยไม่ต้องแก้ไขโครงสร้าง HTML
+
+ประเภทของ Selectors ที่วิศวกรสมัยใหม่ต้องแม่นยำ:
+- **Basic**: Element (`p`), Class (`.card`), ID (`#main`), Attribute (`[type="email"]`)
+- **Combinators**:
+  - Descendant (`A B`): ลูกหลานทุกระดับชั้น
+  - Child (`A > B`): ลูกชั้นตรงตัวเท่านั้น (Direct Child)
+  - Adjacent Sibling (`A + B`): พี่น้องตัวที่อยู่ติดกันถัดไปทันที
+  - General Sibling (`A ~ B`): พี่น้องตัวถัดไปทั้งหมดในระดับเดียวกัน
+- **Modern Pseudo-classes**:
+  - `:hover`, `:focus-visible`, `:first-child`, `:last-child`
+  - `:not(.active)`: เลือกทุกตัวที่ไม่เข้าเงื่อนไข
+  - `:is(h1, h2, h3)`: จัดกลุ่ม Selector ลดความซ้ำซ้อน
+  - **`:has()` (The Parent Selector)**: พลิกวงการ CSS! สามารถเลือกตัวแม่โดยอิงจากตัวลูกได้แล้ว เช่น `.card:has(input:checked)`
+- **Pseudo-elements**: `::before` และ `::after` (สร้าง Node เสมือนสำหรับตกแต่ง โดยต้องมี `content: ""` เสมอ)
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. ความมหัศจรรย์ของ `:has()` (Relational Pseudo-class)
+ในอดีต CSS ไหลจากบนลงล่างเท่านั้น (Top-down) เราไม่สามารถเขียน CSS บอกว่า *"ถ้า Checkbox ใน Card ถูกติ๊ก ให้เปลี่ยนสีกรอบของ Card ทั้งใบ"* ได้เลย ต้องพึ่งพา JavaScript ดัก Event เสมอ 
+แต่ใน Modern CSS ทุกวันนี้ เบราว์เซอร์รองรับ `:has()` อย่างสมบูรณ์แล้ว เอนจินสามารถประเมินความสัมพันธ์แบบย้อนกลับขึ้นไปหา Parent ได้อย่างรวดเร็วระดับ Native Engine
+
+### 2. Pseudo-elements `::before` และ `::after`
+ทั้งสองไม่ใช่ HTML Element จริง แต่เป็น **Virtual Inline Elements** ที่ถูกฉีดเข้าไปอยู่ **"ข้างในตัวแม่"** ที่หัวแถวและท้ายแถวตามลำดับ โดยจะไม่มีทางแสดงผลได้เลยหากลืมใส่พร็อพเพอร์ตี้ `content: ""`
+
+---
+
+## 3. ตัวอย่างโค้ด (Modern CSS)
+
+### ตัวอย่างที่ 1: การใช้ `:has()` ทำ Selection Card ในหน้าชำระเงิน
+
+```css filename="pricing-card.css"
+/* การ์ดสินค้าปกติ */
+.plan-card {
+  border: 2px solid #e2e8f0;
+  border-radius: 16px;
+  padding: 24px;
+  transition: all 0.2s ease-out;
+  cursor: pointer;
+}
+
+/* 🌟 เมื่อมีวิทยุ (Radio) ภายในถูกเลือก ให้เปลี่ยนกรอบตัวแม่ทันทีโดยไม่ต้องใช้ JS! */
+.plan-card:has(input[type="radio"]:checked) {
+  border-color: #0071e3;
+  background-color: #f0f7ff;
+  box-shadow: 0 4px 12px rgba(0, 113, 227, 0.15);
+}
+```
+
+### ตัวอย่างที่ 2: การใช้ `::before` ทำจุดสถานะ และ Combinator `+` จัดระยะห่าง
+
+```css filename="status-badge.css"
+/* ป้ายสถานะเซิร์ฟเวอร์ */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* สร้างจุดไฟสีเขียวกระพริบด้วย ::before */
+.status-badge.online::before {
+  content: ""; /* ขาดไม่ได้เด็ดขาด! */
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #22c55e; /* เขียว */
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.6);
+}
+
+/* Adjacent Sibling (+): ย่อหน้าที่ตามหลังหัวข้อทันที ให้มีระยะห่างเฉพาะเจาะจง */
+h2 + p {
+  margin-top: 8px;
+  color: #64748b;
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ลืม `content: ""` ใน Pseudo-element
+
+```css
+/* ผิด: ไม่ใส่ content: "" ทำให้เบราว์เซอร์ไม่เรนเดอร์ ::after ออกมาเลย */
+.tooltip::after {
+  width: 10px;
+  height: 10px;
+  background: black;
+}
+```
+
+### ✅ โค้ดที่ถูกต้อง: ใส่ `content` เสมอ
+
+```css
+/* ถูกต้อง: ระบุ content แม้จะเป็นสตริงว่าง */
+.tooltip::after {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  background: black;
+}
+```
+
+---
+
+## 5. เทียบกับ Tailwind CSS v4
+
+| Modern CSS Selector | Tailwind CSS v4 Utility Variant |
+| :--- | :--- |
+| `:hover` | `hover:bg-blue-600` |
+| `:focus-visible` | `focus-visible:ring-2` |
+| `::before { content: ""; ... }` | `before:content-[''] before:block` |
+| `:has(input:checked)` | `has-[:checked]:border-blue-600` |
+| `.parent:hover .child` | `group-hover:text-blue-500` (บนแม่ใส่ `group`) |
+
+```html
+<!-- ตัวอย่าง Tailwind v4 กับ has-[:checked] -->
+<label class="block p-4 border rounded-xl has-[:checked]:border-blue-600 has-[:checked]:bg-blue-50 cursor-pointer">
+  <input type="checkbox" class="accent-blue-600">
+  <span class="ml-2 font-medium">สมัครรับจดหมายข่าว</span>
+</label>
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้
+- ใช้ `:has()` แทนการเขียน JavaScript เพื่อเปลี่ยนสไตล์ของ Parent Element
+- ใช้ `:is()` หรือ `:where()` เมื่อต้องการรวมกลุ่ม Selectors ยาวๆ เช่น `:is(h1, h2, h3) > a`
+- ใช้ `::before` และ `::after` สำหรับตกแต่งเชิงดีไซน์ (ไอคอนลูกศร, เส้นคั่น, จุดเรืองแสง) เพื่อไม่ให้ HTML รกไปด้วยแท็ก `<span>` เปล่าๆ
+
+### ไม่ควรใช้
+- **ห้ามใส่เนื้อหาสำคัญที่เป็นข้อความจริงลงใน `content: "..."` ของ Pseudo-element**: เพราะโปรแกรม Screen Reader ในบางอุปกรณ์อาจข้ามการอ่านข้อความใน pseudo-element ไป
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: Pseudo-class `:has()` ช่วยแก้ปัญหาที่ติดค้างใน CSS มายาวนานกว่า 20 ปีได้อย่างไร?
+**แนวทางคำตอบ**: เดิมที CSS ไม่มีกลไก **"Parent Selector"** สไตล์สามารถไหลลงไปหาลูกหลานได้เท่านั้น หากต้องการเปลี่ยนหน้าตากล่องแม่เมื่อมีลูกหลานเปลี่ยนสถานะ (เช่น เช็คถูกในกล่อง หรือฟอร์มกรอกผิด) นักพัฒนาต้องเขียน JavaScript เพื่อคอยดักจับ Event แล้วเติม class ลงบนตัวแม่ 
+การมาถึงของ `:has()` ช่วยให้เราเขียนสไตล์อิงตามความสัมพันธ์ของลูกหรือพี่น้องได้โดยตรงใน CSS เช่น `.card:has(img)` หรือ `form:has(:invalid) button[type="submit"]` ช่วยลดการเขียน JavaScript ซ้ำซ้อนและเพิ่มประสิทธิภาพการเรนเดอร์
+
+### Q2: ความแตกต่างระหว่าง Pseudo-class (เครื่องหมายโคลอนเดียว `:`) และ Pseudo-element (เครื่องหมายดับเบิลโคลอน `::`) คืออะไร?
+**แนวทางคำตอบ**:
+- **Pseudo-class (`:`)**: ใช้ระบุ **"สถานะพิเศษ (State)"** ของ Element ที่มีอยู่จริงใน DOM อยู่แล้ว เช่น เมื่อเอาเมาส์ชี้ (`:hover`), เมื่อได้รับโฟกัส (`:focus`), หรือตำแหน่งลำดับ (`:first-child`)
+- **Pseudo-element (`::`)**: ใช้สร้าง **"ส่วนย่อยเสมือน (Sub-element / Abstraction)"** ที่ไม่มีอยู่ในโค้ด HTML จริง เช่น การสร้างเนื้อหาตกแต่งหัวท้าย (`::before`, `::after`), หรือการเลือกตัวอักษรตัวแรก (`::first-letter`)
+*(หมายเหตุ: CSS2 อนุญาตให้เขียน `:before` แบบตัวเดียวได้เพื่อรองรับเบราว์เซอร์เก่า แต่ในมาตรฐาน CSS3 แนะนำให้ใช้ `::` เสมอเพื่อแยกประเภทให้ชัดเจน)*

@@ -1,0 +1,197 @@
+---
+title: Lucide React Icons
+category: Frontend
+parentTitle: shadcn/ui
+version: shadcn/ui & Radix UI
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**Lucide React** คือชุดไอคอนมาตรฐาน (Default Icon Library) ที่ shadcn/ui เลือกใช้งานอย่างเป็นทางการ ถือเป็นโครงการสืบทอดและพัฒนาต่อยอดมาจาก Feather Icons:
+- **ความเรียบง่ายและเป็นเอกลักษณ์ (Clean & Consistent)**: ไอคอนทุกชิ้นถูกออกแบบบนระบบ Grid ขนาด 24x24 px โดยใช้ความหนาของเส้น (Stroke Width) สม่ำเสมอที่ 2px ทำให้ดูโมเดิร์นและเข้ากับสไตล์ของ shadcn อย่างสมบูรณ์แบบ
+- **ปรับแต่งผ่าน Tailwind CSS ได้ 100%**: ทุกไอคอนเรนเดอร์เป็นแท็ก `<svg>` ดั้งเดิมของ React ซึ่งรองรับการส่งผ่านคลาส Utility เช่น ขนาด (`size-4`, `w-5 h-5`), สี (`text-primary`, `stroke-emerald-500`), และการหมุน/แอนิเมชัน (`animate-spin`)
+- **First-Class Tree-Shaking**: ได้รับการออกแบบให้รองรับ ES Modules ช่วยให้บันเดิล Production มีขนาดเล็กจิ๋ว ตัดไอคอนที่ไม่ได้ใช้ออกไปจนหมดสิ้น
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. Tree-Shaking ทำงานอย่างไรกับ Lucide React?
+เมื่อคุณเขียน:
+```tsx
+import { CheckCircle, AlertTriangle } from "lucide-react";
+```
+- ใน Next.js 16 (Turbopack / Webpack): โครงสร้าง ESM ของ `lucide-react` มีการประกาศ `"sideEffects": false` ใน `package.json`
+- คอมไพเลอร์จะดึงเฉพาะโค้ด SVG ของ `CheckCircle` และ `AlertTriangle` มารวมใน Client Bundle เท่านั้น ไอคอนอื่นๆ นับพันตัวในไลบรารีจะไม่ถูกรวมเข้ามาเลย
+- **ข้อควรระวัง**: ห้ามเขียน `import * as Icons from "lucide-react"` เด็ดขาด เพราะจะทำให้คอมไพเลอร์ไม่สามารถตัดโค้ดทิ้งได้ และดึงไอคอนทั้งหมดกว่า 1,400+ ตัวเข้ามาใน Bundle ทำให้ขนาดไฟล์บวมขึ้นมหาศาล
+
+### 2. Accessibility (a11y) บน Icon Buttons
+ไอคอนส่วนใหญ่ทำหน้าที่เป็น **สิ่งประดับสายตา (Decorative Visuals)**:
+- ตามมาตรฐาน W3C SVG จะต้องมี `aria-hidden="true"` เพื่อป้องกันไม่ให้โปรแกรมอ่านหน้าจอพยายามอ่านแท็ก SVG หรือ Path ภายใน
+- แต่เมื่อไอคอนถูกวางอยู่ใน **ปุ่มที่ไม่มีข้อความกำกับ (Icon-only Button)** เช่น ปุ่มถังขยะ เราจำเป็นต้องเพิ่มคำอธิบายที่มองไม่เห็นด้วยสายตา แต่เครื่อง Screen Reader อ่านออก ผ่าน `<span className="sr-only">ลบรายการ</span>` หรือส่ง `aria-label="ลบรายการ"` ให้กับปุ่มเสมอ
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่าง: เครื่องเล่นสื่อบันเทิงและแถบควบคุม (Audio Media Player Controls)
+
+```tsx filename="app/media/AudioPlayerBar.tsx"
+"use client";
+
+import * as React from "react";
+import { Button } from "@/components/ui/button";
+import {
+  Play,
+  Pause,
+  SkipBack,
+  SkipForward,
+  Volume2,
+  VolumeX,
+  Repeat,
+  Shuffle,
+  Heart,
+  DownloadCloud,
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+
+export function AudioPlayerBar() {
+  const [isPlaying, setIsPlaying] = React.useState(false);
+  const [isMuted, setIsMuted] = React.useState(false);
+  const [isFavorite, setIsFavorite] = React.useState(false);
+
+  return (
+    <div className="max-w-xl mx-auto p-4 border rounded-2xl bg-card shadow-sm flex items-center justify-between gap-4">
+      {/* 1. Track Info & Favorite Toggle */}
+      <div className="flex items-center gap-3 min-w-0">
+        <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+          <span className="text-xl">🎵</span>
+        </div>
+        <div className="min-w-0">
+          <h4 className="text-sm font-semibold truncate">เสียงคลื่นทะเลบำบัดจิตใจ</h4>
+          <p className="text-xs text-muted-foreground truncate">Deep Meditation • 432 Hz</p>
+        </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => setIsFavorite(!isFavorite)}
+          className="shrink-0 text-muted-foreground hover:text-rose-500"
+          aria-label={isFavorite ? "ลบออกจากรายการโปรด" : "เพิ่มในรายการโปรด"}
+        >
+          <Heart
+            className={cn("w-4 h-4 transition-colors", {
+              "fill-rose-500 text-rose-500": isFavorite,
+            })}
+          />
+          <span className="sr-only">
+            {isFavorite ? "บันทึกในรายการโปรดแล้ว" : "ยังไม่ได้บันทึกในรายการโปรด"}
+          </span>
+        </Button>
+      </div>
+
+      {/* 2. Playback Controls */}
+      <div className="flex items-center gap-1">
+        <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="เล่นเพลงก่อนหน้า">
+          <SkipBack className="w-4 h-4" />
+          <span className="sr-only">เพลงก่อนหน้า</span>
+        </Button>
+
+        <Button
+          size="icon"
+          className="h-10 w-10 rounded-full shadow-xs"
+          onClick={() => setIsPlaying(!isPlaying)}
+          aria-label={isPlaying ? "หยุดชั่วคราว" : "เล่น"}
+        >
+          {isPlaying ? (
+            <Pause className="w-4 h-4 fill-current" />
+          ) : (
+            <Play className="w-4 h-4 fill-current ml-0.5" />
+          )}
+          <span className="sr-only">{isPlaying ? "หยุดชั่วคราว" : "เล่นต่อ"}</span>
+        </Button>
+
+        <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="ข้ามไปเพลงถัดไป">
+          <SkipForward className="w-4 h-4" />
+          <span className="sr-only">เพลงถัดไป</span>
+        </Button>
+      </div>
+
+      {/* 3. Volume & Secondary Actions */}
+      <div className="flex items-center gap-1">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 text-muted-foreground"
+          onClick={() => setIsMuted(!isMuted)}
+          aria-label={isMuted ? "เปิดเสียง" : "ปิดเสียง"}
+        >
+          {isMuted ? (
+            <VolumeX className="w-4 h-4 text-destructive" />
+          ) : (
+            <Volume2 className="w-4 h-4" />
+          )}
+          <span className="sr-only">{isMuted ? "เสียงถูกปิดอยู่" : "ระดับเสียงปกติ"}</span>
+        </Button>
+
+        <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" asChild>
+          <a href="/downloads/sample-track.mp3" download aria-label="ดาวน์โหลดไฟล์เสียง">
+            <DownloadCloud className="w-4 h-4" />
+            <span className="sr-only">ดาวน์โหลดไฟล์เสียง</span>
+          </a>
+        </Button>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **เขียนแบบ Dynamic Wildcard Import**<br/>```tsx
+import * as Icons from "lucide-react";
+const Icon = Icons[iconName];
+```<br/>ผลลัพธ์: Tree-shaking พังทันที บันเดิลเพิ่มขึ้นเกือบ 1 MB | **Named Import เฉพาะไอคอนที่ต้องการ**<br/>```tsx
+import { User, Settings, LogOut } from "lucide-react";
+```<br/>ผลลัพธ์: บันเดิลมีเฉพาะไอคอนที่นำไปใช้งานจริง |
+| **สร้าง Icon Button เปลือยๆ โดยไม่มี Text หรือ Label**<br/>```tsx
+<button onClick={handleDelete}><Trash /></button>
+```<br/>ผลลัพธ์: ผู้ใช้พิการทางสายตาได้ยินเพียงคำว่า "Button" โดยไม่รู้ว่าคือกดทำอะไร | **ใส่ Accessible Text เสมอ**<br/>```tsx
+<Button size="icon" aria-label="ลบรายการ">
+  <Trash className="w-4 h-4" aria-hidden="true" />
+  <span className="sr-only">ลบรายการ</span>
+</Button>
+``` |
+| **ปรับขนาดไอคอนด้วยการเขียน Inline Style `style={{ width: 16 }}`** | **ใช้ Tailwind Utility Classes**<br/>`className="w-4 h-4"` หรือ `className="size-4"` สอดคล้องกับระบบขนาดของ Tailwind |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้เมื่อ:
+- **องค์ประกอบอินเทอร์เฟซของระบบ (UI Glyphs)**: เช่น ลูกศร, สัญลักษณ์ค้นหา, กระดิ่งแจ้งเตือน, ปุ่มปิด, เช็คถูก
+- **ปุ่มกระทำการ (Action Buttons)**: วางคู่กับข้อความเพื่อเพิ่มความเข้าใจอย่างรวดเร็ว (Visual Anchor)
+
+### ไม่ควรใช้เมื่อ:
+- **ภาพประกอบฉากหลังหรือกราฟิกขนาดใหญ่ (Illustrations)**: ควรใช้ภาพ SVG ที่วาดเฉพาะ หรือไฟล์รูปภาพ WebP
+- **โลโก้ของแบรนด์ภายนอกที่มีสีสันเฉพาะตัว**: Lucide เป็นไอคอนเส้นเดียวสีเดียว (Monochrome) หากต้องการโลโก้สีอย่าง Google, Visa, Stripe ควรใช้ SVG Logo แท้ของแบรนด์นั้นๆ
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: เพราะเหตุใดจึงควรหลีกเลี่ยงการ Import แบบ `import * as Icons from "lucide-react"` ใน Next.js และสิ่งนี้ส่งผลกระทบต่อ Core Web Vitals อย่างไร?
+**แนวทางตอบ:**
+1. **ผลกระทบต่อ Tree-Shaking**: การ Import แบบ `*` ทำให้ Bundler (Webpack/Turbopack) ไม่สามารถระบุได้ในขั้นตอน Static Analysis ว่าไอคอนตัวใดถูกใช้หรือไม่ถูกใช้ มันจึงต้องนำไอคอนทั้งหมดกว่า 1,400+ ไฟล์ รวมเข้าไปใน Production JavaScript Bundle
+2. **กระทบต่อ Core Web Vitals**: ขนาดไฟล์ JavaScript ที่ใหญ่ขึ้นโดยไม่จำเป็นจะทำให้เวลาในการดาวน์โหลดและ Parse โค้ดนานขึ้น ส่งผลลบโดยตรงต่อคะแนน **Interaction to Next Paint (INP)** และ **Largest Contentful Paint (LCP)** ทำให้หน้าเว็บโหลดช้าลงอย่างเห็นได้ชัดบนสัญญาณมือถือ 3G/4G
+
+### Q2: ในมุมมองของ Web Accessibility (WCAG 2.1) เราควรจัดการกับไอคอนที่เป็น "Decorative" เทียบกับไอคอนที่เป็น "Interactive / Informative" แตกต่างกันอย่างไร?
+**แนวทางตอบ:**
+1. **Decorative Icon (ไอคอนประดับ)**: เช่น ไอคอนรูปแว่นขยายที่อยู่หน้าข้อความ "ค้นหาสินค้า" ให้ใส่ `aria-hidden="true"` เพื่อบอกให้ Screen Reader ข้ามไป ไม่ต้องอ่านซ้ำซ้อน เพราะมีตัวหนังสืออธิบายอยู่แล้ว
+2. **Informative / Interactive Icon (ไอคอนที่ไม่มีข้อความ)**: เช่น ปุ่มรูปกากบาทปิดหน้าต่าง หรือปุ่มจุดสามจุด ต้องมีคำบรรยายเสมอ โดยทำได้ 2 วิธี:
+   - ใส่ `aria-label="ปิดหน้าต่าง"` ที่คอมโพเนนต์ Button แม่
+   - หรือใส่ข้อความกำกับที่ห่อด้วย `<span className="sr-only">ปิดหน้าต่าง</span>` ไว้ข้างใน เพื่อให้เครื่องอ่านออกเสียงได้ถูกต้อง

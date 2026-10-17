@@ -1,0 +1,86 @@
+---
+title: Classes & OOP
+category: Frontend
+parentTitle: TypeScript
+version: v5.6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+แม้ว่าฝั่ง React ในปัจจุบันจะนิยมใช้ Functional Programming แต่ในฝั่ง Backend โดยเฉพาะ **NestJS** และ **Angular** สถาปัตยกรรมยังคงขับเคลื่อนด้วย **Object-Oriented Programming (OOP)**
+
+TypeScript เพิ่มขีดความสามารถให้ JavaScript Class ด้วย **Access Modifiers** (`public`, `private`, `protected`, `readonly`), **Abstract Classes**, การทำสัญญาด้วย **`implements`**, และ **Decorators (`@`)** ซึ่งเป็นแกนหลักของการทำ Dependency Injection (DI)
+
+---
+
+## 2. Access Modifiers ใน TypeScript
+
+- **`public`** (Default): เข้าถึงได้จากทุกที่
+- **`private`**: เข้าถึงได้เฉพาะภายในคลาสตัวเองเท่านั้น (ตรวจตอน Compile time แต่ระวังว่าตอน runtime ยังเป็น JS ธรรมดา หากต้องการ private แท้ๆ ใน runtime ให้ใช้ `#privateField`)
+- **`protected`**: เข้าถึงได้จากคลาสตัวเองและคลาสลูกที่สืบทอด (`extends`)
+- **`readonly`**: อ่านได้อย่างเดียว ห้ามแก้ไขค่านอก Constructor
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / NestJS Style)
+
+### ตัวอย่าง: สถาปัตยกรรม Service และ Controller สไตล์ NestJS
+
+```typescript
+// 1. กำหนดสัญญา Interface
+export interface IPaymentService {
+  processPayment(amount: number): Promise<boolean>;
+}
+
+// 2. Abstract Base Class
+export abstract class BaseService {
+  protected readonly loggerName: string;
+
+  constructor(loggerName: string) {
+    this.loggerName = loggerName;
+  }
+
+  protected log(message: string): void {
+    console.log(`[${this.loggerName}] ${new Date().toISOString()}: ${message}`);
+  }
+
+  // Abstract method ที่คลาสลูกต้อง implement เองเสมอ
+  abstract validate(): boolean;
+}
+
+// 3. Concrete Class พร้อม Parameter Properties ใน Constructor
+export class StripePaymentService extends BaseService implements IPaymentService {
+  // TypeScript Shorthand: ใส่ private readonly ใน constructor จะสร้าง property ให้อัตโนมัติ!
+  constructor(
+    private readonly apiKey: string,
+    private readonly timeoutMs: number = 3000
+  ) {
+    super('StripePaymentService');
+  }
+
+  validate(): boolean {
+    return this.apiKey.startsWith('sk_live_');
+  }
+
+  async processPayment(amount: number): Promise<boolean> {
+    this.log(`กำลังประมวลผลยอดเงิน: ฿${amount}`);
+    // ตรรกะการยิงเชื่อมต่อ Stripe...
+    return true;
+  }
+}
+```
+
+---
+
+## 4. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- *ควรใช้ Classes & OOP*: เมื่อพัฒนา Backend ด้วย NestJS, การสร้าง Custom Error (`class DomainException extends Error`), หรือการทำ Data Transfer Object (DTO) ที่ใช้ร่วมกับ `class-validator`
+- *ไม่ควรใช้*: กับการเขียน Component ใน React ยุคใหม่ (ให้ใช้ Function Components และ Hooks เสมอ)
+
+---
+
+## 5. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: `private` keyword ใน TypeScript ต่างจาก `#private` (Private Identifiers) ใน JavaScript ดั้งเดิมอย่างไร?
+**แนวทางคำตอบ**: `private` ของ TypeScript เป็นการตรวจสอบ **ตอน Compile Time เท่านั้น** พอแปลงเป็น JavaScript จะกลายเป็น property ปกติที่ยังสามารถเข้าถึงได้ตอนรัน ส่วน `#private` (เช่น `#apiKey`) เป็นมาตรฐานแท้ของ ECMAScript ที่มีกลไกป้องกันระดับ Browser Engine ไม่ยอมให้ใครเข้าถึงได้จริงทั้งใน Compile time และ Runtime

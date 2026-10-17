@@ -1,0 +1,196 @@
+---
+title: Pitfalls & Q&A
+category: Frontend
+parentTitle: shadcn/ui
+version: shadcn/ui & Radix UI
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+แม้ว่า **shadcn/ui** จะมอบอิสระและประสิทธิภาพสูงสุดแก่นักพัฒนา แต่การที่ "คุณเป็นเจ้าของโค้ดอย่างแท้จริง (Owning the code)" ก็หมายความว่าความรับผิดชอบทั้งหมดตกอยู่ที่ทีมของคุณเช่นกัน
+
+ข้อผิดพลาดที่พบบ่อยที่สุด (Top Pitfalls):
+1. **Nested Overlays Collision**: ปัญหาเมื่อเปิด Dialog ซ้อน Dropdown หรือ Select ภายใน Sheet แล้วหน้าต่างปิดตัวเองแบบผิดปกติ หรือปัญหาการแย่ง Focus
+2. **Hydration Mismatches**: ความไม่ตรงกันของ HTML ระหว่าง Server และ Client จากการสุ่ม ID หรือการใช้ข้อมูลเวลาของเครื่อง
+3. **Overwriting Custom Code Accidentally**: การสั่งรัน CLI `add --overwrite` จนโค้ดที่ Custom ไว้สูญหาย
+4. **Z-Index Wars**: การใส่ `z-[9999]` มั่วซั่วจนทำลายลำดับชั้นการแสดงผลของ Radix Portal
+5. **Breaking Accessible Names**: การลบ Label, DialogTitle, หรือการทำ Icon Buttons เปล่าๆ โดยไม่มีข้อความบรรยาย
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. ทำไม Nested Modals ถึงชอบปิดตัวเอง (Event Bubbling & Pointer Events)
+- เมื่อคุณมี `<Dialog>` และภายในมี `<DropdownMenu>`:
+  - ทั้งสองตัวเรนเดอร์เนื้อหาผ่าน React Portal ไปยัง `document.body`
+  - หากไม่มีการจัดการที่ดี เมื่อผู้ใช้คลิกเลือกเมนูใน Dropdown ตัว Event `pointerdown` อาจหลุดรอดไปถึง Backdrop ของ Dialog ทำให้ Dialog คิดว่าผู้ใช้กำลัง "คลิกภายนอก (Click Outside)" และสั่งปิดหน้าต่าง Dialog ไปด้วย
+  - **การแก้ปัญหา**: ต้องเข้าใจและใช้งานคุณสมบัติ `modal={false}` หรือจัดการ `onPointerDownOutside={(e) => e.preventDefault()}` ในกรณีที่มีการเปิดหน้าต่างซ้อนกันหลายระดับ
+
+### 2. Hydration Mismatch จาก Dynamic IDs ใน React 18/19
+- Radix UI Primitives สร้าง Accessibility ID เชื่อมโยงระหว่าง Label กับ Input
+- หากมีการใช้ `Math.random()` หรือไลบรารีสร้าง ID รุ่นเก่า ตัวเลข ID บนเซิร์ฟเวอร์กับเบราว์เซอร์จะไม่ตรงกัน
+- ใน Next.js 16 และ React 19 ต้องใช้ `React.useId()` เสมอ ซึ่งเป็น Hook ทางการที่รับประกันว่า ID จาก SSR จะตรงกับ Client Hydration เสมอ
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่าง: การแก้ปัญหา Nested Overlays (เปิด Dialog ยืนยันการลบจากภายใน DropdownMenu)
+
+นี่คือหนึ่งในเคสที่นักพัฒนาตกม้าตายบ่อยที่สุด: การเปิด Modal จากรายการเมนูใน Dropdown โดยไม่ทำให้เมนูปิดแล้วดึงโฟกัสหายไป
+
+```tsx filename="components/NestedOverlayFix.tsx"
+"use client";
+
+import * as React from "react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { MoreVertical, Trash2, Edit } from "lucide-react";
+
+export function FileActionMenu({ fileName }: { fileName: string }) {
+  // แยก State การเปิด Dialog ออกมาควบคุมอย่างชัดเจน (Controlled State)
+  const [isDialogOpen, setIsDialogOpen] = React.useState(false);
+  const [isDeleting, setIsDeleting] = React.useState(false);
+
+  async function handleDeleteConfirm() {
+    setIsDeleting(true);
+    await new Promise((r) => setTimeout(r, 1000));
+    setIsDeleting(false);
+    setIsDialogOpen(false);
+  }
+
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="icon" className="h-8 w-8">
+            <MoreVertical className="w-4 h-4" />
+            <span className="sr-only">เปิดเมนูไฟล์</span>
+          </Button>
+        </DropdownMenuTrigger>
+
+        <DropdownMenuContent align="end" className="w-48">
+          <DropdownMenuLabel>การจัดการไฟล์</DropdownMenuLabel>
+          <DropdownMenuSeparator />
+
+          <DropdownMenuItem onClick={() => console.log("Rename file")}>
+            <Edit className="w-4 h-4 mr-2" />
+            เปลี่ยนชื่อ
+          </DropdownMenuItem>
+
+          {/* 
+            เทคนิคสำคัญ: ใช้ onSelect พร้อม preventDefault() 
+            เพื่อป้องกันไม่ให้ DropdownMenu แย่ง Focus คืนจนทำให้ Dialog ปิดทันที
+          */}
+          <DropdownMenuItem
+            onSelect={(e) => {
+              e.preventDefault();
+              setIsDialogOpen(true);
+            }}
+            className="text-destructive focus:bg-destructive/10 focus:text-destructive"
+          >
+            <Trash2 className="w-4 h-4 mr-2" />
+            ลบไฟล์นี้...
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      {/* วาง Dialog ไว้นอก DropdownMenu เพื่อแยก DOM Hierarchy และป้องกัน Event Conflict */}
+      <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>ยืนยันการลบไฟล์</DialogTitle>
+            <DialogDescription>
+              คุณต้องการลบไฟล์ <strong>"{fileName}"</strong> ใช่หรือไม่? ไฟล์นี้จะถูกย้ายไปยังถังขยะ
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="mt-4">
+            <Button
+              variant="outline"
+              onClick={() => setIsDialogOpen(false)}
+              disabled={isDeleting}
+            >
+              ยกเลิก
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDeleteConfirm}
+              disabled={isDeleting}
+            >
+              {isDeleting ? "กำลังลบ..." : "ลบไฟล์ถาวร"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **วาง `<Dialog>` ซ้อนอยู่ข้างใน `<DropdownMenuItem>`**<br/>```tsx
+<DropdownMenuItem>
+  <Dialog><DialogTrigger>ลบ</DialogTrigger>...</Dialog>
+</DropdownMenuItem>
+```<br/>ผลลัพธ์: เมื่อกดคลิก Dropdown ปิดตัวลง จะลากเอา Dialog ปิดตามไปด้วยทันที | **วาง Dialog อยู่นอก Dropdown เสมอ**<br/>ควบคุมด้วย State `isDialogOpen` และสั่งเปิดผ่าน `onSelect={(e) => { e.preventDefault(); setIsOpen(true); }}` |
+| **ตั้งค่า `z-[99999]` ทับซ้อนใน Tailwind classes**<br/>เพื่อแก้ปัญหา Modal แสดงผลอยู่หลัง Backdrop ทำให้ระบบ Z-index ของทั้งเว็บพังในระยะยาว | **ใช้ค่า Z-index ตามมาตรฐานของ shadcn**<br/>เช่น `z-50` สำหรับ Overlay/Content และใช้ React Portal ที่ถูกต้องแทนการดัน Z-index สูงเกินจริง |
+| **ใช้ `cn()` รวมข้อความธรรมดาที่ไม่ใช่คลาส CSS**<br/>```tsx
+const greeting = cn("สวัสดีคุณ", userName);
+``` | **ใช้ Template Literal ปกติสำหรับข้อความ**<br/>``const greeting = `สวัสดีคุณ ${userName}`;``<br/>เพราะ `cn()` ออกแบบมาสำหรับ Tailwind Utility Classes เท่านั้น |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### Checklist ก่อนส่งโค้ดขึ้น Production (Production Readiness Checklist):
+- [ ] มีการตรวจสอบ Git Diff ใน `components/ui/*` เพื่อให้แน่ใจว่าไม่มีโค้ดเผลอถูก Overwrite
+- [ ] ฟอร์มทุกช่องมี Accessible Label หรือ `aria-label` ครบถ้วน ไม่มีแท็กเดี่ยวลอยๆ
+- [ ] ปุ่มทุกตัวที่มีแต่ไอคอน (Icon Buttons) มีการใส่ `<span className="sr-only">`
+- [ ] Modal และ Dialog ทุกตัวมี `DialogTitle` (แม้จะซ่อนด้วย `sr-only` ก็ตาม)
+- [ ] ทดสอบการกดคีย์บอร์ด `Tab`, `Shift + Tab`, และ `Escape` ว่าหน้าต่างเปิด/ปิดและเลื่อนโฟกัสได้ตามปกติ
+- [ ] ทดสอบทั้งบนโหมดสว่าง (Light) และโหมดมืด (Dark) ว่าตัวหนังสืออ่านออกชัดเจน (Contrast ผ่านเกณฑ์ WCAG)
+- [ ] มีการใส่ `suppressHydrationWarning` บนแท็ก `<html>` ใน `app/layout.tsx`
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: จงอธิบายปัญหา Z-Index และ Event Collision เมื่อมีการเปิดใช้งาน DropdownMenu หรือ Select ซ้อนอยู่ภายใน Dialog และวิธีแก้ปัญหาที่ถูกต้องใน shadcn/ui?
+**แนวทางตอบ:**
+- **สาเหตุของปัญหา**:
+  1. ทั้ง Dialog และ Dropdown เรนเดอร์ผ่าน React Portal ไปยัง `document.body` หากตัวแม่ถูกเมานต์ทีหลัง ตัวลูกอาจไปอยู่ด้านหลังฉาก
+  2. เมื่อคลิกเลือกตัวเลือกในเมนูลูก Event การคลิกจะส่งผลกระทบไปยัง Dismissable Layer ของ Dialog ทำให้ Dialog ตีความว่าเป็นการคลิกข้างนอก (Pointer Down Outside) และสั่งปิดหน้าต่างแม่ลงทันที
+- **วิธีแก้ไขที่ถูกต้อง**:
+  1. ใน DropdownMenuItem ที่ทำหน้าที่เปิด Dialog ให้ใส่ `onSelect={(e) => e.preventDefault()}` เพื่อไม่ให้ Event ไปทริกเกอร์การปิด Dropdown ก่อนที่ Dialog จะเปิด
+  2. แยกคอมโพเนนต์ Dialog ออกมาอยู่นอก DropdownMenu ในระดับ JSX เดียวกัน แล้วควบคุมการเปิด/ปิดผ่าน State ตัวแปรเดียว เช่น `const [open, setOpen] = useState(false)`
+
+### Q2: ในฐานะ Senior Frontend Engineer คุณมีแนวทางและขั้นตอนอย่างไรในการคุมคุณภาพโค้ด (Code Quality) และความสม่ำเสมอของ Design System เมื่อทีมงานหลายคนต้องแก้ไขไฟล์ใน `components/ui/*` โดยตรง?
+**แนวทางตอบ:**
+1. **จัดตั้ง Architecture Rule ที่ชัดเจน**:
+   - ไฟล์ใน `components/ui/*` อนุญาตให้แก้เฉพาะ **สไตล์ระดับ Global** (เช่น ปรับ CVA Variant, สีพื้นฐาน, หรือขอบมน) เท่านั้น
+   - **ห้ามใส่ Business Logic** หรือ State เฉพาะของหน้าจอ (เช่น API call, user authentication) ลงใน `components/ui` เด็ดขาด
+2. **สร้าง Custom Wrappers ใน `components/common/`**: สำหรับคอมโพเนนต์ทางธุรกิจที่นำ shadcn ไปต่อยอด (เช่น `UserAvatarWithStatus`, `AsyncDeleteButton`) ให้แยกไฟล์ไว้ที่อื่น เพื่อให้ `components/ui` ยังคงเป็น Base Primitives ที่สะอาด
+3. **Automated Testing & Linting**:
+   - ใช้ ESLint ปลั๊กอินตรวจจับการละเมิด Accessibility (เช่น `eslint-plugin-jsx-a11y`)
+   - ใช้ Storybook หรือ Playwright Component Testing เพื่อทำ Visual Regression Testing ตรวจสอบว่าการปรับสไตล์ในไฟล์ UI หลักไม่ไปทำลายหน้าจออื่นของโปรเจกต์

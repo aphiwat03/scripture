@@ -1,0 +1,94 @@
+---
+title: keyof & satisfies
+category: Frontend
+parentTitle: TypeScript
+version: v5.6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+เครื่องมือระดับสูงสำหรับการดึงและล็อกชนิดข้อมูลจากโค้ดจริง:
+- **`keyof`**: สกัดชื่อคีย์ทั้งหมดของ Object ออกมาเป็น Union ของ String Literals
+- **`typeof` (Type context)**: ดึง Type ออกมาจากตัวแปร JavaScript จริง
+- **Indexed Access (`T[K]`)**: สกัด Type ของค่าข้างใน Object ตามชื่อคีย์ (เหมือนเปิดดูค่าในดัชนี)
+- **`as const` (Const Assertions)**: ล็อกค่าใน Object หรือ Array ให้เป็น Readonly Literal ถาวร
+- **`satisfies` (TypeScript 4.9+)**: ตรวจสอบว่าค่าตรงตามเงื่อนไข Type หรือไม่ **โดยไม่สูญเสียความแม่นยำของ Type เดิม**
+
+---
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: `keyof`, `typeof`, และ Indexed Access
+
+```typescript
+// 1. ตัวแปร JavaScript ธรรมดา
+const APP_ROLES = {
+  ADMIN: 'administrator',
+  EDITOR: 'content_editor',
+  VIEWER: 'read_only_user',
+} as const; // as const ทำให้ฟิลด์กลายเป็น readonly และล็อกค่าเป็น string literal
+
+// 2. typeof: ดึง Type ของ Object ออกมา
+type AppRoleMap = typeof APP_ROLES;
+
+// 3. keyof: ได้ Union ของชื่อคีย์ -> 'ADMIN' | 'EDITOR' | 'VIEWER'
+type RoleKey = keyof typeof APP_ROLES;
+
+// 4. Indexed Access: ได้ Union ของค่าจริง -> 'administrator' | 'content_editor' | 'read_only_user'
+type RoleValue = (typeof APP_ROLES)[RoleKey];
+
+// ฟังก์ชันดึง Property อย่างปลอดภัย 100%
+function getProp<T, K extends keyof T>(obj: T, key: K): T[K] {
+  return obj[key];
+}
+```
+
+### ตัวอย่างที่ 2: พระเอกคนใหม่ `satisfies` Operator
+
+```typescript
+type Palette = Record<string, string | [r: number, g: number, b: number]>;
+
+// ใช้ satisfies ตรวจสอบโครงสร้าง แต่คงความแม่นยำของค่าข้างในไว้!
+const themeColors = {
+  primary: '#0071e3',
+  background: [255, 255, 255],
+} satisfies Palette;
+
+// ข้อดีเหนือการใช้ Annotation (: Palette):
+// TS รู้ทันทีว่า primary คือ string จึงสามารถใช้ .toLowerCase() ได้โดยไม่ต้อง Narrowing!
+themeColors.primary.toLowerCase();
+
+// และรู้ว่า background คือ Tuple ตัวเลข 3 ตัว ไม่ใช่ string
+const [r, g, b] = themeColors.background;
+```
+
+---
+
+## 3. ผิด vs ถูก (Common Mistakes)
+
+### กรณีที่ 1: การใช้ `: Type` แทน `satisfies` แล้วสูญเสียข้อมูล Literal
+```typescript
+type RouteConfig = Record<string, string>;
+
+// ❌ เมื่อใช้ : RouteConfig ตัว TS จะมองว่าค่าข้างในเป็น string กว้างๆ ทั้งหมด
+const routes: RouteConfig = {
+  home: '/',
+  dashboard: '/dashboard',
+};
+// routes.home.startsWith('/') -> ใช้งานได้ แต่เราเสียประโยชน์ของการ autocomplete ชื่อคีย์ 'home'!
+
+// ✅ ถูก: ใช้ satisfies
+const routes = {
+  home: '/',
+  dashboard: '/dashboard',
+} satisfies Record<string, string>;
+// TS รู้ทั้งคีย์ที่มีอยู่จริง และยังตรวจสอบ type ให้ด้วย
+```
+
+---
+
+## 4. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: `as const` ใน TypeScript ทำหน้าที่อะไร?
+**แนวทางคำตอบ**: ทำหน้าที่เปลี่ยน Type ของ Object หรือ Array ให้เป็น **Deep Readonly** และล็อกค่าของสมาชิกทุกตัวให้เป็น **Literal Types** แบบเจาะจง (เช่น จาก `string` ทั่วไป กลายเป็น `'#0071e3'`) ป้องกันไม่ให้มีการแก้ไขค่า และช่วยให้สามารถดึง Type ของค่าออกมาผ่าน `typeof obj[keyof typeof obj]` ได้อย่างแม่นยำ

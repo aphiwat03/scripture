@@ -1,0 +1,121 @@
+---
+title: Utility-first
+category: Frontend
+parentTitle: Tailwind CSS v4
+version: Tailwind v4.0
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+แนวคิด **Utility-First** คือปรัชญาการออกแบบที่มองว่า แทนที่เราจะมานั่งคิดชื่อคลาสเชิงความหมาย (Semantic Class) เช่น `.user-card`, `.pricing-box-wrapper` แล้วสลับไฟล์ไปเขียนสไตล์ในไฟล์ CSS แยกต่างหาก เราจะใช้ **"คลาสเดี่ยวที่ทำหน้าที่อย่างเดียว (Single-purpose Utility Classes)"** มาประกอบเข้าด้วยกันในมาร์กอัป HTML/JSX โดยตรง
+
+เปรียบเทียบ 3 ยุค:
+- **Traditional CSS (Semantic/BEM)**: ต้องสลับไฟล์ไปมาระหว่าง HTML กับ CSS, ต้องปวดหัวกับการคิดชื่อคลาส, เสี่ยงต่อการลบ CSS ไม่กล้าลบเพราะกลัวกระทบหน้าอื่น (Append-only CSS)
+- **Bootstrap (Component-first)**: มีคอมโพเนนต์สำเร็จรูปมาให้ (`.btn`, `.card`) แต่ทุกเว็บจะหน้าตาเหมือนกันหมด และปรับแต่งข้ามขีดจำกัดได้ยากมาก
+- **Tailwind CSS (Utility-first)**: ให้อิสระในการสร้างดีไซน์เฉพาะตัว 100% สไตล์ถูกจำกัดขอบเขตอยู่เฉพาะในคอมโพเนนต์นั้น ลบ HTML เมื่อไหร่ สไตล์ก็หายไปด้วยทันที
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### Tailwind สร้างไฟล์ CSS อย่างไร? (The Oxide Engine)
+ใน Tailwind CSS v4 ระบบทำงานด้วยเครื่องยนต์คอมไพเลอร์ภาษา Rust ตัวใหม่ล่าสุด (Oxide Engine):
+1. **Static Scanning**: สแกนโค้ดในโปรเจกต์ (`.tsx`, `.html`, `.vue`) เพื่อค้นหาคำที่ตรงกับ Utility Class
+2. **On-Demand Generation (JIT)**: สร้างเฉพาะกฎ CSS ที่ถูกเรียกใช้งานจริงเท่านั้นในหน่วยความจำ
+3. **Zero Dead Code**: หากคุณใช้แค่ 30 คลาส ขนาดไฟล์ CSS ปลายทางจะมีขนาดเพียงไม่กี่กิโลไบต์ (โดยทั่วไป < 15KB บน Production แม้โปรเจกต์จะมีขนาดใหญ่ระดับพันหน้า)
+
+---
+
+## 3. ตัวอย่างโค้ด (Tailwind v4 & TSX)
+
+### ตัวอย่างที่ 1: การ์ดแจ้งเตือนแบบโต้ตอบ (Interactive Notification Card)
+
+```tsx filename="components/NotificationCard.tsx"
+export function NotificationCard() {
+  return (
+    // ประกอบ Utility Classes: layout, spacing, colors, border, shadows
+    <div className="flex items-start gap-4 p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xs hover:shadow-md transition">
+      <div className="p-2 bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 rounded-xl shrink-0">
+        <span className="text-xl">🔔</span>
+      </div>
+      <div className="flex-1 min-w-0">
+        <h4 className="text-sm font-semibold text-slate-900 dark:text-white truncate">
+          การสั่งซื้อสำเร็จ (#ORD-2026-99)
+        </h4>
+        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          สินค้าของคุณกำลังถูกจัดเตรียมโดยคลังสินค้าพระราม 9
+        </p>
+      </div>
+    </div>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: ฟอร์ม Login แบบกะทัดรัด
+
+```tsx filename="components/LoginForm.tsx"
+export function LoginForm() {
+  return (
+    <form className="w-full max-w-sm space-y-4 p-6 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800">
+      <div>
+        <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+          อีเมล
+        </label>
+        <input 
+          type="email" 
+          placeholder="you@company.com"
+          className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" 
+        />
+      </div>
+      <button 
+        type="submit" 
+        className="w-full py-2.5 px-4 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg cursor-pointer transition"
+      >
+        เข้าสู่ระบบ
+      </button>
+    </form>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับ CSS ปกติ
+
+```css
+/* หากเขียนด้วย Pure CSS ดั้งเดิม ต้องตั้งชื่อและเขียนหลายบรรทัด: */
+.notification-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1rem;
+  background-color: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 1rem;
+}
+```
+ใน Tailwind CSS แทนที่ทั้งหมดด้วย:
+```html
+<div class="flex items-start gap-4 p-4 bg-white border border-slate-200 rounded-2xl">
+```
+
+---
+
+## 5. วิธีรับมือกับคำวิจารณ์: "Class Name ยาวเกินไป รกตา!"
+
+1. **แยกเป็น React Component**: เมื่อมีชุดปุ่มที่ต้องใช้ซ้ำ อย่าใช้ `@apply` ซ้ำซาก ให้ห่อเป็น `<Button>` component ใน React แทน
+2. **ใช้เครื่องมือ Prettier**: ติดตั้ง `prettier-plugin-tailwindcss` ซึ่งจะช่วยจัดเรียงลำดับคลาสตามมาตรฐานทางการให้อัตโนมัติ
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: Utility-first CSS ของ Tailwind มีข้อได้เปรียบเหนือ Semantic CSS (เช่น BEM) อย่างไรเมื่อโปรเจกต์มีขนาดใหญ่ขึ้นเรื่อยๆ?
+**แนวทางคำตอบ**: 
+1. **ขนาดไฟล์ CSS ไม่บวมตามขนาดโปรเจกต์**: ใน Semantic CSS ทุกครั้งที่สร้างหน้าใหม่หรือฟีเจอร์ใหม่ ไฟล์ CSS จะโตขึ้นเรื่อยๆ จนเกินความควบคุม แต่ใน Tailwind เมื่อโปรเจกต์ใหญ่ขึ้น Utility Classes ที่ใช้มักเป็นชุดเดิมซ้ำๆ ทำให้ขนาดไฟล์ CSS ปลายทางแทบจะคงที่ (Flat Growth Curve)
+2. **หยุดความกลัวในการลบโค้ด (Fearless Maintenance)**: ใน CSS แบบเดิม เมื่อต้องการลบฟีเจอร์เก่า นักพัฒนามักไม่กล้าลบโค้ดในไฟล์ CSS เพราะกลัวว่าจะไปกระทบหน้าอื่น แต่ใน Tailwind สไตล์ถูกผูกติดอยู่กับตัว JSX เมื่อลบคอมโพเนนต์ทิ้ง สไตล์ของมันก็ถูกลบหายไปอย่างปลอดภัยทันที
+3. **ลดภาระทางสมอง (Mental Overhead)**: ไม่ต้องเสียเวลาประชุมตั้งชื่อคลาส เช่น `.card-inner-left-wrapper`
+
+### Q2: Tailwind CSS สามารถสร้างไฟล์ Production Bundle ที่มีขนาดเล็กเพียงไม่กี่สิบกิโลไบต์ได้อย่างไร ทั้งที่มี Utility Classes นับหมื่นตัว?
+**แนวทางคำตอบ**: Tailwind ใช้วิธี **Just-In-Time (JIT) Scanning Engine** คอมไพเลอร์จะไม่สร้าง CSS ของคลาสทั้งหมดที่มีในโลกลงในไฟล์ผลลัพธ์ แต่จะทำการสแกนไฟล์ต้นฉบับในโปรเจกต์แบบเรียลไทม์ และ **สร้างเฉพาะคลาสที่มีการพิมพ์เรียกใช้จริงเท่านั้น** คลาสใดที่ไม่ถูกเรียกใช้ จะไม่มีวันหลุดเข้าไปในไฟล์ CSS Bundle ทำให้ขนาดไฟล์บน Production เล็กจิ๋ว มักจะต่ำกว่า 15-20 KB เมื่อบีบอัด Gzip/Brotli

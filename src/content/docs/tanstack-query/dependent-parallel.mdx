@@ -1,0 +1,272 @@
+---
+title: Dependent & Parallel
+category: Frontend
+parentTitle: TanStack Query v5
+version: TanStack Query v5.x
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ในการดึงข้อมูลของระบบจริง มักมีรูปแบบความสัมพันธ์ของข้อมูล 2 แบบหลัก:
+
+1. **Parallel Queries (การดึงข้อมูลแบบขนาน)**:
+   - ดึงข้อมูลหลายชุดพร้อมกันโดยไม่ขึ้นต่อกัน เพื่อความรวดเร็วสูงสุด
+   - **Static Parallel**: เรียก `useQuery` หลายตัวในคอมโพเนนต์เดียวกันเมื่อจำนวนคำขอคงที่
+   - **Dynamic Parallel**: ใช้ Hook **`useQueries`** เมื่อจำนวนคำขอขึ้นอยู่กับตัวแปร Runtime (เช่น ได้อาร์เรย์ของ Product IDs มา 5 ชิ้น แล้วต้องการดึงรายละเอียดของสินค้าทั้ง 5 ชิ้นพร้อมกัน)
+2. **Dependent Queries (การดึงข้อมูลแบบต่อเนื่อง)**:
+   - คำขอที่สองต้องการผลลัพธ์จากคำขอแรกก่อนจึงจะเริ่มดึงได้ (เช่น ต้องดึงข้อมูล User มาก่อนเพื่อเอา `userId` ไปค้นหารายการคำสั่งซื้อของลูกค้ารายนั้น)
+   - ควบคุมผ่านตัวเลือก **`enabled`** โดยไม่ต้องฝืนกฎ Rules of Hooks
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. วงจรการทำงานของ `enabled` Option ใน Dependent Query
+
+เมื่อเรากำหนด `enabled: Boolean(userId)`:
+
+```
+[Component Mounts (userId ยังเป็น undefined)]
+   │
+   ├─► Query B ตรวจพบ enabled === false
+   │      │
+   │      ├─► status: 'pending'
+   │      ├─► fetchStatus: 'idle'  <-- ไม่ยิง Network เด็ดขาด! ไม่กินโควตาคำขอ
+   │      └─► data: undefined
+   │
+[Query A ทำงานเสร็จ ได้รับ userId: 'usr-999']
+   │
+   ├─► enabled เปลี่ยนเป็น true!
+   │      │
+   │      └─► Query B เริ่มทำงานทันที (fetchStatus: 'fetching')
+```
+
+### 2. การทำงานของ `useQueries` ใน TanStack Query v5
+
+ใน v5 ตัว Hook `useQueries` รับ Object ที่มีคีย์ `queries: [...]` และคืนค่าเป็น Array ของผลลัพธ์ ซึ่งมี Type Inference ครบถ้วน:
+```ts
+const results = useQueries({
+  queries: productIds.map((id) => ({
+    queryKey: ['products', 'detail', id],
+    queryFn: () => fetchProduct(id),
+  })),
+});
+```
+ทุกคำขอใน Array จะถูกยิงออกไปพร้อมกันแบบขนาน (Concurrent Requests) ผ่าน Event Loop เดียวกัน โดยไม่สร้าง Network Waterfall
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### แบบที่ 1: Dependent Queries (User Profile -> User Orders)
+
+```tsx filename="src/features/dashboard/components/UserOrdersSummary.tsx"
+'use client';
+
+import React from 'react';
+import { useQuery } from '@tanstack/react-query';
+
+interface User {
+  id: string;
+  email: string;
+  name: string;
+}
+
+interface Order {
+  id: string;
+  orderNumber: string;
+  total: number;
+}
+
+async function fetchCurrentUser(): Promise<User> {
+  const res = await fetch('/api/auth/me');
+  if (!res.ok) throw new Error('ไม่สามารถตรวจสอบผู้ใช้งานได้');
+  return res.json();
+}
+
+async function fetchOrdersByUserId(userId: string): Promise<Order[]> {
+  const res = await fetch(`/api/users/${userId}/orders`);
+  if (!res.ok) throw new Error('ไม่สามารถโหลดประวัติคำสั่งซื้อได้');
+  return res.json();
+}
+
+export function UserOrdersSummary() {
+  // 1. ดึงข้อมูล User ปัจจุบัน
+  const { data: user, isPending: isUserPending } = useQuery({
+    queryKey: ['auth', 'me'],
+    queryFn: fetchCurrentUser,
+  });
+
+  // 2. Dependent Query: รอจนกว่าจะได้ user.id
+  const userId = user?.id;
+  const {
+    data: orders,
+    isPending: isOrdersPending,
+  } = useQuery({
+    queryKey: ['orders', 'by-user', userId],
+    queryFn: () => fetchOrdersByUserId(userId!),
+    // ทำงานเมื่อ userId มีค่าจริงเท่านั้น ป้องกันการยิงด้วย undefined
+    enabled: !!userId,
+  });
+
+  if (isUserPending) {
+    return <div className="h-20 bg-gray-100 rounded animate-pulse" />;
+  }
+
+  return (
+    <div className="rounded-xl border p-6 bg-white space-y-4">
+      <h2 className="text-xl font-bold">ยินดีต้อนรับ, {user?.name}</h2>
+
+      <div className="border-t pt-4">
+        <h3 className="text-md font-semibold text-gray-700 mb-2">คำสั่งซื้อล่าสุดของคุณ</h3>
+
+        {isOrdersPending ? (
+          <div className="text-sm text-gray-400">กำลังโหลดรายการคำสั่งซื้อ...</div>
+        ) : (
+          <ul className="divide-y text-sm">
+            {orders?.map((order) => (
+              <li key={order.id} className="py-2 flex justify-between">
+                <span>หมายเลข: {order.orderNumber}</span>
+                <span className="font-bold text-emerald-600">฿{order.total.toLocaleString()}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+```
+
+### แบบที่ 2: Dynamic Parallel Queries (`useQueries`) เปรียบเทียบสินค้า
+
+```tsx filename="src/features/products/components/ProductCompareWidget.tsx"
+'use client';
+
+import React from 'react';
+import { useQueries } from '@tanstack/react-query';
+
+interface ProductItem {
+  id: string;
+  name: string;
+  price: number;
+  specs: Record<string, string>;
+}
+
+async function fetchProduct(id: string): Promise<ProductItem> {
+  const res = await fetch(`/api/products/${id}`);
+  if (!res.ok) throw new Error(`โหลดสินค้า ${id} ไม่สำเร็จ`);
+  return res.json();
+}
+
+export function ProductCompareWidget({ productIds }: { productIds: string[] }) {
+  // ยิงคำขอสินค้าพร้อมกันแบบ Dynamic Array
+  const productQueries = useQueries({
+    queries: productIds.map((id) => ({
+      queryKey: ['products', 'detail', id],
+      queryFn: () => fetchProduct(id),
+      staleTime: 60 * 1000,
+    })),
+  });
+
+  // ตรวจสอบสถานะภาพรวม
+  const isLoadingAny = productQueries.some((q) => q.isPending);
+
+  if (isLoadingAny) {
+    return <div className="h-32 bg-gray-100 animate-pulse rounded-xl" />;
+  }
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      {productQueries.map((query, index) => {
+        const product = query.data;
+        if (!product) return null;
+
+        return (
+          <div key={productIds[index]} className="border rounded-xl p-4 bg-white shadow-sm">
+            <h4 className="font-bold text-gray-900">{product.name}</h4>
+            <p className="text-emerald-600 font-extrabold text-lg mt-2">
+              ฿{product.price.toLocaleString()}
+            </p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม (useEffect vs TanStack Query)
+
+| ปัญหา | วิธีเดิม (Nested `useEffect` Waterfall) | TanStack Query (`enabled` / `useQueries`) |
+| :--- | :--- | :--- |
+| **Waterfall Hell** | `useEffect` ชั้นที่ 1 โหลดเสร็จสั่ง `setState` กระตุ้น `useEffect` ชั้นที่ 2 โค้ดซ้อนเป็นขั้นบันได | ใช้ `enabled: !!dependency` บรรทัดเดียว มีความชัดเจนแบบ Declarative |
+| **Dynamic Array Fetching** | ต้องเขียนลูป `Promise.all` ใน `useEffect` หากตัวใดตัวหนึ่งล้มเหลวจะพังหมด | `useQueries` แยกสถานะ Loading/Error ของแต่ละรายการอย่างอิสระ |
+| **การละเมิด Rules of Hooks** | เผลอเขียน `if (id) useEffect(...)` ทำให้ React พ่นข้อผิดพลาดทันที | Hook ถูกเรียกที่ Top-level เสมอ ปลอดภัยตามกฎของ React 19 |
+
+---
+
+## 5. ผิด vs ถูก
+
+### แบบที่ผิด ❌: เรียกใช้ `useQuery` ภายใต้เงื่อนไข `if`
+
+```tsx
+// ❌ ผิดมหันต์: ละเมิด React Rules of Hooks ทันทีที่ userId ไม่มีค่า
+export function BadComponent({ userId }: { userId?: string }) {
+  if (!userId) {
+    return <div>ไม่พบผู้ใช้</div>;
+  }
+
+  // ❌ ห้ามเรียก Hook หลังเงื่อนไข Early Return หรือใน If Block เด็ดขาด!
+  const { data } = useQuery({
+    queryKey: ['orders', userId],
+    queryFn: () => fetchOrders(userId),
+  });
+
+  return <div>{data?.length}</div>;
+}
+```
+
+### แบบที่ถูก ✅: เรียก Hook ที่ Top-Level เสมอ และควบคุมด้วย `enabled`
+
+```tsx
+// ✅ ถูกต้อง: ประกาศ Hook ด้านบนสุดเสมอ และใช้ enabled ปิดการทำงานชั่วคราว
+export function GoodComponent({ userId }: { userId?: string }) {
+  const { data, isPending } = useQuery({
+    queryKey: ['orders', userId],
+    queryFn: () => fetchOrders(userId!),
+    enabled: Boolean(userId), // ✅ เปิดการทำงานเมื่อ userId พร้อมใช้งานเท่านั้น
+  });
+
+  if (!userId) return <div>กรุณาเลือกผู้ใช้งาน</div>;
+  if (isPending) return <div>กำลังโหลดข้อมูล...</div>;
+
+  return <div>{data?.length}</div>;
+}
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Dependent Query (`enabled`) เมื่อ:
+- ข้อมูลมีความจำเป็นต้องพึ่งพา ID หรือ Token จาก Query ก่อนหน้า
+- ต้องการเปิด/ปิดการยิง Query ตามการกระทำของผู้ใช้ (เช่น Search Box ทำงานเฉพาะเมื่อพิมพ์มากกว่า 3 ตัวอักษร: `enabled: searchTerm.length >= 3`)
+
+### ไม่ควรสร้าง Dependent Queries หลายๆ ทอดเมื่อ:
+- มีการเรียกซ้อนกันเกิน 3-4 ชั้นบนหน้าบ้าน (Client-side Cascading Waterfall) ในกรณีนี้ควรออกแบบเป็น **Backend Aggregation API (BFF Pattern)** รวมข้อมูลมาในรอบเดียวดีกว่า
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการใช้ `enabled: !!userId` จึงเป็นวิธีเดียวที่ถูกต้องในการทำ Dependent Query ใน React?
+**แนวทางตอบ**:
+เพราะตามกฎเหล็กของ React (Rules of Hooks) เราไม่สามารถเรียกใช้ Hook ใดๆ ภายในเงื่อนไข `if`, ลูป หรือหลังคำสั่ง Early Return ได้ เพราะ React อาศัยลำดับการเรียกใช้งานของ Hook (Call Order) ในแต่ละรอบการเรนเดอร์เพื่อจับคู่ Internal State ของคอมโพเนนต์ การใส่ `useQuery` ในบล็อกเงื่อนไขจะทำให้จำนวน Hook สลับไปมาจน React Crash ตัวเลือก `enabled` ของ TanStack Query ช่วยให้เราประกาศ Hook ไว้ที่ส่วนบนสุดของคอมโพเนนต์ได้อย่างถูกต้องตามกฎ และควบคุมการยิง Network ด้วยสถานะทางลอจิกภายในอย่างปลอดภัย
+
+### Q2: ในสถานการณ์ใดที่เราจำเป็นต้องใช้ `useQueries` แทนการเขียน `useQuery` หลายๆ ตัวในคอมโพเนนต์เดียวกัน?
+**แนวทางตอบ**:
+เราจะใช้ `useQuery` ปกติได้เฉพาะเมื่อเราทราบจำนวน Query ที่แน่นอนในตอนเขียนโค้ด (Static Number) เช่น คอมโพเนนต์ต้องการข้อมูล User 1 ตัว และข้อมูล Settings 1 ตัว แต่ถ้าจำนวนของ Query ขึ้นอยู่กับข้อมูลแบบไดนามิก ณ ขณะรันไทม์ (Dynamic Array) เช่น ผู้ใช้เลือกติ๊กเปรียบเทียบสินค้าจำนวน `N` ชิ้น ซึ่ง `N` อาจเป็น 2, 5 หรือ 10 ชิ้น เราไม่สามารถเขียนลูป `productIds.map(id => useQuery(...))` ได้เพราะจะละเมิด Rules of Hooks ตัวเลือกเดียวที่แก้ปัญหานี้ได้คือการใช้ **`useQueries`** ซึ่งรองรับ Dynamic Queries Array ภายใต้ Hook ตัวเดียว

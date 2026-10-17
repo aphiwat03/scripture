@@ -1,0 +1,102 @@
+---
+title: Generics
+category: Frontend
+parentTitle: TypeScript
+version: v5.6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ลองจินตนาการถึง "แม่พิมพ์ขนม" หรือ "กล่องพัสดุเปล่า" ที่ไม่ว่าคุณจะใส่ของชิ้นไหนลงไป กล่องนั้นก็จะปรับขนาดและส่งต่อของชิ้นเดิมออกมาได้อย่างปลอดภัย โดยไม่สูญเสียคุณสมบัติของสิ่งของนั้นไป
+
+**Generics** คือตัวแปรของ Type (Type Variables เช่น `<T>`) ที่เปิดโอกาสให้เราเขียนฟังก์ชัน, Interface หรือ Class ให้สามารถนำกลับมาใช้ซ้ำได้กับข้อมูลหลากหลายชนิด โดย **ไม่ต้องพึ่งพา `any`** และยังคงความถูกต้องของ Type ไว้อย่างสมบูรณ์แบบ 100%
+
+---
+
+## 2. ตัวอย่างโค้ด (TypeScript)
+
+### ตัวอย่างที่ 1: Generic API Response Wrapper ที่ใช้จริงในทุกโปรเจกต์
+
+```typescript
+// 1. สร้าง Generic Interface ห่อหุ้มโครงสร้าง Response จาก Backend
+export interface ApiResponse<TData, TMeta = { timestamp: number }> {
+  statusCode: number;
+  message: string;
+  data: TData;         // ชนิดข้อมูลยืดหยุ่นตามที่กำหนด
+  meta?: TMeta;        // Default generic type
+}
+
+// 2. ข้อมูลเฉพาะทาง
+interface Product {
+  id: string;
+  title: string;
+  price: number;
+}
+
+// 3. นำมาประกอบกัน
+type GetProductResponse = ApiResponse<Product>;
+type ListProductResponse = ApiResponse<Product[], { totalCount: number }>;
+
+const response: GetProductResponse = {
+  statusCode: 200,
+  message: 'Success',
+  data: { id: 'p-1', title: 'Ergonomic Keyboard', price: 4500 },
+};
+```
+
+### ตัวอย่างที่ 2: Generic Function พร้อม Constraints (`extends`)
+
+```typescript
+// มีเงื่อนไขว่า T ต้องมีฟิลด์ id เป็น string หรือ number เสมอ
+interface HasId {
+  id: string | number;
+}
+
+export function findItemById<T extends HasId>(items: T[], targetId: string | number): T | undefined {
+  return items.find((item) => item.id === targetId);
+}
+
+// ใช้งาน:
+const users = [
+  { id: 'u1', name: 'Alice', email: 'alice@example.com' },
+  { id: 'u2', name: 'Bob', email: 'bob@example.com' },
+];
+
+const foundUser = findItemById(users, 'u1'); // TS รู้ว่า foundUser คือ User Object ที่มีฟิลด์ name และ email!
+```
+
+---
+
+## 3. ผิด vs ถูก (Common Mistakes)
+
+### กรณีที่ 1: การใช้ Generics พร่ำเพรื่อในจุดที่ไม่จำเป็น
+```typescript
+// ❌ ผิด: Generic ไม่ได้ถูกนำไปใช้อ้างอิงความสัมพันธ์ของตัวแปรใดๆ เลย
+function printName<T extends { name: string }>(obj: T): void {
+  console.log(obj.name);
+}
+
+// ✅ ถูก: ใช้ Interface ตรงๆ โค้ดสะอาดกว่ามาก
+function printName(obj: { name: string }): void {
+  console.log(obj.name);
+}
+```
+*กฎ*: ให้ใช้ Generic ก็ต่อเมื่อ Type ขาออก (Output) มีความสัมพันธ์ผูกติดกับ Type ขาเข้า (Input) เท่านั้น
+
+---
+
+## 4. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+- *ควรใช้*:
+  - ครอบ Response จากเซิร์ฟเวอร์ (`ApiResponse<T>`, `Paginated<T>`)
+  - Utility Functions จัดการ Array หรือ Object (เช่น `groupBy<T>`, `paginate<T>`)
+  - Custom Hooks และ State (`useState<T>`, `useLocalStorage<T>`)
+- *ไม่ควรใช้*: หากฟังก์ชันทำงานกับ Type ชนิดเดียวที่แน่นอนอยู่แล้ว
+
+---
+
+## 5. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: `T extends SomeType` ใน Generics มีความหมายว่าอย่างไร?
+**แนวทางคำตอบ**: หมายถึง **Generic Constraint (ข้อจำกัด)** เพื่อบังคับว่า Type `T` ที่ส่งเข้ามา จะต้องมีคุณสมบัติหรือโครงสร้างครอบคลุมไม่น้อยไปกว่า `SomeType` ช่วยให้เราสามารถเข้าถึง Properties ของ `SomeType` ภายในฟังก์ชันได้อย่างปลอดภัย

@@ -1,0 +1,127 @@
+---
+title: Unit Test
+category: Testing
+parentTitle: Jest
+version: v29.7
+updatedAt: 2026-10-17
+---
+
+## 1. คืออะไร และแก้ปัญหาอะไร
+
+**Unit Test (การทดสอบระดับหน่วย)** คือกระบวนการตรวจสอบความถูกต้องของส่วนประกอบที่เล็กที่สุดในซอฟต์แวร์ เช่น ฟังก์ชันเดี่ยว หรือเมธอดภายใน Service โดยตัดขาดและแยกส่วน (Isolate) ออกจากองค์ประกอบภายนอกทั้งหมด เช่น ฐานข้อมูล เครือข่าย หรือระบบไฟล์
+
+ปัญหาใหญ่ในการพัฒนาซอฟต์แวร์โดยไม่มีชุดทดสอบ คือความหวาดกลัวเมื่อต้องแก้ไขหรือปรับปรุงโค้ด (Fear of Breaking Changes) เพราะไม่สามารถแน่ใจได้ว่าการแก้ฟังก์ชันหนึ่งจะส่งผลข้างเคียงให้ส่วนอื่นพังหรือไม่ Unit Test เข้ามาแก้ปัญหานี้โดยทำหน้าที่เป็นตาข่ายนิรภัย (Safety Net) ที่คอยยืนยันว่าตรรกะในแต่ละหน่วยยังคงให้ผลลัพธ์ที่ถูกต้องอยู่เสมอ ทั้งในกรณีปกติ (Happy Path) และกรณีเกิดข้อผิดพลาด (Edge Cases)
+
+## 2. Module และ Feature หลัก
+
+ในการทำ Unit Test ด้วย Jest ร่วมกับสถาปัตยกรรม NestJS / TypeScript มีเครื่องมือสำคัญดังนี้:
+
+| ยูทิลิตี้ / ฟังก์ชัน | ใช้ทำอะไร |
+| --- | --- |
+| `Test.createTestingModule()` | สร้างโมดูลจำลองของ NestJS ในหน่วยความจำเพื่อทดสอบการฉีด Dependency Injection |
+| `mockResolvedValue(data)` | กำหนดค่าผลลัพธ์ของ Promise สำเร็จล่วงหน้าสำหรับฟังก์ชันอะซิงโครนัส (Async Method) |
+| `mockRejectedValue(error)` | บังคับให้ฟังก์ชันจำลองส่ง Error ออกมาเพื่อทดสอบการดักจับข้อผิดพลาด (Error Handling) |
+| `toHaveBeenCalledTimes(n)` | ตรวจสอบว่าฟังก์ชันของ Dependency ถูกเรียกใช้งานตรงตามจำนวนรอบที่ระบุหรือไม่ |
+| `toHaveBeenCalledWith(...)` | ตรวจสอบว่าพารามิเตอร์ที่ส่งเข้าไปยัง Dependency ถูกต้องตรงตามที่คาดหวังหรือไม่ |
+| `jest.spyOn(object, method)` | แอบดักจับการเรียกใช้งานเมธอดโดยไม่เปลี่ยนแปลงพฤติกรรมเดิม หรือดัดแปลงผลลัพธ์เฉพาะจุด |
+
+## 3. ตัวอย่างโค้ดการใช้งาน
+
+### การเขียน Unit Test สำหรับ `UsersService` ร่วมกับ Mock Prisma
+
+ตัวอย่างการทดสอบฟังก์ชันค้นหาผู้ใช้งาน โดยจำลองการทำงานของฐานข้อมูลผ่าน `mockResolvedValue`:
+
+```typescript filename="src/users/users.service.spec.ts"
+import { Test, TestingModule } from '@nestjs/testing';
+import { NotFoundException } from '@nestjs/common';
+import { UsersService } from './users.service';
+import { PrismaService } from '../prisma/prisma.service';
+
+describe('UsersService (Unit Test)', () => {
+  let service: UsersService;
+  let prisma: PrismaService;
+
+  // สร้าง Mock Object จำลอง Prisma Client
+  const mockPrismaService = {
+    user: {
+      findUnique: jest.fn(),
+      create: jest.fn(),
+    },
+  };
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        UsersService,
+        {
+          provide: PrismaService,
+          useValue: mockPrismaService,
+        },
+      ],
+    }).compile();
+
+    service = module.get<UsersService>(UsersService);
+    prisma = module.get<PrismaService>(PrismaService);
+  });
+
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  describe('findById()', () => {
+    it('ควรส่งข้อมูลผู้ใช้กลับมาเมื่อพบรหัสในฐานข้อมูล (Happy Path)', async () => {
+      const mockUser = { id: 'usr-1', email: 'dev@scripture.app', name: 'John Doe' };
+      
+      // Arrange: กำหนดให้ Prisma คืนค่า mockUser
+      (prisma.user.findUnique as jest.Mock).mockResolvedValue(mockUser);
+
+      // Act: เรียกใช้งานเมธอดที่ต้องการทดสอบ
+      const result = await service.findById('usr-1');
+
+      // Assert: ตรวจสอบผลลัพธ์และการเรียกฟังก์ชัน
+      expect(result).toEqual(mockUser);
+      expect(prisma.user.findUnique).toHaveBeenCalledTimes(1);
+      expect(prisma.user.findUnique).toHaveBeenCalledWith({
+        where: { id: 'usr-1' },
+      });
+    });
+
+    it('ควรโยน NotFoundException ออกมาเมื่อไม่พบผู้ใช้ในระบบ (Error Path)', async () => {
+      // Arrange: กำหนดให้ Prisma คืนค่า null (ไม่พบข้อมูล)
+      (prisma.user.findUnique as jest.Mock).mockResolvedValue(null);
+
+      // Act & Assert: ตรวจสอบว่ามีการโยน NotFoundException อย่างถูกต้อง
+      await expect(service.findById('non-existent')).rejects.toThrow(
+        NotFoundException
+      );
+    });
+  });
+});
+```
+
+## 4. Callout สำคัญที่ควรรู้
+
+<Callout type="tip" title="ใช้ mockResolvedValue สำหรับ Async ฟังก์ชัน">
+สำหรับฟังก์ชันที่ส่งคืน Promise ให้ใช้ `.mockResolvedValue(value)` แทนการเขียน `.mockReturnValue(Promise.resolve(value))` เพื่อให้โค้ดทดสอบกระชับและอ่านง่ายขึ้น
+</Callout>
+
+<Callout type="note" title="การรัน Unit Test รวดเร็วกว่า Integration Test หลายเท่า">
+เนื่องจาก Unit Test ทำงานบนหน่วยความจำ (In-memory) และไม่มีการเชื่อมต่อไปยัง Database หรือ Disk I/O จริง ชุดทดสอบนับร้อยเคสสามารถรันเสร็จสิ้นได้ในเวลาไม่กี่วินาที เหมาะสำหรับการรันอย่างต่อเนื่องทุกครั้งที่มีการบันทึกไฟล์
+</Callout>
+
+<Callout type="warning" title="อย่า Mock ตัวคลาสที่กำลังทดสอบ (SUT)">
+คลาสหรือฟังก์ชันที่เรากำลังทดสอบ (System Under Test - SUT) จะต้องรันโค้ดจริงเสมอ เราจะทำการ Mock เฉพาะ Dependencies ภายนอกที่ถูกฉีดเข้ามาเท่านั้น หากเผลอไป Mock ตัว SUT เอง การทดสอบนั้นจะไม่มีความหมายทันที
+</Callout>
+
+## 5. ข้อควรระวังและ Best Practices
+
+- **ทดสอบทั้งเงื่อนไขสำเร็จและเงื่อนไขล้มเหลว**: อย่าทดสอบเฉพาะกรณีที่ข้อมูลถูกต้อง (Happy Path) ต้องเขียนเคสทดสอบกรณีใส่ค่าผิด ข้อมูลซ้ำ หรือระบบส่ง Exception ออกมาเสมอ
+- **ทำให้ Unit Test เป็นอิสระจากเวลาและสภาพแวดล้อม (Deterministic)**: หลีกเลี่ยงการเขียน Assertion ที่ผูกกับ `Date.now()` หรือการสุ่ม `Math.random()` ให้ใช้ `jest.useFakeTimers()` หรือ Mock เวลาไว้ล่วงหน้าเพื่อให้ผลลัพธ์เป็นจริงเสมอไม่ว่าจะรันเมื่อใด
+- **ไม่ละเลยการเคลียร์ Mock หลังจบแต่ละเคส**: ใช้ `jest.clearAllMocks()` ใน `afterEach` เพื่อป้องกันค่าที่ถูกเรียกในเคสก่อนหน้าตกค้างมาทำให้เคสถัดไปรันไม่ผ่าน
+- **ตั้งชื่อ Test Case ให้อ่านเหมือนประโยคภาษาอังกฤษหรือภาษาไทยที่เข้าใจง่าย**: ใช้โครงสร้าง "ควร... เมื่อ..." (Should ... when ...) เพื่อให้รายงานข้อผิดพลาดระบุจุดที่ล้มเหลวได้อย่างชัดเจนโดยไม่ต้องเปิดดูโค้ดข้างใน
+
+## 6. แหล่งอ้างอิง (Official Documentation)
+
+- [NestJS Official Testing Guide](https://docs.nestjs.com/fundamentals/testing) — คู่มือการเขียน Unit Test และ Integration Test ใน NestJS
+- [Jest Mock Functions API](https://jestjs.io/docs/mock-function-api) — เอกสารอ้างอิงเมธอดจำลองข้อมูลทั้งหมดของ Jest
+- [Martin Fowler on Unit Testing](https://martinfowler.com/bliki/UnitTest.html) — แนวคิดและปรัชญาพื้นฐานของการออกแบบ Unit Test ที่ดี

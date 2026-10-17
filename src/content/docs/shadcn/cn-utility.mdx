@@ -1,0 +1,204 @@
+---
+title: cn() & tailwind-merge
+category: Frontend
+parentTitle: shadcn/ui
+version: shadcn/ui & Radix UI
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ฟังก์ชัน `cn()` ที่อยู่ในไฟล์ `lib/utils.ts` เปรียบเสมือน **"หัวใจของการจัดรวมคลาส (Class Composition Engine)"** ใน shadcn/ui ทุกคอมโพเนนต์ที่คุณดึงมาใช้งานจะเรียกใช้ฟังก์ชันนี้เสมอ
+
+ฟังก์ชันนี้เป็นการผสานความสามารถของ 2 ไลบรารีระดับตำนาน:
+1. **`clsx`**: จัดการเรื่อง **Conditional Class Names** ช่วยให้เราเขียนเงื่อนไขเปิด/ปิดคลาสในรูปแบบของ Object, Array, หรือ Boolean Expression ได้อย่างคลีนและอ่านง่าย
+2. **`tailwind-merge` (`twMerge`)**: จัดการเรื่อง **Conflict Resolution** ตัดคลาส Tailwind ที่ทับซ้อนหรือขัดแย้งกันออกอย่างแม่นยำ เพื่อให้คลาสที่ส่งเข้ามาภายหลัง (เช่น ผ่าน `className` prop) สามารถ Override สไตล์เริ่มต้นได้อย่างถูกต้อง 100%
+
+```typescript
+// ไส้ในทั้งหมดของ lib/utils.ts
+import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ทำไมแค่ Template Literal หรือ `clsx` ธรรมดาถึง "ไม่เพียงพอ"?
+
+นักพัฒนาหลายคนมักคิดว่าการเขียนแบบนี้ก็ใช้งานได้:
+```tsx
+// ❌ วิธีการที่สร้างบั๊กแอบแฝง:
+<button className={`bg-blue-600 px-4 py-2 text-white ${className}`}>
+```
+หรือแม้แต่การใช้ `clsx`:
+```tsx
+// ❌ clsx ช่วยแค่เงื่อนไข แต่ไม่แก้ปัญหาคลาสชนกัน:
+<button className={clsx("bg-blue-600 px-4 py-2", className)}>
+```
+
+สมมติว่าผู้เรียกใช้คอมโพเนนต์ต้องการเปลี่ยนสีปุ่มเป็นสีแดง โดยส่ง `className="bg-red-600"` เข้ามา:
+- สตริงผลลัพธ์ใน HTML จะกลายเป็น: `class="bg-blue-600 px-4 py-2 bg-red-600"`
+- **ปัญหา**: ในสเปกของ CSS เบราว์เซอร์ **ไม่ได้ตัดสินว่าคลาสไหนชนะจากลำดับที่เขียนใน `class=""`** แต่ตัดสินจาก **CSS Specificity และตำแหน่งของ Class Declaration ใน Stylesheet**
+- หากในไฟล์ CSS ของ Tailwind มีกฎ `.bg-blue-600` ประกาศไว้ทีหลัง `.bg-red-600` ปุ่มของคุณจะยังคงเป็นสีน้ำเงินเสมอ แม้คุณจะส่ง `bg-red-600` เข้ามาทีหลังก็ตาม!
+
+### `tailwind-merge` เข้ามาแก้อย่างไร?
+`tailwind-merge` มี Dictionary ความรู้เกี่ยวกับลำดับชั้นและกลุ่มของ Tailwind CSS Utility ทั้งหมด:
+- เมื่อมันเห็น `"bg-blue-600"` (หมวด Background Color) และต่อมาพบ `"bg-red-600"` ในหมวดเดียวกัน มันจะทำการ **ลบ `"bg-blue-600"` ทิ้งทันที**
+- เมื่อส่ง `"p-4"` (Padding รวม) แล้วตามด้วย `"px-6"` (Padding ซ้าย-ขวา) มันจะคำนวณและเก็บทั้งคู่ไว้โดยฉลาด แต่หากส่ง `"p-4"` ตามด้วย `"p-8"` ตัวเก่าจะถูกแทนที่ทันที
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่าง: สร้างคอมโพเนนต์ Status Badge ที่รับการ Override สไตล์ได้อย่างสมบูรณ์แบบ
+
+```tsx filename="components/ui/status-badge.tsx"
+import * as React from "react";
+import { cn } from "@/lib/utils";
+
+export interface StatusBadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
+  status: "success" | "warning" | "error" | "info";
+  isPulsing?: boolean;
+}
+
+export function StatusBadge({
+  status,
+  isPulsing = false,
+  className,
+  children,
+  ...props
+}: StatusBadgeProps) {
+  return (
+    <span
+      className={cn(
+        // 1. Base Styles (คลาสพื้นฐาน)
+        "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium border transition-colors",
+        
+        // 2. Conditional Variants (สไตล์ตามสถานะ)
+        {
+          "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400 dark:border-emerald-800":
+            status === "success",
+          "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-400 dark:border-amber-800":
+            status === "warning",
+          "bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/40 dark:text-rose-400 dark:border-rose-800":
+            status === "error",
+          "bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950/40 dark:text-sky-400 dark:border-sky-800":
+            status === "info",
+        },
+
+        // 3. Conditional Effect (แสดงจุดกระพริบเมื่อ pulsing)
+        isPulsing && "animate-pulse",
+
+        // 4. External Override (รับคลาสจากภายนอกมาทับสไตล์เดิมได้อย่างแม่นยำ)
+        className
+      )}
+      {...props}
+    >
+      <span
+        className={cn("w-1.5 h-1.5 rounded-full shrink-0", {
+          "bg-emerald-500": status === "success",
+          "bg-amber-500": status === "warning",
+          "bg-rose-500": status === "error",
+          "bg-sky-500": status === "info",
+        })}
+      />
+      {children}
+    </span>
+  );
+}
+```
+
+### การนำไปใช้จริงในหน้าแดชบอร์ดเซิร์ฟเวอร์ (Server Status Monitoring)
+```tsx filename="app/servers/ServerList.tsx"
+import { StatusBadge } from "@/components/ui/status-badge";
+
+export function ServerMonitor() {
+  return (
+    <div className="p-6 border border-border rounded-2xl bg-card space-y-4">
+      <h3 className="text-base font-semibold">สถานะเซิร์ฟเวอร์คลัสเตอร์ (Bangkok Region)</h3>
+      
+      <div className="flex flex-wrap items-center gap-3">
+        {/* ใช้ค่า Default */}
+        <StatusBadge status="success" isPulsing>
+          Database Primary: Online
+        </StatusBadge>
+
+        <StatusBadge status="warning">
+          Redis Cache: High Memory (88%)
+        </StatusBadge>
+
+        {/* ตัวอย่างการ Override ด้วย className: ปรับ padding ใหญ่ขึ้นและเปลี่ยนขอบ */}
+        <StatusBadge
+          status="error"
+          className="px-4 py-1.5 text-sm font-semibold shadow-xs border-dashed border-rose-400"
+        >
+          Payment Gateway: Connection Timeout
+        </StatusBadge>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **ใช้ Template Strings ธรรมดาในการรวมคลาส**<br/>```tsx
+<div className={`p-4 bg-white ${className}`}>
+```<br/>ผลลัพธ์: หากผู้ใช้ส่ง `className="p-8"` บราวเซอร์อาจยังใช้ `p-4` เหมือนเดิม | **ใช้ฟังก์ชัน `cn()` เสมอ**<br/>```tsx
+<div className={cn("p-4 bg-white", className)}>
+```<br/>ผลลัพธ์: `tailwind-merge` ตัด `p-4` ออก และคงเหลือ `p-8 bg-white` อย่างถูกต้อง |
+| **ใช้ ternary operator ซ้อนกันยาวเป็นพรืดใน JSX**<br/>```tsx
+className={`text-sm ${isActive ? 'text-primary font-bold' : isPending ? 'text-muted opacity-50' : 'text-foreground'}`}
+``` | **ใช้ Object syntax ของ `clsx` ผ่าน `cn()`**<br/>```tsx
+className={cn("text-sm text-foreground", {
+  "text-primary font-bold": isActive,
+  "text-muted opacity-50": isPending,
+})}
+``` |
+| **ส่ง Boolean `false` ตรงๆ ใน Template literal**<br/>ทำให้เกิดสตริงคำว่า `"false"` โผล่ไปใน HTML class attr | **`cn()` จะกรองค่า Falsy (`false`, `null`, `undefined`) ทิ้งอัตโนมัติ** |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้เมื่อ:
+- **สร้าง Reusable Component ทุกตัว** ที่ต้องการเปิดรับ prop `className` จากภายนอก
+- **มีการสลับคลาสตาม State หรือ Props** (เช่น Active, Disabled, Loading, Selected)
+- **ต้องการ Override ขนาด, สี หรือ Margin** ของ shadcn component สำเร็จรูปในหน้าเจาะจง
+
+### ไม่ควรใช้เมื่อ:
+- **รวมข้อความ String ธรรมดาทั่วไป** ที่ไม่ใช่ CSS classes เช่น การต่อ URL หรือชื่อผู้ใช้ (ให้ใช้ Template literal ปกติ)
+- **กรณีที่คลาสคงที่และไม่มีเงื่อนไขใดๆ เลย** เช่น `<div className="flex items-center gap-2">` ไม่จำเป็นต้องครอบด้วย `cn()` ให้เปลืองการเรียกฟังก์ชัน
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ทำไมการใช้ `clsx` เพียงอย่างเดียวจึงไม่สามารถแก้ปัญหาการส่ง `className` ไป Override สไตล์ของคอมโพเนนต์ใน Tailwind CSS ได้?
+**แนวทางตอบ:**
+`clsx` เป็นไลบรารีที่จัดการเฉพาะ **การต่อข้อความตามเงื่อนไข (Conditional String Joining)** เท่านั้น มันไม่เข้าใจความหมายของ CSS คลาส:
+- หากคอมโพเนนต์มีสไตล์ตั้งต้นคือ `"bg-blue-500"` และผู้ใช้ส่ง `"bg-red-500"` ผ่าน `className` ฟังก์ชัน `clsx` จะส่งผลลัพธ์เป็น `"bg-blue-500 bg-red-500"`
+- ตามหลักการทำงานของเบราว์เซอร์ ลำดับการแสดงผลของ CSS ไม่ได้ขึ้นอยู่กับว่าคลาสไหนเขียนก่อนหรือหลังใน HTML แต่อิงตาม **Cascade Priority และ Specificity** ในไฟล์ StyleSheet ที่คอมไพล์แล้ว
+- หาก `.bg-blue-500` อยู่ลำดับหลังในไฟล์ CSS มันจะชนะเสมอ ทำให้ปุ่มไม่ยอมเปลี่ยนเป็นสีแดง
+- จึงจำเป็นต้องมี `tailwind-merge` เพื่อวิเคราะห์หมวดหมู่ Utility และตัดคลาสเดิมทิ้งให้เหลือเฉพาะตัวล่าสุด
+
+### Q2: จงวิเคราะห์ผลลัพธ์ของคำสั่ง `cn("px-4 py-2 text-sm text-gray-500", "px-6 text-base text-red-600", false && "hidden")` พร้อมอธิบายการทำงานภายใน?
+**แนวทางตอบ:**
+1. **ขั้นตอนของ `clsx`**:
+   - ประเมินค่า Input ทั้งหมด ค่า `false && "hidden"` ได้ค่า `false` ซึ่งเป็น falsy value จะถูกตัดทิ้ง
+   - ข้อความที่เหลือจะถูกส่งต่อไปยัง `tailwind-merge`
+2. **ขั้นตอนของ `tailwind-merge`**:
+   - `px-4` ปะทะกับ `px-6` (หมวด Horizontal Padding) → `px-4` ถูกตัดออก เหลือ `px-6`
+   - `py-2` (หมวด Vertical Padding) ไม่มีตัวขัดแย้ง → คงไว้
+   - `text-sm` ปะทะกับ `text-base` (หมวด Font Size) → `text-sm` ถูกตัดออก เหลือ `text-base`
+   - `text-gray-500` ปะทะกับ `text-red-600` (หมวด Text Color) → `text-gray-500` ถูกตัดออก เหลือ `text-red-600`
+3. **ผลลัพธ์สุดท้าย**: `"py-2 px-6 text-base text-red-600"` อย่างสมบูรณ์แบบโดยไม่มีคลาสขยะเหลืออยู่เลย

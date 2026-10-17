@@ -1,0 +1,320 @@
+---
+title: Sonner vs React Toastify
+category: Frontend
+parentTitle: Toast Notify
+version: Sonner & React Toastify (Next.js 16)
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ในระบบนิเวศของ React การแสดงผลข้อความแจ้งเตือน (Toast Notification) มีการวิวัฒนาการอย่างต่อเนื่องเพื่อตอบสนองต่อแนวคิดการออกแบบ UI ยุคใหม่:
+- **React Toastify**: ปู่ใหญ่ผู้บุกเบิกแห่งวงการ (เปิดตัวราวปี 2017) มีชื่อเสียงเรื่องความครบเครื่อง ปรับแต่งได้แทบทุกพิกเซล มาพร้อมแถบความคืบหน้านับเวลาถอยหลัง (Progress Timer Bar) และได้รับการพิสูจน์ในสนามจริง (Battle-tested) มายาวนาน
+- **Sonner**: ไลบรารีคลื่นลูกใหม่ที่พัฒนาโดย Emil Kowalski (เปิดตัวราวปี 2023) มุ่งเน้นไปที่ความเรียบง่าย ขนาดไฟล์เบาบาง (Lightweight) ฟิสิกส์ท่าทางสัมผัสที่ลื่นไหล (Physics-based Gestures) และการซ้อนการ์ด 3 มิติ (3D Stacking Deck) ซึ่งถูกยกให้เป็นมาตรฐานหลักใน **shadcn/ui** และโมเดิร์นเว็บ Next.js 16
+
+```
+เปรียบเทียบสไตล์การแสดงผล:
+[ React Toastify: Vertical Column ]         [ Sonner: 3D Card Stack Deck ]
+┌──────────────────────────────┐              ┌──────────────────────────────┐
+│ [✓] ดาวน์โหลดสำเร็จ   [====] │              │ [✓] กำลังซิงค์ข้อมูล (ล่าสุด)│
+└──────────────────────────────┘              └──┬─────────────────────────┬─┘
+┌──────────────────────────────┐                 │  [i] แบบร่างบันทึกแล้ว   │ (ซ้อนด้านหลัง)
+│ [!] เตือนการเชื่อมต่อ [===]  │                 └───┬───────────────────┬──┘
+└──────────────────────────────┘                     │  [✓] เชื่อมต่อสำเร็จ  │
+(เรียงเป็นเสายาว กินพื้นที่หน้าจอ)             (ซ้อนเป็นการ์ด 3D ขยายออกเมื่อนำเมาส์ชี้)
+```
+
+### กฎเหล็ก: "1 โปรเจกต์ ควรเลือกใช้เพียง 1 ไลบรารีเท่านั้น" (Single Toast Provider Rule)
+ทีมพัฒนาไม่ควรนำ Sonner และ React Toastify มาติดตั้งปนกันในโปรเจกต์เดียวกันโดยเด็ดขาด เพราะจะเกิดปัญหาตามมา:
+1. **Bundle Overhead ที่ซ้ำซ้อน**: ต้องโหลด Event Listeners, State Stores และสไตล์ชีตซ้ำกันสองชุด
+2. **Portal Collision & Z-Index War**: การแย่งกันเรนเดอร์ในเลเยอร์สูงสุดของ DOM ส่งผลให้ Toast ซ้อนทับกันอย่างไม่เป็นระเบียบ
+3. **Inconsistent User Experience**: ผู้ใช้จะสับสนกับความไม่เป็นหนึ่งเดียวของทั้ง Animation, ตำแหน่งที่แสดง, และฟอนต์
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. Bundle Size & Dependency Architecture
+- **Sonner (~4.1 KB Minified + Gzip)**: ถูกสร้างขึ้นแบบ Zero Dependency ภายในใช้ CSS Transform (`translate3d`, `scale`) และ CSS Variables ในการคำนวณตำแหน่ง ไม่จำเป็นต้องดึง stylesheet ภายนอกมาใช้งาน ทำให้ Core Web Vitals (โดยเฉพาะ FCP และ LCP) แทบไม่ได้รับผลกระทบ
+- **React Toastify (~16-20 KB JS + ~5 KB CSS)**: มีโค้ดค่อนข้างใหญ่กว่าเนื่องจากมีฟีเจอร์อย่าง Timeline Progress Tracker, Animation Engine หลายโหมด (Bounce, Slide, Zoom, Flip) และจำเป็นต้องนำเข้าไฟล์สไตล์ชีตแยกต่างหาก (`react-toastify/dist/ReactToastify.css`) หากลืมนำเข้า โค้ดจะพังทันที
+
+### 2. Rendering & Gesture Mechanics
+- **Sonner 3D Deck Mechanism**: ใช้การคำนวณลำดับชั้น (Index calculation) ผ่าน CSS Variable `--index`, `--toasts-before`, และ `--offset` เมื่อ Toast ใหม่ปรากฏ การ์ดใบเก่าจะถูกย่อขนาดลงเล็กน้อย (`scale(0.95)`) และเลื่อนซ้อนไปอยู่เบื้องหลัง เมื่อผู้ใช้นำเมาส์ไปชี้ (Hover) หรือสัมผัส การ์ดทั้งหมดจะคลี่ตัวขยายออก (Expand) ให้เห็นครบทุกรายการ
+- **React Toastify Column Mechanism**: ใช้การต่อท้ายแถว (Vertical List Stacking) เมื่อมี Toast หลายตัว จะต่อยาวลงมาหรือขึ้นไปตามทิศทางแกน Y หากมีข้อความเข้ามาพร้อมกัน 5 ตัว จะกินพื้นที่หน้าจอด้านบนหรือด้านล่างจนบดบังเนื้อหาหลัก
+
+### 3. ความเข้ากันได้กับ React 19 และ Next.js 16 (App Router)
+- **Sonner**: ออกแบบมาในยุคของ React Server Components (RSC) ตัว `<Toaster />` ถูกห่อหุ้มเป็น Client Component ได้ง่าย และฟังก์ชัน `toast()` สามารถ import เข้าไปเรียกใน Event Handlers หรือ Custom Hooks ฝั่ง Client ได้ทันทีโดยไม่ติดขัดเรื่อง React 19 Hook Lifecycle
+- **React Toastify**: มีโค้ดยุคดั้งเดิมที่ต้องจัดการกับ Window Event และ Dynamic DOM Manipulation ต้องระวังการวาง `<ToastContainer />` ในโครงสร้าง Server Component อย่างเข้มงวด มิฉะนั้นจะเกิดข้อผิดพลาดด้านการ Render บน Server
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### ตัวอย่างที่ 1: การจัดการ Asynchronous API Call แบบ Promise ในทั้งสองไลบรารี
+
+ตัวอย่างนี้จำลองการอัปเกรดแผนการใช้งานสมาชิก (Subscription Plan Upgrade) ซึ่งต้องจัดการสถานะ Loading -> Success หรือ Error
+
+#### รูปแบบที่ 1: ใช้ Sonner (`toast.promise`)
+```tsx filename="src/components/subscription/UpgradePlanSonner.tsx"
+"use client";
+
+import * as React from "react";
+import { toast } from "sonner";
+import { ShieldCheck, ArrowUpRight } from "lucide-react";
+
+interface UpgradePlanProps {
+  planName: string;
+  priceId: string;
+}
+
+export function UpgradePlanSonner({ planName, priceId }: UpgradePlanProps) {
+  const [isPending, setIsPending] = React.useState(false);
+
+  async function callUpgradeApi(id: string): Promise<{ invoiceId: string }> {
+    const res = await fetch("/api/subscription/upgrade", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ priceId: id }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || "ระบบไม่สามารถตัดยอดบัตรเครดิตได้");
+    }
+
+    return res.json();
+  }
+
+  function handleUpgrade() {
+    setIsPending(true);
+
+    toast.promise(callUpgradeApi(priceId), {
+      loading: `กำลังอัปเกรดเป็นแพ็กเกจ ${planName}...`,
+      success: (data) => {
+        setIsPending(false);
+        return `อัปเกรดสำเร็จ! ใบเสร็จเลขที่ #${data.invoiceId}`;
+      },
+      error: (err: Error) => {
+        setIsPending(false);
+        return `เกิดข้อผิดพลาด: ${err.message}`;
+      },
+      action: {
+        label: "ดูแดชบอร์ด",
+        onClick: () => (window.location.href = "/dashboard/billing"),
+      },
+    });
+  }
+
+  return (
+    <button
+      type="button"
+      disabled={isPending}
+      onClick={handleUpgrade}
+      className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-md hover:from-blue-500 hover:to-indigo-500 disabled:opacity-50 transition-all"
+    >
+      <ShieldCheck className="w-4 h-4" />
+      {isPending ? "กำลังดำเนินการ..." : `สมัครแพ็กเกจ ${planName}`}
+      <ArrowUpRight className="w-4 h-4" />
+    </button>
+  );
+}
+```
+
+#### รูปแบบที่ 2: ใช้ React Toastify (`toast.promise`)
+```tsx filename="src/components/subscription/UpgradePlanToastify.tsx"
+"use client";
+
+import * as React from "react";
+import { toast } from "react-toastify";
+import { ShieldCheck, ArrowUpRight } from "lucide-react";
+
+interface UpgradePlanProps {
+  planName: string;
+  priceId: string;
+}
+
+export function UpgradePlanToastify({ planName, priceId }: UpgradePlanProps) {
+  const [isPending, setIsPending] = React.useState(false);
+
+  async function callUpgradeApi(id: string): Promise<{ invoiceId: string }> {
+    const res = await fetch("/api/subscription/upgrade", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ priceId: id }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || "ระบบไม่สามารถตัดยอดบัตรเครดิตได้");
+    }
+
+    return res.json();
+  }
+
+  function handleUpgrade() {
+    setIsPending(true);
+
+    toast
+      .promise(
+        callUpgradeApi(priceId),
+        {
+          pending: `กำลังอัปเกรดเป็นแพ็กเกจ ${planName}...`,
+          success: {
+            render({ data }) {
+              return `อัปเกรดสำเร็จ! ใบเสร็จเลขที่ #${data?.invoiceId}`;
+            },
+            icon: "🎉",
+          },
+          error: {
+            render({ data }: { data: Error }) {
+              return `เกิดข้อผิดพลาด: ${data.message}`;
+            },
+          },
+        },
+        {
+          position: "top-right",
+          autoClose: 5000,
+        }
+      )
+      .finally(() => {
+        setIsPending(false);
+      });
+  }
+
+  return (
+    <button
+      type="button"
+      disabled={isPending}
+      onClick={handleUpgrade}
+      className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow hover:bg-blue-500 disabled:opacity-50"
+    >
+      <ShieldCheck className="w-4 h-4" />
+      {isPending ? "กำลังดำเนินการ..." : `สมัครแพ็กเกจ ${planName}`}
+      <ArrowUpRight className="w-4 h-4" />
+    </button>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: ระบบตรวจจับเครือข่ายอินเทอร์เน็ต (Network Connectivity Watcher)
+
+ตัวอย่างนี้แสดงการจัดการ Toast ที่สามารถ Dismiss ตัวเก่า และ Replace ด้วยสถานะใหม่เมื่อระบบเปลี่ยนจาก Offline เป็น Online
+
+```tsx filename="src/hooks/useNetworkNotification.ts"
+"use client";
+
+import * as React from "react";
+import { toast } from "sonner";
+
+/**
+ * Hook ตรวจจับสถานะการเชื่อมต่ออินเทอร์เน็ตด้วย Sonner
+ */
+export function useNetworkNotification() {
+  React.useEffect(() => {
+    let offlineToastId: string | number | undefined;
+
+    function handleOnline() {
+      // 1. ปลด Toast แจ้งเตือนออฟไลน์ทิ้งทันที
+      if (offlineToastId) {
+        toast.dismiss(offlineToastId);
+      }
+
+      // 2. แจ้งสถานะกลับมาออนไลน์
+      toast.success("กลับมาเชื่อมต่ออินเทอร์เน็ตแล้ว", {
+        description: "ระบบกำลังซิงค์ข้อมูลล่าสุดกับเซิร์ฟเวอร์",
+        duration: 3500,
+      });
+    }
+
+    function handleOffline() {
+      // เมื่อเน็ตหลุด ให้แสดง Toast ค้างไว้ ไม่ให้ปิดอัตโนมัติ (duration: Infinity)
+      offlineToastId = toast.error("ขาดการเชื่อมต่ออินเทอร์เน็ต", {
+        description: "คุณกำลังทำงานในโหมดออฟไลน์ การเปลี่ยนแปลงจะถูกเก็บในเครื่อง",
+        duration: Infinity,
+        action: {
+          label: "ลองเชื่อมต่อใหม่",
+          onClick: () => window.location.reload(),
+        },
+      });
+    }
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+      if (offlineToastId) {
+        toast.dismiss(offlineToastId);
+      }
+    };
+  }, []);
+}
+```
+
+---
+
+## 4. เทียบกับวิธีอื่น (Sonner vs React Toastify Full Matrix)
+
+| มิติการเปรียบเทียบ | Sonner | React Toastify |
+| :--- | :--- | :--- |
+| **ขนาด Bundle Size** | **~4.1 KB** (Gzip) เล็กและเบามาก | **~16-20 KB** JS + ~5 KB CSS |
+| **สไตล์การเรียงซ้อน (Stacking)** | **3D Card Deck** (ซ้อนลึกมีมิติ ขยายเมื่อ Hover) | **Vertical Column** (เรียงเป็นแถวยาวลงมา) |
+| **Animation Engine** | CSS Transform ลื่นไหลตามธรรมชาติ รองรับ Gesture ปัดทิ้ง | CSS Keyframes (Bounce, Slide, Zoom, Flip) |
+| **การรองรับ Tailwind CSS** | **ดีเยี่ยมระดับ First-class** (ทำงานคู่กับ shadcn/ui ไร้รอยต่อ) | ต้องเขียน Custom CSS หรือ override classes ค่อนข้างยาก |
+| **Theme Switching (Dark Mode)** | สลับอัตโนมัติตาม `next-themes` หรือ CSS Variables | มีโหมด `'light'`, `'dark'`, `'colored'` สำเร็จรูป |
+| **Action & Undo Buttons** | **มี First-class API** (`action: { label, onClick }`) | ต้องใส่ React Element เข้าไปใน JSX เอง |
+| **Progress Timer Bar** | ไม่มีตามปรัชญามินิมอล (เพื่อไม่ให้รกสายตา) | **มีแถบเวลา Progress Bar นับถอยหลังในตัว** |
+| **React 19 & Next.js 16** | รองรับสมบูรณ์แบบ ออกแบบมาสำหรับ RSC ยุคใหม่ | รองรับได้ดี แต่ต้องระวัง Client Component wrapper |
+| **กระแสชุมชนและการพัฒนา** | เติบโตสูงมาก เป็นตัวเลือกเริ่มต้นของ Modern React | ชุมชนใหญ่มาก เสถียรสูง เหมาะกับแอปเดิมที่มีอยู่แล้ว |
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practices)
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **ติดตั้งทั้ง Sonner และ React Toastify ไว้ใน `package.json` เดียวกัน**<br/>แล้วให้นักพัฒนาแต่ละคนในทีมเลือกใช้ตามใจชอบ<br/>*ผลลัพธ์:* Bundle Size บวม และ Toast ทับกันสองชั้น | **กำหนดข้อตกลงทีมและเลือกใช้เพียงตัวเดียวตลอดโปรเจกต์**<br/>หากเป็นโปรเจกต์ใหม่ Next.js 16 + Tailwind ให้เลือก **Sonner** เป็นมาตรฐานเดียว |
+| **ใช้ React Toastify ใน Next.js 16 แต่ลืมนำเข้า CSS**<br/>ทำให้ Toast กลายเป็นกล่องสีขาวลอยไร้สไตล์ | **นำเข้าไฟล์ CSS ที่ Root Layout หรือไฟล์ Global CSS ทันที**<br/>`import 'react-toastify/dist/ReactToastify.css';` |
+| **เขียน Custom CSS ไปทับ Container ของ Sonner โดยไม่เข้าใจ Stacking Engine**<br/>เช่น ไปใส่ `overflow: hidden` หรือเปลี่ยน `position` จนการ์ด 3D ไม่คลี่ตัว | **ปรับแต่งผ่าน `toastOptions.classNames` ใน Toaster**<br/>หรือใช้คอมโพเนนต์ wrapper จาก shadcn/ui ตามมาตรฐาน |
+| **เรียกใช้คำสั่ง `toast()` ใน Render Phase ของ Component**<br/>เช่น `if (error) toast.error("เกิดข้อผิดพลาด");`<br/>ส่งผลให้เกิด Infinite Re-render Loop ใน React | **เรียกใช้ `toast()` ภายใน Event Handlers หรือ `useEffect` เสมอ**<br/>ตามกฎบริสุทธิ์ (Purity) ของ React Component |
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรเลือกใช้ Sonner เมื่อ:
+1. **เริ่มโปรเจกต์ใหม่ด้วย Next.js 16, React 19 หรือ Vite**: ที่ต้องการดีไซน์มินิมอล ทันสมัย สไตล์ Apple หรือ Vercel
+2. **ใช้ Tailwind CSS หรือ shadcn/ui เป็นหัวใจหลัก**: เพราะ Sonner ถูกผนวกเป็นส่วนหนึ่งของ shadcn/ui อย่างเป็นทางการ
+3. **ให้ความสำคัญกับ Core Web Vitals และ Bundle Budget**: ลดขนาดโหลดหน้าเว็บลงกว่า 15-20 KB
+4. **ต้องการ UX การ์ดซ้อนกันแบบ 3D**: ที่ประหยัดพื้นที่บนหน้าจอมือถือ ไม่บดบังเนื้อหาของผู้ใช้
+
+### ควรเลือกใช้ React Toastify เมื่อ:
+1. **ดูแลรักษาโปรเจกต์เดิม (Legacy React Project)**: ที่มีโค้ดเขียนผูกกับ React Toastify ไว้แล้วหลายร้อยจุด การย้ายอาจไม่คุ้มค่าทางธุรกิจ
+2. **ต้องการแถบเวลานับถอยหลัง (Progress Timer Line)**: ที่แสดงชัดเจนว่าเหลือเวลากี่วินาทีก่อนที่กล่องจะปิดตัวลง
+3. **ต้องการระบบ Multi-Container ต่างจุดในหน้าจอเดียวกัน**: เช่น กล่องแจ้งเตือนแชตอยู่ที่มุมล่างขวา แต่กล่องแจ้งเตือนข้อผิดพลาดของระบบอยู่ที่มุมบนขวา
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: หากทีมกำลังจะตัดสินใจ Migrate จาก React Toastify ไปเป็น Sonner ในโปรเจกต์ Next.js 16 ขนาดใหญ่ อะไรคือความเสี่ยง (Risks) และประโยชน์ (Benefits) ที่ได้รับในเชิงสถาปัตยกรรมและ Core Web Vitals?
+**แนวทางตอบแบบ Senior Developer:**
+"**ในแง่ของประโยชน์ (Benefits):**
+1. **Performance & Bundle Size**: ช่วยลดน้ำหนัก JavaScript ลงราว 15 KB และตัด CSS Dependency ภายนอกออกไป 1 ไฟล์ ช่วยลด Render-blocking resources และเพิ่มคะแนน LCP/FCP
+2. **Design Consistency**: สอดคล้องกับ shadcn/ui และ Tailwind CSS v4 ได้สมบูรณ์แบบ ทั้งเรื่อง Dark Mode และโทนสี
+3. **Mobile UX**: ระบบ 3D Stacking ของ Sonner ป้องกันปัญหา Toast ยาวล้นหน้าจอสมาร์ตโฟน
+
+**ในแง่ของความเสี่ยงและการจัดการ (Risks & Mitigation):**
+1. **API Signature แตกต่างกัน**: `toast.promise` ของ Toastify ใช้ `{ pending, success, error }` ในขณะที่ Sonner ใช้ `{ loading, success, error }` รวมถึงการจัดการ Progress Bar ที่ Sonner ไม่มี หากโปรเจกต์เดิมพึ่งพา Progress Bar ต้องสื่อสารกับทีม Design ก่อน
+2. **กลยุทธ์การ Migrate ที่ราบรื่น**: เราควรสร้าง **Adapter Wrapper Function** ขึ้นมาคั่นกลาง (เช่น `src/lib/notify.ts`) เพื่อให้โค้ดเก่าเรียกใช้งานผ่าน Interface กลางได้ จากนั้นค่อยสลับ Engine ภายในเป็น Sonner เพื่อไม่ให้ต้องตามแก้โค้ดทีละหน้าพร้อมกัน"
+
+---
+
+### Q2: กลไก 3D Card Deck Stacking ใน Sonner มีข้อดีเหนือกว่าการเรียงเป็นคอลัมน์แนวดิ่ง (Vertical List) ของ Toastify อย่างไรในแง่ของ Mobile Viewport และ Layout Shift (CLS)?
+**แนวทางตอบแบบ Senior Developer:**
+"ข้อดีที่เห็นได้ชัดเจนที่สุดมี 2 มิติหลัก:
+1. **การควบคุม Viewport Estate บนหน้าจอมือถือ**: การแจ้งเตือนแบบดั้งเดิมของ Toastify หากระบบยิงข้อมูลมา 4 ตัวพร้อมกัน กล่องข้อความจะต่อแถวยาวลงมาจนกินพื้นที่ความสูงหน้าจอกว่า 60-70% ทำให้ผู้ใช้บนมือถือถูกบดบังข้อมูลและไม่สามารถใช้งานปุ่มสำคัญด้านหลังได้ ในขณะที่ Sonner จะซ้อนการ์ดทั้งหมดไว้ในความสูงของการ์ดใบเดียวบวกระยะเหลื่อมเพียงเล็กน้อยเท่านั้น
+2. **การป้องกัน Cumulative Layout Shift (CLS)**: ตัว `<Toaster />` ถูก Mount ผ่าน React Portal ลอยอยู่บนเลเยอร์คงที่ (`position: fixed`) ไม่กินพื้นที่ Flow ของเอกสาร HTML ปกติ และการที่ Sonner ใช้ CSS Transform (`scale`, `translate3d`) ซึ่งประมวลผลบน GPU Thread ทำให้ไม่เกิดการ Trigger Browser Reflow/Repaint ส่งผลให้เฟรมเรตคงที่ 60-120fps ลื่นไหล แม้ในขณะที่การ์ดกำลังคลี่ตัวหรือถูกปัดทิ้ง"

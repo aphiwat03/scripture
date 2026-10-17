@@ -1,0 +1,126 @@
+---
+title: Units & clamp()
+category: Frontend
+parentTitle: CSS
+version: CSS3 / Modern CSS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การเลือกใช้ **"หน่วยวัด (Units)"** ใน CSS คือจุดตัดระหว่างเว็บไซต์ที่แข็งทื่อ ปรับขนาดไม่ได้ กับเว็บไซต์ที่มีความยืดหยุ่นระดับ **Responsive & Accessible Design**
+
+กลุ่มหน่วยวัดที่สำคัญ:
+- **`px` (Absolute)**: ค่าพิกเซลตายตัว เหมาะกับเส้นขอบ (`border: 1px solid`), รัศมีความโค้ง (`border-radius: 8px`), หรือเงา
+- **`rem` (Root EM)**: สัมพันธ์กับขนาดฟอนต์ของ `<html>` (โดยปกติ `1rem = 16px`) **เป็นหน่วยหลักสำหรับ Typography และ Spacing** เพื่อเคารพการตั้งค่าขนาดฟอนต์ของผู้ใช้
+- **`em`**: สัมพันธ์กับขนาดฟอนต์ของ **Parent ของตัวเอง** (ระวังการคูณทบ Compound Effect)
+- **`%`**: สัมพันธ์กับขนาดของคอนเทนเนอร์แม่
+- **`vw / vh / dvh`**: สัมพันธ์กับหน้าจอ (Viewport Width / Viewport Height) โดย **`dvh` (Dynamic Viewport Height)** คือฮีโร่ตัวจริงที่ช่วยแก้ปัญหามือถือที่มีแถบ URL Bar โผล่ขึ้นมาบัง
+- **ฟังก์ชันคณิตศาสตร์**: `calc()`, `min()`, `max()`, และ **`clamp(min, preferred, max)`**
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. ทำไมวิศวกรมืออาชีพถึงใช้ `rem` แทน `px` สำหรับฟอนต์?
+ผู้ใช้ที่มีปัญหาทางสายตามักจะปรับขนาดตัวอักษรเริ่มต้นในเบราว์เซอร์จาก 16px เป็น 24px:
+- หากเราเขียน `font-size: 16px;` เบราว์เซอร์จะ **ล็อกตายตัว** ตัวหนังสือจะเล็กเท่าเดิม ไม่ยอมขยายตามความต้องการของผู้ใช้ (ขัดต่อเกณฑ์ Accessibility WCAG)
+- หากเราเขียน `font-size: 1rem;` ตัวหนังสือจะขยายเป็น 24px ตามที่ผู้ใช้ตั้งค่าไว้โดยอัตโนมัติ
+
+### 2. มหัศจรรย์ของ `clamp(min, val, max)` สำหรับ Fluid Typography
+แทนที่จะต้องเขียน `@media (max-width: 768px)` หลายๆ รอบเพื่อเปลี่ยนขนาดหัวข้อ เราสามารถเขียนบรรทัดเดียว:
+```css
+font-size: clamp(1.5rem, 4vw + 1rem, 3rem);
+```
+ขนาดจะค่อยๆ ไหลลื่นจากเล็กสุด (1.5rem บนมือถือ) ขยายตามสัดส่วนจอ (4vw + 1rem) และหยุดขยายเมื่อถึง 3rem บนหน้าจอใหญ่
+
+---
+
+## 3. ตัวอย่างโค้ด (Modern CSS)
+
+### ตัวอย่างที่ 1: Fluid Typography & Layout ด้วย `clamp()` และ `dvh`
+
+```css filename="hero-section.css"
+.hero-banner {
+  /* dvh: ป้องกันปัญหาแถบ Safari Address bar บน iOS บังส่วนล่าง */
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  /* clamp: เว้นระยะ padding ขอบข้างแบบยืดหยุ่นระหว่าง 16px ถึง 64px */
+  padding: clamp(1rem, 5vw, 4rem);
+}
+
+.hero-title {
+  /* ลื่นไหลตั้งแต่ 28px (1.75rem) บนมือถือ จนถึง 64px (4rem) บนเดสก์ท็อป */
+  font-size: clamp(1.75rem, 5vw + 1rem, 4rem);
+  line-height: 1.15;
+  text-align: center;
+}
+```
+
+### ตัวอย่างที่ 2: การใช้ `calc()` ร่วมกับ CSS Variables
+
+```css filename="layout.css"
+:root {
+  --header-height: 56px;
+}
+
+.sidebar {
+  position: sticky;
+  top: var(--header-height);
+  /* ความสูงเต็มหน้าจอลบด้วยความสูงของ Header ด้านบน */
+  height: calc(100dvh - var(--header-height));
+  overflow-y: auto;
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ใช้ `100vh` บนหน้าจอมือถือ
+
+```css
+/* ผิด: บน iPhone/Android เมื่อแถบ Address Bar ปรากฏ 100vh จะยาวเกินหน้าจอจริง ทำให้เนื้อหาด้านล่างถูกบังและเกิด scroll ส่วนเกิน */
+.mobile-drawer {
+  height: 100vh;
+}
+```
+
+### ✅ โค้ดที่ถูกต้อง: ใช้ `100dvh` (Dynamic Viewport Height)
+
+```css
+/* ถูกต้อง: ขนาดจะหดและขยายตามการเปิด-ปิดของ Address Bar บนมือถือแบบเรียลไทม์ */
+.mobile-drawer {
+  height: 100dvh;
+}
+```
+
+---
+
+## 5. เทียบกับ Tailwind CSS v4
+
+| Modern CSS Units & Functions | Tailwind CSS v4 Utility |
+| :--- | :--- |
+| `min-height: 100dvh;` | `min-h-dvh` |
+| `height: 100dvh;` | `h-dvh` |
+| `font-size: 1rem;` | `text-base` |
+| `font-size: clamp(...);` | `text-[clamp(1.5rem,4vw,3rem)]` |
+| `height: calc(100vh - 4rem);` | `h-[calc(100vh-4rem)]` |
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ความแตกต่างระหว่าง `100vh`, `100svh`, `100lvh`, และ `100dvh` คืออะไร?
+**แนวทางคำตอบ**:
+- `100vh`: ความสูง Viewport แบบดั้งเดิม ซึ่งบนมือถือมักจะอิงขนาดเมื่อไม่มีแถบ Browser UI ทำให้เนื้อหาล้นจอ
+- `100svh` (Small Viewport Height): ความสูงเมื่อแถบ Browser UI (เช่น Address bar, Navigation bar) ขยายออกมาเต็มที่ (พื้นที่มองเห็นสั้นที่สุด)
+- `100lvh` (Large Viewport Height): ความสูงเมื่อแถบ Browser UI หดตัวซ่อนไป (พื้นที่มองเห็นยาวที่สุด)
+- `100dvh` (Dynamic Viewport Height): ค่าไดนามิกที่จะปรับความสูงตามสถานะปัจจุบันของแถบ Browser UI แบบเรียลไทม์เมื่อผู้ใช้เลื่อนหน้าจอ
+
+### Q2: ฟังก์ชัน `clamp(MIN, VAL, MAX)` ทำงานอย่างไร และมีประโยชน์เด่นในการทำ Responsive อย่างไร?
+**แนวทางคำตอบ**: `clamp()` รับพารามิเตอร์ 3 ค่า: ขอบเขตต่ำสุด (MIN), ค่าเป้าหมายที่คำนวณตามสัดส่วนจอ (VAL), และขอบเขตสูงสุด (MAX) โดยเบราว์เซอร์จะเลือกใช้ค่า VAL ตราบใดที่ค่านั้นยังอยู่ระหว่าง MIN และ MAX 
+ประโยชน์สูงสุดคือการทำ **Fluid Responsive Design** เช่น Fluid Typography หรือ Fluid Padding ที่ช่วยให้ขนาดตัวอักษรหรือช่องว่างค่อยๆ ขยายตามขนาดหน้าจอได้อย่างนุ่มนวล โดยไม่ต้องเขียน `@media query` ดักจับ Breakpoint หลายๆ จุด

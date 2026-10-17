@@ -1,0 +1,234 @@
+---
+title: Optimistic Updates
+category: Frontend
+parentTitle: TanStack Query v5
+version: TanStack Query v5.x
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+**Optimistic Update (การอัปเดตหน้าจอแบบมองโลกในแง่ดี)** คือเทคนิคการออกแบบประสบการณ์ผู้ใช้ (UX) ขั้นสูง โดยระบบจะ **เปลี่ยนข้อมูลบนหน้าจอทันทีที่ผู้ใช้คลิก** เสมือนว่าคำขอทางอินเทอร์เน็ตสำเร็จลุล่วงแล้วโดยไม่ต้องรอให้เซิร์ฟเวอร์ตอบกลับแม้แต่วินาทีเดียว (Zero Latency)
+
+หากคำขอทางเครือข่ายล้มเหลว (เช่น เน็ตหลุด หรือเกิด Error 500 บนเซิร์ฟเวอร์) TanStack Query v5 จะทำการ **Rollback (ย้อนคืนข้อมูลกลับสู่จุดเดิม)** ให้โดยอัตโนมัติ
+
+ใน TanStack Query v5 มี 2 แนวทางหลักในการทำ Optimistic UI:
+1. **Cache Manipulation ผ่าน `onMutate` + Snapshot Rollback**: เหมาะกับการดำเนินการที่มีผลต่อข้อมูลส่วนกลาง เช่น การกดถูกใจสินค้า (Wishlist Toggle) หรือการเพิ่มลดจำนวนสินค้าในตะกร้า
+2. **UI Variables ผ่าน `mutation.variables`**: เหมาะกับการเรนเดอร์ Element ชั่วคราวบนหน้าจอขณะที่คำขอกำลังส่งอยู่
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ขั้นตอนธุรกรรม 6 สเต็ป (The 6-Step Transaction Pattern)
+
+เพื่อให้การทำ Optimistic Update ปราศจากบั๊กและปลอดภัยต่อ Race Conditions ต้องปฏิบัติตาม 6 สเต็ปมาตรฐานอย่างเคร่งครัด:
+
+```
+[ผู้ใช้กดปุ่ม Like สินค้า]
+   │
+   ├─► 1. await queryClient.cancelQueries({ queryKey })
+   │      (สำคัญมาก: สั่งยกเลิก Request ที่ค้างอยู่เดิมเพื่อไม่ให้ผลลัพธ์เก่ามาเขียนทับข้อมูลใหม่)
+   │
+   ├─► 2. const previousSnapshot = queryClient.getQueryData(queryKey)
+   │      (บันทึกภาพถ่ายแคชเดิมไว้เป็นตัวสำรองสำหรับย้อนคืน)
+   │
+   ├─► 3. queryClient.setQueryData(queryKey, optimisticUpdater)
+   │      (เขียนข้อมูลใหม่ลงแคชทันที หน้าจอเปลี่ยนสีใน 0ms!)
+   │
+   ├─► 4. return { previousSnapshot }
+   │      (ส่ง Snapshot คืนออกไปเป็น Context ให้กับ onError)
+   │
+   ├─► [ส่งคำขอจริงไปยัง Server]
+   │      │
+   │      └─── [เกิดข้อผิดพลาด / Net หลุด]
+   │              └──► 5. onError(err, newVariables, context)
+   │                       queryClient.setQueryData(queryKey, context.previousSnapshot)
+   │                       (ย้อนกลับสู่สถานะเดิมทันทีพร้อมเตือน Toast)
+   │
+   └─► 6. onSettled: queryClient.invalidateQueries({ queryKey })
+          (ไม่ว่าจะสำเร็จหรือล้มเหลว ให้ซิงค์ข้อมูลจริงจากเซิร์ฟเวอร์อีกครั้งเสมอ)
+```
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+ระบบกดเพิ่ม/ลบสินค้าในรายการที่ชอบ (Wishlist Toggle) พร้อม Optimistic Rollback:
+
+```tsx filename="src/features/wishlist/components/WishlistButton.tsx"
+'use client';
+
+import React from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+
+interface WishlistState {
+  itemIds: string[];
+}
+
+interface ToggleWishlistPayload {
+  productId: string;
+  isFavorite: boolean;
+}
+
+// 1. ดึงรายการ Wishlist ปัจจุบัน
+async function fetchWishlist(): Promise<WishlistState> {
+  const res = await fetch('/api/wishlist');
+  if (!res.ok) throw new Error('โหลดรายการสิ่งที่ชอบไม่สำเร็จ');
+  return res.json();
+}
+
+// 2. ส่งคำขอบันทึกไปยัง Server
+async function toggleWishlistApi({ productId, isFavorite }: ToggleWishlistPayload) {
+  const res = await fetch('/api/wishlist', {
+    method: isFavorite ? 'POST' : 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ productId }),
+  });
+  if (!res.ok) throw new Error('ไม่สามารถบันทึกรายการโปรดได้');
+  return res.json();
+}
+
+export function WishlistButton({ productId }: { productId: string }) {
+  const queryClient = useQueryClient();
+  const queryKey = ['wishlist'] as const;
+
+  const { data: wishlist } = useQuery<WishlistState>({
+    queryKey,
+    queryFn: fetchWishlist,
+    staleTime: 60 * 1000,
+  });
+
+  const isFavorite = wishlist?.itemIds.includes(productId) ?? false;
+
+  // 3. Mutation พร้อม Optimistic Rollback เต็มรูปแบบ
+  const toggleMutation = useMutation({
+    mutationFn: toggleWishlistApi,
+    // สเต็ปที่ 1 - 4: ทำงานก่อน Network Request ยิงออกไป
+    onMutate: async (newPayload) => {
+      // 1. ยกเลิก Request ที่อาจกำลังค้างอยู่บน Key นี้
+      await queryClient.cancelQueries({ queryKey });
+
+      // 2. ถ่าย Snapshot แคชปัจจุบันไว้
+      const previousWishlist = queryClient.getQueryData<WishlistState>(queryKey);
+
+      // 3. อัปเดตแคชล่วงหน้าทันที
+      queryClient.setQueryData<WishlistState>(queryKey, (old) => {
+        if (!old) return { itemIds: [newPayload.productId] };
+        return {
+          itemIds: newPayload.isFavorite
+            ? [...old.itemIds, newPayload.productId]
+            : old.itemIds.filter((id) => id !== newPayload.productId),
+        };
+      });
+
+      // 4. ส่ง Snapshot ออกไปเป็น Context
+      return { previousWishlist };
+    },
+
+    // สเต็ปที่ 5: หากเกิดข้อผิดพลาด ให้ Rollback กลับสู่ Snapshot
+    onError: (err, newPayload, context) => {
+      if (context?.previousWishlist) {
+        queryClient.setQueryData(queryKey, context.previousWishlist);
+      }
+      alert('บันทึกไม่สำเร็จ กำลังย้อนกลับสู่ค่าเดิม');
+    },
+
+    // สเต็ปที่ 6: จบการทำงาน ให้ซิงค์แคชกับเซิร์ฟเวอร์จริงเสมอ
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey });
+    },
+  });
+
+  return (
+    <button
+      onClick={() =>
+        toggleMutation.mutate({ productId, isFavorite: !isFavorite })
+      }
+      className={`p-2 rounded-full border transition-all ${
+        isFavorite
+          ? 'bg-rose-50 border-rose-300 text-rose-600'
+          : 'bg-white border-gray-200 text-gray-400 hover:text-gray-600'
+      }`}
+      title={isFavorite ? 'นำออกจากรายการโปรด' : 'เพิ่มในรายการโปรด'}
+    >
+      <svg
+        className={`w-6 h-6 ${isFavorite ? 'fill-current' : 'fill-none stroke-current'}`}
+        viewBox="0 0 24 24"
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth="2"
+          d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"
+        />
+      </svg>
+    </button>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม (useEffect vs TanStack Query)
+
+| ฟีเจอร์ | วิธีเขียนเอง (Manual Optimistic State) | TanStack Query v5 Transaction Pattern |
+| :--- | :--- | :--- |
+| **ความซับซ้อนของโค้ด** | ต้องสร้าง State คู่ขนาน 2-3 ตัว เช่น `optimisticVal`, `serverVal` | ใช้แคชตัวเดิมผ่าน `setQueryData` ร่วมกับ `context` |
+| **การจัดการ Race Conditions** | แทบเป็นไปไม่ได้ที่จะจัดการถ้าผู้ใช้กดปุ่มรัวๆ | ป้องกันได้ 100% ด้วย `cancelQueries` ก่อนทำ Snapshot |
+| **การ Rollback** | ต้องเขียนตรรกะกู้คืนข้อมูลแบบแมนนวลใน `catch` block | ส่ง snapshot ผ่าน `onMutate` และกู้คืนใน `onError` แบบเบ็ดเสร็จ |
+| **การแชร์ข้อมูลข้ามคอมโพเนนต์** | หน้าอื่นไม่เห็นผลลัพธ์ทันที จนกว่าจะส่ง Event | ทุกคอมโพเนนต์ที่ฟัง Key เดียวกันจะเห็นข้อมูลอัปเดตพร้อมกันใน 0ms |
+
+---
+
+## 5. ผิด vs ถูก
+
+### แบบที่ผิด ❌: ลืมเรียก `await queryClient.cancelQueries` ก่อนอัปเดตแคช
+
+```tsx
+// ❌ ผิด: ไม่สั่ง cancelQueries ก่อนทำ Snapshot
+onMutate: async (newTodo) => {
+  // หากมี Background Refetch เก่ากำลังวิ่งอยู่ มันอาจจะตอบกลับมาทีหลัง
+  // แล้วเขียนทับข้อมูลที่เราเพิ่งอัปเดตแบบ Optimistic ไป!
+  const previousData = queryClient.getQueryData(['todos']);
+  queryClient.setQueryData(['todos'], (old) => [...old, newTodo]);
+  return { previousData };
+}
+```
+
+### แบบที่ถูก ✅: ต้อง `await cancelQueries` ทุกครั้งใน `onMutate`
+
+```tsx
+// ✅ ถูกต้อง: รอให้คำขอเก่าทั้งหมดถูกยกเลิกอย่างสมบูรณ์ก่อนเสมอ
+onMutate: async (newTodo) => {
+  await queryClient.cancelQueries({ queryKey: ['todos'] });
+  const previousData = queryClient.getQueryData(['todos']);
+  queryClient.setQueryData(['todos'], (old) => [...old, newTodo]);
+  return { previousData };
+}
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Optimistic Updates เมื่อ:
+- การกระทำที่เกิดขึ้นบ่อย และผู้ใช้คาดหวังการตอบสนองทันที เช่น ปุ่ม Like, ปุ่ม Save Bookmark, การติ๊ก Todo List, การกด + / - จำนวนสินค้าในตะกร้า
+- โอกาสที่เซิร์ฟเวอร์จะปฏิเสธคำขอมีน้อยมาก (Low Failure Rate)
+
+### ไม่ควรใช้ Optimistic Updates เมื่อ:
+- การทำธุรกรรมทางการเงิน เช่น การกดยืนยันจ่ายเงิน (Checkout/Payment) หรือโอนเงิน
+- การกระทำที่ย้อนคืนไม่ได้ง่ายๆ หรือต้องรอการอนุมัติทางธุรกิจจากฝั่ง Server ก่อน (เช่น การลบข้อมูลสำคัญถาวร, การส่งอีเมลแจ้งเตือนลูกค้า)
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: ในการทำ Optimistic Update ทำไมขั้นตอนแรกสุดใน `onMutate` ต้องเรียก `await queryClient.cancelQueries` เสมอ?
+**แนวทางตอบ**:
+เพราะหากไม่มีการสั่ง `cancelQueries` อาจมีคำขอเดิม (Outgoing Refetch) ที่ยังค้างอยู่บนเครือข่าย หากคำขอนั้นตอบกลับมาหลังจากที่เราได้เขียนข้อมูล Optimistic ลงในแคชไปแล้ว Response เก่าจากเซิร์ฟเวอร์จะเข้ามาเขียนทับข้อมูล Optimistic ของเรา ทำให้หน้าจอกลับไปเป็นข้อมูลเก่าชั่วขณะจนสร้างความสับสนให้ผู้ใช้ การเรียก `await queryClient.cancelQueries` จึงเป็นการเคลียร์ท่อเครือข่ายให้สะอาดและปลอดภัยก่อนทำการบันทึก Snapshot
+
+### Q2: ใน TanStack Query v5 มีวิธีทำ Optimistic UI ผ่านตัวแปร `mutation.variables` อย่างไร และต่างจากการแก้แคชใน `onMutate` อย่างไร?
+**แนวทางตอบ**:
+- วิธี `mutation.variables`: เราไม่ต้องแก้ข้อมูลใน `QueryCache` เลย แต่ในขณะที่ `mutation.isPending === true` เราสามารถนำค่าจาก `mutation.variables` มาเรนเดอร์แทรกไว้บน UI ได้โดยตรง เช่น นำคอมเมนต์ที่กำลังพิมพ์ไปแสดงในลิสต์พร้อมเครื่องหมายนาฬิกาทราย วิธีนี้ง่าย ไม่ต้องเขียน Rollback logic
+- วิธี `onMutate`: เป็นการเข้าไปเขียนข้อมูลทับใน QueryCache ส่วนกลาง เหมาะกับกรณีที่ข้อมูลนั้นถูกนำไปใช้ในหลายๆ คอมโพเนนต์พร้อมกัน หรือการกระทำที่มีการคำนวณซับซ้อน เช่น ราคารวมในตะกร้าสินค้า

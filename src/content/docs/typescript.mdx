@@ -1,0 +1,57 @@
+---
+title: TypeScript
+category: Frontend
+version: v5.6
+updatedAt: 2026-10-17
+---
+
+## 1. ภาพรวมของ TypeScript (Overview & Philosophy)
+
+**TypeScript** คือภาษาโปรแกรมประเภท Strongly Typed ที่พัฒนาต่อยอดมาจาก JavaScript โดยเพิ่ม **ระบบ Type เชิงสถิต (Static Type System)** เข้ามา เพื่อช่วยให้นักพัฒนาสามารถตรวจจับข้อผิดพลาด (Type Errors, Typos, Undefined Access) ได้ตั้งแต่ช่วงเขียนโค้ดในโปรแกรมแก้ไข (Compile Time) แทนที่จะปล่อยให้ไคลเอนต์ไปเจอบั๊กตอนรันจริง (Runtime)
+
+ปรัชญาสำคัญที่สุดของ TypeScript คือ **"Type Erasure"** — ทุก Interface, Type Alias, Generic และ Type Annotation จะมีตัวตนอยู่เฉพาะในขั้นตอนการ Compile เท่านั้น เมื่อถูกแปลงเป็น JavaScript ไฟล์สุดท้าย ชนิดข้อมูลเหล่านี้จะถูกลบทิ้งไปทั้งหมด 100% ทำให้ไม่มีผลกระทบต่อขนาดและประสิทธิภาพของโค้ดในขณะรันบนเบราว์เซอร์หรือ Node.js
+
+<InteractiveFlowDiagram variant="auth" title="วงจรการทำงานของ TypeScript (Source Code ➔ Type Checker ➔ Transpilation ➔ Pure JavaScript Runtime)" subtitle="แสดงขั้นตอนการตรวจสอบความถูกต้องของไวยากรณ์และประเภทข้อมูล ก่อนทำการลบ Types ทิ้งและแปลงเป็น JavaScript บริสุทธิ์" />
+
+---
+
+## 2. เสาหลักของ TypeScript (Core Pillars)
+
+| เสาหลัก | คำอธิบายและบทบาทสำคัญ |
+| :--- | :--- |
+| **Static Type Checking** | ตรวจสอบความถูกต้องของประเภทข้อมูลตั้งแต่ก่อนรันแอปพลิเคชัน |
+| **Type Inference** | คอมไพเลอร์มีความฉลาดในการคาดเดาประเภทข้อมูลอัตโนมัติโดยไม่ต้องพิมพ์กำกับทุกจุด |
+| **Structural Typing (Duck Typing)** | เปรียบเทียบความเข้ากันได้ของ Object จากโครงสร้างของฟิลด์ข้างใน ไม่ได้ยึดตามชื่อคลาส |
+| **Type Erasure** | ชนิดข้อมูลทั้งหมดจะหายไปในไฟล์ JavaScript ปลายทาง ไม่เพิ่ม Overhead ให้ระบบ |
+
+---
+
+## 3. สารบัญหัวข้อการเรียนรู้เชิงลึก 16 ระดับ (Learning Directory)
+
+เนื้อหา TypeScript 5.x ถูกจัดเรียงลำดับจากพื้นฐานไปจนถึงระดับสูงที่ใช้ร่วมกับ React, NestJS และ Prisma:
+
+| หัวข้อย่อย | ขอบเขตเนื้อหา | ลิงก์เข้าสู่บทเรียน |
+| :--- | :--- | :--- |
+| **Primitives & Types** | ชนิดข้อมูลพื้นฐาน, Array, Tuple, Enum vs Union of Literals, any vs unknown vs never | [เปิดอ่าน Primitives & Types](/docs/typescript/basics) |
+| **Inference** | Type Inference vs Annotation: ปล่อยให้ TS เดาเมื่อไหร่ ระบุเองเมื่อไหร่ | [เปิดอ่าน Inference](/docs/typescript/inference) |
+| **Interface vs Type** | ความแตกต่างเชิงลึกระหว่าง `interface` กับ `type` และเกณฑ์การเลือกใช้งาน | [เปิดอ่าน Interface vs Type](/docs/typescript/interface-vs-type) |
+| **Unions & Literals** | Union (`|`), Intersection (`&`), และ Literal Types เพื่อจำกัดขอบเขตค่าที่ยอมรับ | [เปิดอ่าน Unions & Literals](/docs/typescript/unions) |
+| **Narrowing** | Type Guards (`typeof`, `instanceof`, `in`), Type Predicates (`is`), Discriminated Unions | [เปิดอ่าน Narrowing](/docs/typescript/narrowing) |
+| **Functions** | Parameter/Return Types, Optional/Default, Function Overloads, และ Callbacks | [เปิดอ่าน Functions](/docs/typescript/functions) |
+| **Generics** | การสร้างโค้ดแบบ Reusable ด้วย Generics, Constraints (`extends`), และ Default Types | [เปิดอ่าน Generics](/docs/typescript/generics) |
+| **Utility Types** | ตัวแปลง Type มาตรฐาน: `Partial`, `Required`, `Pick`, `Omit`, `Record`, `ReturnType`, `Awaited` | [เปิดอ่าน Utility Types](/docs/typescript/utility-types) |
+| **keyof & satisfies** | การดึง Key ด้วย `keyof`, `typeof`, Indexed Access, `as const`, และโอเปอเรเตอร์ `satisfies` | [เปิดอ่าน keyof & satisfies](/docs/typescript/advanced-types) |
+| **Classes & OOP** | การเขียน Class แบบ NestJS: Access Modifiers (`private`, `readonly`), Abstract, Decorators | [เปิดอ่าน Classes & OOP](/docs/typescript/classes-oop) |
+| **Async & Result** | การ Type Promise, การจัดการ `unknown` ใน catch block, และ Result Pattern | [เปิดอ่าน Async & Result](/docs/typescript/async-error) |
+| **TS in React** | การ Type Props, `children`, Events, `useState`, `useRef`, `useReducer`, Generic Components | [เปิดอ่าน TS in React](/docs/typescript/react-ts) |
+| **TS in Backend** | DTO Class, Request/Response Types, Prisma Types, และการแชร์ Type ระหว่างหน้าบ้าน-หลังบ้าน | [เปิดอ่าน TS in Backend](/docs/typescript/backend-ts) |
+| **Zod Validation** | Runtime Schema Validation ด้วย Zod, การอนุมาน Type ด้วย `z.infer`, ทำไม Type อย่างเดียวไม่พอ | [เปิดอ่าน Zod Validation](/docs/typescript/zod-runtime) |
+| **tsconfig.json** | การปรับแต่งคอมไพเลอร์: `strict`, `noUncheckedIndexedAccess`, `paths` alias | [เปิดอ่าน tsconfig.json](/docs/typescript/tsconfig) |
+| **Pitfalls & Q&A** | ข้อผิดพลาดที่พบบ่อย (any abuse, unsafe casting `as`, non-null `!`) และคำถามสัมภาษณ์งาน | [เปิดอ่าน Pitfalls & Q&A](/docs/typescript/pitfalls) |
+
+---
+
+## 4. แหล่งอ้างอิงทางการ (Official Documentation)
+
+- [TypeScript Official Handbook](https://www.typescriptlang.org/docs/handbook/intro.html) — คู่มืออ้างอิงฉบับสมบูรณ์ของ TypeScript
+- [TypeScript 5.x Release Notes](https://devblogs.microsoft.com/typescript/) — บล็อกอัปเดตฟีเจอร์ใหม่

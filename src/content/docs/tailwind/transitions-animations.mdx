@@ -1,0 +1,213 @@
+---
+title: Transitions & Animations
+category: Frontend
+parentTitle: Tailwind CSS v4
+version: Tailwind v4.0 & Next.js 16
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+การสร้างการเคลื่อนไหว (Motion & Micro-interactions) ช่วยยกระดับความรู้สึกพรีเมียมและความลื่นไหลในการใช้งานเว็บแอปพลิเคชัน
+
+ใน **Tailwind CSS v4** การจัดการ Animation ก้าวหน้าขึ้นอย่างมาก:
+- ควบคุมการเปลี่ยนสถานะด้วย `transition-*`, `duration-*`, `ease-*`
+- มีแอนิเมชันมาตรฐานพร้อมใช้: `animate-spin`, `animate-pulse`, `animate-ping`, `animate-bounce`
+- **`starting:` Variant**: ฟีเจอร์สำคัญที่รองรับคุณสมบัติใหม่ของเบราว์เซอร์ **`@starting-style`** ช่วยให้นักพัฒนาสร้าง **Entry Transition (แอนิเมชันเปิดตัวเมื่อ Element ปรากฏบนจอ)** ได้ด้วย CSS แท้ๆ โดยไม่ต้องพึ่งพา JavaScript หรือไลบรารีภายนอกขนาดใหญ่อย่าง Framer Motion
+- **`motion-reduce` Variant**: คำนึงถึง Accessibility รองรับผู้ใช้งานที่ไวต่ออาการเวียนศีรษะจากภาพเคลื่อนไหว
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### กลไก `@starting-style` และ GPU Compositor
+1. **The `starting:` Variant Mechanism**:
+   เมื่อคุณเขียน:
+   ```html
+   <div className="transition-all duration-300 opacity-100 starting:opacity-0 starting:translate-y-4">
+   ```
+   Oxide Engine จะแปลงเป็น Modern CSS:
+   ```css
+   .toast {
+     transition: all 300ms cubic-bezier(0.4, 0, 0.2, 1);
+     opacity: 1;
+     transform: translateY(0);
+     @starting-style {
+       opacity: 0;
+       transform: translateY(1rem);
+     }
+   }
+   ```
+   ทำให้เมื่อ Element ถูก Mount เข้าสู่ DOM เบราว์เซอร์จะรับรู้สถานะเริ่มต้นจาก `@starting-style` และทำ Transition สู่สถานะปกติโดยอัตโนมัติ!
+2. **GPU Acceleration**:
+   Tailwind ออกแบบให้ Utility ในกลุ่ม Transform (`translate-*`, `scale-*`, `rotate-*`) และ Opacity ทำงานบน **Compositor Thread** ของ GPU โดยตรง ไม่ทำให้เกิด Reflow หรือ Repaint บน CPU Main Thread
+3. **Reduced Motion Safety**:
+   `motion-reduce:transition-none` จะถูกคอมไพล์เข้าสู่ `@media (prefers-reduced-motion: reduce)` ทันที
+
+---
+
+## 3. ตัวอย่างโค้ด (Tailwind v4 & TSX)
+
+### ตัวอย่างที่ 1: กล่องข้อความแจ้งเตือนป๊อปอัป (ToastNotification ด้วย `starting:`)
+
+```tsx filename="src/components/ToastNotification.tsx"
+"use client";
+
+import { useState } from "react";
+import { CheckCircle2, X } from "lucide-react";
+
+interface ToastProps {
+  title: string;
+  message: string;
+}
+
+export function ToastNotification({ title, message }: ToastProps) {
+  const [isVisible, setIsVisible] = useState(true);
+
+  if (!isVisible) return null;
+
+  return (
+    <div className="fixed bottom-6 right-6 z-50">
+      {/* ใช้ starting:opacity-0 และ starting:translate-y-4 สำหรับ Entry Animation แท้ด้วย CSS */}
+      <div className="flex w-88 items-start gap-3.5 rounded-2xl border border-neutral-200 bg-white p-4 shadow-xl transition-all duration-300 ease-out starting:opacity-0 starting:translate-y-4 starting:scale-95 motion-reduce:transition-none dark:border-neutral-800 dark:bg-neutral-900">
+        <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+          <CheckCircle2 className="size-5" />
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <h4 className="text-sm font-bold text-neutral-900 dark:text-white">
+            {title}
+          </h4>
+          <p className="mt-1 text-xs leading-relaxed text-neutral-500 dark:text-neutral-400">
+            {message}
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => setIsVisible(false)}
+          className="rounded-lg p-1 text-neutral-400 transition hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+          aria-label="ปิดการแจ้งเตือน"
+        >
+          <X className="size-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+### ตัวอย่างที่ 2: การ์ดแดชบอร์ดพร้อมสถานะประมวลผล (InteractiveStatsCard)
+
+```tsx filename="src/components/InteractiveStatsCard.tsx"
+import { Loader2, ArrowUpRight, Database } from "lucide-react";
+
+interface StatsCardProps {
+  label: string;
+  value: string;
+  isLoading?: boolean;
+}
+
+export function InteractiveStatsCard({
+  label,
+  value,
+  isLoading = false,
+}: StatsCardProps) {
+  return (
+    <div className="group relative w-full max-w-sm rounded-3xl border border-neutral-200 bg-white p-6 shadow-sm transition-all duration-300 ease-in-out hover:-translate-y-1.5 hover:shadow-xl hover:border-indigo-200 motion-reduce:transition-none motion-reduce:hover:transform-none dark:border-neutral-800 dark:bg-neutral-900 dark:hover:border-neutral-700">
+      <div className="flex items-center justify-between">
+        <div className="flex size-11 items-center justify-center rounded-2xl bg-indigo-50 text-indigo-600 transition-colors duration-300 group-hover:bg-indigo-600 group-hover:text-white dark:bg-indigo-950/60 dark:text-indigo-400">
+          <Database className="size-5" />
+        </div>
+
+        {isLoading ? (
+          <span className="flex items-center gap-1.5 text-xs text-neutral-400">
+            <Loader2 className="size-3.5 animate-spin text-indigo-600" />
+            กำลังซิงก์...
+          </span>
+        ) : (
+          <span className="relative flex size-2.5">
+            {/* Ping animation สำหรับสถานะ Live Online */}
+            <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-75 motion-reduce:hidden" />
+            <span className="relative inline-flex size-2.5 rounded-full bg-emerald-500" />
+          </span>
+        )}
+      </div>
+
+      <div className="mt-5">
+        <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">
+          {label}
+        </p>
+        <div className="mt-1 flex items-baseline justify-between">
+          <h3 className="text-2xl font-black tracking-tight text-neutral-900 dark:text-white">
+            {value}
+          </h3>
+          <span className="flex items-center gap-0.5 text-xs font-semibold text-indigo-600 opacity-0 transition-opacity duration-200 group-hover:opacity-100 dark:text-indigo-400">
+            ดูรายละเอียด <ArrowUpRight className="size-3" />
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. เทียบกับ CSS ปกติ
+
+| งาน | Tailwind v4 Utility | Native Modern CSS |
+| :--- | :--- | :--- |
+| **การเปลี่ยนผ่านพื้นฐาน** | `transition-all duration-200 ease-out` | `transition: all 200ms cubic-bezier(0, 0, 0.2, 1);` |
+| **สถานะตั้งต้นตอน Mount** | `starting:opacity-0 starting:scale-95` | `@starting-style { opacity: 0; transform: scale(0.95); }` |
+| **การหมุนวนรอบตัวเอง** | `animate-spin` | `@keyframes spin { to { transform: rotate(360deg); } } animation: spin 1s linear infinite;` |
+| **ปิดแอนิเมชันสำหรับ A11y** | `motion-reduce:transition-none` | `@media (prefers-reduced-motion: reduce) { transition: none; }` |
+
+---
+
+## 5. ผิด vs ถูก
+
+### จุดที่ 1: การ Transition ขนาดกล่องด้วย `height` หรือ `width` ตรงๆ
+```tsx
+// ❌ ผิด: อนิเมตผ่าน width/height ก่อให้เกิด Browser Reflow กระตุกอย่างรุนแรง
+<div className="transition-all duration-300 hover:w-96">
+
+// ✅ ถูก: ใช้ Transform (scaleX หรือ scale) ที่รันบน GPU
+<div className="transition-transform duration-300 hover:scale-105">
+```
+*เหตุผล*: การเปลี่ยนแปลง `width`, `height`, `top`, หรือ `left` บังคับให้เบราว์เซอร์คำนวณผังหน้าจอใหม่ทั้งหมด (Layout Thrashing) ในขณะที่ `transform` ทำงานบน GPU ไม่รบกวน Main Thread
+
+### จุดที่ 2: ลืมใส่ `motion-reduce` บนเอฟเฟกต์ที่มีการเคลื่อนที่รวดเร็ว
+```tsx
+// ❌ ผิด: ขาด Accessibility Safeguard สำหรับผู้ใช้ที่มีภาวะความผิดปกติของหูชั้นใน/การมองเห็น
+<div className="transition-transform duration-300 hover:-translate-y-4">
+
+// ✅ ถูก: ปิดหรือลดทอนการเคลื่อนไหวเมื่อผู้ใช้เปิด Reduced Motion
+<div className="transition-transform duration-300 hover:-translate-y-4 motion-reduce:transform-none motion-reduce:transition-none">
+```
+*เหตุผล*: ผู้ใช้บางกลุ่มเปิดโหมดลดภาพเคลื่อนไหวในระดับ OS เพื่อป้องกันอาการคลื่นไส้ การใส่ `motion-reduce:` เป็นไปตามเกณฑ์มาตรฐาน WCAG 2.1
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้
+- ใช้ `transition-colors duration-150` กับปุ่ม, ลิงก์, และแบบฟอร์มเพื่อการตอบสนองที่นุ่มนวล
+- ใช้ `starting:` เมื่อต้องการ Entry Transition ให้ Modal, Toast หรือ Dropdown โดยไม่ต้องติดตั้ง Library Motion ขนาดใหญ่
+- ใช้ `animate-spin` บนปุ่มส่งข้อมูลเมื่ออยู่ในสถานะ Pending / Loading
+
+### ไม่ควรใช้
+- ไม่ควรใช้ Transition กับทุกสิ่งแบบไม่เจาะจง (`transition-all`) บนตารางข้อมูลที่มีแถวเป็นพันแถว เพราะจะเปลือง Memory
+- ไม่ควรใช้ `animate-bounce` หรือ `animate-ping` พร่ำเพรื่อจนแย่งสมาธิการอ่านเนื้อหาหลักของผู้ใช้
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: `starting:` variant ใน Tailwind v4 ทำงานอย่างไร และเข้ามาทดแทน JavaScript Animation Libraries ได้ในกรณีใดบ้าง?
+**แนวทางคำตอบ**: 
+`starting:` variant ใน Tailwind v4 ถูกคอมไพล์เป็นฟีเจอร์ใหม่ของ CSS คือ `@starting-style` ซึ่งช่วยให้นักพัฒนากำหนดสถานะเริ่มต้นขององค์ประกอบก่อนที่จะถูกเรนเดอร์ครั้งแรกใน DOM ได้ ในอดีต หากเราต้องการสร้าง Fade-in หรือ Slide-up ตอนที่คอมโพเนนต์เพิ่งถูก Mount เข้าสู่หน้าจอ เราจำเป็นต้องใช้ไลบรารี JS เช่น Framer Motion หรือเขียน `useEffect` หน่วงเวลาเพื่อสลับคลาส แต่ด้วย `starting:` เบราว์เซอร์สามารถคำนวณ Transition จากจุดเริ่มต้นสู่จุดปกติได้โดยตรงผ่าน CSS แท้ๆ ทำให้ลดขนาด JavaScript Bundle ของโปรเจกต์ลงได้อย่างมาก
+
+### Q2: ในแง่ Web Performance ทำไมเราจึงควร animate ด้วย `transform` และ `opacity` แทนการใช้ `top/left/margin`?
+**แนวทางคำตอบ**: 
+การเปลี่ยนแปลงค่าทางเรขาคณิต เช่น `top`, `left`, `margin`, หรือ `height` จะกระตุ้นกระบวนการ **Layout (Reflow)** และ **Paint** ของเบราว์เซอร์ ซึ่งทำงานบน CPU Main Thread และบล็อกการตอบสนองของผู้ใช้ แต่ `transform` และ `opacity` เป็นคุณสมบัติที่ถูกประมวลผลบน **Compositor Layer** โดยตรงผ่านชิปประมวลผลกราฟิก (GPU) ทำให้สามารถแสดงผลได้อย่างราบรื่น 60 หรือ 120 FPS โดยไม่มีอาการกระตุกแม้ซีพียูจะกำลังประมวลผลสคริปต์หนักอยู่ก็ตาม

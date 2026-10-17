@@ -1,0 +1,138 @@
+---
+title: Cascade & Specificity
+category: Frontend
+parentTitle: CSS
+version: CSS3 / Modern CSS
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+คำว่า **"Cascading"** ใน CSS หมายถึง **"การไหลหลั่งของน้ำตก"** เมื่อมีคำสั่งหลายคำสั่งที่พยายามจะเปลี่ยนสีหรือขนาดของ Element เดียวกัน เบราว์เซอร์จะมีกฎเกณฑ์ในการตัดสินอย่างเป็นวิทยาศาสตร์ว่า **"ใครชนะ (Who Wins?)"**
+
+3 เสาหลักของการตัดสิน:
+1. **Source Order (ลำดับที่เขียน)**: หากคะแนนเท่ากัน คำสั่งที่เขียนอยู่ **"บรรทัดล่างสุด"** จะชนะเสมอ
+2. **Specificity (คะแนนความจำเพาะเจาะจง)**: Selector ที่ชี้เป้าเจาะจงมากกว่า จะชนะ Selector ทั่วไป
+3. **Importance (`!important`)**: ไพ่ตายไม้ตายที่ตัดหน้าทุกกฎ (แต่เป็นดาบสองคม!)
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. สูตรคำนวณคะแนน Specificity (A, B, C)
+```
+┌───────────────┬──────────────────────────┬─────────────────────────┐
+│ A: ID (100)   │ B: Class / Attribute (10)│ C: Element / Pseudo (1) │
+└───────────────┴──────────────────────────┴─────────────────────────┘
+```
+- `p` = `(0, 0, 1)` (1 แต้ม)
+- `.btn` = `(0, 1, 0)` (10 แต้ม) — ชนะแท็ก `p`
+- `.btn.primary` = `(0, 2, 0)` (20 แต้ม)
+- `#header .btn` = `(1, 1, 0)` (110 แต้ม) — ชนะคลาสธรรมดาอย่างขาดลอย
+- **Inline Style (`style="..."`)** = `(1, 0, 0, 0)` (1000 แต้ม) ชนะทุก Selector ในไฟล์ CSS
+
+### 2. Cascade Layers (`@layer`) ใน Modern CSS
+ใน CSS สมัยใหม่ เรามี `@layer` เพื่อจัดหมวดหมู่ความสำคัญ เช่น:
+```css
+@layer reset, framework, components, utilities;
+```
+สิ่งที่อยู่ใน `@layer utilities` จะมีน้ำหนักชนะ `@layer components` เสมอ **โดยไม่สนว่า Specificity ข้างในจะสูงหรือต่ำกว่า** ซึ่งเป็นหัวใจสำคัญที่ทำให้ Tailwind CSS v4 จัดการลำดับความสำคัญได้อย่างเป็นระเบียบ
+
+---
+
+## 3. ตัวอย่างโค้ด (Modern CSS)
+
+### ตัวอย่างที่ 1: การใช้ `@layer` จัดระเบียบการเขียนทับสไตล์อย่างปลอดภัย
+
+```css filename="theme.css"
+/* กำหนดลำดับเลเยอร์จากต่ำไปสูง */
+@layer base, components, overrides;
+
+@layer base {
+  /* สเปกพื้นฐาน Specificity สูง (id) ก็ยังแพ้ layer components */
+  #main button {
+    background-color: #94a3b8;
+    color: white;
+  }
+}
+
+@layer components {
+  /* คลาสธรรมดา ชนะ base layer แม้ base จะมี #id ก็ตาม! */
+  .btn-accent {
+    background-color: #0071e3;
+    padding: 10px 20px;
+    border-radius: 8px;
+  }
+}
+```
+
+### ตัวอย่างที่ 2: อันตรายของ `!important` และการสืบทอด (Inheritance)
+
+```css filename="card.css"
+/* คุณสมบัติที่สืบทอดลงไปหาลูกหลาน (Inherited): color, font-family, line-height */
+.article-card {
+  color: #334155;
+  font-family: var(--font-sans);
+}
+
+/* คุณสมบัติที่ไม่สืบทอด (Non-inherited): margin, padding, border, background */
+.article-card p {
+  /* ได้สีและฟอนต์จากแม่โดยอัตโนมัติ */
+  margin-bottom: 1rem;
+}
+```
+
+---
+
+## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+
+### ❌ โค้ดที่ผิด: ใช้ `!important` แก้ปัญหาทุกครั้งที่แก้ไม่ติด
+
+```css
+/* ผิด: ก่อสงคราม !important war จนไม่มีใครสามารถ override โค้ดนี้ได้อีก */
+.navbar-link {
+  color: #0f172a !important;
+}
+
+.navbar-link:hover {
+  color: #0071e3 !important; /* ต้องเติม !important ซ้ำซาก */
+}
+```
+
+### ✅ โค้ดที่ถูกต้อง: แก้ที่โครงสร้าง Specificity หรือใช้ Nesting
+
+```css
+/* ถูกต้อง: เพิ่ม Specificity เล็กน้อย หรือจัดโครงสร้างเลเยอร์ */
+.navbar .navbar-link {
+  color: #0f172a;
+  transition: color 0.15s ease;
+}
+
+.navbar .navbar-link:hover {
+  color: #0071e3;
+}
+```
+
+---
+
+## 5. เทียบกับ Tailwind CSS v4
+
+| Concept | Tailwind CSS v4 Equivalent |
+| :--- | :--- |
+| `!important` | `!text-blue-600` หรือ `text-blue-600!` |
+| `@layer base` | จัดการใน `@import "tailwindcss";` |
+| `@layer utilities` | Utility classes ปกติของ Tailwind |
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: จงคำนวณคะแนน Specificity ระหว่าง `nav.primary ul li a:hover` กับ `#header .nav-link` อันไหนชนะ?
+**แนวทางคำตอบ**:
+- `nav.primary ul li a:hover`: มี 1 class (`.primary`), 1 pseudo-class (`:hover`), และ 4 elements (`nav`, `ul`, `li`, `a`) รวมคะแนนคือ **(0, 2, 4)**
+- `#header .nav-link`: มี 1 ID (`#header`), และ 1 class (`.nav-link`) รวมคะแนนคือ **(1, 1, 0)**
+**ผลลัพธ์**: `#header .nav-link` ชนะอย่างขาดลอย เพราะมี 1 ID selector ซึ่งมีค่าน้ำหนักในหลัก A เหนือกว่าจำนวนคลาสและเอลิเมนต์ทั้งหมด
+
+### Q2: ฟีเจอร์ `@layer` ใน Modern CSS ช่วยแก้ปัญหาเรื่อง Specificity Hell ได้อย่างไร?
+**แนวทางคำตอบ**: เดิมทีใน CSS กฎข้อเดียวที่ใช้ตัดสินเมื่อเกิดการชนกันคือคะแนน Specificity ทำให้เมื่อเราดึงไลบรารีภายนอกมาใช้และต้องการเขียนทับ เราต้องเขียน Selector ให้ยาวขึ้นเรื่อยๆ หรือพึ่งพา `!important` 
+แต่ `@layer` ช่วยจัดลำดับความสำคัญของเลเยอร์ได้ตั้งแต่ต้น (เช่น `@layer base, components, utilities`) สไตล์ที่อยู่ในเลเยอร์ที่อยู่ลำดับหลัง จะสามารถเขียนทับสไตล์ในเลเยอร์ลำดับก่อนหน้าได้เสมอ แม้ว่า Selector ในเลเยอร์ก่อนหน้าจะมี Specificity สูงกว่าก็ตาม

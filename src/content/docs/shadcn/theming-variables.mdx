@@ -1,0 +1,265 @@
+---
+title: Theming & Variables
+category: Frontend
+parentTitle: shadcn/ui
+version: shadcn/ui & Radix UI
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+shadcn/ui ไม่ได้ใช้ระบบสีแบบระบุค่าตายตัว เช่น `bg-blue-600` หรือ `text-gray-900` แต่ใช้สถาปัตยกรรม **"Semantic Design Tokens"** ควบคู่กับ **CSS Custom Properties (Variables)**
+
+แนวคิดนี้คือการตั้งชื่อสีตาม **"บทบาทหน้าที่ในระบบ (Role/Intent)"** ไม่ใช่ชื่อของสี:
+- แทนที่จะเรียกสีว่า `blue`: เราเรียกว่า `primary` (สีหลักของแบรนด์)
+- แทนที่จะเรียกสีว่า `white`: เราเรียกว่า `background` (พื้นหลัง) หรือ `card` (พื้นหลังการ์ด)
+- แทนที่จะเรียกสีว่า `red`: เราเรียกว่า `destructive` (การกระทำที่อันตราย เช่น การลบ)
+- คู่สีข้อความสำหรับพื้นหลังนั้นๆ: จะลงท้ายด้วย `-foreground` เสมอ เช่น `primary-foreground` คือสีตัวอักษรที่อ่านออกชัดเจนบนพื้นหลัง `primary`
+
+ประโยชน์สูงสุดของระบบนี้คือ **การรองรับ Dark Mode และ Multi-Theme ได้อย่างสมบูรณ์แบบทันที** โดยการสลับ Class เพียงจุดเดียวที่ Root Element (`<html>`) ผ่านไลบรารี `next-themes`
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### สถาปัตยกรรมสีใน Tailwind CSS v4 และ `globals.css`
+ใน Tailwind CSS v4 ระบบตัวแปรสีถูกกำหนดผ่าน 2 ส่วนในไฟล์ `globals.css`:
+
+1. **CSS Variables Definitions**: กำหนดค่าสีดิบ (Raw Color Values ในรูปแบบ HSL หรือ OKLCH) ใน Scope `:root` (Light Mode) และ `.dark` (Dark Mode)
+2. **`@theme inline` Directive**: ทำการแมปตัวแปร CSS เหล่านั้นเข้ากับระบบ Utility Classes ของ Tailwind v4 โดยอัตโนมัติ
+
+```css
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-destructive: var(--destructive);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+}
+
+:root {
+  --background: oklch(1 0 0); /* สีขาว */
+  --foreground: oklch(0.14 0.005 285); /* สีเทาดำ */
+  --primary: oklch(0.21 0.006 285);
+  --primary-foreground: oklch(0.98 0 0);
+  --destructive: oklch(0.57 0.24 27);
+  --muted: oklch(0.96 0.002 285);
+  --muted-foreground: oklch(0.55 0.015 285);
+  --border: oklch(0.92 0.004 285);
+}
+
+.dark {
+  --background: oklch(0.14 0.005 285); /* สีมืด */
+  --foreground: oklch(0.98 0 0); /* สีขาวสว่าง */
+  --primary: oklch(0.98 0 0);
+  --primary-foreground: oklch(0.21 0.006 285);
+  --destructive: oklch(0.65 0.24 27);
+  --muted: oklch(0.26 0.005 285);
+  --muted-foreground: oklch(0.7 0.015 285);
+  --border: oklch(0.26 0.005 285);
+}
+```
+
+### การป้องกัน Hydration Mismatch และ FOUC ด้วย `next-themes`
+เมื่อเบราว์เซอร์ดาวน์โหลดหน้าเว็บที่ทำ Server-Side Rendering (SSR) เกิดขึ้น:
+- หากไม่มีการเตรียมการที่ดี ผู้ใช้ที่ตั้งค่า Dark Mode จะเห็นหน้าจอสีขาวแวบขึ้นมาก่อน (Flash of Unstyled Content: FOUC)
+- `next-themes` แทรก Script ขนาดเล็กจิ๋วเข้าไปใน `<head>` เพื่ออ่านค่า Preference จาก `localStorage` หรือ `prefers-color-scheme` ของระบบปฏิบัติการ และใส่คลาส `.dark` ลงใน `<html>` **ก่อนที่เบราว์เซอร์จะเริ่มวาดหน้าจอ (Paint)**
+- ใน Next.js เราจึงต้องใส่ `suppressHydrationWarning` บนแท็ก `<html>` เพื่อบอก React ว่าไม่ต้องแจ้งเตือน Error เรื่องความไม่ตรงกันของคลาสระหว่าง Server กับ Client
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### 1. การสร้าง Theme Provider
+```tsx filename="components/theme-provider.tsx"
+"use client";
+
+import * as React from "react";
+import { ThemeProvider as NextThemesProvider } from "next-themes";
+
+export function ThemeProvider({
+  children,
+  ...props
+}: React.ComponentProps<typeof NextThemesProvider>) {
+  return <NextThemesProvider {...props}>{children}</NextThemesProvider>;
+}
+```
+
+### 2. ติดตั้งใน Root Layout (`src/app/layout.tsx`)
+```tsx filename="src/app/layout.tsx"
+import type { Metadata } from "next";
+import { Inter } from "next/font/google";
+import "./globals.css";
+import { ThemeProvider } from "@/components/theme-provider";
+
+const inter = Inter({ subsets: ["latin"] });
+
+export const metadata: Metadata = {
+  title: "Cloud Billing Dashboard",
+  description: "Next.js 16 Enterprise App with Dark Mode",
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="th" suppressHydrationWarning>
+      <body className={`${inter.className} min-h-screen bg-background text-foreground antialiased`}>
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem
+          disableTransitionOnChange
+        >
+          {children}
+        </ThemeProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+### 3. ปุ่มสลับธีมพร้อม Dropdown Menu (`ThemeToggle.tsx`)
+```tsx filename="components/ThemeToggle.tsx"
+"use client";
+
+import * as React from "react";
+import { Moon, Sun, Monitor } from "lucide-react";
+import { useTheme } from "next-themes";
+import { Button } from "@/components/ui/button";
+
+export function ThemeToggle() {
+  const { theme, setTheme } = useTheme();
+  const [mounted, setMounted] = React.useState(false);
+
+  // ป้องกัน Hydration mismatch ในฝั่ง Client UI
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  if (!mounted) {
+    return (
+      <Button variant="outline" size="sm" className="w-9 h-9 p-0 opacity-50" disabled>
+        <Sun className="h-4 w-4" />
+      </Button>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-1 border border-border bg-card p-1 rounded-xl">
+      <Button
+        variant={theme === "light" ? "default" : "ghost"}
+        size="sm"
+        onClick={() => setTheme("light")}
+        className="h-8 w-8 p-0 rounded-lg"
+        aria-label="Light mode"
+      >
+        <Sun className="h-4 w-4" />
+      </Button>
+      <Button
+        variant={theme === "dark" ? "default" : "ghost"}
+        size="sm"
+        onClick={() => setTheme("dark")}
+        className="h-8 w-8 p-0 rounded-lg"
+        aria-label="Dark mode"
+      >
+        <Moon className="h-4 w-4" />
+      </Button>
+      <Button
+        variant={theme === "system" ? "default" : "ghost"}
+        size="sm"
+        onClick={() => setTheme("system")}
+        className="h-8 w-8 p-0 rounded-lg"
+        aria-label="System mode"
+      >
+        <Monitor className="h-4 w-4" />
+      </Button>
+    </div>
+  );
+}
+```
+
+### 4. คอมโพเนนต์ที่ใช้ Semantic Tokens เต็มรูปแบบ: Billing Overview Card
+```tsx filename="components/BillingSummaryCard.tsx"
+import { CreditCard, ArrowUpRight } from "lucide-react";
+import { Button } from "@/components/ui/button";
+
+export function BillingSummaryCard() {
+  return (
+    <div className="rounded-2xl border border-border bg-card p-6 shadow-xs text-card-foreground transition-all">
+      <div className="flex items-center justify-between pb-4 border-b border-border">
+        <div className="flex items-center gap-3">
+          <div className="p-2.5 rounded-xl bg-primary/10 text-primary">
+            <CreditCard className="w-5 h-5" />
+          </div>
+          <div>
+            <h4 className="text-sm font-semibold">แพ็กเกจ Enterprise Cloud</h4>
+            <p className="text-xs text-muted-foreground">รอบบิลถัดไป: 1 พฤศจิกายน 2026</p>
+          </div>
+        </div>
+        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+          ใช้งานอยู่ (Active)
+        </span>
+      </div>
+
+      <div className="mt-4 flex items-baseline justify-between">
+        <div>
+          <span className="text-2xl font-bold tracking-tight">฿45,000</span>
+          <span className="text-xs text-muted-foreground ml-1">/ เดือน</span>
+        </div>
+        <Button variant="outline" size="sm" className="gap-1.5">
+          <span>ดูใบแจ้งหนี้</span>
+          <ArrowUpRight className="w-3.5 h-3.5 text-muted-foreground" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **Hardcode สี Hex หรือ Palette ตรงๆ**<br/>```tsx
+<div className="bg-white text-black dark:bg-[#121212] dark:text-white">
+```<br/>ผลลัพธ์: โค้ดยาวรุงรัง หากต้องการเปลี่ยนเฉดสีดำหรือสีขาว ต้องแก้ทุกไฟล์ด้วยตนเอง | **ใช้ Semantic Tokens เสมอ**<br/>```tsx
+<div className="bg-background text-foreground">
+```<br/>ผลลัพธ์: สลับโหมดอัตโนมัติ และเปลี่ยนชุดสีทั้งหมดของระบบได้ในที่เดียว (`globals.css`) |
+| **ลืมใส่ `suppressHydrationWarning` บน `<html>`**<br/>ทำให้ Console ของ Next.js พ่น Warning ยาวเหยียดเมื่อ `next-themes` สลับคลาสระหว่าง SSR กับ Client | **ใส่ `suppressHydrationWarning` ที่แท็ก `<html>` เสมอ**<br/>เพื่อรับรองการทำงานของ Theme injector อย่างถูกต้อง |
+| **ใช้ `bg-primary` คู่กับ `text-black` หรือ `text-white`**<br/>เมื่อสลับธีม หรือเมื่อ Primary เปลี่ยนสี อาจเกิดปัญหาคอนทราสต์ต่ำจนอ่านตัวหนังสือไม่ออก | **ใช้คู่ Foreground เสมอ**<br/>`bg-primary text-primary-foreground` รับประกันอัตราส่วนคอนทราสต์ (Contrast Ratio) ตามเกณฑ์ WCAG |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้เมื่อ:
+- **ทุกโปรเจกต์ระดับมืออาชีพ**: ที่ต้องการรองรับ Light Mode, Dark Mode และ System Mode ได้อย่างลื่นไหล
+- **ระบบ SaaS / Multi-Tenant**: ที่ลูกค้าแต่ละบริษัทสามารถเลือกสี Theme (Custom Theming) ประจำแบรนด์ตนเองได้ เพียงแค่เปลี่ยนค่า CSS Variables แบบ Dynamic
+
+### ไม่ควรใช้เมื่อ:
+- **เว็บไซต์ที่กำหนด Visual Art แบบตายตัว (Single Hardcoded Theme)**: เช่น หน้าโปรโมตเกมที่ถูกออกแบบมาให้มืดสนิทตลอดเวลา และดีไซเนอร์ไม่อนุญาตให้มีโหมดสว่าง
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: Semantic Color Tokens แตกต่างจาก Utility Palette ของ Tailwind (เช่น `blue-500`, `gray-100`) อย่างไร และทำไม shadcn/ui ถึงเลือกใช้แนวทางนี้?
+**แนวทางตอบ:**
+- **Utility Palette (`blue-500`, `gray-900`)**: เป็นการบอก **"ค่าสีที่ตายตัว (Physical Color)"** หากเราใช้ `bg-white dark:bg-gray-900` ทั่วโปรเจกต์ เมื่อต้องการเปลี่ยนโหมดมืดจากสีเทาเข้มเป็นสีดำสนิท (OLED Black) เราต้องค้นหาและแก้ไขโค้ดนับร้อยไฟล์
+- **Semantic Tokens (`background`, `primary`, `muted`)**: เป็นการกำหนด **"ความหมายและบทบาทของสี (Contextual Meaning)"** คอมโพเนนต์จะสนใจแค่ว่าตัวเองคือ "พื้นหลัง" หรือ "สีหลัก"
+- **ข้อดีที่ shadcn เลือกใช้**: ทำให้สามารถสลับ Dark Mode, High Contrast Mode หรือทำ Multi-Tenant White-labeling ได้โดยการเปลี่ยนค่า CSS Variables ในที่เดียว ไม่ต้องแตะต้องโค้ด JSX เลย
+
+### Q2: ทำไมจึงเกิดปรากฏการณ์ Flash of Unstyled Content (FOUC) เมื่อทำ Dark Mode ใน Next.js App Router และ `next-themes` มีกลไกป้องกันปัญหานี้อย่างไร?
+**แนวทางตอบ:**
+- **สาเหตุ**: Next.js เรนเดอร์ HTML มาจากเซิร์ฟเวอร์โดยไม่ทราบว่าผู้ใช้ตั้งค่าโหมดมืดไว้ใน LocalStorage ของเบราว์เซอร์หรือไม่ หากเบราว์เซอร์แสดงผล HTML โหมดสว่างก่อน แล้ว React ค่อยสั่งอ่าน LocalStorage มาสลับคลาสเป็น `.dark` หน้าจอจะกระพริบขาววาบ (FOUC)
+- **กลไกป้องกันของ `next-themes`**: ไลบรารีจะแทรก Blocking Inline Script เล็กๆ ไว้ใน `<head>` สคริปต์นี้จะอ่านค่าจาก `localStorage` ทันทีและเติมคลาส `.dark` ลงในแท็ก `<html>` ก่อนที่เบราว์เซอร์จะเริ่มขั้นตอน Paint หน้าจอ ทำให้ผู้ใช้เห็นธีมที่ถูกต้องตั้งแต่เฟรมแรกโดยไม่กระพริบ

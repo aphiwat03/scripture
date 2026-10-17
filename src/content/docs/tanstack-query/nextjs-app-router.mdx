@@ -1,0 +1,265 @@
+---
+title: App Router & Prefetch
+category: Frontend
+parentTitle: TanStack Query v5
+version: TanStack Query v5.x
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ใน **Next.js 16 (App Router)** สถาปัตยกรรมการดึงข้อมูลถูกยกระดับด้วยการทำงานร่วมกันระหว่าง **React Server Components (RSC)** และ **TanStack Query v5**
+
+ความท้าทายของนักพัฒนาคือการเลือกว่า "ควรดึงข้อมูลที่ไหน":
+1. **Pure Server Component Fetching**: เหมาะกับหน้าเว็บที่เน้น SEO และข้อมูลเป็นแบบอ่านอย่างเดียว (Read-only Static Content)
+2. **Server Prefetching + HydrationBoundary (TanStack Query v5)**: เหมาะที่สุดกับหน้าที่ต้องการทั้ง **SEO ที่รวดเร็วทันใจ (โหลดหน้าแรกมี HTML ครบ ไม่เห็น Skeleton)** และต้องการ **Client-side Interactivity ในภายหลัง** (เช่น ต้องการแคชข้อมูลไว้, สลับแท็บกลับมาแล้ว Revalidate เบื้องหลัง, หรือทำ Optimistic Updates)
+
+นอกจากนี้ เรายังสามารถนำ **Next.js Server Actions** มาทำงานร่วมกับ `useMutation` เพื่อบันทึกข้อมูลแบบ End-to-end Type-safe ได้อีกด้วย
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### วงจรสะพานเชื่อมข้อมูลผ่าน `dehydrate` และ `HydrationBoundary`
+
+```
+[Next.js Server Component (Node.js runtime)]
+   │
+   ├─► 1. const queryClient = getQueryClient()
+   │
+   ├─► 2. await queryClient.prefetchQuery({ queryKey, queryFn })
+   │      (ดึงข้อมูลล่วงหน้าบน Server แล้วเก็บลงใน Server QueryCache)
+   │
+   ├─► 3. const dehydratedState = dehydrate(queryClient)
+   │      (แปลง QueryCache ฝั่ง Server ให้กลายเป็น JSON Object ธรรมดาที่ปลอดภัยต่อการ Serialize)
+   │
+   └─► 4. ส่ง HTML + <HydrationBoundary state={dehydratedState}> ข้ามสายเคเบิลมายังเบราว์เซอร์
+          │
+          ▼
+[Browser (Client Hydration)]
+   │
+   ├─► HydrationBoundary นำ dehydratedState ฉีดเข้าสู่ Client QueryClient ในหน่วยความจำทันที
+   │
+   └─► Client Component เรียก useQuery({ queryKey })
+          │
+          └─► พบข้อมูลในแคชทันที! (isPending = false, แสดงผล 0ms โดยไม่ต้องยิงซ้ำ!)
+```
+
+การทำงานแบบนี้ทำให้ผู้ใช้ได้คะแนน **Core Web Vitals (LCP)** ยอดเยี่ยม เพราะเซิร์ฟเวอร์เรนเดอร์เนื้อหาจริงมาให้ทันที และ Client ก็พร้อมทำ Background Revalidation ได้อย่างต่อเนื่อง
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+ระบบหน้ารายละเอียดสินค้า (`/products/[id]`) ที่ทำ Server Prefetching และรองรับการสั่งซื้อผ่าน Server Action:
+
+### ไฟล์ที่ 1: Server Component ทำหน้าที่ Prefetch ข้อมูล
+
+```tsx filename="src/app/products/[id]/page.tsx"
+import React from 'react';
+import { dehydrate, HydrationBoundary } from '@tanstack/react-query';
+import { getQueryClient } from '@/lib/query-client';
+import { ProductDetailClient } from './ProductDetailClient';
+
+interface PageProps {
+  params: Promise<{ id: string }>;
+}
+
+async function fetchProductOnServer(id: string) {
+  const res = await fetch(`https://api.example.com/products/${id}`, {
+    // กำหนด cache header ได้ตามต้องการของ Next.js
+    next: { revalidate: 60 },
+  });
+  if (!res.ok) throw new Error('ไม่พบข้อมูลสินค้า');
+  return res.json();
+}
+
+export default async function ProductDetailPage({ params }: PageProps) {
+  const { id } = await params;
+  const queryClient = getQueryClient();
+
+  // 1. ดึงข้อมูลล่วงหน้าบนเซิร์ฟเวอร์
+  await queryClient.prefetchQuery({
+    queryKey: ['products', 'detail', id],
+    queryFn: () => fetchProductOnServer(id),
+  });
+
+  // 2. Dehydrate แคชแล้วส่งต่อให้ Client
+  return (
+    <HydrationBoundary state={dehydrate(queryClient)}>
+      <ProductDetailClient productId={id} />
+    </HydrationBoundary>
+  );
+}
+```
+
+### ไฟล์ที่ 2: Client Component ใช้งานข้อมูลจากแคช
+
+```tsx filename="src/app/products/[id]/ProductDetailClient.tsx"
+'use client';
+
+import React from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { purchaseProductAction } from './actions';
+
+interface Product {
+  id: string;
+  name: string;
+  price: number;
+  description: string;
+  stock: number;
+}
+
+export function ProductDetailClient({ productId }: { productId: string }) {
+  const queryClient = useQueryClient();
+
+  // 1. useQuery จะได้ข้อมูลทันทีจาก HydrationBoundary โดยไม่มีสถานะ isPending กระพริบ
+  const { data: product, isFetching } = useQuery<Product>({
+    queryKey: ['products', 'detail', productId],
+    queryFn: async () => {
+      const res = await fetch(`/api/products/${productId}`);
+      return res.json();
+    },
+  });
+
+  // 2. เชื่อมต่อ Server Action เข้ากับ useMutation
+  const purchaseMutation = useMutation({
+    mutationFn: async () => {
+      return await purchaseProductAction(productId, 1);
+    },
+    onSuccess: () => {
+      // เมื่อซื้อสำเร็จ สั่ง Invalidate แคชสินค้าเพื่อดึงสต็อกใหม่
+      queryClient.invalidateQueries({ queryKey: ['products', 'detail', productId] });
+      alert('สั่งซื้อสินค้าสำเร็จ!');
+    },
+  });
+
+  if (!product) return null;
+
+  return (
+    <div className="max-w-2xl mx-auto p-6 bg-white border rounded-2xl shadow-sm relative">
+      {isFetching && (
+        <span className="absolute top-4 right-4 text-xs text-blue-500 font-medium">
+          ซิงค์ข้อมูลล่าสุด...
+        </span>
+      )}
+
+      <h1 className="text-3xl font-extrabold text-gray-900">{product.name}</h1>
+      <p className="mt-4 text-gray-600">{product.description}</p>
+      
+      <div className="mt-6 flex items-center justify-between border-t pt-4">
+        <div>
+          <span className="text-sm text-gray-400">ราคาพิเศษ</span>
+          <p className="text-2xl font-bold text-emerald-600">฿{product.price.toLocaleString()}</p>
+        </div>
+
+        <button
+          onClick={() => purchaseMutation.mutate()}
+          disabled={purchaseMutation.isPending || product.stock <= 0}
+          className="px-6 py-2.5 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 disabled:bg-gray-300"
+        >
+          {purchaseMutation.isPending ? 'กำลังสั่งซื้อ...' : 'สั่งซื้อทันที'}
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+### ไฟล์ที่ 3: Next.js Server Action (`actions.ts`)
+
+```ts filename="src/app/products/[id]/actions.ts"
+'use server';
+
+export async function purchaseProductAction(productId: string, quantity: number) {
+  // จำลองคำสั่งซื้อบน Server Side
+  const res = await fetch(`https://api.example.com/checkout`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ productId, quantity }),
+  });
+
+  if (!res.ok) {
+    throw new Error('ไม่สามารถประมวลผลคำสั่งซื้อบนเซิร์ฟเวอร์ได้');
+  }
+
+  return res.json();
+}
+```
+
+---
+
+## 4. เทียบกับวิธีเดิม (Server Fetch Props vs HydrationBoundary)
+
+| ปัจจัย | วิธีส่ง Raw Props (`<Client data={data} />`) | สถาปัตยกรรม `HydrationBoundary` (v5) |
+| :--- | :--- | :--- |
+| **การส่งข้อมูลข้าม Component** | ต้องส่งผ่าน Props Drilling ต่อลงไปทุกชั้น | คอมโพเนนต์ลูกหลานทุกตัวเรียก `useQuery` ได้ทันทีจากแคชส่วนกลาง |
+| **Background Revalidation** | ข้อมูลตายตัว หากผู้ใช้เปิดหน้าต่างค้างไว้จะไม่มีวันอัปเดต | ได้ประโยชน์ของ SWR อัตโนมัติ (Revalidate เมื่อ Focus หรือ Reconnect) |
+| **Cache Coordination** | เมื่อเกิด Mutation หน้าอื่นจะไม่ทราบว่าข้อมูลหน้านี้เปลี่ยน | ซิงค์ร่วมกับ QueryCache ทั้งระบบ สั่ง Invalidate ได้ครอบคลุม |
+| **การป้องกัน Double Fetch** | มักเผลอดึงซ้ำใน `useEffect` ซ้ำซ้อนกับ Server | ป้องกัน 100% เพราะมีแคชรองรับอยู่แล้วตั้งแต่วินาทีแรกที่ Hydrate |
+
+---
+
+## 5. ผิด vs ถูก
+
+### แบบที่ผิด ❌: ดึงข้อมูลบน Server แต่ไม่ส่งผ่าน Hydration แล้วไปเรียก useQuery ซ้ำ
+
+```tsx
+// ❌ ผิดมหันต์: ยิง fetch บน Server แล้วส่ง raw data เป็น Props
+// แต่ใน Client Component กลับไปเรียก useQuery โดยไม่มีแคชตั้งต้น
+export default async function BadPage({ params }: { params: { id: string } }) {
+  const rawData = await fetchProduct(params.id); // ดึงรอบที่ 1 บน Server
+  return <BadClient initialData={rawData} id={params.id} />;
+}
+
+'use client';
+function BadClient({ initialData, id }: any) {
+  // ❌ useQuery มองว่ายังไม่มีข้อมูลในแคช จึงสั่งยิง API รอบที่ 2 บนเบราว์เซอร์ทันที!
+  const { data } = useQuery({ queryKey: ['product', id], queryFn: () => fetchProduct(id) });
+  return <div>{data?.name || initialData.name}</div>;
+}
+```
+
+### แบบที่ถูก ✅: ใช้ `prefetchQuery` + `HydrationBoundary` แชร์ Key เดียวกัน
+
+```tsx
+// ✅ ถูกต้อง: ดึงลงแคช Server แล้ว Dehydrate ข้ามมา
+export default async function GoodPage({ params }: { params: { id: string } }) {
+  const queryClient = getQueryClient();
+  await queryClient.prefetchQuery({
+    queryKey: ['products', params.id],
+    queryFn: () => fetchProduct(params.id),
+  });
+
+  return (
+    <HydrationBoundary state={dehydrate(queryClient)}>
+      <GoodClient id={params.id} />
+    </HydrationBoundary>
+  );
+}
+```
+
+---
+
+## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ `prefetchQuery` + `HydrationBoundary` เมื่อ:
+- หน้านั้นต้องการคะแนน SEO สูง (Search Engine เห็นข้อมูลทันที) แต่ก็ต้องการให้ผู้ใช้โต้ตอบ เช่น มีปุ่มกดแก้ไข, มีการแจ้งเตือนยอดคงเหลือแบบเรียลไทม์ หรือมี Modal รายละเอียดที่ต้องการดึงแคชไปแสดงผลซ้ำ
+
+### ใช้ Native Server Component Fetching ธรรมดาเมื่อ:
+- หน้าเว็บเป็นบทความ Blog, หน้าเงื่อนไขการใช้งาน, หรือเนื้อหาที่ไม่มีปุ่มคลิกโต้ตอบใดๆ และไม่ต้องแคชข้ามหน้า
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: อธิบายกระบวนการทำงานของ `HydrationBoundary` และ `dehydrate` ใน Next.js App Router?
+**แนวทางตอบ**:
+1. บน Server Component ฟังก์ชัน `prefetchQuery` จะดึงข้อมูลและเก็บไว้ในหน่วยความจำของ `QueryClient` ชั่วคราว
+2. คำสั่ง `dehydrate(queryClient)` จะสกัดเอาเฉพาะข้อมูลแคชที่มีสถานะสำเร็จ แปลงเป็น JSON-serializable State
+3. Next.js จะฝัง JSON นี้ลงไปใน HTML Payload ที่ส่งกลับไปยังเบราว์เซอร์
+4. เมื่อโหลดถึงเบราว์เซอร์ `<HydrationBoundary state={...}>` จะอ่าน JSON ก้อนนี้และฉีด (Hydrate) ข้อมูลเข้าสู่ `QueryClient` ฝั่งเบราว์เซอร์โดยอัตโนมัติ ทำให้คอมโพเนนต์ที่เรียก `useQuery` ด้วย Query Key เดียวกัน ได้ข้อมูลไปใช้ทันทีแบบ 0ms โดยไม่เกิดอาการจอกระพริบและไม่ต้องยิง Network ซ้ำ
+
+### Q2: ในการทำ Prefetching บน Next.js Server Components ทำไมเราจึงต้องกำหนด `staleTime` ในระดับ Client ให้มากกว่า 0?
+**แนวทางตอบ**:
+เพราะหากปล่อยให้ `staleTime: 0` (ค่าเริ่มต้น) ทันทีที่ Client Component ทำการ Hydrate บนหน้าจอเบราว์เซอร์ มันจะตัดสินว่าข้อมูลที่เพิ่งได้รับมาจาก Server นั้น "ล้าสมัยแล้วทันที" และจะส่ง Network Request ไปดึงซ้ำจากเซิร์ฟเวอร์อีกรอบ (Double Fetching) ซึ่งทำให้การทำ Prefetching บนเซิร์ฟเวอร์สูญเปล่า การกำหนด `staleTime` (เช่น 30 วินาที หรือ 1 นาที) จะบอกให้ไคลเอนต์ทราบว่าข้อมูลที่เซิร์ฟเวอร์ส่งมาให้ยังสดใหม่อยู่ และไม่ต้องยิงซ้ำในทันที

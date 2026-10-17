@@ -1,0 +1,63 @@
+---
+title: Pitfalls & Q&A
+category: Frontend
+parentTitle: Next.js 16
+version: v16.4
+updatedAt: 2026-10-17
+---
+
+## 1. คืออะไร / ใช้ทำไม
+
+**Pitfalls & Interview Questions** คือการรวบรวมข้อผิดพลาดที่พบบ่อยที่สุดในการพัฒนา Next.js 16 App Router พร้อมแนวทางการแก้ไขอย่างถูกต้อง และสรุปคำถาม-คำตอบเชิงลึกที่มักพบในการสัมภาษณ์งานตำแหน่ง Frontend และ Full-Stack Developer
+
+ช่วยให้นักพัฒนาหลีกเลี่ยงข้อผิดพลาดร้ายแรง และเตรียมความพร้อมในการอธิบายสถาปัตยกรรมระดับมืออาชีพ
+
+## 2. ข้อผิดพลาดที่พบบ่อย (Common Pitfalls)
+
+### 1. การใส่ `'use client'` พร่ำเพรื่อทั้งหน้า
+- **ปัญหา**: วาง `'use client'` ไว้บนสุดของ `page.tsx` หรือ `layout.tsx` ทำให้โค้ดทั้งหน้ากลายเป็น Client Component และส่ง JavaScript ทั้งหมดไปให้ผู้ใช้
+- **วิธีแก้**: คงหน้าหลักไว้เป็น Server Component เสมอ แล้วผลัก `'use client'` ลงไปไว้เฉพาะคอมโพเนนต์ปลายกิ่งที่มี Event Listener หรือ State เท่านั้น
+
+### 2. ลืมใส่ `await` กับ Next.js 16 Async APIs
+- **ปัญหา**: ใน Next.js 16 ข้อมูลอย่าง `params`, `searchParams`, `cookies()`, และ `headers()` ถูกเปลี่ยนเป็นแบบ Asynchronous ทั้งหมด
+- **วิธีแก้**: ใส่ `await params`, `await cookies()` ทุกครั้งก่อนนำค่ามาใช้งาน
+
+```tsx
+// ❌ ผิด (Next.js 14 แบบเดิม)
+export default function Page({ params }: { params: { id: string } }) {
+  return <h1>ID: {params.id}</h1>;
+}
+
+// ✅ ถูกต้อง (Next.js 16)
+export default async function Page({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  return <h1>ID: {id}</h1>;
+}
+```
+
+### 3. อาการ Hydration Mismatch
+- **ปัญหา**: โครงสร้าง HTML ที่เซิร์ฟเวอร์เรนเดอร์ไม่ตรงกับที่เบราว์เซอร์เรนเดอร์ เช่น การใช้ `window.innerWidth`, `localStorage`, หรือเวลา `new Date()`
+- **วิธีแก้**: ใช้ตัวแปรสถานะ `isMounted` ผ่าน `useEffect` เพื่อให้เบราว์เซอร์พร้อมก่อน หรือใช้ `suppressHydrationWarning` บนแท็กเฉพาะจุด
+
+---
+
+## 3. คำถามสัมภาษณ์งานที่มักเจอ (Interview Q&A)
+
+### Q1: App Router แตกต่างจาก Pages Router อย่างไร?
+**แนวทางคำตอบ**: App Router ใช้สถาปัตยกรรม **React Server Components (RSC)** เป็นค่าเริ่มต้น ทำให้ประมวลผลบนเซิร์ฟเวอร์โดยตรงและส่งเฉพาะผลลัพธ์กลับไป ช่วยลดขนาด Bundle Size ฝั่ง Client อย่างมาก, รองรับ **Nested Layouts** ที่คงสถานะไว้เมื่อเปลี่ยนหน้าย่อย, รองรับ **Streaming UI** ผ่าน Suspense, และจัดการการส่งข้อมูลผ่าน **Server Actions** โดยไม่ต้องเขียน API Route ซ้ำซ้อน
+
+### Q2: Static Rendering, Dynamic Rendering, และ ISR แตกต่างกันอย่างไร?
+**แนวทางคำตอบ**:
+- **Static Rendering (SSG)**: เรนเดอร์ HTML ครั้งเดียวล่วงหน้าตั้งแต่ตอน Build รวดเร็วที่สุดและแคชบน CDN ได้ เหมาะกับหน้าที่ข้อมูลคงที่
+- **Dynamic Rendering (SSR)**: ประมวลผลและสร้าง HTML สดใหม่ทุกครั้งที่มี Request เข้ามา เหมาะกับหน้าที่ข้อมูลเฉพาะรายบุคคลหรือมีเรียลไทม์
+- **ISR (Incremental Static Regeneration)**: สร้างหน้าแบบ Static ไว้ก่อน และเมื่อครบกำหนดเวลา (เช่น `revalidate: 60`) ระบบจะดึงข้อมูลใหม่ในพื้นหลังและอัปเดตแคชให้โดยที่ผู้ใช้ไม่ต้องรอ
+
+### Q3: เมื่อไหร่ที่ควรใช้ Server Actions แทน Route Handlers (`app/api/`)?
+**แนวทางคำตอบ**: ควรใช้ Server Actions สำหรับการจัดการข้อมูลภายในเว็บแอปเดียวกัน เช่น การส่งฟอร์ม, การกดปุ่มแก้ไขสถานะ เพราะสามารถทำ Type-safe ร่วมกับ TypeScript และสั่งล้างแคชด้วย `revalidatePath` ได้โดยตรง ส่วน Route Handlers ควรใช้เมื่อต้องการสร้าง Endpoint สาธารณะสำหรับ Third-party, Mobile App หรือรับ Webhook Callbacks
+
+---
+
+## 4. แหล่งอ้างอิงทางการ
+
+- [Next.js App Router Upgrade Guide](https://nextjs.org/docs/app/building-your-application/upgrading)
+- [React 19 Documentation](https://react.dev)

@@ -1,0 +1,128 @@
+---
+title: tsconfig.json
+category: Frontend
+parentTitle: TypeScript
+version: v5.6
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+ไฟล์ `tsconfig.json` เปรียบเสมือน **"กฎบัตรและคู่มือการคุมสอบ (Compiler Rulebook)"** ของ TypeScript Compiler (`tsc`) 
+
+หากไม่มีการตั้งค่าที่รัดกุม TypeScript อาจทำหน้าที่เพียงแค่โปรแกรมช่วยจัดรูปแบบโค้ด แต่เมื่อเปิดโหมดตรวจจับแบบเข้มงวด มันจะกลายเป็นระบบวิเคราะห์ความปลอดภัยระดับสูงที่ช่วยดักจับ Bug ที่ซ่อนอยู่ก่อนส่งโค้ดขึ้น Production
+
+---
+
+## 2. ตัวเลือกสำคัญที่ต้องรู้ (Core Compiler Options)
+
+### 1. `strict: true`
+เปิดใช้งานกฎความปลอดภัยแบบรวมมิตร เช่น:
+- `noImplicitAny`: ห้ามปล่อยให้ตัวแปรมี type เป็น `any` โดยไม่ตั้งใจ
+- `strictNullChecks`: บังคับตรวจเช็ค `null` หรือ `undefined` เสมอก่อนเข้าถึง property
+- `strictFunctionTypes`: ตรวจสอบชนิดข้อมูลของพารามิเตอร์ฟังก์ชันอย่างเคร่งครัด
+
+### 2. `noUncheckedIndexedAccess: true`
+ตัวเลือกที่นักพัฒนา TypeScript ระดับโปรแนะนำมากที่สุด โดยปกติถ้าเราเข้าถึงอาเรย์ เช่น `items[0]` หรือ Record `map["key"]` ตัว TypeScript ปกติจะคิดว่าได้ค่าเสมอ แต่ในความเป็นจริงตำแหน่งนั้นอาจไม่มีอยู่จริง การเปิดออปชันนี้จะทำให้ผลลัพธ์มี type เป็น `T | undefined` เสมอ
+
+### 3. `paths` และ `baseUrl`
+การทำ Path Aliasing เช่น `@/*: ["./src/*"]` เพื่อหลีกเลี่ยงการ import แบบเดินถอยหลังซับซ้อน เช่น `../../../components/Button`
+
+### 4. `target` และ `module` / `moduleResolution`
+- `target`: เวอร์ชั่น JavaScript ปลายทางที่ต้องการคอมไพล์ออกมา เช่น `ES2022` หรือ `ESNext`
+- `moduleResolution: "bundler"`: รูปแบบใหม่ล่าสุดสำหรับ Next.js, Vite หรือ Bun ที่เข้าใจโมดูลสมัยใหม่และการ export แบบ package.json exports
+
+---
+
+## 3. ตัวอย่างการตั้งค่า (Recommended tsconfig.json)
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    /* 1. Target & Environment */
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+
+    /* 2. Strict Type-Checking Rules */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,       // สำคัญมากสำหรับความปลอดภัยของ Array/Record
+    "noImplicitOverride": true,
+    "exactOptionalPropertyTypes": true,
+
+    /* 3. Modules & Bundler */
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+
+    /* 4. Path Aliasing */
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+```
+
+---
+
+## 4. เปรียบเทียบ: ผลลัพธ์ของ `noUncheckedIndexedAccess`
+
+### ❌ เมื่อ `noUncheckedIndexedAccess: false` (ค่าเริ่มต้นทั่วไป)
+
+```typescript
+const userRoleMap: Record<string, string> = {
+  admin: "Super Administrator",
+};
+
+const roleName = userRoleMap["guest"]; // TypeScript คิดว่า roleName เป็น string (ไม่เตือนเลย!)
+console.log(roleName.toUpperCase());   // 💥 Runtime Crash: Cannot read properties of undefined
+```
+
+### ✅ เมื่อ `noUncheckedIndexedAccess: true` (แนะนำอย่างยิ่ง)
+
+```typescript
+const userRoleMap: Record<string, string> = {
+  admin: "Super Administrator",
+};
+
+const roleName = userRoleMap["guest"]; 
+// TypeScript ตรวจพบว่า: type คือ string | undefined
+// Compiler Error: 'roleName' is possibly 'undefined'. (2722)
+
+// บังคับให้เราเขียนโค้ดป้องกัน:
+if (roleName) {
+  console.log(roleName.toUpperCase());
+} else {
+  console.log("ไม่พบสิทธิ์ดังกล่าวในระบบ");
+}
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรเปิด Strict Rules ทุกข้อ
+- เมื่อเริ่มต้นโปรเจกต์ใหม่ทุกประเภท ไม่ว่าจะเป็น Next.js, React หรือ NestJS
+- โปรเจกต์ที่มีทีมขนาดใหญ่ ทำงานร่วมกันหลายคน
+- งานที่มีความสำคัญสูง เช่น ระบบชำระเงิน, สัญญาณเตือนภัย, ตะกร้าสินค้า
+
+### ควรผ่อนปรนบางกฎชั่วคราว
+- โปรเจกต์เก่า (Legacy Codebase) ขนาดใหญ่ที่กำลังทยอย Migrate จาก JavaScript มาเป็น TypeScript
+- การทำ Prototype เร่งด่วนเพื่อทดสอบแนวคิดภายใน 1-2 วัน
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: `skipLibCheck: true` มีประโยชน์อย่างไร และส่งผลต่อความเร็วในการ Build อย่างไร?
+**แนวทางคำตอบ**: `skipLibCheck` สั่งให้ TypeScript Compiler ละเว้นการตรวจเช็ค Type ภายในไฟล์ Type Definition (`*.d.ts`) ทั้งหมดใน `node_modules` โดยจะตรวจเช็คเฉพาะโค้ดที่เราเขียนเองเท่านั้น ประโยชน์สำคัญคือช่วยลดระยะเวลา Compile/Build ลงอย่างมหาศาล และป้องกันปัญหา Build พังจาก Third-party libraries ที่อาจมี Type ประกาศชนกันหรือไม่สมบูรณ์
+
+### Q2: ทำไมจึงควรเปิด `noUncheckedIndexedAccess` ในโปรเจกต์ TypeScript สมัยใหม่?
+**แนวทางคำตอบ**: เพราะใน JavaScript ดั้งเดิม การเข้าถึง Index ของ Array ที่ไม่มีสมาชิกอยู่จริง หรือการเข้าถึง Key ของ Object ที่ไม่มีค่านั้น จะคืนค่าเป็น `undefined` เสมอ แต่ TypeScript แบบดั้งเดิมจะอนุมาน Type ว่ามีค่าอยู่จริงเสมอ การเปิด `noUncheckedIndexedAccess` จะบังคับให้ Type ทุกตัวที่มาจากการ Indexed Access กลายเป็น `T | undefined` ทำให้นักพัฒนาต้องเขียนเงื่อนไขตรวจสอบก่อนใช้งาน ช่วยกำจัดสาเหตุหลักของบั๊กยอดฮิตอย่าง `Cannot read properties of undefined` ได้อย่างสิ้นเชิง

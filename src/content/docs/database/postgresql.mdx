@@ -1,0 +1,1242 @@
+---
+title: PostgreSQL 16
+category: Database
+version: PostgreSQL 16.x
+updatedAt: 2026-10-17
+---
+
+# PostgreSQL 16
+
+(สำหรับฝั่ง Application และการใช้งาน Prisma Client สามารถดูเพิ่มเติมที่กลุ่ม BACKEND: [Prisma ORM](/docs/backend/prisma-orm) โดยเอกสารนี้จะเจาะลึกที่ตัวฐานข้อมูล PostgreSQL 16 สถาปัตยกรรม ชนิดข้อมูล constraints และการทำงานระดับ engine เป็นหลัก)
+
+<Callout type="tip" title="ทำไม PostgreSQL 16 จึงเป็นหัวใจของระบบ Enterprise Data Platform">
+PostgreSQL เป็นระบบจัดการฐานข้อมูลเชิงสัมพันธ์แบบวัตถุ (Object-Relational Database Management System: ORDBMS) ที่ได้รับการยอมรับว่ามีมาตรฐานความถูกต้องของข้อมูล (Data Integrity) สูงที่สุดในโลกโอเพนซอร์ส ในเวอร์ชัน 16 ได้มีการยกเครื่องประสิทธิภาพครั้งใหญ่ ทั้งระบบ Query Parallelism, การประมวลผล Logical Replication จาก Standby Node, การเก็บ Cumulative Statistics ใน Shared Memory, และการปฏิบัติตามมาตรฐาน ANSI SQL เกือบสมบูรณ์แบบ ในคู่มือนี้เราจะใช้แพลตฟอร์ม **Smart Butcher Marketplace** (ร้านค้าเนื้อพรีเมียมและเนื้อดรายเอจออนไลน์) เป็นแกนกลางในการศึกษาโครงสร้างระดับลึก
+</Callout>
+
+| หัวข้อในบทเรียนนี้ | ขอบเขตเนื้อหาสำคัญ | ลิงก์ข้ามไปยังหัวข้อ |
+| :--- | :--- | :--- |
+| **1. Overview & Comparison** | PostgreSQL 16 คืออะไร เทียบกับ MySQL, SQL Server และ MongoDB | [อ่านหัวข้อที่ 1](#1-postgresql-คืออะไรและเปรียบเทียบกับฐานข้อมูลอื่น) |
+| **2. Process & MVCC** | สถาปัตยกรรม Postmaster, Shared Buffers และกลไก MVCC | [อ่านหัวข้อที่ 2](#2-สถาปัตยกรรมพื้นฐานของ-postgresql-process-architecture-และ-mvcc) |
+| **3. Production Data Types** | `text` vs `varchar`, `numeric` สำหรับเงิน, `timestamptz`, `uuid`, `jsonb` | [อ่านหัวข้อที่ 3](#3-ชนิดข้อมูลที่ใช้จริงในงาน-production-data-types) |
+| **4. Constraints & Integrity** | `PRIMARY KEY`, `FOREIGN KEY`, `UNIQUE`, `CHECK` และ `ON DELETE` | [อ่านหัวข้อที่ 4](#4-constraints-และ-data-integrity-การรักษาความถูกต้องของข้อมูล) |
+| **5. Schema & Roles** | การแบ่ง Namespace ด้วย Schema และการกำหนดสิทธิ์ตาม Role | [อ่านหัวข้อที่ 5](#5-schema-และ-role-permissions-security-isolation) |
+| **6. Extensions** | การใช้งาน `pgcrypto`, `pg_trgm` และ `uuid-ossp` ในระบบจริง | [อ่านหัวข้อที่ 6](#6-postgresql-extensions-ที่มักใช้ในงานจริง) |
+| **7. Tools & psql CLI** | การใช้งาน `psql`, DBeaver, pgAdmin และคำสั่งดูแลฐานข้อมูล | [อ่านหัวข้อที่ 7](#7-เครื่องมือบริหารจัดการและคำสั่ง-psql-ที่ใช้บ่อย) |
+
+---
+
+## 1. PostgreSQL คืออะไรและเปรียบเทียบกับฐานข้อมูลอื่น
+
+### แนวคิด (Concept)
+หากเปรียบเทียบระบบฐานข้อมูลกับร้านจำหน่ายเนื้อสเต๊กพรีเมียม **Smart Butcher Marketplace**:
+- **NoSQL (เช่น MongoDB):** เปรียบเหมือน "กล่องเก็บเนื้อแบบตามใจคนส่ง" ใครจะใส่เนื้ออะไร ตัดแต่งแบบไหน มีกระดูกปนหรือไม่ ไม่มีการตรวจสอบเข้มงวด เหมาะกับข้อมูลที่ไม่มีโครงสร้างแน่นอน เช่น บันทึก Log การคลิกดูหน้าเว็บของลูกค้า
+- **Pure RDBMS (เช่น MySQL รุ่นดั้งเดิม):** เปรียบเหมือน "ตู้แช่เนื้อที่มีช่องตารางขนาดมาตรฐานเท่ากันทุกช่อง" เก็บได้เฉพาะข้อมูลตาราง 2 มิติแบบตายตัว
+- **PostgreSQL (ORDBMS):** เปรียบเหมือน "ห้องแล็บควบคุมอุณหภูมิระดับสากล" ที่นอกจากจะมีช่องเก็บตารางมาตรฐาน (Relational) แล้ว ยังรองรับการสร้างชนิดข้อมูลใหม่ (Custom Types), การประมวลผลโครงสร้างเอกสารขั้นสูง (JSONB), การขยายฟังก์ชันด้วยภาษาต่างๆ (Extensibility), การสืบทอดโครงสร้าง (Inheritance), และการรับประกันธุรกรรมแบบ **ACID (Atomicity, Consistency, Isolation, Durability)** ที่ไม่มีวันยอมให้ยอดเงินหรือน้ำหนักเนื้อในระบบคลาดเคลื่อนแม้แต่มิลลิกรัมเดียว
+
+PostgreSQL นิยามตัวเองว่าเป็น **Object-Relational DBMS** เพราะโครงสร้างภายใน (System Catalogs) มองทุกอย่างเป็นวัตถุ (Objects) ตั้งแต่ตาราง, ชนิดข้อมูล (Data Types), ตัวดำเนินการ (Operators), ดัชนี (Index Methods) ไปจนถึงฟังก์ชัน ทำให้ผู้ใช้งานสามารถเพิ่มขีดความสามารถใหม่ๆ เข้าไปในตัว Engine ได้โดยตรง
+
+### หลักการเบื้องหลัง (Under the Hood)
+1. **ANSI SQL Standard Compliance:** PostgreSQL ปฏิบัติตามมาตรฐาน SQL ล่าสุดมากกว่า 170 ฟีเจอร์หลักจาก 179 ฟีเจอร์ของ SQL:2023 ครอบคลุม Window Functions, Common Table Expressions (CTE แบบ Recursive), Lateral Joins, และ Full Outer Joins อย่างเคร่งครัด
+2. **ACID Robustness:** รับประกันว่าข้อมูลที่บันทึกลงตารางจะต้องคงความถูกต้อง 100% ผ่านกลไก Write-Ahead Logging (WAL) ก่อนจะยืนยันการ Commit ไปยังแอปพลิเคชัน
+3. **Cost-Based Optimizer (CBO):** ตัววิเคราะห์และวางแผนสืบค้นข้อมูล (Planner) ที่ประเมินต้นทุน I/O, CPU, และสถิติการกระจายตัวของข้อมูลในตาราง เพื่อเลือกใช้วิธีที่ดีที่สุด เช่น Sequential Scan, Index Scan, Bitmap Index Scan, Hash Join หรือ Merge Join
+4. **Extensibility Framework:** สามารถติดตั้งส่วนขยาย (Extensions) เข้าไปฝังใน Engine เพื่อรองรับเวิร์กโหลดเฉพาะทาง เช่น Trigram matching (`pg_trgm`), การเข้ารหัส (`pgcrypto`), หรือ Vector Embeddings สำหรับ AI (`pgvector`)
+
+#### ตารางเปรียบเทียบเชิงลึก: PostgreSQL 16 vs MySQL 8.4 vs Microsoft SQL Server vs MongoDB
+
+| มิติการเปรียบเทียบ | PostgreSQL 16 | MySQL 8.4 (LTS) | Microsoft SQL Server 2022 | MongoDB 7.0 / 8.0 |
+| :--- | :--- | :--- | :--- | :--- |
+| **ประเภทฐานข้อมูล** | Object-Relational (ORDBMS) | Pure Relational (RDBMS) | Relational + Enterprise Features | Document Store (NoSQL) |
+| **โมเดลการประมวลผล** | Process-based (1 Connection ต่อ 1 Process) | Thread-based (Multi-threaded) | Thread-based / Task Scheduling | Thread-based / Distributed Engine |
+| **กลไก Concurrency** | MVCC เต็มรูปแบบ (Heap Tuple Versioning) | MVCC ผ่าน InnoDB Undo Log Pages | Lock-based (Locking/Blocking) + Optional RCSI | WiredTiger MVCC (Document-level Lock) |
+| **การรองรับเอกสาร JSON** | **JSONB** (Binary Decomposition + GIN Indexing ยอดเยี่ยมที่สุด) | JSON Type (Binary แต่ Indexing และการ Query จำกัดกว่า) | JSON Support (เก็บเป็น NVARCHAR + ฟังก์ชัน Parse) | **Native BSON** (เป็นจุดเด่นหลักของระบบ) |
+| **ความซับซ้อนของ SQL** | สูงมาก (Window Functions, CTEs, GROUPING SETS, LATERAL) | ปานกลางถึงสูง (เพิ่ม CTE และ Window Functions ใน MySQL 8) | สูงมาก (T-SQL, Analytical & Graph Functions) | MQL (Aggregation Pipeline) ไม่มี SQL แท้จริง |
+| **ความสามารถในการขยาย (Extensibility)** | **เป็นเลิศ** (Extensions, Custom Types, Custom Index Access) | ปานกลาง (เน้น Storage Engine Pluggability) | ต่ำ (ขยายผ่าน CLR Integration) | ต่ำ (ไม่เปิดให้แตะ Engine ภายใน) |
+| **สัญญาอนุญาตและค่าใช้จ่าย** | **Open Source 100% (PostgreSQL License)** ฟรีไม่มีข้อจำกัด | Dual License (GPL / Commercial Oracle) | Proprietary (คิด License ราย Core ราคาแพงมาก) | SSPL (Server Side Public License - กึ่งเปิด) |
+| **ความเหมาะสมกับ Smart Butcher** | **เหมาะที่สุด:** รองรับทั้งตารางคำสั่งซื้อที่เคร่งครัดและ Metadata เนื้อสัตว์แบบ JSONB | เหมาะกับ Web Apps ทั่วไป แต่ JSON Query และความซับซ้อนสู้ไม่ได้ | ดีเยี่ยมในองค์กรที่ใช้ Windows/.NET แต่ต้นทุนสูง | ไม่เหมาะกับระบบคิดเงินและตัดสต็อกที่มีความสัมพันธ์ซับซ้อน |
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: การใช้ Object-Relational Feature (Custom Composite Type และ Domain Type)
+ในร้าน Smart Butcher เราต้องการสร้างชนิดข้อมูลเฉพาะสำหรับ "มิติการตัดเนื้อ" (ความหนา, ความกว้าง, น้ำหนักเฉลี่ย) และสร้าง Domain Type เพื่อตรวจสอบความถูกต้องของเบอร์โทรศัพท์ไทยในระดับ Engine:
+
+```sql filename="01_object_relational_types.sql"
+-- 1. สร้าง Custom Domain สำหรับตรวจสอบหมายเลขโทรศัพท์ 10 หลักของไทย
+CREATE DOMAIN thai_phone_number AS VARCHAR(10)
+CHECK (
+    VALUE ~ '^0[689][0-9]{8}$'
+);
+
+-- 2. สร้าง Custom Composite Type สำหรับสเปกการตัดแต่งเนื้อสเต๊ก (Steak Cut Spec)
+CREATE TYPE steak_cut_spec AS (
+    thickness_cm   NUMERIC(4, 1),
+    recommended_doneness VARCHAR(20),
+    bone_in        BOOLEAN
+);
+
+-- 3. ทดสอบการใช้งาน Type ในตารางทดลอง
+CREATE TABLE test_cut_profiles (
+    id SERIAL PRIMARY KEY,
+    butcher_phone thai_phone_number NOT NULL,
+    spec steak_cut_spec NOT NULL
+);
+
+-- บันทึกข้อมูลที่ถูกต้อง
+INSERT INTO test_cut_profiles (butcher_phone, spec)
+VALUES (
+    '0812345678',
+    ROW(3.5, 'MEDIUM_RARE', TRUE)
+);
+
+-- ผลลัพธ์: INSERT 0 1 สำเร็จ ข้อมูลถูกตรวจสอบความถูกต้องตั้งแต่ระดับ Database
+```
+
+#### ตัวอย่างที่ 2: Complex Analytical Window Query สำหรับสรุปยอดขายเนื้อพรีเมียม
+PostgreSQL มีความโดดเด่นอย่างมากในการทำรายงานเชิงลึกโดยไม่ต้องพึ่งพา Application Logic ด้วยการใช้ Window Functions:
+
+```sql filename="02_analytics_query.sql"
+-- แสดงยอดขายสะสม (Running Total) และอันดับยอดขายเนื้อแยกตามหมวดหมู่สินค้า
+SELECT 
+    c.name AS category_name,
+    p.name AS product_name,
+    p.sku,
+    SUM(oi.quantity) AS total_units_sold,
+    SUM(oi.subtotal) AS total_revenue,
+    -- คำนวณอันดับยอดขายภายในหมวดหมู่เดียวกัน
+    DENSE_RANK() OVER (
+        PARTITION BY c.id 
+        ORDER BY SUM(oi.subtotal) DESC
+    ) AS rank_in_category,
+    -- คำนวณยอดขายสะสม (Running Total) ในหมวดหมู่นั้น
+    SUM(SUM(oi.subtotal)) OVER (
+        PARTITION BY c.id 
+        ORDER BY SUM(oi.subtotal) DESC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS running_category_revenue
+FROM categories c
+JOIN products p ON p.category_id = c.id
+JOIN order_items oi ON oi.product_id = p.id
+JOIN orders o ON o.id = oi.order_id
+WHERE o.status = 'COMPLETED'
+GROUP BY c.id, c.name, p.id, p.name, p.sku
+ORDER BY c.name, rank_in_category;
+```
+
+**เปรียบเทียบกับการเรียกใช้ผ่าน Prisma ORM:**
+```typescript filename="src/services/report.service.ts"
+// การทำ Window Function ซับซ้อน Prisma Client ยังไม่รองรับแบบ Fluent API
+// จึงต้องใช้ $queryRawTyped หรือ $queryRaw เพื่อดึงพลังของ PostgreSQL 16 ออกมาตรงๆ:
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
+
+export async function getCategoryRevenueReport() {
+  const report = await prisma.$queryRaw<Array<{
+    category_name: string;
+    product_name: string;
+    sku: string;
+    total_revenue: string;
+    rank_in_category: number;
+  }>>`
+    SELECT 
+      c.name AS category_name,
+      p.name AS product_name,
+      p.sku,
+      SUM(oi.subtotal) AS total_revenue,
+      DENSE_RANK() OVER (
+        PARTITION BY c.id 
+        ORDER BY SUM(oi.subtotal) DESC
+      ) AS rank_in_category
+    FROM categories c
+    JOIN products p ON p.category_id = c.id
+    JOIN order_items oi ON oi.product_id = p.id
+    JOIN orders o ON o.id = oi.order_id
+    WHERE o.status = 'COMPLETED'
+    GROUP BY c.id, c.name, p.id, p.name, p.sku
+  `;
+  return report;
+}
+```
+
+### ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+#### ❌ สิ่งที่ผิด: เลือกใช้ NoSQL กับธุรกรรมที่ต้องการความสมบูรณ์สูงเพียงเพราะไม่อยากเขียน Schema
+```typescript filename="src/postgresql.ts"
+// ใน MongoDB: นักพัฒนาเก็บรายการคำสั่งซื้อและตัดสต็อกแยกสอง collection
+// หากเซิร์ฟเวอร์ดับระหว่างบันทึก order_items กับหัก stock_qty 
+// จะเกิดสถานะ "ของหมดแต่ขายได้" หรือ "หักเงินแล้วแต่สต็อกไม่ตัด" (Inconsistent Data)
+await ordersCollection.insertOne({ userId, totalAmount });
+await productsCollection.updateOne({ _id: prodId }, { $inc: { stockQty: -1 } }); 
+// ไม่มี Foreign Key ป้องกัน หรือไม่มี ACID Transaction ที่รัดกุมระดับ Database Engine
+```
+
+#### ✅ สิ่งที่ถูก: ใช้ PostgreSQL 16 จัดการความสัมพันธ์และธุรกรรมทางการเงิน
+```sql filename="sql/postgresql.sql"
+-- ใช้ Foreign Keys + CHECK Constraints + Transaction Block ใน PostgreSQL
+BEGIN;
+  INSERT INTO orders (id, user_id, order_no, status, total_amount)
+  VALUES ('ord-001', 'usr-100', 'ORD-2026-0001', 'PENDING', 2450.00);
+
+  INSERT INTO order_items (id, order_id, product_id, cut_type, unit_price, quantity, subtotal)
+  VALUES ('itm-001', 'ord-001', 'prd-wgy-01', 'STEAK_CUT_1_INCH', 2450.00, 1, 2450.00);
+
+  UPDATE products 
+  SET stock_qty = stock_qty - 1 
+  WHERE id = 'prd-wgy-01' AND stock_qty >= 1; -- ป้องกัน Race condition
+COMMIT;
+```
+
+### ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ PostgreSQL เมื่อ:**
+  - ระบบต้องการความถูกต้องของข้อมูลระดับ 100% (Financial, E-Commerce, ERP, Inventory)
+  - ต้องทำงานร่วมกันระหว่างข้อมูลเชิงสัมพันธ์ (Tables) และข้อมูลกึ่งมีโครงสร้าง (JSONB)
+  - มีการสืบค้นข้อมูลที่ซับซ้อน เช่น Analytics, Reporting, Geospatial (PostGIS)
+  - ต้องการระบบฐานข้อมูลเกรด Enterprise ที่ไม่มีค่าธรรมเนียมลิขสิทธิ์
+- **ไม่ควรใช้ PostgreSQL เมื่อ:**
+  - งานที่ต้องเขียน Log ปริมาณมหาศาลแบบ Append-Only นับแสนรายการต่อวินาทีโดยไม่แคร์ความสัมพันธ์ (ควรใช้ ClickHouse หรือ Cassandra)
+  - ข้อมูลเป็น Simple Key-Value ที่เน้นความเร็วระดับ Sub-millisecond ในหน่วยความจำ (ควรใช้ Redis)
+
+### คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: เหตุใด PostgreSQL จึงถูกจัดหมวดหมู่เป็น Object-Relational Database (ORDBMS) แตกต่างจาก RDBMS ทั่วไปอย่างไร?**
+  - *แนวคำตอบ:* PostgreSQL ได้รับการออกแบบสถาปัตยกรรมมาจากโครงการ POSTGRES ของ UC Berkeley โดยวางให้แค็ตตาล็อกระบบเก็บ Data Types, Operators, Index Methods, และ Functions เป็น Class/Object ในระดับเดียวกับตาราง ทำให้ผู้ใช้งานสามารถประกาศ Custom Types, Operator Overloading, Table Inheritance และเขียน Procedural Language (PL/pgSQL, PL/Python) ฝังใน Engine ได้ ซึ่ง RDBMS ดั้งเดิมอย่าง MySQL ไม่สามารถทำได้
+- **Q2: ในสถานการณ์ที่มี Write Concurrency สูงมาก อะไรคือข้อแตกต่างสำคัญระหว่าง MVCC ของ PostgreSQL และ MySQL InnoDB?**
+  - *แนวคำตอบ:* MySQL InnoDB ใช้แนวคิด Undo Log Segment โดยเมื่อเกิดการ UPDATE ข้อมูลใหม่จะถูกเขียนทับลงที่เดิม (In-place update) และข้อมูลเก่าจะถูกย้ายไปเก็บไว้ใน Undo Log หากต้องการ Rollback หรือ Snapshot เก่าระบบจะตามไปอ่านที่ Undo Log ในทางกลับกัน PostgreSQL ใช้ Heap Tuple Versioning โดยการ UPDATE คือการสร้าง Tuple แถวใหม่ลงในตารางโดยตรง และแท็ก xmin/xmax ทำให้ Postgres เขียนได้รวดเร็วและไม่ต้องจัดการพื้นที่ Undo Log แต่จะมีภาระในการทำ VACUUM เพื่อกวาด Dead Tuples ในภายหลัง
+
+---
+
+## 2. สถาปัตยกรรมพื้นฐานของ PostgreSQL (Process Architecture และ MVCC)
+
+### แนวคิด (Concept)
+ลองจินตนาการถึงโรงงานตัดแต่งเนื้อสเต๊กพรีเมียม **Smart Butcher Central Processing Plant**:
+- **Client-Server Model:** ผู้จัดการร้านสาขา (Client / Backend Node.js) ส่งคำสั่งขอเบิกเนื้อเข้ามายังสำนักงานใหญ่
+- **Postmaster (ผู้จัดการใหญ่):** นั่งเฝ้าประตู (Port 5432) เมื่อมีสายโทรเข้ามาขอเชื่อมต่อ จะไม่ลงมือสับเนื้อเอง แต่จะ "เรียกลูกน้องประจำตัวคนใหม่" (Fork a dedicated Backend Process) มารับสายลูกค้ารายนั้นเป็นการเฉพาะ
+- **Crash Isolation:** หากลูกน้องคนหนึ่งเกิดอุบัติเหตุทำมีดหล่น (Backend Process แครช) คนอื่นๆ ยังคงแล่เนื้อต่อไปได้โดยไม่ทำให้โรงงานต้องปิดตัวลง
+- **MVCC (Multi-Version Concurrency Control):** ในขณะที่ช่างแล่เนื้อกำลังแต่งก้อนเนื้อสันนอกชิ้นใหม่ (Writer กำลัง UPDATE ข้อมูล) ลูกค้าที่เดินเข้ามาส่องตู้กระจก (Reader) จะมองเห็นก้อนเนื้อเวอร์ชันเดิมที่ตัดเสร็จเรียบร้อยแล้วทันที โดยไม่ต้องยืนรอให้ช่างแล่เนื้อเสร็จ และในขณะเดียวกันช่างก็ไม่ต้องหยุดรอให้ลูกค้ามองเสร็จ นี่คือเหตุผลที่ **Reader ไม่บล็อก Writer และ Writer ไม่บล็อก Reader**
+
+### หลักการเบื้องหลัง (Under the Hood)
+
+```text filename="docs/database/postgresql.txt"
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       POSTGRESQL INSTANCE ARCHITECTURE                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  [ Client: NestJS App ] ───( TCP Connection )───┐                          │
+│                                                 ▼                           │
+│                                        ┌─────────────────┐                  │
+│                                        │    Postmaster   │                  │
+│                                        │ (Master Process)│                  │
+│                                        └────────┬────────┘                  │
+│                                                 │ fork()                    │
+│                        ┌────────────────────────┴───────────────────────┐   │
+│                        ▼                                                ▼   │
+│             ┌──────────────────────┐                         ┌──────────────────────┐
+│             │    Backend Process   │                         │    Backend Process   │
+│             │  (Connection #1)     │                         │  (Connection #2)     │
+│             │ ┌──────────────────┐ │                         │ ┌──────────────────┐ │
+│             │ │ work_mem         │ │                         │ │ work_mem         │ │
+│             │ │ maintenance_w_mem│ │                         │ │ maintenance_w_mem│ │
+│             │ └──────────────────┘ │                         │ └──────────────────┘ │
+│             └──────────┬───────────┘                         └──────────┬───────────┘
+│                        │                                                │   │
+│ ═══════════════════════╪════════════════════════════════════════════════╪═══│
+│   SHARED MEMORY        │                                                │   │
+│   ┌────────────────────┴────────────────────────────────────────────────┴─┐ │
+│   │                         shared_buffers                                │ │
+│   │        (Data Pages Cache: 8KB per Page, LRU Clock Sweep)              │ │
+│   ├───────────────────────────────────────────────────────────────────────┤ │
+│   │                         WAL Buffers (Write-Ahead Log)                 │ │
+│   ├───────────────────────────────────────────────────────────────────────┤ │
+│   │                         Lock Management & Shared Catalog Cache        │ │
+│   └──────┬─────────────────────┬──────────────────────┬───────────────────┘ │
+│          │                     │                      │                     │
+│ ═════════╪═════════════════════╪══════════════════════╪═════════════════════│
+│   AUXILIARY BACKGROUND PROCESSES                      │                     │
+│   ┌──────▼──────┐       ┌──────▼──────┐        ┌──────▼──────┐              │
+│   │ WAL Writer  │       │ Checkpointer│        │ Autovacuum  │              │
+│   │             │       │             │        │   Daemon    │              │
+│   └──────┬──────┘       └──────┬──────┘        └──────┬──────┘              │
+│          │ fsync()             │ flush dirty          │ clean dead          │
+│          ▼                     ▼ pages                ▼ tuples              │
+│   ┌─────────────┐       ┌─────────────┐        ┌─────────────┐              │
+│   │  WAL Files  │       │  Data Files │        │ Cumulative  │              │
+│   │  (pg_wal)   │       │ (base/oid)  │        │ Stats (RAM) │              │
+│   └─────────────┘       └─────────────┘        └─────────────┘              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 1. สถาปัตยกรรมหน่วยความจำ (Memory Architecture)
+- **Shared Memory:**
+  - `shared_buffers`: หน่วยความจำหลักที่ใช้พัก Data Pages ขนาด 8KB จากดิสก์ ค่ามาตรฐานใน Production มักตั้งอยู่ที่ 25% ของ RAM ทั้งหมดของเครื่อง
+  - `wal_buffers`: พักข้อมูล Transaction Log ก่อนจะสั่ง `fsync()` ลงใน `pg_wal`
+  - Lock Space: จัดการล็อกในระดับ Table, Row, Page
+- **Process Private Memory (Local Memory ต่อ 1 Backend):**
+  - `work_mem`: หน่วยความจำสำหรับการเรียงลำดับ (`ORDER BY`), สร้างตาราง Hash (`DISTINCT`, Hash Join), หากข้อมูลเกินขนาดนี้ Postgres จะ spill ข้อมูลลง Disk (Temp Files) ซึ่งทำให้ระบบช้าลงมาก
+  - `maintenance_work_mem`: หน่วยความจำสำหรับคำสั่งบำรุงรักษา เช่น `VACUUM`, `CREATE INDEX`, `ALTER TABLE`
+  - `temp_buffers`: จัดเก็บตารางชั่วคราว (Temporary Tables)
+
+#### 2. กลไก Background Processes
+- **WAL Writer:** ทำหน้าที่ Flush ข้อมูลจาก `wal_buffers` ลงดิสก์ เพื่อให้มั่นใจในหลักการ Durability
+- **Checkpointer:** รันตามรอบเวลา (`checkpoint_timeout`) หรือปริมาณ WAL (`max_wal_size`) เพื่อดัน Data Pages ที่ถูกแก้ไข (Dirty Pages) จาก `shared_buffers` ลง Data Files เพื่อลดระยะเวลาในการ Recovery หากเครื่องดับ
+- **Autovacuum Daemon:** มอนิเตอร์จำนวนแถวที่ถูก UPDATE หรือ DELETE และทำการ Reclaim พื้นที่ของ Dead Tuples คืนกลับมา รวมถึงสั่งรัน `ANALYZE` เพื่ออัปเดตสถิติให้ Cost-Based Optimizer ทำงานได้อย่างแม่นยำ
+
+#### 3. กลไก MVCC และ Tuple Versioning (xmin / xmax)
+ทุกๆ แถว (Tuple) ใน PostgreSQL จะมีคอลัมน์พิเศษระดับระบบ (System Hidden Columns) แฝงอยู่เสมอ:
+- `xmin`: หมายเลข Transaction ID (XID) ของธุรกรรมที่ทำการ INSERT แถวนี้เข้ามา
+- `xmax`: หมายเลข Transaction ID ของธุรกรรมที่ทำการ DELETE หรือ UPDATE แถวนี้ออกไป (หากแถวยังมีสถานะใช้งานอยู่ `xmax` จะมีค่าเป็น 0)
+- `ctid`: ตำแหน่งทางกายภาพของ Tuple บนดิสก์ ในรูปแบบ `(page_number, tuple_index)`
+
+เมื่อมีการสั่ง `UPDATE products SET stock_qty = 15 WHERE id = 1`:
+1. Postgres จะ **ไม่ลบหรือเขียนทับ** ข้อมูลเดิม
+2. ใส่ค่า Transaction ID ปัจจุบันลงใน `xmax` ของ Tuple เดิม (กลายเป็น Dead Tuple สำหรับ Transaction ในอนาคต)
+3. สั่ง INSERT Tuple ใหม่ลงในพื้นที่ว่าง โดยใส่ค่า Transaction ID ปัจจุบันลงใน `xmin` ของ Tuple ใหม่ และให้ `xmax` เป็น 0
+4. อัปเดต `ctid` ของ Tuple เดิมให้ชี้ไปยังตำแหน่งของ Tuple ใหม่
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: ตรวจสอบ xmin, xmax และ ctid เพื่อพิสูจน์การทำงานของ MVCC
+เราจะมาส่องดูการทำงานระดับ Low-Level ของตาราง `products` เมื่อมีการอัปเดตสต็อกเนื้อริบอายวากิว:
+
+```sql filename="03_mvcc_deep_dive.sql"
+-- 1. สร้างตารางและบันทึกข้อมูลตั้งต้น
+CREATE TABLE products (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    sku TEXT UNIQUE NOT NULL,
+    price_per_kg NUMERIC(10,2) NOT NULL,
+    stock_qty INT NOT NULL,
+    dry_aged_days INT DEFAULT 0
+);
+
+INSERT INTO products (name, sku, price_per_kg, stock_qty, dry_aged_days)
+VALUES ('Japanese Wagyu A5 Ribeye', 'WAGYU-A5-RIB', 4500.00, 20, 0);
+
+-- 2. ส่องดูคอลัมน์ระบบ xmin, xmax, ctid
+SELECT xmin, xmax, ctid, id, name, stock_qty 
+FROM products 
+WHERE sku = 'WAGYU-A5-RIB';
+
+/* ผลลัพธ์ตัวอย่าง:
+  xmin   | xmax | ctid  | id |           name           | stock_qty 
+---------+------+-------+----+--------------------------+-----------
+ 1005234 |    0 | (0,1) |  1 | Japanese Wagyu A5 Ribeye |        20
+*/
+
+-- 3. ทำการ UPDATE สต็อกเนื้อเมื่อมีออเดอร์ตัดเนื้อออกไป 2 กก.
+UPDATE products 
+SET stock_qty = 18 
+WHERE sku = 'WAGYU-A5-RIB';
+
+-- 4. ส่องดู xmin, xmax, ctid อีกครั้ง
+SELECT xmin, xmax, ctid, id, name, stock_qty 
+FROM products 
+WHERE sku = 'WAGYU-A5-RIB';
+
+/* ผลลัพธ์หลัง UPDATE:
+  xmin   | xmax | ctid  | id |           name           | stock_qty 
+---------+------+-------+----+--------------------------+-----------
+ 1005235 |    0 | (0,2) |  1 | Japanese Wagyu A5 Ribeye |        18
+ 
+ สังเกตเห็นได้ชัดเจน:
+ - xmin เปลี่ยนเป็น Transaction ID ใหม่ (1005235)
+ - ctid ขยับจาก Page 0 Item 1 (0,1) กลายเป็น Page 0 Item 2 (0,2)
+ - ข้อมูลเก่าที่ (0,1) ยังคงค้างอยู่ใน Disk File กลายเป็น Dead Tuple รอ Autovacuum มาเก็บกวาด!
+*/
+```
+
+#### ตัวอย่างที่ 2: การตรวจสอบสถานะ Dead Tuples และสั่งคำสั่ง VACUUM
+ตรวจสอบว่าตารางในระบบ Smart Butcher มี Dead Tuples สะสมมากเกินไปหรือไม่:
+
+```sql filename="04_vacuum_monitoring.sql"
+-- 1. ตรวจสอบจำนวน Live Tuples และ Dead Tuples ในระบบ
+SELECT 
+    relname AS table_name,
+    n_live_tup AS active_rows,
+    n_dead_tup AS dead_tuples,
+    last_vacuum,
+    last_autovacuum,
+    last_analyze
+FROM pg_stat_user_tables
+WHERE relname IN ('products', 'orders', 'order_items');
+
+-- 2. สั่งรัน VACUUM แบบเจาะจงพร้อมเก็บสถิติ (ANALYZE)
+-- หมายเหตุ: VACUUM ธรรมดาทำงานแบบ Online โดยไม่บล็อกการ SELECT, INSERT, UPDATE
+VACUUM (VERBOSE, ANALYZE) products;
+
+-- 3. กรณีที่ต้องการคืนพื้นที่ระดับ OS Disk (ล็อกตาราง Exclusive Lock - ใช้เฉพาะช่วง Maintenance)
+-- VACUUM FULL products; 
+```
+
+### ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+#### ❌ สิ่งที่ผิด: ตั้งค่า `work_mem` ใน `postgresql.conf` สูงเกินไปจนเกิด Out Of Memory (OOM)
+```ini filename="docs/database/postgresql.txt"
+# การตั้งค่าที่ผิดพลาดร้ายแรงในระดับ Global
+# เซิร์ฟเวอร์มี RAM 32GB แต่ตั้ง work_mem = 2GB
+# หากมี 50 Concurrent Queries รันคำสั่ง Sort หรือ Hash Join พร้อมกัน
+# 50 * 2GB = 100GB -> Linux Kernel OOM Killer จะเข้ามายิง Process postgres ดับทันที!
+work_mem = 2GB
+```
+
+#### ✅ สิ่งที่ถูก: ตั้ง `work_mem` ระดับ Global ต่ำๆ แล้วเปิดเพิ่มเฉพาะ Session ที่ต้องรัน Report
+```sql filename="sql/postgresql.sql"
+-- ในไฟล์คอนฟิกหลัก postgresql.conf ตั้งค่าพอเหมาะสำหรับเวิร์กโหลดทั่วไป
+-- work_mem = 32MB
+
+-- เมื่อมีคิวรีสรุปยอดขายประจำปีของร้านเนื้อที่ต้อง Sort ข้อมูลหลายล้านแถว:
+BEGIN;
+  -- เพิ่ม work_mem เฉพาะทรานแซกชันหรือเซสชันนี้เท่านั้น ไม่กระทบผู้ใช้อื่น
+  SET LOCAL work_mem = '512MB';
+
+  SELECT product_id, SUM(subtotal)
+  FROM order_items
+  GROUP BY product_id
+  ORDER BY SUM(subtotal) DESC;
+COMMIT;
+```
+
+### ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **Process Architecture:** เนื่องจาก 1 Connection กินทรัพยากรประมาณ 5-10MB ของ RAM หากระบบมี Backend Instances หลายตัวต่อเข้ามาตรงๆ พร้อมกันเกิน 300-500 Connections ระบบจะเริ่มสูญเสียประสิทธิภาพจากการทำ Context Switching ของ OS
+- **ทางออกที่ถูกต้อง:** **ต้องใช้ Connection Pooler เสมอ** ในงานระดับ Production เช่น **PgBouncer** หรือ **Supavisor** โดยตั้งค่าให้แอปพลิเคชันเชื่อมต่อไปยัง Pooler ในโหมด `Transaction Pooling` เพื่อจำกัด Connection จริงที่เข้าสู่ PostgreSQL ให้ไม่เกิน 50-100 Connections
+
+### คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: อะไรคือสาเหตุของปัญหา Table Bloat ใน PostgreSQL และเหตุใด Long-running Transaction จึงส่งผลร้ายแรงต่อระบบ?**
+  - *แนวคำตอบ:* Table Bloat เกิดจากการสะสมของ Dead Tuples ที่เกิดจากการ UPDATE หรือ DELETE แต่ Autovacuum ไม่สามารถเข้ามา Reclaim พื้นที่คืนได้ สาเหตุที่พบบ่อยและร้ายแรงที่สุดคือการมี **Long-running Transaction** (เช่น มี Batch Job ค้างอยู่นานหลายชั่วโมง) เพราะกลไก MVCC กำหนดว่า Autovacuum ห้ามลบ Dead Tuple ใดๆ ที่ Transaction เก่าตัวนั้นอาจจะต้องมองเห็น ส่งผลให้ Dead Tuples จากคำสั่งอื่นทั่วทั้งตารางไม่สามารถถูกลบออกได้ ขนาดตารางจะบวมขึ้นเรื่อยๆ เปลืองแคช I/O และทำให้ Query ช้าลงอย่างมหาศาล
+- **Q2: ใน PostgreSQL 16 มีการปรับปรุงกลไก Cumulative Statistics อย่างไรที่ช่วยลดภาระ Disk I/O?**
+  - *แนวคำตอบ:* ก่อนหน้า PostgreSQL 15 สถิติการทำงานของระบบ (Activity Stats) จะถูกส่งผ่าน UDP Socket ไปยังกระบวนการ Stats Collector Process ซึ่งจะคอยเขียนไฟล์สถิติลง Disk อย่างต่อเนื่อง แต่ใน PostgreSQL 16 ระบบ Cumulative Statistics ถูกเปลี่ยนมาจัดเก็บไว้ใน **Shared Memory (RAM)** โดยตรง ทำให้ตัดกระบวนการ Stats Collector ทิ้งไปได้อย่างสมบูรณ์ ลดภาระ Disk I/O และลดการทำงานที่ไม่จำเป็นของ CPU ได้อย่างมีนัยสำคัญ
+
+---
+
+## 3. ชนิดข้อมูลที่ใช้จริงในงาน Production (Data Types)
+
+### แนวคิด (Concept)
+การเลือกชนิดข้อมูลในฐานข้อมูล เปรียบเสมือนการเลือก "บรรจุภัณฑ์สำหรับเนื้อสัตว์" ในร้าน **Smart Butcher Marketplace**:
+- หากนำเนื้อสันในชั้นยอดไปใส่ในถุงพลาสติกบางๆ (เช่น นำตัวเลขเงินไปเก็บใน `FLOAT`) คุณภาพของเนื้อจะเน่าเสียเพราะความชื้นซึมผ่าน (เกิดความคลาดเคลื่อนทางทศนิยม เงินหาย)
+- หากนำเนื้อบด 100 กรัม ไปใส่ในกล่องโฟมแช่แข็งขนาดใหญ่ (เช่น นำค่า Flag สถานะไปเก็บใน `VARCHAR(255)`) จะเปลืองเนื้อที่จัดเก็บในตู้เย็นโดยเปล่าประโยชน์
+- การเลือก Data Type ที่แม่นยำและพอดี ไม่เพียงแต่ช่วยประหยัดพื้นที่จัดเก็บ แต่ยังช่วยให้ CPU สามารถประมวลผล เปรียบเทียบ และสร้าง B-Tree Index ได้ด้วยประสิทธิภาพสูงสุด
+
+### หลักการเบื้องหลัง (Under the Hood)
+
+#### 1. `text` vs `varchar(n)` vs `char(n)`
+- ในระบบฐานข้อมูลอื่นๆ เช่น Oracle หรือ MySQL โบราณ `VARCHAR(n)` อาจมีการจองพื้นที่ต่างจาก `TEXT`
+- แต่ใน **PostgreSQL:** ทั้ง `TEXT` และ `VARCHAR(n)` ใช้โครงสร้างภายในแบบเดียวกันทุกประการ เรียกว่า **`varlena` (Variable-length Array)** ซึ่งมี Header ขนาด 1 ถึง 4 ไบต์สำหรับระบุความยาวข้อมูล
+- **Performance:** `TEXT` มีความเร็วในการสืบค้นและเขียน **เท่ากับ `VARCHAR(n)` 100%**!
+- ข้อแตกต่างเพียงอย่างเดียวคือ `VARCHAR(n)` จะเพิ่ม Overhead ให้ CPU ต้องคอยเช็กความยาวตัวอักษรทุกครั้งที่มีการบันทึก
+- **คำแนะนำ:** ใช้ `TEXT` เป็นค่าเริ่มต้นสำหรับข้อความทั่วไป และใช้ `CHECK (length(...) <= N)` หากต้องการจำกัดความยาว หรือใช้ `VARCHAR(n)` เฉพาะเมื่อต้องการให้สอดคล้องกับมาตรฐานทางธุรกิจ เช่น รหัส SKU
+
+#### 2. `numeric` (หรือ `decimal`) vs `float` (หรือ `double precision`)
+- `FLOAT` และ `DOUBLE PRECISION` ใช้มาตรฐาน **IEEE 754 Floating-Point** ซึ่งเก็บตัวเลขแบบประมาณค่าฐาน 2 ไม่สามารถแทนค่าเศษส่วนฐาน 10 บางค่าได้ตรงเป๊ะ (เช่น `0.1 + 0.2 = 0.30000000000000004`)
+- `NUMERIC(precision, scale)` เก็บตัวเลขแบบ Exact Arbitrary Precision เป็นเลขฐานสิบแท้จริง แม้จะกินพื้นที่และใช้ CPU ในการคำนวณมากกว่าเล็กน้อย แต่ **ห้ามใช้ FLOAT กับตัวเลขเงิน (`total_amount`), ราคาสินค้า (`unit_price`), และน้ำหนักเนื้อสัตว์เด็ดขาด**
+
+#### 3. `timestamptz` vs `timestamp`
+- `timestamp with time zone` (`timestamptz`): **ต้องใช้ตัวนี้เสมอใน Production!** PostgreSQL จะแปลงเวลาที่ได้รับจาก Client ไม่ว่าจะมาจาก Timezone ใด ให้กลายเป็น **UTC (Universal Time Coordinated)** เพื่อบันทึกลงดิสก์ขนาด 8 ไบต์ และเมื่อส่งกลับให้ Client จะแปลงเป็น Timezone ของ Client ให้อัตโนมัติ
+- `timestamp without time zone` (`timestamp`): ไม่สนใจ Timezone เลย หากเซิร์ฟเวอร์รันที่กรุงเทพฯ (+07:00) แล้วย้ายไปรันบน Cloud ที่ไอร์แลนด์ (UTC) ข้อมูลเวลาจะเพี้ยนทันที 7 ชั่วโมง
+
+#### 4. `UUID` (Universally Unique Identifier) v4 vs v7
+- `UUID v4`: สุ่มแบบสมบูรณ์ 128 บิต ส่งผลให้เมื่อทำ Index บน B-Tree จะเกิดปัญหา **Index Fragmentation (B-Tree Leaf Node Splits)** เพราะค่าไม่ได้เรียงตามเวลา ทำให้แคช `shared_buffers` ถูกดันออกตลอดเวลา
+- `UUID v7` ( Time-Ordered UUID): นำ Timestamp ไว้ส่วนหน้า และค่าสุ่มไว้ส่วนหลัง ทำให้ข้อมูลเรียงตามลำดับเวลา ช่วยแก้ปัญหา B-Tree Fragmentation ได้อย่างสมบูรณ์แบบ
+
+#### 5. `JSONB` vs `JSON`
+- `JSON`: เก็บข้อความ String แบบดั้งเดิม ตรวจสอบเพียงว่าเป็น JSON ที่ถูกต้องหรือไม่ ทุกครั้งที่ Query ต้องแปลง (Parse) ใหม่ทั้งหมด ไม่รองรับการทำ Index ภายใน
+- `JSONB` (Binary JSON): ทำการแยกโครงสร้าง (Decomposition) ข้อมูลเป็น Binary Tree ตั้งแต่ขั้นตอนบันทึก แม้จะใช้เวลาเขียนช้ากว่าเล็กน้อย แต่ความเร็วในการ Query และ Filter ฟิลด์ข้างในไวกว่าหลายสิบเท่า และรองรับการทำ **GIN Index (Generalized Inverted Index)**
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: การออกแบบ DDL ตารางในระบบ Smart Butcher ด้วย Data Types ที่ถูกต้อง
+ไฟล์นี้สร้างโครงสร้างตารางหลักของร้านขายเนื้อ ด้วย Data Types เกรด Production:
+
+```sql filename="05_production_schema.sql"
+-- สร้าง Extension สำหรับการสร้าง UUID และ Trigram Search
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- 1. ตาราง categories (หมวดหมู่เนื้อ เช่น วากิว, แองกัส, ดรายเอจ)
+CREATE TABLE categories (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 2. ตาราง users (ผู้ใช้งานระบบ)
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    full_name TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('CUSTOMER', 'BUTCHER', 'ADMIN')),
+    phone TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3. ตาราง products (สินค้าเนื้อพรีเมียม)
+CREATE TABLE products (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    category_id UUID NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+    name TEXT NOT NULL,
+    sku VARCHAR(30) NOT NULL UNIQUE,
+    price_per_kg NUMERIC(10, 2) NOT NULL CHECK (price_per_kg > 0),
+    stock_qty INT NOT NULL CHECK (stock_qty >= 0),
+    dry_aged_days INT NOT NULL DEFAULT 0 CHECK (dry_aged_days >= 0),
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    -- เก็บสเปกเฉพาะ เช่น ค่า Marble Score, สายพันธุ์, แหล่งที่มา เป็น JSONB
+    specifications JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- เก็บแท็กประเภทการตัดแต่งเนื้อที่รองรับเป็น Array
+    available_cuts TEXT[] NOT NULL DEFAULT ARRAY['STEAK', 'ROAST'],
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 4. ตาราง orders (คำสั่งซื้อเนื้อ)
+CREATE TABLE orders (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    order_no VARCHAR(32) NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status IN ('PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'COMPLETED', 'CANCELLED')),
+    total_amount NUMERIC(12, 2) NOT NULL CHECK (total_amount >= 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 5. ตาราง order_items (รายการเนื้อในแต่ละออเดอร์)
+CREATE TABLE order_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    product_id UUID NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
+    cut_type TEXT NOT NULL,
+    unit_price NUMERIC(10, 2) NOT NULL CHECK (unit_price > 0),
+    quantity INT NOT NULL CHECK (quantity > 0),
+    subtotal NUMERIC(12, 2) NOT NULL CHECK (subtotal > 0)
+);
+
+-- 6. ตาราง payments (การชำระเงิน)
+CREATE TABLE payments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id UUID NOT NULL REFERENCES orders(id) ON DELETE RESTRICT,
+    amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
+    method TEXT NOT NULL CHECK (method IN ('PROMPTPAY', 'CREDIT_CARD', 'BANK_TRANSFER')),
+    slip_url TEXT,
+    status TEXT NOT NULL CHECK (status IN ('PENDING', 'VERIFIED', 'REJECTED')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+#### ตัวอย่างที่ 2: การ Query ใช้งาน JSONB และ Array ในงานจริง
+ตัวอย่างการดึงข้อมูลสเปกเนื้อวากิวที่มี Marble Score (BMS) ตั้งแต่ 8 ขึ้นไป และตัดแบบ Ribeye ได้:
+
+```sql filename="06_jsonb_and_array_queries.sql"
+-- 1. เพิ่มข้อมูลตัวอย่างสินค้าเนื้อวากิวพร้อม JSONB specifications
+INSERT INTO categories (id, name, slug) 
+VALUES ('c1111111-1111-1111-1111-111111111111', 'Japanese Wagyu', 'japanese-wagyu');
+
+INSERT INTO products (
+    category_id, name, sku, price_per_kg, stock_qty, dry_aged_days, 
+    specifications, available_cuts
+) VALUES (
+    'c1111111-1111-1111-1111-111111111111',
+    'Miyazaki Wagyu A5 Striploin',
+    'WGY-MIYA-A5-STRIP',
+    5200.00,
+    15,
+    0,
+    '{"origin": "Miyazaki, Japan", "bms_score": 9, "feed_type": "Grain-fed 600 days", "halal": true}'::jsonb,
+    ARRAY['STEAK_1_INCH', 'STEAK_2_INCH', 'YAKINIKU', 'SHABU']
+);
+
+-- 2. Query ด้วย JSONB Containment Operator (@>)
+-- ค้นหาเนื้อที่ระบุว่าเป็น halal = true ใน JSONB
+SELECT name, price_per_kg, specifications->>'origin' AS origin
+FROM products
+WHERE specifications @> '{"halal": true}';
+
+-- 3. Query เจาะจงค่าตัวเลขใน JSONB โดยแปลงเป็น Integer
+-- ค้นหาเนื้อที่มี BMS Score >= 8
+SELECT name, sku, (specifications->>'bms_score')::int AS bms
+FROM products
+WHERE (specifications->>'bms_score')::int >= 8;
+
+-- 4. Query ค้นหาสินค้าที่มีรูปแบบการตัดแต่ง 'YAKINIKU' ในคอลัมน์ Array
+SELECT name, available_cuts
+FROM products
+WHERE 'YAKINIKU' = ANY(available_cuts);
+```
+
+**ตัวอย่างผลลัพธ์ของ Query (Expected Output):**
+```text filename="docs/database/postgresql.txt"
+            name             | price_per_kg |      origin      
+-----------------------------+--------------+------------------
+ Miyazaki Wagyu A5 Striploin |      5200.00 | Miyazaki, Japan
+(1 row)
+```
+
+### ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+#### ❌ สิ่งที่ผิด: ใช้ `FLOAT` เก็บเงิน และใช้ `TIMESTAMP WITHOUT TIME ZONE`
+```sql filename="sql/postgresql.sql"
+-- เสี่ยงต่อการเกิดข้อผิดพลาดร้ายแรง
+CREATE TABLE bad_orders (
+    id SERIAL PRIMARY KEY,
+    total_amount DOUBLE PRECISION, -- อันตราย! 100.10 + 200.20 อาจกลายเป็น 300.29999999999995
+    created_at TIMESTAMP          -- อันตราย! ไม่มี Timezone เมื่อ Server ย้าย Location เวลาจะเพี้ยนทันที
+);
+```
+
+#### ✅ สิ่งที่ถูก: ใช้ `NUMERIC(12,2)` สำหรับเงิน และ `TIMESTAMPTZ` เสมอ
+```sql filename="sql/postgresql.sql"
+-- ถูกต้อง แม่นยำตามมาตรฐานสากล
+CREATE TABLE good_orders (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    total_amount NUMERIC(12, 2) NOT NULL, -- แม่นยำแน่นอน 100%
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP -- เก็บเป็น UTC สากล
+);
+```
+
+### ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **`JSONB`:** ควรใช้เมื่อต้องการเก็บ Metadata ที่มีโครงสร้างยืดหยุ่นสูงและแต่ละสินค้ามีฟิลด์ไม่เหมือนกัน (เช่น เนื้อวากิวมี `bms_score`, แต่เนื้อดรายเอจมี `aging_room_humidity`) แต่ **ห้ามนำฟิลด์ที่เป็นแกนหลักของธุรกิจ เช่น ราคา, สต็อก, สถานะคำสั่งซื้อ ไปซ่อนไว้ใน JSONB** เพราะจะเสียความสามารถในการทำ Foreign Key และ Integrity Constraint
+- **`TEXT`:** ควรใช้แทน `VARCHAR(255)` ใน 95% ของตารางใน PostgreSQL เพราะไม่มีข้อเสียเรื่องความเร็ว และไม่ต้องคอยกังวลเรื่องการขยายขนาดฟิลด์ในอนาคต
+
+### คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: เหตุใดใน PostgreSQL จึงควรเลือกใช้ `TIMESTAMPTZ` แทน `TIMESTAMP` เสมอ แม้ว่าระบบจะให้บริการเฉพาะลูกค้าภายในประเทศไทย (+07:00) เท่านั้น?**
+  - *แนวคำตอบ:* แม้ผู้ใช้จะอยู่ใน Timezone เดียวกัน แต่ระบบคลาวด์ในปัจจุบัน (AWS RDS, GCP Cloud SQL, Docker Containers) ถูกตั้งค่าระบบปฏิบัติการเป็น UTC โดยค่าเริ่มต้น หากใช้ `TIMESTAMP` (Without Time Zone) ตัว Engine จะไม่เก็บออฟเซ็ตเวลา เมื่อแอปพลิเคชันส่งเวลาแบบ ISO 8601 (`2026-10-17T10:00:00+07:00`) เข้ามา Postgres จะตัด `+07:00` ทิ้งไปดื้อๆ ทำให้เวลาถูกบันทึกเป็น 10:00 UTC ซึ่งคลาดเคลื่อนจากความเป็นจริงไป 7 ชั่วโมง การใช้ `TIMESTAMPTZ` จะทำให้ Engine แปลงค่าทั้งหมดเป็น UTC จริง และแปลงกลับเป็น Local Timezone ของ Client ได้อย่างถูกต้องเสมอ
+- **Q2: การใช้ `ENUM` ที่สร้างด้วยคำสั่ง `CREATE TYPE ... AS ENUM` มีข้อเสียอะไรเมื่อเทียบกับการใช้ `TEXT` ร่วมกับ `CHECK constraint` ในระบบที่มีการ Deploy บ่อยครั้ง?**
+  - *แนวคำตอบ:* ข้อเสียหลักของ PostgreSQL Enum คือ: (1) การลบหรือเปลี่ยนชื่อค่า Enum ทำได้ยากมากในระดับ DDL ต้องรัน migration ที่ซับซ้อน, (2) ก่อน PostgreSQL เวอร์ชันใหม่ การเพิ่มค่า Enum เข้าไปใหม่ภายใน Transaction Block ไม่สามารถเรียกใช้ค่านั้นได้ทันทีใน Transaction เดียวกัน, (3) เครื่องมือ Database Migration เช่น Prisma มักมีปัญหากับการ Diff Enum Type ของ Postgres การใช้ `TEXT` ร่วมกับ `CHECK (status IN ('PENDING', 'PAID'))` ให้ความยืดหยุ่นในการแก้เงื่อนไขผ่าน `ALTER TABLE ... DROP/ADD CONSTRAINT` ได้ง่ายกว่ามากโดยไม่ต้องล็อกตารางนาน
+
+---
+
+## 4. Constraints และ Data Integrity (การรักษาความถูกต้องของข้อมูล)
+
+### แนวคิด (Concept)
+ในการสร้างระบบจำหน่ายเนื้อระดับพรีเมียม **Smart Butcher Marketplace**:
+- หากไม่มี Constraints ระดับ Database Engine เปรียบเหมือนร้านขายเนื้อที่พึ่งพาเพียง "ความจำของพนักงานคิดเงินหน้าร้าน" (Application Code)
+- วันดีคืนดี พนักงานหน้าร้านอาจจะกดคีย์บอร์ดพิมพ์ราคาเนื้อติดลบ `-500` บาท หรือเผลอคีย์ตัดสต็อกเนื้อไป `-50` ชิ้น หรือลูกค้าสั่งซื้อเนื้อจากหมวดหมู่ที่ถูกลบไปแล้วแต่รายการในออเดอร์ยังค้างอยู่
+- **Database Constraints เปรียบเสมือน "กฎฟิสิกส์ประจำร้าน":** ไม่ว่าใครจะพยายามยิง API หรือรันสคริปต์อะไรเข้ามา ฐานข้อมูลจะทำหน้าที่เป็นป้อมปราการสุดท้ายในการปฏิเสธคำสั่งที่ไม่ถูกต้องทันที เพื่อให้แน่ใจว่าระบบจะไม่มีวันมีข้อมูลเน่าเสีย (Corrupted Data) เข้าไปอยู่ในฮาร์ดดิสก์
+
+### หลักการเบื้องหลัง (Under the Hood)
+
+#### 1. Primary Key และ Unique Constraints
+- เมื่อประกาศ `PRIMARY KEY` ระบบ PostgreSQL จะสร้างดัชนีแบบ **B-Tree Index** แบบ Unique ขึ้นมาเบื้องหลัง พร้อมบังคับกฎ `NOT NULL`
+- `UNIQUE`: รับประกันว่าไม่มีข้อมูลซ้ำซ้อน
+- **ความพิเศษของ PostgreSQL 15 & 16 (`NULLS NOT DISTINCT`):**
+  - ตามมาตรฐาน SQL ดั้งเดิม `NULL` หมายถึง "ไม่ทราบค่า" ดังนั้น `NULL != NULL` ทำให้ใน Postgres ยุคก่อน แถวที่มีค่า `NULL` ในคอลัมน์ที่เป็น UNIQUE สามารถซ้ำกันได้หลายแถว
+  - ใน PostgreSQL 15+ สามารถระบุคำสั่ง `UNIQUE NULLS NOT DISTINCT` เพื่อบังคับให้มีค่า `NULL` ได้เพียงแถวเดียวเท่านั้น!
+
+#### 2. CHECK Constraints
+- ทำการประเมินค่านิพจน์แบบ Boolean ทุกครั้งที่มีการสั่ง `INSERT` หรือ `UPDATE`
+- หากผลลัพธ์เป็น `TRUE` หรือ `UNKNOWN` (มีค่า NULL ปน) ข้อมูลจะผ่าน หากผลลัพธ์เป็น `FALSE` จะถูกปฏิเสธทันทีด้วย Error Code `23514 (check_violation)`
+
+#### 3. Foreign Key และพฤติกรรม `ON DELETE`
+เมื่อมีการอ้างอิงตารางแม่ (Parent) กับตารางลูก (Child) ผ่าน `FOREIGN KEY`:
+- `ON DELETE RESTRICT`: ไม่อนุญาตให้ลบแถวในตารางแม่ หากยังมีแถวในตารางลูกชี้มาอยู่ (Throw error ทันที)
+- `ON DELETE NO ACTION`: มีพฤติกรรมคล้าย `RESTRICT` แต่ต่างกันตรงที่ `NO ACTION` รองรับการทำงานแบบ **Deferred Constraint Check** (รอตรวจตอนจบ Transaction ก่อนสั่ง `COMMIT`)
+- `ON DELETE CASCADE`: เมื่อลบแถวในตารางแม่ แถวทั้งหมดในตารางลูกที่อ้างอิงถึงจะถูกลบตามไปด้วยอัตโนมัติ (เช่น ลบ Order -> ลบ Order Items ทั้งหมดของ Order นั้น)
+- `ON DELETE SET NULL`: เมื่อลบแถวในตารางแม่ ให้เซตค่า Foreign Key ในตารางลูกให้เป็น `NULL` (เช่น ลบ Category -> ให้ Product ที่เคยอยู่ในหมวดหมู่นี้กลายเป็น `category_id = NULL`)
+- `ON DELETE SET DEFAULT`: ปรับค่า Foreign Key ในตารางลูกให้กลับไปเป็นค่า Default ที่กำหนดไว้
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: การกำหนด Constraints ครบวงจรและ Foreign Key Behaviors
+สร้างความสัมพันธ์ระหว่าง Categories, Products, Orders และ Order Items:
+
+```sql filename="07_constraints_mastery.sql"
+-- สร้างตารางสินค้าพร้อม Integrity Constraints ขั้นสูง
+CREATE TABLE butcher_products (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    sku TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    -- ราคาต้องมากกว่า 0 เสมอ
+    price_per_kg NUMERIC(10,2) NOT NULL CONSTRAINT chk_positive_price CHECK (price_per_kg > 0),
+    -- สต็อกต้องไม่ติดลบ
+    stock_qty INT NOT NULL CONSTRAINT chk_non_negative_stock CHECK (stock_qty >= 0),
+    -- จำนวนวันที่ทำ Dry-aged ต้องอยู่ระหว่าง 0 ถึง 120 วัน
+    dry_aged_days INT NOT NULL DEFAULT 0 CONSTRAINT chk_valid_aging_days CHECK (dry_aged_days BETWEEN 0 AND 120),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- สร้างตารางคำสั่งซื้อ
+CREATE TABLE butcher_orders (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_no TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CONSTRAINT chk_order_status CHECK (
+        status IN ('PENDING', 'PAID', 'PREPARING', 'SHIPPED', 'CANCELLED')
+    ),
+    total_amount NUMERIC(12,2) NOT NULL CONSTRAINT chk_positive_total CHECK (total_amount >= 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- สร้างตาราง Order Items พร้อมระบุ ON DELETE CASCADE
+CREATE TABLE butcher_order_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id UUID NOT NULL REFERENCES butcher_orders(id) ON DELETE CASCADE,
+    product_id UUID NOT NULL REFERENCES butcher_products(id) ON DELETE RESTRICT,
+    quantity INT NOT NULL CONSTRAINT chk_item_quantity CHECK (quantity > 0),
+    unit_price NUMERIC(10,2) NOT NULL CONSTRAINT chk_item_price CHECK (unit_price > 0),
+    subtotal NUMERIC(12,2) NOT NULL CONSTRAINT chk_item_subtotal CHECK (subtotal > 0),
+    -- ห้ามสั่งสินค้าชิ้นเดิมซ้ำหลายบรรทัดในออเดอร์เดียวกัน (ให้ใช้วิธีเพิ่ม quantity แทน)
+    CONSTRAINT uq_order_product UNIQUE (order_id, product_id)
+);
+```
+
+#### ตัวอย่างที่ 2: การทดสอบความถูกต้องและการจำลอง Violation Errors
+ทดสอบว่า Engine ตอบสนองอย่างไรเมื่อมีคนพยายามป้อนข้อมูลผิด:
+
+```sql filename="08_test_constraints.sql"
+-- 1. ทดสอบป้อนเนื้อที่มีจำนวนวัน Dry-aged ผิดธรรมชาติ (เกิน 120 วัน)
+INSERT INTO butcher_products (sku, name, price_per_kg, stock_qty, dry_aged_days)
+VALUES ('DRY-TEST-01', 'Over-aged Beef', 1200.00, 5, 300);
+
+/* ผลลัพธ์ Error ที่ PostgreSQL ส่งกลับมา:
+ERROR:  new row for relation "butcher_products" violates check constraint "chk_valid_aging_days"
+DETAIL:  Failing row contains (..., DRY-TEST-01, Over-aged Beef, 1200.00, 5, 300, ...).
+*/
+
+-- 2. ทดสอบ ON DELETE RESTRICT
+-- สร้างสินค้าและนำไปผูกใน Order
+INSERT INTO butcher_products (id, sku, name, price_per_kg, stock_qty)
+VALUES ('p1111111-1111-1111-1111-111111111111', 'T-BONE-001', 'Dry-aged T-Bone', 1850.00, 10);
+
+INSERT INTO butcher_orders (id, order_no, status, total_amount)
+VALUES ('o1111111-1111-1111-1111-111111111111', 'ORD-2026-999', 'PAID', 1850.00);
+
+INSERT INTO butcher_order_items (order_id, product_id, quantity, unit_price, subtotal)
+VALUES ('o1111111-1111-1111-1111-111111111111', 'p1111111-1111-1111-1111-111111111111', 1, 1850.00, 1850.00);
+
+-- พยายามลบสินค้าที่ถูกสั่งซื้อไปแล้ว:
+DELETE FROM butcher_products WHERE id = 'p1111111-1111-1111-1111-111111111111';
+
+/* ผลลัพธ์ Error จาก Foreign Key RESTRICT:
+ERROR:  update or delete on table "butcher_products" violates foreign key constraint "butcher_order_items_product_id_fkey" on table "butcher_order_items"
+DETAIL:  Key (id)=(p1111111-1111-1111-1111-111111111111) is still referenced from table "butcher_order_items".
+*/
+
+-- 3. ทดสอบ ON DELETE CASCADE
+-- เมื่อลบออเดอร์ butcher_orders รายการลูกใน butcher_order_items จะถูกลบตามทันทีอย่างปลอดภัย
+DELETE FROM butcher_orders WHERE id = 'o1111111-1111-1111-1111-111111111111';
+-- ผลลัพธ์: DELETE 1 (และรายการใน butcher_order_items หายไปด้วยอัตโนมัติ)
+```
+
+### ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+#### ❌ สิ่งที่ผิด: ลืมสร้าง Index บน Foreign Key Columns
+ใน PostgreSQL เมื่อคุณสร้าง `FOREIGN KEY (order_id) REFERENCES orders(id)` **ระบบจะไม่สร้าง Index บนคอลัมน์ `order_id` ของตารางลูกให้อัตโนมัติ!**
+```sql filename="sql/postgresql.sql"
+-- สิ่งที่คนมักมองข้าม:
+CREATE TABLE order_items (
+    id UUID PRIMARY KEY,
+    order_id UUID REFERENCES orders(id) ON DELETE CASCADE
+    -- ไม่มี Index บน order_id!
+);
+-- ผลกระทบ: ทุกครั้งที่มีการ DELETE แถวใน orders หรือ UPDATE orders.id 
+-- PostgreSQL จะต้องทำ Sequential Scan เต็มตาราง order_items นับล้านแถวเพื่อเช็กว่ามีลูกหรือไม่!
+```
+
+#### ✅ สิ่งที่ถูก: สร้าง B-Tree Index บน Foreign Key Column ทุกตัวเสมอ
+```sql filename="sql/postgresql.sql"
+-- กฎเหล็กของ Senior Database Engineer:
+CREATE TABLE order_items (
+    id UUID PRIMARY KEY,
+    order_id UUID REFERENCES orders(id) ON DELETE CASCADE
+);
+-- สร้าง Index ทันที:
+CREATE INDEX idx_order_items_order_id ON order_items(order_id);
+```
+
+### ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `ON DELETE CASCADE`:** เฉพาะความสัมพันธ์แบบที่เป็น "เนื้อแท้ส่วนเดียวกัน" (Composition / Strong Ownership) เช่น ลบ Order แล้วลบ Order Items ทิ้ง หรือลบ User แล้วลบ User Profiles ทิ้ง
+- **ห้ามใช้ `ON DELETE CASCADE`:** กับความสัมพันธ์ทางการเงินและการบัญชี เช่น ลบ Product แล้วสั่งให้ Cascade ลบประวัติการสั่งซื้อในอดีตทิ้ง หรือลบ Customer แล้วลบใบกำกับภาษีทิ้งเด็ดขาด (ต้องใช้ `RESTRICT` หรือเปลี่ยนสถานะเป็น Soft Delete แทน)
+
+### คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: อะไรคือความแตกต่างทางเทคนิคระหว่าง `ON DELETE RESTRICT` และ `ON DELETE NO ACTION` ใน PostgreSQL?**
+  - *แนวคำตอบ:* แม้ว่าทั้งคู่จะปฏิเสธการลบแถวแม่เมื่อยังมีแถวลูกอ้างอิงอยู่ แต่ `NO ACTION` ปฏิบัติตามมาตรฐาน SQL อย่างเคร่งครัดโดยเปิดโอกาสให้สามารถกำหนดเป็น `DEFERRABLE INITIALLY DEFERRED` ได้ ซึ่งหมายความว่า ในระหว่าง Transaction เราสามารถสั่งลบแถวแม่ก่อนได้ ตราบใดที่ก่อนจบ Transaction (ก่อนสั่ง COMMIT) เราได้ทำการลบแถวลูกตามไป หรือย้าย Foreign Key ไปชี้ที่อื่นแล้ว Transaction นั้นจะผ่าน ในขณะที่ `RESTRICT` จะไม่ยอมให้ทำ Deferred Check เลยเด็ดขาด มันจะตรวจสอบและโยน Error ขัดขวางทันทีที่คำสั่ง DELETE หรือ UPDATE แถวแม่ถูกรัน
+- **Q2: เพราะเหตุใด PostgreSQL จึงไม่สร้าง Index บน Foreign Key ให้โดยอัตโนมัติ เหมือนกับที่ทำใน Primary Key และ Unique Constraints?**
+  - *แนวคำตอบ:* เพราะ Primary Key และ Unique จำเป็นต้องใช้ Unique B-Tree Index ในการตรวจสอบความซ้ำซ้อน (Uniqueness Validation) ในจังหวะ INSERT/UPDATE ทางเทคนิคจึงหลีกเลี่ยงไม่ได้ แต่สำหรับ Foreign Key คอลัมน์ฝั่งลูกอนุญาตให้มีค่าซ้ำกันได้ และไม่ใช่ทุกกรณีที่ตารางลูกจำเป็นต้องถูกค้นหาผ่าน Foreign Key (เช่น ตาราง Log บางประเภทที่มีแต่ INSERT) ทีมออกแบบ PostgreSQL จึงไม่บังคับสร้าง Index เพื่อไม่ให้สิ้นเปลืองพื้นที่ดิสก์และไม่เพิ่มภาระ Write Overhead โดยไม่จำเป็น แต่ในทางปฏิบัติของระบบ Production วิศวกรต้องสร้าง Index บน FK เองเสมอเพื่อป้องกันการเกิด Table Lock และ Sequential Scan เมื่อมีการลบแถวแม่
+
+---
+
+## 5. Schema และ Role (Permissions & Security Isolation)
+
+### แนวคิด (Concept)
+ลองจินตนาการถึงแผนกความปลอดภัยในอาคารสำนักงานใหญ่ของ **Smart Butcher Marketplace**:
+- **Database:** คือ "ตัวอาคารทั้งหลัง" (แยกระหว่างอาคาร Butcher Production กับอาคาร Butcher Staging เด็ดขาด ไม่สามารถเดินทะลุกำแพงหากันได้ใน Query เดียว)
+- **Schema:** คือ "แผนกต่างๆ ภายในอาคาร" (เช่น แผนกหน้าร้าน `public`, แผนกบัญชี `accounting`, แผนกผู้เช่ารายย่อย `tenant_butcher_01`, แผนกกล้องวงจรปิด `audit`) ที่อยู่ภายใต้อาคารเดียวกัน แต่มีประตูล็อกกั้นไว้
+- **Role / User:** คือ "บัตรประจำตัวพนักงาน" ที่ระบุสิทธิ์ชัดเจน
+  - แม่บ้านทำความสะอาด (Reporting App): เข้าได้เฉพาะห้องที่ได้รับอนุญาต และ "ดูได้อย่างเดียว ห้ามหยิบของ" (`SELECT` only)
+  - พนักงานขายหน้าร้าน (Backend NestJS App): บันทึกคำสั่งซื้อและตัดเนื้อได้ (`SELECT`, `INSERT`, `UPDATE`) แต่ "ห้ามทุบตึกหรือรื้อผนังห้อง" (ห้ามสิทธิ์ DDL เช่น `DROP TABLE`)
+
+### หลักการเบื้องหลัง (Under the Hood)
+
+```text filename="docs/database/postgresql.txt"
+┌────────────────────────────────────────────────────────────────────────┐
+│                        POSTGRESQL CLUSTER                              │
+│                                                                        │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │                    DATABASE: smart_butcher_db                    │  │
+│  │                                                                  │  │
+│  │  ┌───────────────────────┐             ┌──────────────────────┐  │  │
+│  │  │  SCHEMA: public       │             │  SCHEMA: audit_log   │  │  │
+│  │  │  - users              │             │  - security_events   │  │  │
+│  │  │  - products           │             │  - price_audit_trail │  │  │
+│  │  │  - orders             │             │                      │  │  │
+│  │  └───────────────────────┘             └──────────────────────┘  │  │
+│  │                                                                  │  │
+│  │  ┌───────────────────────┐             ┌──────────────────────┐  │  │
+│  │  │ SCHEMA: tenant_korat  │             │  SCHEMA: reporting   │  │  │
+│  │  │ (Multi-tenant isolate)│             │  - materialized_views│  │  │
+│  │  └───────────────────────┘             └──────────────────────┘  │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                                                                        │
+│  GLOBAL ROLES (ใช้ร่วมกันทั้ง Cluster):                                │
+│  - butcher_admin (Superuser / Migration runner)                        │
+│  - butcher_api_app (DML privileges: SELECT, INSERT, UPDATE, DELETE)    │
+│  - butcher_read_only (Analytics / PowerBI: SELECT only)                │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 1. Database vs Schema vs Table
+- **Database:** แยกพื้นที่อย่างสมบูรณ์ ข้าม Database ไม่สามารถทำ JOIN ตรงๆ ได้ (ยกเว้นใช้ `dblink` หรือ Foreign Data Wrapper `postgres_fdw`)
+- **Schema:** เป็น Namespace ภายใน Database เดียวกัน สามารถทำ Cross-Schema JOIN ได้ง่าย เช่น `SELECT * FROM public.orders JOIN audit_log.price_changes ...`
+- **`search_path`:** ตัวแปรที่ควบคุมว่าเมื่อผู้ใช้เขียนชื่อตารางลอยๆ เช่น `SELECT * FROM products;` ระบบจะไปค้นหาใน Schema ใดก่อน ค่าตั้งต้นคือ `"$user", public`
+
+#### 2. Role vs User
+- ตั้งแต่ PostgreSQL 8.1 เป็นต้นมา คำสั่ง `CREATE USER` และ `CREATE GROUP` เป็นเพียง Alias ของคำสั่ง **`CREATE ROLE`**
+- ข้อแตกต่างเดียวคือ `CREATE ROLE ... LOGIN` จะอนุญาตให้ใช้ชื่อนี้เชื่อมต่อเข้าสู่ Database ได้ (ซึ่งเทียบเท่ากับ User) ส่วน Role ที่ไม่มีคำสั่ง `LOGIN` จะทำหน้าที่เป็น Group ไว้แจกจ่ายสิทธิ์
+
+#### 3. Principle of Least Privilege
+- แอปพลิเคชัน Backend (Node.js / NestJS) ในระดับ Production **ต้องไม่ใช้ Superuser หรือ Role `postgres` เด็ดขาด!**
+- หากแอปพลิเคชันถูกโจมตีด้วย SQL Injection และเชื่อมต่อด้วยสิทธิ์ Superuser ผู้โจมตีสามารถสั่ง `DROP DATABASE`, อ่านไฟล์ในระบบปฏิบัติการผ่าน `pg_read_file()`, หรือสั่งรันคำสั่ง OS Shell ผ่าน `COPY ... PROGRAM` ได้ทันที
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: การสร้าง Custom Schema และจัดการ Search Path
+แยกตาราง Audit Log และตารางสินค้าหน้าร้านออกจากกัน:
+
+```sql filename="09_schema_management.sql"
+-- 1. สร้าง Schema ใหม่สำหรับระบบ Audit และระบบผู้เช่า
+CREATE SCHEMA audit_store;
+CREATE SCHEMA tenant_chiangmai;
+
+-- 2. สร้างตารางบันทึกการเปลี่ยนราคาเนื้อใน Schema audit_store
+CREATE TABLE audit_store.price_change_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    product_id UUID NOT NULL,
+    old_price NUMERIC(10,2) NOT NULL,
+    new_price NUMERIC(10,2) NOT NULL,
+    changed_by TEXT NOT NULL,
+    changed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3. ตรวจสอบและตั้งค่า search_path
+SHOW search_path;
+-- ผลลัพธ์เดิม: "$user", public
+
+-- ตั้งค่าให้ค้นหาใน audit_store ก่อน public สำหรับ Session นี้
+SET search_path TO audit_store, public;
+
+-- ตอนนี้สามารถคิวรีโดยไม่ต้องพิมพ์ชื่อ schema นำหน้าได้
+SELECT * FROM price_change_logs;
+```
+
+#### ตัวอย่างที่ 2: การสร้าง Roles ตามหลัก Least Privilege สำหรับ Production
+ออกแบบสิทธิ์ความปลอดภัยสำหรับ Backend Application และ Data Analyst:
+
+```sql filename="10_security_roles.sql"
+-- 1. สร้าง Role สำหรับ Backend API App (ล็อกอินได้ แต่ไม่มีสิทธิ์ DDL สร้าง/ลบตาราง)
+CREATE ROLE butcher_app_user WITH 
+    LOGIN 
+    PASSWORD 'StrongEnterprisePassword#2026'
+    NOSUPERUSER 
+    NOCREATEDB 
+    NOREPLICATION;
+
+-- 2. สร้าง Role สำหรับทีม Data Analytics (อ่านอย่างเดียว)
+CREATE ROLE butcher_analyst_user WITH 
+    LOGIN 
+    PASSWORD 'AnalystReadOnlyPass#2026'
+    NOSUPERUSER;
+
+-- 3. มอบสิทธิ์การเข้าใช้งาน Schema public
+GRANT USAGE ON SCHEMA public TO butcher_app_user;
+GRANT USAGE ON SCHEMA public TO butcher_analyst_user;
+
+-- 4. มอบสิทธิ์ DML เฉพาะตารางธุรกิจให้แก่ Backend App
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO butcher_app_user;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO butcher_app_user;
+
+-- 5. มอบสิทธิ์เฉพาะ SELECT ให้แก่ Analyst
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO butcher_analyst_user;
+
+-- 6. กำหนด Default Privileges เพื่อให้ตารางที่จะถูกสร้างขึ้นในอนาคตได้รับสิทธิ์นี้ด้วยอัตโนมัติ!
+ALTER DEFAULT PRIVILEGES IN SCHEMA public 
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO butcher_app_user;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public 
+GRANT SELECT ON TABLES TO butcher_analyst_user;
+
+-- 7. ป้องกันไม่ให้ใครก็ตามเข้ามาสร้างตารางใน Schema public ตามใจชอบ (ความปลอดภัยสูงสุด)
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+```
+
+### ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+#### ❌ สิ่งที่ผิด: Hardcode การเชื่อมต่อ Backend ด้วย Superuser `postgres`
+```env filename=".env.example"
+# ไฟล์ .env ของ NestJS App ที่อันตรายมาก
+DATABASE_URL="postgresql://postgres:rootpassword@db-host:5432/smart_butcher_db"
+# หากมีโค้ดจุดใดเกิด SQL Injection Hacker สามารถสั่ง:
+# '; DROP SCHEMA public CASCADE; --
+# ข้อมูลทั้งร้านค้าจะหายวับไปในเสี้ยววินาที!
+```
+
+#### ✅ สิ่งที่ถูก: เชื่อมต่อด้วย Restricted Role และแยก Migration Role
+```env filename=".env.example"
+# 1. สำหรับตัว App ที่รันในชีวิตประจำวัน (รันได้เฉพาะ SELECT, INSERT, UPDATE, DELETE)
+DATABASE_URL="postgresql://butcher_app_user:StrongEnterprisePassword#2026@db-host:5432/smart_butcher_db"
+
+# 2. สำหรับ CI/CD Pipeline ที่ใช้รัน Prisma Migrate / Flyway (มีสิทธิ์ DDL เฉพาะช่วง Deploy)
+MIGRATION_DATABASE_URL="postgresql://butcher_migration_runner:SecureAdminPass#2026@db-host:5432/smart_butcher_db"
+```
+
+### ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **Schema-based Multi-tenancy:** ควรใช้เมื่อต้องการทำระบบ SaaS ให้ร้านขายเนื้อแต่ละสาขาหรือลูกค้าแต่ละองค์กรแยกข้อมูลออกจากกันอย่างเป็นระเบียบ (`tenant_a`, `tenant_b`) โดยยังคงสามารถแชร์ตารางกลาง (เช่น System Master Data) ได้ และประหยัดทรัพยากรกว่าการเปิด Database แยกก้อน
+- **ข้อควรระวัง:** ไม่ควรสร้าง Schema ย่อยเกินหลักพัน schemas ใน Database เดียว เพราะจะทำให้ PostgreSQL System Catalogs บวม และส่งผลกระทบต่อประสิทธิภาพในการค้นหา Metadata และการทำ Autovacuum
+
+### คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: คำสั่ง `ALTER DEFAULT PRIVILEGES` แก้ปัญหาอะไรใน PostgreSQL ที่คำสั่ง `GRANT` ปกติไม่สามารถทำได้?**
+  - *แนวคำตอบ:* คำสั่ง `GRANT` ปกติจะมีผลเฉพาะกับตารางหรืออ็อบเจกต์ที่ **มีตัวตนอยู่แล้วในปัจจุบัน** เท่านั้น หากในอนาคตทีมงานรันคำสั่ง `CREATE TABLE` ขึ้นมาใหม่ผ่าน Migration Script ผู้ใช้หรือ Role อื่นๆ จะไม่ได้รับสิทธิ์ในตารางใหม่นั้นทันที ส่งผลให้แอปพลิเคชันพังด้วยข้อผิดพลาด `permission denied for relation ...` การใช้ `ALTER DEFAULT PRIVILEGES` จะเป็นการกำหนดกฎแม่แบบล่วงหน้าว่า เมื่อใดก็ตามที่มีการสร้างตารางหรือ Sequence ใหม่ขึ้นใน Schema นั้น ให้ทำการแจกจ่ายสิทธิ์ที่ระบุไปยัง Roles เป้าหมายโดยอัตโนมัติ
+- **Q2: `search_path` สามารถถูกใช้ในการโจมตีแบบ Trojan Horse / Privilege Escalation ได้อย่างไร และมีวิธีป้องกันอย่างไร?**
+  - *แนวคำตอบ:* หาก `search_path` มี Schema ที่อนุญาตให้ผู้ใช้ทั่วไปสร้างตารางได้ (เช่น `$user` หรือ `public` ในเวอร์ชันเก่า) อยู่หน้า Schema จริง ผู้โจมตีสามารถสร้างฟังก์ชันหรือตารางเลียนแบบขึ้นมา เช่น สร้างฟังก์ชัน `schema_user.max()` เมื่อ Superuser มารันคำสั่งที่มีการเรียกฟังก์ชันนั้น ระบบจะไปเรียกใช้ฟังก์ชันอันตรายของผู้โจมตี วิธีป้องกันคือ: (1) ปลดสิทธิ์ `CREATE ON SCHEMA public FROM PUBLIC`, (2) ระบุ Schema นำหน้าการเรียกใช้อ็อบเจกต์เสมอ, หรือ (3) ตั้งค่า `search_path` ในฟังก์ชันที่มี `SECURITY DEFINER` ให้ตายตัว เช่น `SET search_path = pg_catalog, pg_temp`
+
+---
+
+## 6. PostgreSQL Extensions ที่มักใช้ในงานจริง
+
+### แนวคิด (Concept)
+หากเปรียบเทียบ PostgreSQL กับรถกระบะห้องเย็นขนส่งเนื้อของ **Smart Butcher Marketplace**:
+- ตัว PostgreSQL Engine ดั้งเดิม เปรียบเหมือนโครงสร้างรถ เครื่องยนต์ดีเซล และห้องแช่แข็งมาตรฐาน
+- แต่หากร้านต้องการฟังก์ชันพิเศษ เช่น:
+  - ติดตั้งตู้เซฟป้องกันการโจรกรรมรหัสผ่าน (ต้องการระบบ Hash ชั้นสูง) -> ติดตั้งส่วนขยาย **`pgcrypto`**
+  - ติดตั้งระบบ GPS อัจฉริยะที่เดาชื่อเนื้อที่ลูกค้าพิมพ์ผิดบนหน้าจอสั่งซื้อ เช่น ลูกค้าพิมพ์ "วากิว ดรายเอช" หรือ "wagy ribye" แต่ระบบยังเดาใจได้ถูกต้อง -> ติดตั้งส่วนขยาย **`pg_trgm` (Trigram Matching)**
+- **PostgreSQL Extension Architecture:** ช่วยให้เราสามารถติดตั้งฟังก์ชันระดับ C Library ที่มีความเร็วสูงสุดลงในตัว Database Engine ได้โดยตรงผ่านคำสั่ง `CREATE EXTENSION` เพียงบรรทัดเดียว โดยไม่ต้อง Compile ตัวฐานข้อมูลใหม่และไม่ต้องรีสตาร์ตเซิร์ฟเวอร์
+
+### หลักการเบื้องหลัง (Under the Hood)
+
+#### 1. กลไกการโหลด Extension
+เมื่อรันคำสั่ง `CREATE EXTENSION extension_name;`:
+1. PostgreSQL จะมองหาไฟล์ Control File (`extension_name.control`) ในไดเรกทอรีแชร์ของระบบ
+2. โหลด Shared Object Library (`.so` บน Linux หรือ `.dll` บน Windows) เข้าสู่หน่วยความจำของ Process
+3. รันสคริปต์ SQL ของ Extension เพื่อลงทะเบียน Functions, Operators, Data Types, และ Index Access Methods ลงใน System Catalogs (`pg_proc`, `pg_type`, `pg_am`)
+
+#### 2. `pgcrypto`
+- นำเสนออัลกอริทึมการเข้ารหัสมาตรฐานสากล: Blowfish/Bcrypt (`crypt()`, `gen_salt('bf')`), SHA-2 (`digest()`), AES-Symmetric (`pgp_sym_encrypt()`), และฟังก์ชันสร้างตัวเลขสุ่มความปลอดภัยสูง
+- ใน PostgreSQL 13+ ฟังก์ชัน `gen_random_uuid()` ถูกยกเข้าไปเป็น Core Function โดยไม่ต้องเปิด Extension อีกต่อไป แต่ `pgcrypto` ยังคงจำเป็นสำหรับงาน Hashing และ Encryption
+
+#### 3. `pg_trgm` (Trigram Matching)
+- **Trigram คืออะไร:** คือการตัดข้อความออกเป็นชิ้นย่อยๆ ขนาด 3 ตัวอักษรเรียงต่อกัน โดยเติมช่องว่างข้างหน้า 2 ช่องและข้างหลัง 1 ช่อง
+  - ตัวอย่างคำว่า `"WAGYU"` จะถูกแตกเป็น trigrams: `["  w", " wa", "wag", "agy", "gyu", "yu "]`
+- **Similarity Score:** คำนวณความเหมือนกันของสองข้อความโดยการเทียบสัดส่วนของ Trigram ที่ซ้ำกัน (0.0 ถึง 1.0)
+- **Index Support:** สามารถสร้างดัชนีแบบ **GIN (Generalized Inverted Index)** หรือ **GiST** บน Trigrams ทำให้สามารถค้นหาคำค้นแบบมี Wildcard ข้างหน้า เช่น `WHERE name LIKE '%wagyu%'` ได้อย่างรวดเร็ว โดยเปลี่ยนจาก Sequential Scan เป็น Index Scan ทันที!
+
+### ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+#### ตัวอย่างที่ 1: การเปิดใช้งาน Extensions และการเข้ารหัสรหัสผ่านด้วย `pgcrypto`
+จัดการระบบสมาชิกพนักงาน Butcher ด้วยการเข้ารหัสระดับ Database:
+
+```sql filename="11_pgcrypto_demo.sql"
+-- 1. ติดตั้ง Extensions ที่จำเป็น
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+
+-- 2. สร้างตารางพนักงานขายเนื้อพร้อมการแฮชรหัสผ่านด้วย Blowfish (Bcrypt)
+CREATE TABLE butcher_staff (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username TEXT NOT NULL UNIQUE,
+    -- เก็บสตริง hash ที่ได้จาก bcrypt
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'STAFF'
+);
+
+-- 3. บันทึกข้อมูลพนักงาน โดยสั่งแฮชรหัสผ่านตั้งแต่ใน SQL ด้วย Blowfish Cost Factor 10
+INSERT INTO butcher_staff (username, password_hash)
+VALUES (
+    'chef_somchai',
+    crypt('SuperSecretPass#2026', gen_salt('bf', 10))
+);
+
+-- 4. ตรวจสอบรหัสผ่านตอนล็อกอิน (Password Verification)
+-- ฟังก์ชัน crypt() จะนำ salt จาก hash เดิมมาเข้ารหัสใหม่แล้วเปรียบเทียบ
+SELECT id, username, role
+FROM butcher_staff
+WHERE username = 'chef_somchai'
+  AND password_hash = crypt('SuperSecretPass#2026', password_hash);
+
+/* ผลลัพธ์เมื่อรหัสผ่านถูกต้อง:
+                  id                  |   username   | role  
+--------------------------------------+--------------+-------
+ 4a9f9d2b-4261-4c6e-8d5e-7a912bb0e922 | chef_somchai | STAFF
+(1 row)
+*/
+```
+
+#### ตัวอย่างที่ 2: ระบบ Fuzzy Search ค้นหาเนื้อพรีเมียมด้วย `pg_trgm` และ GIN Index
+จำลองระบบค้นหาสินค้าของหน้าร้าน Smart Butcher ที่รองรับคำสะกดผิดและการค้นหาแบบข้อความย่อย:
+
+```sql filename="12_trigram_search.sql"
+-- 1. เพิ่ม GIN Index บนคอลัมน์ชื่อสินค้าโดยใช้ trigram operator class (gin_trgm_ops)
+CREATE INDEX idx_products_name_trgm ON products USING GIN (name gin_trgm_ops);
+
+-- 2. ป้อนข้อมูลสินค้าหลากหลายประเภท
+INSERT INTO products (category_id, name, sku, price_per_kg, stock_qty)
+VALUES 
+('c1111111-1111-1111-1111-111111111111', 'Japanese Miyazaki Wagyu A5 Ribeye', 'WGY-MIYA-RIB', 5500.00, 10),
+('c1111111-1111-1111-1111-111111111111', 'Australian Black Angus Tomahawk', 'ANG-AUS-TOMA', 2800.00, 8),
+('c1111111-1111-1111-1111-111111111111', 'Dry-Aged 45 Days Striploin Beef', 'DRY-45D-STRIP', 3200.00, 5);
+
+-- 3. ทดสอบการค้นหาแบบ Wildcard ที่มีเครื่องหมาย % ด้านหน้า
+-- หากไม่มี pg_trgm คำสั่งนี้จะบังคับทำ Sequential Scan แต่เมื่อมี GIN Trigram Index ระบบจะวิ่งผ่าน Index ทันที!
+EXPLAIN ANALYZE
+SELECT id, name, price_per_kg
+FROM products
+WHERE name ILIKE '%wagyu%ribeye%';
+
+-- 4. ทดสอบ Fuzzy Search ในกรณีที่ลูกค้าสะกดคำผิด เช่น พิมพ์ "wagy ribye"
+-- ใช้ตัวดำเนินการ % (Similarity Operator) หรือฟังก์ชัน similarity()
+SELECT 
+    name, 
+    sku,
+    ROUND(similarity(name, 'wagy ribye')::numeric, 3) AS similarity_score
+FROM products
+WHERE similarity(name, 'wagy ribye') > 0.25
+ORDER BY similarity_score DESC;
+
+/* ผลลัพธ์ตัวอย่าง (Expected Output):
+               name                |     sku      | similarity_score 
+-----------------------------------+--------------+------------------
+ Japanese Miyazaki Wagyu A5 Ribeye | WGY-MIYA-RIB |            0.412
+(1 row)
+ระบบสามารถ match เจอ 'Japanese Miyazaki Wagyu A5 Ribeye' ได้อย่างแม่นยำแม้ลูกค้าพิมพ์ผิด!
+*/
+```
+
+### ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+#### ❌ สิ่งที่ผิด: ใช้ `B-Tree` Index กับการค้นหาแบบ `LIKE '%keyword%'`
+```sql filename="sql/postgresql.sql"
+-- สร้าง B-Tree Index ปกติ
+CREATE INDEX idx_products_name ON products(name);
+
+-- คิวรีที่มี wildcard ด้านหน้า:
+SELECT * FROM products WHERE name LIKE '%wagyu%';
+-- B-Tree Index ไร้ประโยชน์โดยสิ้นเชิง! 
+-- เพราะ B-Tree ค้นหาได้เฉพาะคำขึ้นต้น (Prefix) เท่านั้น เช่น LIKE 'wagyu%' 
+-- ส่งผลให้ PostgreSQL ต้องกวาดอ่านทุกหน้าตาราง (Full Table Scan)
+```
+
+#### ✅ สิ่งที่ถูก: ติดตั้ง `pg_trgm` และใช้ `GIN` Index แบบ `gin_trgm_ops`
+```sql filename="sql/postgresql.sql"
+-- สร้าง GIN Trigram Index
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX idx_products_name_gin ON products USING GIN (name gin_trgm_ops);
+
+-- คิวรีเดิมจะทำงานผ่าน Bitmap Index Scan ทันที ไม่ว่า % จะอยู่หน้าหรือหลัง:
+SELECT * FROM products WHERE name ILIKE '%wagyu%';
+```
+
+### ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **ควรใช้ `pg_trgm`:** ในงาน Search Box ของ E-Commerce ทั่วไป ที่ต้องการค้นหาชื่อสินค้า, แท็ก, หรือชื่อลูกค้า ที่มีขนาดข้อมูลไม่เกินหลักล้านแถว ประหยัดทรัพยากรกว่าการติดตั้ง Elasticsearch แยกเซิร์ฟเวอร์
+- **ไม่ควรใช้ `pg_trgm`:** กับตารางที่มีการ `INSERT` / `UPDATE` ปริมาณมหาศาลทุกวินาที (High-velocity Write) เพราะ GIN Index มีภาระในการแตก Trigram และจัดระเบียบ Index Tree ค่อนข้างหนักหน่วงตอนเขียนข้อมูล
+
+### คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: เหตุใด GIN Index ร่วมกับ `pg_trgm` จึงสามารถเร่งความเร็ว Query ที่มี Wildcard ด้านหน้าอย่าง `LIKE '%wagyu%'` ได้ ต่างจาก B-Tree ดั้งเดิม?**
+  - *แนวคำตอบ:* B-Tree เป็นโครงสร้างต้นไม้ที่เรียงลำดับสตริงแบบ Lexicographical Order ตามตัวอักษรแรกเริ่ม หากเราค้นหาแบบ `LIKE '%wagyu%'` ตัว Engine ไม่ทราบว่าตัวอักษรตัวแรกคืออะไร จึงไม่สามารถใช้คุณสมบัติการนำทางของ B-Tree ได้ ต้องยอมกวาดอ่านข้อมูลทั้งหมด ในทางตรงกันข้าม GIN (Generalized Inverted Index) จะทำหน้าที่เหมือนดัชนีท้ายเล่มหนังสือ มันจะแยกสตริงออกเป็นชิ้นย่อย Trigrams 3 ตัวอักษร แล้วสร้างดัชนีย้อนกลับชี้ว่า Trigram `"wag"` ปรากฏอยู่ในแถวที่เท่าไรบ้าง เมื่อเราค้นหาคำว่า `"wagyu"` GIN Index จะค้นหาเฉพาะแถวที่มี Trigram ของคำนี้ตรงกัน แล้วดึงเฉพาะแถวเหล่านั้นมาตรวจสอบ ทำให้ลดจำนวนแถวที่ต้องอ่านลงได้อย่างมหาศาล
+- **Q2: หากต้องการทำ Vector Search สำหรับค้นหาความคล้ายคลึงของเนื้อสัตว์ด้วย AI Embeddings บน PostgreSQL 16 จะต้องใช้ Extension ใด และมี Index Access Method อะไรบ้าง?**
+  - *แนวคำตอบ:* ใช้ Extension **`pgvector`** โดยจะเพิ่มชนิดข้อมูล `vector(n)` ลงใน PostgreSQL พร้อมตัวดำเนินการวัดระยะห่าง (Distance Operators) เช่น L2 Distance (`<->`), Cosine Distance (`<=>`), และ Inner Product (`<#>`) และมี Index Methods 2 ชนิดหลักคือ **IVFFlat** (Inverted File Flat - สร้างง่าย ใช้หน่วยความจำน้อย) และ **HNSW** (Hierarchical Navigable Small World - แม่นยำสูงและค้นหาได้เร็วกว่ามาก แต่กินพื้นที่และใช้เวลาสร้างนานกว่า)
+
+---
+
+## 7. เครื่องมือบริหารจัดการและคำสั่ง psql ที่ใช้บ่อย
+
+### แนวคิด (Concept)
+การบริหารจัดการฐานข้อมูลระดับมืออาชีพ เปรียบเหมือนการขับเครื่องบินพาณิชย์:
+- **GUI Tools (DBeaver, pgAdmin 4):** เปรียบเหมือน "แผงหน้าปัดดิจิทัลและแผนที่การบินบนจอสัมผัส" เหมาะสำหรับการสำรวจข้อมูลภาพรวม ออกแบบความสัมพันธ์ ER Diagram และดู Visual Explain Plan ในช่วงการพัฒนาบนเครื่อง Local
+- **`psql` CLI:** เปรียบเหมือน "คันโยกและระบบควบคุมโดยตรงของเครื่องบิน" ที่วิศวกรทุกคนต้องเชี่ยวชาญ เพราะในโลกความเป็นจริง เมื่อระบบ Production เกิดปัญหาบน Kubernetes Cluster, Docker Container หรือ Remote Linux Server ที่ไม่มี GUI สิ่งเดียวที่คุณจะสามารถเข้าถึงได้ผ่าน SSH หรือ `kubectl exec` คือหน้าจอดำของ **`psql`**
+
+### หลักการเบื้องหลัง (Under the Hood)
+- `psql` ทำงานบน Client Library พื้นฐานของ PostgreSQL คือ `libpq`
+- **Meta-Commands (คำสั่งที่ขึ้นต้นด้วย `\`):** คำสั่งเหล่านี้ **ไม่ใช่คำสั่ง SQL** และไม่ได้ถูกประมวลผลบนเซิร์ฟเวอร์โดยตรง แต่ตัวโปรแกรม `psql` ในฝั่ง Client จะเป็นตัวตีความ แล้วแปลงเป็นคำสั่ง SQL สลับซับซ้อนเพื่อวิ่งไปดึงข้อมูลจาก Catalog Tables (`pg_catalog.pg_class`, `pg_catalog.pg_attribute`, `pg_catalog.pg_roles` ฯลฯ) แล้วนำมาจัดรูปแบบเป็นตารางสวยงามบนหน้าจอ Terminal
+
+### รายการคำสั่ง Meta-commands ของ psql ที่ Developer ต้องรู้
+
+| คำสั่ง psql | หน้าที่การทำงาน | ตัวอย่างสถานการณ์ใช้งานจริง |
+| :--- | :--- | :--- |
+| `\l` หรือ `\l+` | แสดงรายชื่อ Database ทั้งหมด พร้อมขนาด พื้นที่จัดเก็บ และ Encoding | เช็กดูว่ามีกี่ฐานข้อมูลในเซิร์ฟเวอร์ และขนาดโตไปกี่ GB |
+| `\c dbname` | สลับการเชื่อมต่อไปยัง Database อื่น (`CONNECT`) | เปลี่ยนจากฐานข้อมูล `postgres` ไปทำงานที่ `smart_butcher_db` |
+| `\dt` หรือ `\dt+` | แสดงรายชื่อตารางทั้งหมดใน Schema ปัจจุบัน พร้อมขนาดตาราง | สำรวจดูว่า Migration ตารางเนื้อสัตว์เข้ามาครบหรือไม่ |
+| `\d+ table_name` | **คำสั่งยอดฮิต:** แสดงรายละเอียดโครงสร้างตารางอย่างลึกซึ้ง | เช็กคอลัมน์, Data Types, Constraints, Default, Indexes, Foreign Keys, Triggers |
+| `\dn` หรือ `\dn+` | แสดงรายชื่อ Schemas ทั้งหมดใน Database | ตรวจสอบว่ามี Schema `tenant_a` หรือ `audit` อยู่หรือไม่ |
+| `\du` หรือ `\du+` | แสดงรายชื่อ Roles ทั้งหมด พร้อมสิทธิ์ (Attributes/Members) | ตรวจดูว่า User แอปพลิเคชันมีสิทธิ์ Superuser หลุดมาหรือไม่ |
+| `\x` หรือ `\x auto` | เปิดโหมด **Expanded Display** (แสดงผลแนวตั้งแทนแนวนอน) | **จำเป็นอย่างยิ่ง:** ใช้เมื่อตารางมีหลายคอลัมน์ หรือมีฟิลด์ JSONB ยาวๆ |
+| `\timing` | เปิด/ปิด ตัวจับเวลาการประมวลผล Query (มิลลิวินาที) | ใช้วัดประสิทธิภาพความเร็วของคำสั่ง SQL ได้ทันที |
+| `\q` | ออกจากโปรแกรม psql | ปิด Terminal เพื่อกลับสู่ OS Shell |
+
+### ตัวอย่างการใช้งานจริง
+
+#### 1. การสำรวจโครงสร้างตารางด้วย `\d+ products`
+เมื่อพิมพ์คำสั่ง `\d+ products` ใน Terminal ของ `psql`:
+
+```text filename="docs/database/postgresql.txt"
+smart_butcher_db=# \d+ products
+                                                                Table "public.products"
+     Column     |            Type             | Collation | Nullable |      Default      | Storage  | Compression | Stats target | Description 
+----------------+-----------------------------+-----------+----------+-------------------+----------+-------------+--------------+-------------
+ id             | uuid                        |           | not null | gen_random_uuid() | plain    |             |              | 
+ category_id    | uuid                        |           | not null |                   | plain    |             |              | 
+ name           | text                        |           | not null |                   | extended |             |              | 
+ sku            | character varying(30)       |           | not null |                   | extended |             |              | 
+ price_per_kg   | numeric(10,2)               |           | not null |                   | main     |             |              | 
+ stock_qty      | integer                     |           | not null |                   | plain    |             |              | 
+ dry_aged_days  | integer                     |           | not null | 0                 | plain    |             |              | 
+ is_active      | boolean                     |           | not null | true              | plain    |             |              | 
+ specifications | jsonb                       |           | not null | '{}'::jsonb       | extended |             |              | 
+ available_cuts | text[]                      |           | not null | ARRAY['STEAK'...] | extended |             |              | 
+ created_at     | timestamp with time zone    |           | not null | CURRENT_TIMESTAMP | plain    |             |              | 
+Indexes:
+    "products_pkey" PRIMARY KEY, btree (id)
+    "products_sku_key" UNIQUE CONSTRAINT, btree (sku)
+    "idx_products_name_trgm" gin (name gin_trgm_ops)
+Check constraints:
+    "products_dry_aged_days_check" CHECK (dry_aged_days >= 0)
+    "products_price_per_kg_check" CHECK (price_per_kg > 0::numeric)
+    "products_stock_qty_check" CHECK (stock_qty >= 0)
+Foreign-key constraints:
+    "products_category_id_fkey" FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT
+Referenced by:
+    TABLE "order_items" CONSTRAINT "order_items_product_id_fkey" FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE RESTRICT
+```
+
+#### 2. การเปิด Expanded Display (`\x auto`) และรันจับเวลา (`\timing`)
+เมื่อต้องตรวจสอบคำสั่งซื้อที่มีฟิลด์ JSON หรือข้อมูลกว้างมากๆ:
+
+```text filename="docs/database/postgresql.txt"
+smart_butcher_db=# \timing
+Timing is on.
+
+smart_butcher_db=# \x auto
+Expanded display is used automatically.
+
+smart_butcher_db=# SELECT * FROM products WHERE sku = 'WGY-MIYA-A5-STRIP';
+-[ RECORD 1 ]--+---------------------------------------------------------------------------------------
+id             | 8e94fae4-18df-4158-b34e-6e8ebdc5fca1
+category_id    | c1111111-1111-1111-1111-111111111111
+name           | Miyazaki Wagyu A5 Striploin
+sku            | WGY-MIYA-A5-STRIP
+price_per_kg   | 5200.00
+stock_qty      | 15
+dry_aged_days  | 0
+is_active      | t
+specifications | {"halal": true, "bms_score": 9, "feed_type": "Grain-fed 600 days", "origin": "Miyazaki, Japan"}
+available_cuts | {STEAK_1_INCH,STEAK_2_INCH,YAKINIKU,SHABU}
+created_at     | 2026-10-17 04:30:00+07
+Time: 1.245 ms
+```
+
+#### 3. การรัน SQL Script จากไฟล์ด้วย `psql -f`
+คำสั่งสำหรับการทำ Automation, Seeding หรือรัน Database Migration:
+
+```bash filename="run_database_setup.sh"
+# 1. รันไฟล์สคริปต์ SQL บนเซิร์ฟเวอร์แบบ Non-interactive
+psql -h localhost -p 5432 -U butcher_app_user -d smart_butcher_db -f 05_production_schema.sql
+
+# 2. รันสคริปต์และหยุดการทำงานทันทีหากพบ Error (สำคัญมากสำหรับ CI/CD!)
+psql -v ON_ERROR_STOP=1 -h localhost -U butcher_app_user -d smart_butcher_db -f 06_seed_data.sql
+
+# 3. สั่ง Export ข้อมูลผลลัพธ์เป็นไฟล์ CSV ตรงๆ จาก CLI
+psql -U butcher_app_user -d smart_butcher_db -c "COPY (SELECT name, sku, price_per_kg FROM products) TO STDOUT WITH CSV HEADER" > products_catalog.csv
+```
+
+### ผิด vs ถูก (Common Pitfalls & Best Practices)
+
+#### ❌ สิ่งที่ผิด: รันสคริปต์ขนาดใหญ่บน Production โดยไม่ใส่ `ON_ERROR_STOP=1`
+```bash filename="terminal.sh"
+# เมื่อคำสั่งที่ 2 เกิด Error เช่น Table Duplicate ตัว psql จะยังคงฝืนรันคำสั่งที่ 3, 4, 5 ต่อไป!
+# ส่งผลให้ฐานข้อมูลเกิดสถานะครึ่งๆ กลางๆ (Inconsistent Schema)
+psql -d smart_butcher_db -f migration_v2.sql
+```
+
+#### ✅ สิ่งที่ถูก: สั่ง `ON_ERROR_STOP=1` และครอบสคริปต์ทั้งหมดด้วย `BEGIN; ... COMMIT;`
+```bash filename="terminal.sh"
+# เมื่อมีบรรทัดใดเกิด Error ระบบจะหยุดรันทันทีและ Rollback ทุกอย่างกลับสู่จุดเดิม
+psql -v ON_ERROR_STOP=1 -d smart_butcher_db -f migration_v2_safe.sql
+```
+
+### ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+- **`psql` CLI:** ควรใช้เป็นเครื่องมือหลักสำหรับ Automation Scripts, CI/CD Deployment, Backup/Restore Verification, และการเข้าแก้ปัญหาเร่งด่วนในเซิร์ฟเวอร์จริง
+- **GUI Tools (DBeaver / pgAdmin):** เหมาะกับการดู Explain Execution Plan แบบ Graphic Tree ในจังหวะที่ทำการ Tuning Query ที่มีความซับซ้อนสูง และการสำรวจ Entity-Relationship Diagrams (ERD) ของระบบ
+
+### คำถามสัมภาษณ์ (Senior Level Questions)
+- **Q1: ในการเข้าตรวจสอบปัญหา Slow Query ฉุกเฉินบน Production Server ที่ไม่มีหน้าจอ GUI คุณจะใช้คำสั่งและขั้นตอนใดใน `psql` เพื่อวิเคราะห์?**
+  - *แนวคำตอบ:* 
+    1. รันคำสั่ง `\timing` เพื่อเปิดระบบจับเวลา
+    2. รันคำสั่งตรวจสอบการล็อกและคิวรีที่กำลังทำงานค้างอยู่ผ่านแค็ตตาล็อก:
+       `SELECT pid, now() - query_start AS duration, query, state FROM pg_stat_activity WHERE state != 'idle' ORDER BY duration DESC;`
+    3. เมื่อพบคิวรีต้องสงสัย ให้นำคิวรีนั้นมารันด้วย `EXPLAIN (ANALYZE, BUFFERS) <query>;` เพื่อดู Plan จริง เวลาที่ใช้ และจำนวน Shared Buffers Hit/Read บนดิสก์
+    4. ใช้ `\d+ <table_name>` เพื่อตรวจสอบว่าคอลัมน์ในเงื่อนไข `WHERE` หรือ `JOIN` มี Index รองรับหรือไม่
+
+---
+
+## ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+ในการออกแบบและบริหารจัดการ PostgreSQL 16 สำหรับระบบ Enterprise ระดับ Senior Backend มักพบ Anti-patterns สำคัญดังต่อไปนี้:
+
+### 1. ละเลยการสร้าง Index บน Foreign Key Columns
+- **พฤติกรรม:** สร้าง `REFERENCES parent_table(id)` แต่ไม่ได้สั่ง `CREATE INDEX idx_fk ON child_table(fk_column)`
+- **ผลกระทบ:** เมื่อเกิดการลบ (`DELETE`) หรืออัปเดต (`UPDATE`) แถวในตารางแม่ PostgreSQL จะต้องกวาดอ่านตารางลูกแบบ **Sequential Scan เต็มตาราง** เพื่อตรวจสอบความถูกต้อง ซึ่งทำให้ตารางลูกถูกล็อกนานขึ้น และทำให้แอปพลิเคชันค้างเมื่อตารางเริ่มมีข้อมูลหลักแสนแถว
+- **แนวทางแก้ไข:** สร้าง B-Tree Index บนทุก Foreign Key Column เป็นมาตรฐานตั้งต้นเสมอ
+
+### 2. การสั่ง `SELECT *` กับตารางที่มีคอลัมน์ Large TEXT หรือ JSONB (TOAST Table Overhead)
+- **พฤติกรรม:** เขียนคิวรี `SELECT * FROM products` ทั้งที่ต้องการเพียงชื่อและราคาเพื่อแสดงผลหน้ารายการสินค้า
+- **ผลกระทบ:** ใน PostgreSQL ข้อมูลที่มีขนาดยาวเกิน 2KB (เช่น JSONB specifications ขนาดใหญ่) จะถูกย้ายไปเก็บแยกไว้ในพื้นที่พิเศษเรียกว่า **TOAST (The Oversized-Attribute Storage Technique)** การสั่ง `SELECT *` จะบังคับให้ Engine ต้องไปเปิดอ่านข้อมูลจากตาราง TOAST และแตกไฟล์บีบอัดออกมาทุกแถว เปลือง RAM, I/O และทำให้ Network Transfer ช้าลงอย่างมาก
+- **แนวทางแก้ไข:** เลือกเฉพาะคอลัมน์ที่ต้องใช้งานจริงเสมอ เช่น `SELECT id, name, price_per_kg FROM products`
+
+### 3. การปล่อยให้เกิด Long-running Transactions ค้างในระบบ
+- **พฤติกรรม:** การเปิด `BEGIN;` ใน Node.js แล้วมีโค้ดรอ Call Third-party API (เช่น Payment Gateway หรือส่ง Email) นานหลายนาทีก่อนจะสั่ง `COMMIT`
+- **ผลกระทบ:** Transaction ID ยังคงค้างอยู่ ทำให้กระบวนการ **Autovacuum ไม่สามารถล้าง Dead Tuples ของแถวที่ถูกแก้ไขทั่วทั้งฐานข้อมูลได้** ก่อให้เกิด Table Bloat ขนาดตารางบวมขึ้นหลายเท่าตัว และอาจนำไปสู่ภาวะวิกฤต Transaction ID Wraparound
+- **แนวทางแก้ไข:** เปิด Transaction ให้สั้นที่สุดเฉพาะคำสั่ง SQL ที่ต้องรับประกันความสอดคล้องกัน ห้ามใส่ Asynchronous Network Call ใดๆ เข้าไปอยู่ภายใน Transaction Block
+
+### 4. การเชื่อมต่อแอปพลิเคชันโดยตรงโดยไม่มี Connection Pooler
+- **พฤติกรรม:** กำหนด Connection Pool ใน NestJS หรือ Prisma Client ไว้ตัวละ 50 connections เมื่อ Deploy แอปพลิเคชัน 10 Pods บน Kubernetes จะมี Connections ยิงเข้าหา PostgreSQL พร้อมกันถึง 500 connections
+- **ผลกระทบ:** PostgreSQL ใช้โมเดล Process-based แต่ละ Connection ใช้หน่วยความจำ 5-10MB และแย่ง CPU Core ในการ Context Switching จนระบบเกิดอาการกระตุกและปฏิเสธการเชื่อมต่อ (`FATAL: sorry, too many clients already`)
+- **แนวทางแก้ไข:** ติดตั้ง **PgBouncer** หรือ **Supavisor** คั่นกลางระหว่างแอปพลิเคชันและฐานข้อมูล โดยใช้โหมด `Transaction Pooling` เพื่อคุม Connection จริงเข้า Postgres ไม่ให้เกิน 50-100 Connections
+
+### 5. การใช้ชนิดข้อมูล FLOAT สำหรับการเงินและน้ำหนักสินค้า
+- **พฤติกรรม:** ใช้ `FLOAT`, `DOUBLE PRECISION`, หรือ `REAL` ในคอลัมน์ `total_amount` หรือ `price_per_kg`
+- **ผลกระทบ:** เกิดความผิดพลาดจากการปัดเศษทศนิยมตามมาตรฐาน IEEE 754 เช่น เงินขาดไป 1 สตางค์ หรือยอดรวมในใบเสร็จไม่ตรงกับรายการสินค้า
+- **แนวทางแก้ไข:** บังคับใช้ `NUMERIC(10, 2)` หรือ `NUMERIC(12, 2)` สำหรับการคำนวณเงินและสต็อกเสมอ
+
+---
+
+## Checklist สรุป
+
+ก่อนนำฐานข้อมูล PostgreSQL 16 ขึ้นสู่สภาพแวดล้อม Production ของระบบ **Smart Butcher Marketplace** ให้ตรวจสอบความพร้อมตามรายการนี้:
+
+- [ ] **Type Precision:** คอลัมน์ที่เกี่ยวกับเงินและน้ำหนักทั้งหมดใช้ `NUMERIC(10,2)` หรือ `NUMERIC(12,2)` และไม่มีการใช้ `FLOAT` ในระบบ
+- [ ] **Timezone Uniformity:** คอลัมน์เก็บเวลาทั้งหมด (เช่น `created_at`, `updated_at`) กำหนดเป็นชนิด `TIMESTAMPTZ` (Timestamp with time zone)
+- [ ] **Primary Key Standard:** ตารางทุกตัวมี Primary Key ที่ชัดเจน แนะนำให้ใช้ `UUID` v7 หรือ `gen_random_uuid()` หรือ `BIGINT`
+- [ ] **Foreign Key Indexing:** คอลัมน์ Foreign Key ทุกตัวในระบบมี B-Tree Index กำกับไว้เรียบร้อย เพื่อป้องกันปัญหา Sequential Scan ตอนทำ Referential Action
+- [ ] **Referential Actions Defined:** ตรวจสอบพฤติกรรม `ON DELETE` ของทุก Foreign Key อย่างรัดกุม (`CASCADE` เฉพาะข้อมูลที่เป็นเนื้อเดียวกัน, `RESTRICT` สำหรับประวัติคำสั่งซื้อและการเงิน)
+- [ ] **Data Integrity Constraints:** มีการใส่ `CHECK` constraint ป้องกันข้อมูลติดลบ (เช่น `price > 0`, `stock_qty >= 0`) ครบถ้วน
+- [ ] **Least Privilege Role Enforcement:** แอปพลิเคชัน Backend เชื่อมต่อด้วย Dedicated Role ที่มีเฉพาะสิทธิ์ DML (`SELECT`, `INSERT`, `UPDATE`, `DELETE`) ไม่ใช้ Superuser `postgres`
+- [ ] **Search Path Fixed:** มีการตั้งค่า `search_path` อย่างชัดเจน และเพิกถอนสิทธิ์การสร้างตารางของ Public (`REVOKE CREATE ON SCHEMA public FROM PUBLIC;`)
+- [ ] **Extensions Ready:** ติดตั้ง Extension ที่จำเป็น เช่น `pgcrypto` และ `pg_trgm` พร้อมสร้าง GIN Index สำหรับการค้นหาแบบข้อความ
+- [ ] **Connection Pooling Active:** มีการติดตั้ง Connection Pooler (เช่น PgBouncer หรือ Supabase Supavisor) กั้นหน้าฐานข้อมูลบน Production
+- [ ] **Autovacuum Tuning:** ตรวจสอบว่า Autovacuum ทำงานปกติ และไม่มี Long-running Transaction ค้างใน `pg_stat_activity`
+- [ ] **Memory Allocation Sized:** ปรับแต่งค่า `shared_buffers` ให้เหมาะสม (ประมาณ 25% ของ RAM เครื่อง) และควบคุมค่า `work_mem` ไม่ให้สูงเกินไปจนเสี่ยงต่อ OOM
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+หลังจากเข้าใจสถาปัตยกรรมระดับลึก ชนิดข้อมูล และกลไก Integrity ของ PostgreSQL 16 เรียบร้อยแล้ว ขอแนะนำให้ศึกษาหัวข้อที่เกี่ยวข้องตามลำดับดังนี้:
+
+<Callout type="tip" title="ศึกษาต่อในหัวข้อถัดไป">
+1. **ภาษา SQL เชิงลึกและการเขียน Query ประสิทธิภาพสูง:**  
+   👉 **[SQL](/docs/database/sql)** — เจาะลึกการเขียน DDL, DML, Complex Joins, Subqueries, Aggregate Functions, Window Functions และ Common Table Expressions (CTE)
+
+2. **การเชื่อมต่อและใช้งานผ่าน Application Layer:**  
+   👉 **[Prisma ORM](/docs/backend/prisma-orm)** — เรียนรู้วิธีการ Map Schema จาก PostgreSQL สู่ Prisma Models, การจัดการ Connection Pooling, การทำ Migration ด้วย Prisma Migrate, และการทำ Transactions อย่างปลอดภัยใน Node.js/NestJS
+</Callout>

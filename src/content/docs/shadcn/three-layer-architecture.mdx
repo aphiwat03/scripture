@@ -1,0 +1,273 @@
+---
+title: 3-Layer Architecture
+category: Frontend
+parentTitle: shadcn/ui
+version: shadcn/ui & Radix UI
+updatedAt: 2026-10-17
+---
+
+## 1. แนวคิด (Concept)
+
+หัวใจสำคัญที่ทำให้ shadcn/ui ทรงพลังและได้รับความนิยมอย่างถล่มทลาย ไม่ใช่เรื่องของความสวยงามเพียงอย่างเดียว แต่คือ **"สถาปัตยกรรม 3 ชั้น (The 3-Layer Architecture)"** ที่แยกบทบาทหน้าที่ (Separation of Concerns) ออกจากกันอย่างสมบูรณ์แบบ:
+
+```
+┌────────────────────────────────────────────────────────┐
+│             Layer 3: Assembly (shadcn/ui)              │
+│   (TypeScript Components, CVA Variants, cn() Utility)  │
+├────────────────────────────────────────────────────────┤
+│             Layer 2: Style (Tailwind CSS v4)           │
+│      (Utility Classes, Design Tokens, CSS Variables)   │
+├────────────────────────────────────────────────────────┤
+│          Layer 1: Headless a11y (Radix UI)             │
+│   (WAI-ARIA, Keyboard Navigation, Focus Trap, Portal)   │
+└────────────────────────────────────────────────────────┘
+```
+
+1. **ชั้นที่ 1: Radix UI (Headless Layer)** — ทำหน้าที่ควบคุม "พฤติกรรมและการเข้าถึง (Behavior & Accessibility)" 100% โดยไม่มีสไตล์ CSS ใดๆ ติดมาเลย (Unstyled & Headless)
+2. **ชั้นที่ 2: Tailwind CSS v4 (Style Layer)** — ทำหน้าที่กำหนด "หน้าตาและโทนสี (Presentation & Theming)" ผ่าน Utility Classes และตัวแปร CSS Variables (`@theme`)
+3. **ชั้นที่ 3: shadcn/ui (Assembly Layer)** — ทำหน้าที่เป็น "กาวเชื่อมประสาน (Glue Code)" นำ Radix UI และ Tailwind CSS มารวมกันเป็นคอมโพเนนต์พร้อมใช้ วางไว้ในโปรเจกต์ของคุณ
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. Headless UI คืออะไร และทำไมต้องใช้ Radix UI?
+การสร้าง Interactive UI ที่ถูกต้องตามมาตรฐาน W3C WAI-ARIA เป็นเรื่องที่ยากมาก หากคุณสร้าง Dropdown หรือ Modal ขึ้นมาเอง คุณมักจะลืมสิ่งเหล่านี้:
+- **Keyboard Navigation**: การกด `Tab`, `Shift + Tab`, ลูกศรขึ้น-ลง (`ArrowUp`/`ArrowDown`), ปุ่ม `Home`/`End`, และปุ่ม `Escape`
+- **Focus Management**: Focus Trap (ไม่ให้กด Tab ทะลุออกไปนอก Modal) และ Focus Restoration (เมื่อปิด Modal ให้คืน Focus กลับไปที่ปุ่มที่กดเปิด)
+- **Screen Reader Announcements**: การใส่ `aria-expanded`, `aria-haspopup`, `aria-controls`, `aria-labelledby` แบบ Dynamic
+- **Portal Rendering**: การยกเลเยอร์ของ Popup/Modal ไปไว้ที่ `document.body` เพื่อไม่ให้โดนตัดด้วย `overflow: hidden` หรือปัญหา `z-index` ของ Parent container
+
+Radix UI จัดการความซับซ้อนระดับต่ำเหล่านี้ให้ทั้งหมด โดยไม่บังคับหน้าตา คุณจึงได้ความสมบูรณ์แบบด้าน Accessibility โดยไม่ต้องเขียนโค้ดซ้ำซ้อน
+
+### 2. บทบาทของ Tailwind CSS v4 และ CVA ใน Assembly Layer
+เมื่อ Radix UI มอบ Primitive DOM Nodes มาให้:
+- **Tailwind CSS v4** เข้ามารับหน้าที่สไตลิ่งด้วยคลาส Utility
+- **CVA (Class Variance Authority)** เข้ามาช่วยสร้างตัวแปรของคอมโพเนนต์อย่างเป็นระบบ เช่น `variant="primary" | "secondary" | "destructive"` และ `size="sm" | "md" | "lg"`
+- **`cn()` Utility** รวมคลาสเริ่มต้นเข้ากับคลาสที่ผู้ใช้งานส่งผ่าน `className` จากภายนอก พร้อมตัดคลาสที่ขัดแย้งกันออกอย่างชาญฉลาด
+
+---
+
+## 3. ตัวอย่างโค้ด (TypeScript / TSX)
+
+### แกะไส้ใน: ดู 3 ชั้นที่ประกอบเป็น `<AlertDialog>` สำหรับยืนยันการลบข้อมูล (Delete Confirmation)
+
+#### ไฟล์ประกอบร่าง: `components/ui/alert-dialog.tsx` (Layer 3 รวม Layer 1 & 2)
+```tsx filename="components/ui/alert-dialog.tsx"
+"use client";
+
+import * as React from "react";
+// [Layer 1] นำเข้า Headless Primitives จาก Radix UI
+import * as AlertDialogPrimitive from "@radix-ui/react-alert-dialog";
+// [Layer 2 & 3] นำเข้า Utility สำหรับประกอบสไตล์
+import { cn } from "@/lib/utils";
+
+// 1. Root & Trigger: ส่งต่อการทำงานของ Radix โดยตรง
+export const AlertDialog = AlertDialogPrimitive.Root;
+export const AlertDialogTrigger = AlertDialogPrimitive.Trigger;
+export const AlertDialogPortal = AlertDialogPrimitive.Portal;
+
+// 2. Overlay: สร้างฉากหลังสีดำโปร่งใส พร้อม Animation (Tailwind CSS v4)
+export const AlertDialogOverlay = React.forwardRef<
+  React.ElementRef<typeof AlertDialogPrimitive.Overlay>,
+  React.ComponentPropsWithoutRef<typeof AlertDialogPrimitive.Overlay>
+>(({ className, ...props }, ref) => (
+  <AlertDialogPrimitive.Overlay
+    className={cn(
+      "fixed inset-0 z-50 bg-black/60 backdrop-blur-xs",
+      "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+      className
+    )}
+    ref={ref}
+    {...props}
+  />
+));
+AlertDialogOverlay.displayName = AlertDialogPrimitive.Overlay.displayName;
+
+// 3. Content: หน้าต่างหลัก จัดกึ่งกลางหน้าจอ พร้อมระบบ Accessible Dialog
+export const AlertDialogContent = React.forwardRef<
+  React.ElementRef<typeof AlertDialogPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof AlertDialogPrimitive.Content>
+>(({ className, ...props }, ref) => (
+  <AlertDialogPortal>
+    <AlertDialogOverlay />
+    <AlertDialogPrimitive.Content
+      ref={ref}
+      className={cn(
+        "fixed left-1/2 top-1/2 z-50 grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 border bg-background p-6 shadow-xl duration-200 sm:rounded-2xl",
+        "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
+        className
+      )}
+      {...props}
+    />
+  </AlertDialogPortal>
+));
+AlertDialogContent.displayName = AlertDialogPrimitive.Content.displayName;
+
+export const AlertDialogHeader = ({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement>) => (
+  <div className={cn("flex flex-col space-y-2 text-center sm:text-left", className)} {...props} />
+);
+
+export const AlertDialogTitle = React.forwardRef<
+  React.ElementRef<typeof AlertDialogPrimitive.Title>,
+  React.ComponentPropsWithoutRef<typeof AlertDialogPrimitive.Title>
+>(({ className, ...props }, ref) => (
+  <AlertDialogPrimitive.Title
+    ref={ref}
+    className={cn("text-lg font-semibold text-foreground", className)}
+    {...props}
+  />
+));
+AlertDialogTitle.displayName = AlertDialogPrimitive.Title.displayName;
+
+export const AlertDialogDescription = React.forwardRef<
+  React.ElementRef<typeof AlertDialogPrimitive.Description>,
+  React.ComponentPropsWithoutRef<typeof AlertDialogPrimitive.Description>
+>(({ className, ...props }, ref) => (
+  <AlertDialogPrimitive.Description
+    ref={ref}
+    className={cn("text-sm text-muted-foreground leading-relaxed", className)}
+    {...props}
+  />
+));
+AlertDialogDescription.displayName = AlertDialogPrimitive.Description.displayName;
+
+export const AlertDialogAction = React.forwardRef<
+  React.ElementRef<typeof AlertDialogPrimitive.Action>,
+  React.ComponentPropsWithoutRef<typeof AlertDialogPrimitive.Action>
+>(({ className, ...props }, ref) => (
+  <AlertDialogPrimitive.Action
+    ref={ref}
+    className={cn(
+      "inline-flex h-10 items-center justify-center rounded-lg bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground hover:bg-destructive/90 transition-colors",
+      className
+    )}
+    {...props}
+  />
+));
+AlertDialogAction.displayName = AlertDialogPrimitive.Action.displayName;
+
+export const AlertDialogCancel = React.forwardRef<
+  React.ElementRef<typeof AlertDialogPrimitive.Cancel>,
+  React.ComponentPropsWithoutRef<typeof AlertDialogPrimitive.Cancel>
+>(({ className, ...props }, ref) => (
+  <AlertDialogPrimitive.Cancel
+    ref={ref}
+    className={cn(
+      "mt-2 sm:mt-0 inline-flex h-10 items-center justify-center rounded-lg border border-input bg-background px-4 py-2 text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors",
+      className
+    )}
+    {...props}
+  />
+));
+AlertDialogCancel.displayName = AlertDialogPrimitive.Cancel.displayName;
+```
+
+#### นำไปใช้งานในหน้าจอจริง: การลบฐานข้อมูลโปรเจกต์
+```tsx filename="app/projects/ProjectDeleteDialog.tsx"
+"use client";
+
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
+import { AlertTriangle } from "lucide-react";
+
+interface ProjectDeleteProps {
+  projectName: string;
+  onConfirmDelete: () => Promise<void>;
+}
+
+export function ProjectDeleteDialog({ projectName, onConfirmDelete }: ProjectDeleteProps) {
+  return (
+    <AlertDialog>
+      <AlertDialogTrigger asChild>
+        <Button variant="destructive" size="sm" className="gap-2">
+          <AlertTriangle className="w-4 h-4" />
+          ลบโปรเจกต์
+        </Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>คุณแน่ใจหรือไม่ที่จะลบโปรเจกต์ "{projectName}"?</AlertDialogTitle>
+          <AlertDialogDescription>
+            การกระทำนี้ไม่สามารถย้อนกลับได้ ข้อมูลตารางทั้งหมด ไฟล์มีเดีย
+            และสิทธิ์การเข้าถึงของผู้ใช้งานในโปรเจกต์นี้จะถูกลบออกจากคลัสเตอร์อย่างถาวร
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <div className="flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2 mt-4">
+          <AlertDialogCancel>ยกเลิก</AlertDialogCancel>
+          <AlertDialogAction onClick={onConfirmDelete}>
+            ยืนยันการลบถาวร
+          </AlertDialogAction>
+        </div>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+```
+
+---
+
+## 4. ผิด vs ถูก
+
+| รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
+| :--- | :--- |
+| **เขียน Modal เองด้วย `<div>` และ `useState` ดักคลิก**<br/>```tsx
+{isOpen && (
+  <div className="modal-overlay">
+    <div className="modal-box">{children}</div>
+  </div>
+)}
+```<br/>ผลลัพธ์: ลืม Focus Trap, กด Tab ทะลุไปหน้าหลัง, กด ESC ไม่ปิด, Screen Reader ไม่ส่งเสียง | **ใช้ Radix UI Primitive ผ่าน shadcn**<br/>ให้ Radix จัดการ Event Listeners, Focus Trap, WAI-ARIA role และ State อัตโนมัติ<br/>```tsx
+<AlertDialog open={isOpen} onOpenChange={setIsOpen}>
+  <AlertDialogContent>...</AlertDialogContent>
+</AlertDialog>
+``` |
+| **ลบ `AlertDialogTitle` หรือ `Description` ออก**<br/>เพราะไม่อยากให้มีตัวหนังสือหัวข้อในดีไซน์ ส่งผลให้บราวเซอร์ฟ้อง Error ใน Console เรื่องขาด Accessible Label | **คงแท็กไว้แล้วซ่อนด้วย Tailwind `sr-only`**<br/>```tsx
+<AlertDialogTitle className="sr-only">
+  ยืนยันการทำรายการ
+</AlertDialogTitle>
+```<br/>หน้าตาไม่แสดงข้อความ แต่ยังรักษามาตรฐานการเข้าถึง 100% |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้เมื่อ:
+- **สร้างแอปพลิเคชันระดับ Production**: ที่ต้องผ่านมาตรฐาน WCAG 2.1 AA หรือมีผู้ใช้ที่ต้องพึ่งพาแป้นพิมพ์และเครื่องอ่านหน้าจอ
+- **ต้องการควบคุม Design System ขององค์กร 100%**: สถาปัตยกรรม 3 ชั้นช่วยให้คุณเปลี่ยนธีมหรือฟอนต์ในเลเยอร์ Tailwind ได้โดยไม่กระทบฟังก์ชันการทำงานของคอมโพเนนต์
+- **โปรเจกต์ที่ต้องการประสิทธิภาพสูงสุด**: ไม่มี JavaScript Runtime Overhead ของระบบสไตล์แบบเก่า
+
+### ไม่ควรใช้เมื่อ:
+- **ต้องการ Component ที่สมบูรณ์แบบโดยไม่ต้องเขียนโค้ดอะไรเลย**: หากทีมไม่มีความรู้เรื่อง Tailwind หรือ TypeScript และไม่อยากดูแลโค้ดใน `components/ui`
+- **ระบบที่เรียบง่ายมากๆ ระดับ Static Landing Page**: ที่มีเพียงข้อความและรูปภาพ ไม่มี Interactive Elements เช่น Dialog, Tooltip, หรือ Dropdown
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+
+### Q1: อธิบายความหมายของคำว่า "Headless UI" และเหตุใดสถาปัตยกรรมของ Radix UI จึงเป็นรากฐานที่สำคัญของ shadcn/ui?
+**แนวทางตอบ:**
+"Headless UI" คือคอมโพเนนต์ที่เตรียม Logic, State Management, Event Handlers, และ Accessibility (WAI-ARIA) ทั้งหมดไว้ให้ แต่ **ไม่มีสไตล์ (Unstyled)** หรือมาร์กอัปตกแต่งใดๆ ติดมาด้วยเลย
+
+ประโยชน์ที่ Radix UI มอบให้แก่ shadcn/ui:
+1. **แก้ปัญหายากที่สุดใน Frontend**: พฤติกรรมเช่น Keyboard Trapping, ARIA Attribute Syncing, Floating element positioning (ผ่าน Floating UI) ถูกทดสอบและรองรับทุกเบราว์เซอร์แล้ว
+2. **ไม่จำกัดกรอบดีไซน์**: นักพัฒนาสามารถสไตลิ่งด้วย Tailwind CSS ได้อย่างอิสระ 100% โดยไม่ต้องต่อสู้กับ default styles หรือ CSS specificity ของไลบรารี
+
+### Q2: หากบริษัทต้องการทำ Rebranding ครั้งใหญ่ โดยเปลี่ยน Border-radius, สีหลัก และแอนิเมชันทั้งหมด สถาปัตยกรรม 3 ชั้นนี้ช่วยให้การปรับปรุงทำได้ง่ายและปลอดภัยอย่างไร?
+**แนวทางตอบ:**
+เนื่องจากสถาปัตยกรรมแยกส่วนชัดเจน:
+1. **กระทบเฉพาะ Layer 2 (Style Layer)**: เราเพียงเข้าไปแก้ไขตัวแปร CSS Variables ใน `globals.css` (เช่น `--primary`, `--radius`) หรือปรับคลาสใน CVA variants ของคอมโพเนนต์ที่เกี่ยวข้อง
+2. **Layer 1 (Logic & a11y) ไม่ถูกแตะต้อง**: การทำงานของ Modal, Dropdown, Accordion, การจัดการคีย์บอร์ด และการส่งข้อมูลไปยัง Server ยังคงทำงานได้อย่างเสถียร 100% โดยไม่มีบั๊กหลุดรอด
+3. **ลดเวลา Regression Testing**: QA ไม่จำเป็นต้องกังวลว่าการเปลี่ยนดีไซน์จะทำให้ Event Handler หลุดหรือ Focus Trap เสียหาย

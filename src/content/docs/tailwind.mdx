@@ -1,0 +1,44 @@
+---
+title: Tailwind CSS v4
+category: Frontend
+version: Tailwind CSS v4.0
+updatedAt: 2026-10-17
+---
+
+## ภาพรวม Tailwind CSS v4 & Next.js 16
+
+**Tailwind CSS v4** คือการยกเครื่องสถาปัตยกรรมครั้งใหญ่ที่สุดในประวัติศาสตร์ของ Tailwind โดยเปลี่ยนผ่านจากระบบเดิม (v3 ที่พึ่งพา JavaScript Engine และไฟล์ `tailwind.config.js`) ไปสู่สถาปัตยกรรม **"CSS-First Engine (Oxide Engine)"** ที่เขียนด้วยภาษา Rust ซึ่งมีความเร็วในการคอมไพล์สูงขึ้นกว่าเดิมถึง 10 เท่า
+
+จุดเปลี่ยนสำคัญใน Tailwind CSS v4:
+- **Zero Configuration File**: ไม่มีไฟล์ `tailwind.config.js` เป็นค่าเริ่มต้นอีกต่อไป ทุกการตั้งค่าทำผ่าน CSS ดั้งเดิมด้วย Directive `@theme`
+- **One-line Import**: นำเข้าเพียง `@import "tailwindcss";` บรรทัดเดียวใน `globals.css` (แทนที่ `@tailwind base; components; utilities;`)
+- **Native Modern Features**: รองรับ CSS Variables (`--color-*`), ระบบสีสเปกตรัมกว้าง **OKLCH**, Container Queries (`@container`), 3D Transforms, และ Relational Variants (`has-*`, `not-*`) ในตัวทันที
+- **Automatic Content Detection**: ไม่ต้องระบุพาธ `content: [...]` อีกต่อไป เอนจินจะสแกนไฟล์เทมเพลตและคอมโพเนนต์ในโปรเจกต์ให้อัตโนมัติ
+
+---
+
+## แผนผังเนื้อหา Tailwind CSS v4 (Directory)
+
+บทเรียนนี้ครอบคลุม 19 หัวข้อสำคัญที่วิศวกร Fullstack ต้องใช้จริงในงาน:
+
+| หัวข้อ | ลิงก์อ่านเนื้อหา | คำอธิบายสังเขป |
+| :--- | :--- | :--- |
+| **1. แนวคิด Utility-first** | [Utility-first](/docs/tailwind/utility-first) | เทียบกับ CSS ดั้งเดิม & Bootstrap, ข้อดี-ข้อเสีย, วิธีแก้ปัญหา class ยาว |
+| **2. การติดตั้งใน Next.js 16** | [Next.js 16 Setup](/docs/tailwind/installation) | `@tailwindcss/postcss`, `@import "tailwindcss"`, สิ่งที่เปลี่ยนจาก v3 |
+| **3. Spacing & Sizing** | [Spacing & Sizing](/docs/tailwind/spacing-sizing) | `p`, `m`, `gap`, `w`, `h`, `size`, Spacing Scale, Arbitrary values `w-[320px]` |
+| **4. Flexbox & Grid** | [Flexbox & Grid](/docs/tailwind/flexbox-grid) | `flex`, `items-*`, `justify-*`, `grid-cols-*`, `col-span-*`, Common UI Layouts |
+| **5. Typography & Thai Fonts** | [Typography & Thai](/docs/tailwind/typography) | `text-*`, `font-*`, `leading-*`, `tracking-*`, `line-clamp`, ฟอนต์ Sarabun ผ่าน `@theme` |
+| **6. สี พื้นหลัง และเงา** | [Colors & Shadows](/docs/tailwind/colors-effects) | ระบบสี OKLCH, Opacity modifier (`bg-black/50`), Gradient, Ring, Shadow |
+| **7. Responsive Design** | [Responsive Design](/docs/tailwind/responsive) | Mobile-first breakpoints (`sm`, `md`, `lg`, `xl`, `2xl`), Container Queries (`@container`) |
+| **8. State Variants** | [State Variants](/docs/tailwind/state-variants) | `hover:`, `focus-visible:`, `group-*`, `peer-*`, `has-*`, `not-*`, `data-*` |
+| **9. Dark Mode & Theming** | [Dark Mode & Themes](/docs/tailwind/dark-mode) | `dark:` variant, next-themes, CSS variables, การสลับธีม |
+| **10. ปรับแต่งแบบ CSS-first** | [@theme & CSS-first](/docs/tailwind/css-first-theme) | `@theme`, `@utility`, `@custom-variant`, `@source`, `@plugin` vs v3 config |
+| **11. Transitions & Animations** | [Animations](/docs/tailwind/transitions-animations) | `transition-*`, `duration-*`, `animate-*`, `starting:`, `motion-reduce:` |
+| **12. Modern UI Effects** | [Modern UI Effects](/docs/tailwind/modern-ui-effects) | Glassmorphism (`backdrop-blur`), Gradient text, Overlay, Skeleton loading |
+| **13. Arbitrary Values** | [Arbitrary Values](/docs/tailwind/arbitrary-variables) | `[...]` syntax, `bg-(--my-var)`, เมื่อไหร่ใช้ arbitrary vs เมื่อไหร่ใส่ `@theme` |
+| **14. Class ใน React (cn)** | [Class in React (cn)](/docs/tailwind/class-management) | `clsx`, `tailwind-merge`, ฟังก์ชัน `cn()`, `cva` สำหรับ Variant Component |
+| **15. การจัดโครงสร้างโค้ด** | [Code Organization](/docs/tailwind/code-organization) | เมื่อไหร่แยก component แทน `@apply`, prettier sorting, ข้อห้าม dynamic class |
+| **16. Tailwind & shadcn/ui** | [Tailwind & shadcn](/docs/tailwind/shadcn-integration) | การทำงานร่วมกับ shadcn, CSS Variables theming, Component overriding |
+| **17. Performance & a11y** | [Performance & a11y](/docs/tailwind/performance-a11y) | ทำไม CSS เล็ก, Color contrast, Focus rings, `sr-only` |
+| **18. การ Debugging** | [DevTools Debugging](/docs/tailwind/debugging) | ตรวจสอบ utility ใน DevTools, Class ไม่ติด, Specificity conflicts |
+| **19. Pitfalls & Q&A** | [Pitfalls & Q&A](/docs/tailwind/pitfalls) | รวม Anti-patterns ยอดฮิต, คำถามสัมภาษณ์งาน, Checklist สรุป และ Roadmap |

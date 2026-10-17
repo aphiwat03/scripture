@@ -1,0 +1,105 @@
+---
+title: PostgreSQL 16
+category: Database
+version: v16.4
+updatedAt: 2026-10-17
+---
+
+## 1. คืออะไร และแก้ปัญหาอะไร
+
+**PostgreSQL 16** คือระบบจัดการฐานข้อมูลเชิงสัมพันธ์แบบโอเพนซอร์ส (Object-Relational Database Management System - ORDBMS) ที่ได้รับความนิยมสูงสุดในหมู่นักพัฒนาระดับองค์กร โดดเด่นด้วยความน่าเชื่อถือ ความถูกต้องแม่นยำของข้อมูลตามมาตรฐาน **ACID** และความสามารถในการรองรับเวิร์กโหลดขนาดใหญ่
+
+ในระบบที่ต้องจัดการข้อมูลธุรกรรมทางการเงินหรือข้อมูลผู้ใช้งาน ฐานข้อมูลประเภท NoSQL หรือฐานข้อมูลทั่วไปมักประสบปัญหาข้อจำกัดด้านความสมบูรณ์ของความสัมพันธ์ (Referential Integrity) หรือขาดความยืดหยุ่นในการสืบค้นข้อมูลที่ซับซ้อน PostgreSQL เข้ามาแก้ปัญหานี้ด้วยการรวมจุดเด่นของฐานข้อมูลแบบสัมพันธ์ (Tables, Foreign Keys, Joins) เข้ากับความยืดหยุ่นของเอกสารสมัยใหม่ผ่านคอลัมน์ชนิด **JSONB** ทำให้นักพัฒนาสามารถจัดเก็บข้อมูลทั้งแบบมีโครงสร้างตายตัวและแบบ Dynamic Schema ได้ภายในฐานข้อมูลตัวเดียวกัน
+
+<InteractiveFlowDiagram variant="storage" title="โครงสร้างการจัดเก็บข้อมูล (Prisma ORM ➔ PostgreSQL 16 ➔ Supabase Storage)" subtitle="แสดงความสัมพันธ์ระหว่างการบันทึกข้อมูลเชิงสัมพันธ์ใน PostgreSQL และการเชื่อมโยงไฟล์มัลติมีเดียไปยัง Object Storage" />
+
+## 2. Module และ Feature หลัก
+
+PostgreSQL 16 มาพร้อมกับคุณสมบัติระดับสูงที่รองรับทั้งการพัฒนาแอปพลิเคชันทั่วไปและการวิเคราะห์ข้อมูลขนาดใหญ่:
+
+| คุณสมบัติ / ฟีเจอร์หลัก | ใช้ทำอะไร |
+| --- | --- |
+| `ACID Transactions` | รับประกันความถูกต้องของธุรกรรม (Atomicity, Consistency, Isolation, Durability) ป้องกันข้อมูลสูญหายหรือคลาดเคลื่อน |
+| `JSONB Data Type` | จัดเก็บข้อมูลแบบ JSON ในรูปแบบไบนารีที่ถูกบีบอัดและทำ Index ได้ ทำให้ค้นหาข้อมูลลึกใน JSON ได้อย่างรวดเร็ว |
+| `GIN & B-Tree Indexes` | ระบบดัชนีหลากหลายรูปแบบ โดย B-Tree ใช้กับการเปรียบเทียบค่าทั่วไป ส่วน GIN ใช้สำหรับค้นหาฟิลด์ใน JSONB และข้อความ |
+| `Logical Replication` | ระบบจำลองข้อมูลแบบกระจายศูนย์ที่ในเวอร์ชัน 16 สามารถ Replicate ข้อมูลจาก Standby Node ได้ ช่วยลดภาระของ Primary DB |
+| `PostgreSQL Extensions` | ระบบส่วนขยายที่ทรงพลัง เช่น `pgvector` (สำหรับจัดเก็บ AI Vector Embeddings), `uuid-ossp`, และ `postgis` |
+| `Table Partitioning` | การแบ่งตารางข้อมูลขนาดใหญ่ (เช่น Logs หลายล้านแถว) ออกเป็นตารางย่อยตามช่วงเวลาหรือเงื่อนไขเพื่อเพิ่มความเร็วในการ Query |
+
+## 3. ตัวอย่างโค้ดการใช้งาน
+
+### การกำหนด Schema และเชื่อมต่อผ่าน Prisma ORM
+
+ตัวอย่างการออกแบบตาราง `User` และ `Order` พร้อมคอลัมน์ชนิด `Json` ใน PostgreSQL ผ่านไฟล์ Schema ของ Prisma:
+
+```prisma filename="prisma/schema.prisma"
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String
+  role      String   @default("CUSTOMER")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  orders    Order[]
+
+  @@map("users")
+}
+
+model Order {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  totalAmount Decimal  @db.Decimal(10, 2)
+  status      String   @default("PENDING")
+  metadata    Json?    // คอลัมน์ JSONB สำหรับเก็บข้อมูลรายละเอียดสลิปหรือพิกัด
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@map("orders")
+}
+```
+
+### การสืบค้นข้อมูล JSONB ด้วยคำสั่ง SQL โดยตรง
+
+```sql
+-- ค้นหาคำสั่งซื้อที่ในคอลัมน์ metadata มีฟิลด์ paymentMethod เป็น 'PROMPTPAY'
+SELECT id, total_amount, metadata->>'paymentMethod' AS payment_method
+FROM orders
+WHERE metadata @> '{"paymentMethod": "PROMPTPAY"}';
+```
+
+## 4. Callout สำคัญที่ควรรู้
+
+<Callout type="tip" title="สร้าง GIN Index เมื่อมีการสืบค้นข้อมูลใน JSONB บ่อยครั้ง">
+แม้ว่า JSONB จะมีความเร็วในการอ่านข้อมูลสูง แต่หากตารางมีข้อมูลมากกว่าแสนแถวและต้องสืบค้นด้วยโอเปอเรเตอร์ `@>` บ่อยๆ ควรสร้าง GIN Index เช่น `CREATE INDEX idx_orders_metadata ON orders USING gin (metadata);` เพื่อให้ค้นหาได้ในระดับมิลลิวินาที
+</Callout>
+
+<Callout type="note" title="PostgreSQL 16 ปรับปรุง Query Execution Engine">
+ในเวอร์ชัน 16 ระบบ Query Optimizer ได้รับการปรับปรุงให้รองรับ Parallel Execution ในคำสั่ง `FULL` และ `RIGHT OUTER JOIN` รวมถึงลดการใช้ I/O ในการทำ Bulk Insert ทำให้การจัดการข้อมูลจำนวนมากเร็วขึ้นอย่างเห็นได้ชัด
+</Callout>
+
+<Callout type="warning" title="อย่าลืมสร้าง Index บน Foreign Key ทุกครั้ง">
+PostgreSQL จะสร้าง Unique Index ให้เฉพาะ Primary Key โดยอัตโนมัติ แต่จะไม่สร้าง Index ให้กับคอลัมน์ Foreign Key หากไม่ได้ใส่ Index กำกับไว้ การทำ `JOIN` หรือการสั่ง `CASCADE DELETE` อาจทำให้เกิด Table Scan ทั้งตารางจนฐานข้อมูลช้าลงได้
+</Callout>
+
+## 5. ข้อควรระวังและ Best Practices
+
+- **ใช้ Connection Pooling เสมอเมื่อต่อกับ Node.js**: PostgreSQL ใช้ 1 Process ต่อ 1 Connection หากมี Request จาก Node.js หรือ Next.js เข้ามาพร้อมกันจำนวนมาก อาจทำให้ Connection เต็มได้อย่างรวดเร็ว ควรใช้ Connection Pooler เช่น PgBouncer หรือ Prisma Accelerate เพื่อจัดการจำนวน Connection อย่างมีประสิทธิภาพ
+- **ระมัดระวังการทำ N+1 Queries ใน ORM**: เมื่อเขียนโค้ดดึงข้อมูลตารางที่สัมพันธ์กันผ่าน ORM ต้องตรวจสอบเสมอว่ามีการใช้ `include` หรือ `JOIN` อย่างถูกต้องเพื่อไม่ให้เกิดการยิงคำสั่ง SQL ย่อยซ้ำๆ ตามจำนวนแถว
+- **ตั้งค่า Auto-Vacuum อย่างเหมาะสม**: กระบวนการ Vacuum มีหน้าที่คืนพื้นที่และอัปเดตสถิติตารางหลังจากมีการ Update/Delete ข้อมูล ไม่ควรปิด Auto-Vacuum เป็นอันขาด เพราะจะทำให้ตารางบวม (Table Bloat) และ Query ช้าลงเรื่อยๆ
+- **กำหนดขนาดคอลัมน์ Decimal สำหรับการเงิน**: อย่าใช้ `Float` หรือ `Double Precision` เก็บยอดเงินหรือแต้มคะแนนเด็ดขาด เพราะอาจเกิดปัญหาเลขทศนิยมคลาดเคลื่อนจากการคำนวณในระบบไบนารี ให้ใช้ชนิดข้อมูล `DECIMAL(precision, scale)` หรือ `NUMERIC` เท่านั้น
+
+## 6. แหล่งอ้างอิง (Official Documentation)
+
+- [PostgreSQL Official Documentation](https://www.postgresql.org/docs/16/index.html) — คู่มืออ้างอิงฉบับสมบูรณ์ของ PostgreSQL 16
+- [JSON Types and Operators in PostgreSQL](https://www.postgresql.org/docs/16/datatype-json.html) — รายละเอียดการใช้งานคอลัมน์ JSON/JSONB และฟังก์ชันสืบค้น
+- [Prisma ORM with PostgreSQL Guide](https://www.prisma.io/docs/orm/overview/databases/postgresql) — แนวทางการเชื่อมต่อและจัดการ Schema ร่วมกับ Prisma
