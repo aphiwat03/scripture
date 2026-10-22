@@ -1,0 +1,98 @@
+---
+title: Branching Strategy
+category: TESTING & QUALITY
+parentTitle: Git
+version: Git 2.4x / Workflows
+updatedAt: 2026-10-21
+---
+
+# Branching Strategy
+
+(เปรียบเทียบกลยุทธ์การบริหารจัดการกิ่งโค้ดในทีมพัฒนาซอฟต์แวร์: **GitHub Flow**, **Git Flow**, และ **Trunk-Based Development** พร้อมคำสั่งจัดการ Branch: `branch`, `switch`, `checkout`, และ `merge`)
+
+---
+
+## 1. แนวคิดและรูปแบบ Branching Model (Concept)
+
+เมื่อทำงานในทีมขนาดใหญ่ การที่ทุกคน Commit ลงกิ่ง `main` พร้อมกันจะทำให้เกิดความขัดแย้งของโค้ด (Merge Conflict) ตลอดเวลา จึงต้องมีกลยุทธ์การแตกกิ่ง:
+
+```text
+========================================================================================
+1. GitHub Flow (เรียบง่าย เหมาะกับเว็บยุคใหม่ / CI-CD)
+   main -----------------------------------------------------> [Deploy to Production]
+            \                                      /
+             +--- feat/payment-promptpay ---------+ (Pull Request + Code Review)
+
+========================================================================================
+2. Trunk-Based Development (เร็วที่สุด สำหรับทีมระดับ High-performing Enterprise)
+   main/trunk -------------------------------------------------> [Continuous Deploy]
+                 \       /       \       /
+                  +--F1-+         +--F2-+ (กิ่งมีอายุสั้นไม่เกิน 1-2 วัน + Feature Flags)
+========================================================================================
+```
+
+### การเปรียบเทียบ 3 รูปแบบยอดนิยม:
+1. **GitHub Flow:**
+   - มีกิ่งหลักเพียงกิ่งเดียวคือ `main` (พร้อม Deploy ตลอดเวลา)
+   - แตกกิ่งสั้นๆ เช่น `feat/xxx` หรือ `fix/xxx` เมื่อเสร็จให้เปิด Pull Request (PR) ตรวจสอบและ Merge กลับ
+   - เหมาะที่สุดสำหรับเว็บแอปพลิเคชัน Next.js / Fullstack ยุคใหม่
+2. **Trunk-Based Development:**
+   - ทุกคนทำงานบนกิ่งหลัก (Trunk) โดยแตก Branch ขนาดสั้นมากๆ (อายุไม่เกิน 24-48 ชั่วโมง)
+   - ใช้ **Feature Flags / Toggles** ซ่อนฟีเจอร์ที่ยังทำไม่เสร็จแทนการแยก Branch ยาวๆ
+   - เหมาะกับทีมที่ต้องการส่งมอบงานไวระดับวันละหลายรอบ (Continuous Deployment)
+3. **Git Flow (แบบดั้งเดิม):**
+   - มีกิ่งหลักคู่กันคือ `main` (Production) และ `develop` (Staging)
+   - มีกิ่งเสริม: `feature/*`, `release/*`, `hotfix/*`
+   - ค่อนข้างซับซ้อน เหมาะกับซอฟต์แวร์ที่มีรอบ Release เป็นไตรมาส (เช่น Mobile Apps หรือ Enterprise Desktop)
+
+---
+
+## 2. คำสั่งจัดการ Branch ในชีวิตจริง
+
+```bash
+# ตรวจสอบกิ่งทั้งหมดในเครื่อง
+git branch
+
+# สร้างกิ่งใหม่และสลับไปทันที (คำสั่งสมัยใหม่)
+git switch -c feat/order-tracking
+
+# หรือคำสั่งดั้งเดิม
+git checkout -b feat/order-tracking
+
+# สลับกลับไปยังกิ่งหลัก
+git switch main
+
+# ลบกิ่งในเครื่องหลังจากที่ Merge แล้ว
+git branch -d feat/order-tracking
+
+# ลบกิ่งบน Remote (GitHub)
+git push origin --delete feat/order-tracking
+```
+
+---
+
+## 3. มาตรฐานการตั้งชื่อ Branch ในโปรเจกต์ (Naming Conventions)
+
+ในระบบ **Smart Butcher Marketplace** เรากำหนดมาตรฐานการตั้งชื่อกิ่งดังนี้:
+
+| รูปแบบชื่อกิ่ง | ตัวอย่าง | การใช้งาน |
+| :--- | :--- | :--- |
+| `feat/<issue-id>-<short-desc>` | `feat/102-wagyu-a5-catalog` | เพิ่มฟีเจอร์ใหม่ |
+| `fix/<issue-id>-<short-desc>` | `fix/109-checkout-rounding-error` | แก้ไขบั๊ก |
+| `refactor/<short-desc>` | `refactor/clean-cart-hooks` | ปรับโครงสร้างโค้ด |
+| `chore/<short-desc>` | `chore/update-nextjs-16` | งานบำรุงรักษา |
+| `hotfix/<short-desc>` | `hotfix/security-jwt-bypass` | กิ่งแก้ปัญหาด่วนบน Prod |
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+- **Long-lived Feature Branches (กิ่งค้างนานนับเดือน):** การดองกิ่งไว้นานจะทำให้โค้ดเดินห่างจาก `main` เรื่อยๆ จนเมื่อถึงเวลา Merge จะเกิด "Merge Conflict มหาศาล" ที่ไม่มีใครกล้าแก้ไข
+- **การละเลยการ Rebase หรือ Sync กับ `main`:** ในระหว่างทำฟีเจอร์ ควรดึงอัปเดตจาก `main` เข้ามาในกิ่งตัวเองเป็นระยะด้วย `git pull --rebase origin main`
+
+---
+
+## ดูเพิ่มเติมที่
+- [Git Basics Flow](/docs/testing/git/basics-flow) — ขั้นตอนการทำงานพื้นฐาน
+- [Merge vs Rebase](/docs/testing/git/merge-vs-rebase) — การรวมกิ่งโค้ดอย่างมืออาชีพ
+- [GitHub Actions CI](/docs/testing/github-actions) — การตรวจสอบ Pull Request อัตโนมัติ

@@ -1,0 +1,96 @@
+---
+title: Merge vs Rebase
+category: TESTING & QUALITY
+parentTitle: Git
+version: Git 2.4x
+updatedAt: 2026-10-21
+---
+
+# Merge vs Rebase
+
+(เปรียบเทียบกลไกการรวมโค้ด: **`git merge`** (Non-destructive / 3-Way Merge) vs **`git rebase`** (Linear History / ย้ายฐานประวัติ), การทำ **Interactive Rebase** (`git rebase -i`), และเทคนิค **Squash & Merge**)
+
+---
+
+## 1. แนวคิดและกลไกเบื้องหลัง (Under the Hood)
+
+คำถามยอดฮิตของนักพัฒนา: *"จะรวมโค้ดจากกิ่งฟีเจอร์กลับเข้า main ควรใช้ Merge หรือ Rebase?"*
+
+```text
+สถานการณ์ตั้งต้น:
+main:      A --- B --- C
+                  \
+feature:           D --- E
+
+--------------------------------------------------------------------------------------
+1. ผลลัพธ์ของ `git merge feature` (สร้าง Merge Commit M):
+main:      A --- B --- C ------- M (ประวัติเป็นสองสาย คงบริบทเดิม 100%)
+                  \             /
+feature:           D --- E ----+
+
+--------------------------------------------------------------------------------------
+2. ผลลัพธ์ของ `git rebase main` (ย้ายฐาน D, E ไปต่อท้าย C):
+main:      A --- B --- C
+                        \
+feature:                 D' --- E' (ประวัติเป็นเส้นตรงเรียบเนียน Linear History)
+--------------------------------------------------------------------------------------
+```
+
+### การเปรียบเทียบจุดเด่น:
+- **`git merge`:**
+  - **ข้อดี:** ปลอดภัย ไม่แก้ไขประวัติศาสตร์เดิม (Non-destructive), เก็บหลักฐานเวลาและการแตกกิ่งชัดเจน
+  - **ข้อเสีย:** ทำให้ `git log` กลายเป็นเส้นใยแมงมุมที่อ่านยาก หากมีกิ่งย่อยเยอะเกินไป
+- **`git rebase`:**
+  - **ข้อดี:** ประวัติศาสตร์โค้ดสะอาด เป็นเส้นตรงเส้นเดียว (Clean Linear History), ง่ายต่อการทำ `git bisect` เพื่อหาจุดเกิดบั๊ก
+  - **ข้อเสีย:** มีการ Rewrite Commit Hash (สร้าง Commit ใหม่ `D'`, `E'`) **ห้ามทำ Rebase บนกิ่งที่เป็น Public Shared Branch เด็ดขาด!**
+
+---
+
+## 2. การใช้งาน Interactive Rebase (`git rebase -i`)
+
+ก่อนเปิด Pull Request นักพัฒนาระดับ Senior มักใช้คำสั่งนี้เพื่อจัดระเบียบ Commit ในกิ่งของตนเอง:
+
+```bash
+# ปรับแต่ง 3 Commit ล่าสุดในกิ่งปัจจุบัน
+git rebase -i HEAD~3
+```
+
+หน้าจอจะแสดงรายการคำสั่งให้เลือก:
+```text
+pick a1b2c3d feat(cart): add initial cart layout
+squash e4f5g6h fix typo in cart state
+squash j7k8l9m remove console.log
+
+# คำสั่งสำคัญ:
+# pick   = เก็บ Commit นี้ไว้
+# reword = แก้ไขเฉพาะข้อความ Commit message
+# edit   = หยุดเพื่อแก้ไขโค้ดใน Commit นั้น
+# squash = รวบ Commit นี้เข้ากับ Commit ก่อนหน้า
+# drop   = ลบ Commit นี้ทิ้งไปเลย
+```
+
+เมื่อใช้ `squash` ข้อความ Commit ทั้งหมดจะถูกรวบเหลือเพียง 1 Commit ที่สะอาดสมบูรณ์!
+
+---
+
+## 3. กลยุทธ์ Squash and Merge บน GitHub
+
+ในองค์กรสมัยใหม่ นิยมตั้งค่า Repository บน GitHub ให้ใช้ **Squash and Merge**:
+- นักพัฒนาในกิ่ง Feature สามารถ Commit เล็กๆ ย่อยๆ ได้นับสิบครั้ง (`wip`, `fix typo`)
+- เมื่อ Pull Request ผ่านการ Review และกดปุ่ม **Squash and Merge** ระบบจะบีบรวมทุก Commit ในกิ่งนั้นให้กลายเป็น **1 Commit สะอาดชิ้นเดียวบน `main`** พร้อมข้อความ Conventional Commit ที่ถูกต้อง
+
+---
+
+## 4. กฎเหล็กของ Rebase (The Golden Rule of Rebase)
+
+<Callout type="warning" title="The Golden Rule of Rebase">
+**"ห้าม Rebase กิ่งสาธารณะที่แชร์ร่วมกับผู้อื่น (เช่น `main` หรือ `staging`) เด็ดขาด!"**
+ให้ทำ Rebase เฉพาะกิ่งส่วนตัวในเครื่องของคุณก่อนที่จะ Push เท่านั้น เพราะการ Rebase จะเปลี่ยนเลข Commit SHA ทำให้เพื่อนร่วมทีมที่ดึงโค้ดไปก่อนหน้าเกิดอาการประวัติศาสตร์ตีกันอย่างรุนแรง
+</Callout>
+
+---
+
+## ดูเพิ่มเติมที่
+- [Commit Conventions](/docs/testing/git/commit-conventions) — มาตรฐานข้อความ Commit
+- [Stash Reset Revert](/docs/testing/git/stash-reset-revert) — เทคนิคการย้อนคืนโค้ดอย่างปลอดภัย
+- [Git Hooks](/docs/testing/git-hooks) — ป้องกันข้อผิดพลาดก่อนบันทึกโค้ด

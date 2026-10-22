@@ -1,0 +1,128 @@
+---
+title: Git Basics Flow
+category: TESTING & QUALITY
+parentTitle: Git
+version: Git 2.4x
+updatedAt: 2026-10-21
+---
+
+# Git Basics Flow
+
+(ทำความเข้าใจสถาปัตยกรรม 3 สถานะของ Git, วงจรชีวิตของไฟล์, และคำสั่งพื้นฐานที่ใช้ในการทำงานประจำวัน: `init`, `clone`, `add`, `commit`, `status`, `diff`, `push`, `pull`)
+
+---
+
+## 1. แนวคิดและสถาปัตยกรรม 3 สถานะ (Concept & The Three Trees)
+
+สิ่งที่ทำให้ Git แตกต่างจากระบบควบคุมเวอร์ชันยุคเก่า คือแนวคิด **Three-Tree Architecture (3 พื้นที่การทำงาน)**:
+
+```text
++-----------------------+     git add      +-----------------------+    git commit    +-----------------------+
+|  Working Directory    | ---------------> |     Staging Area      | ---------------> |    Git Repository     |
+| (ไฟล์ที่เรากำลังแก้)     |                  |    (Index / เตรียมเซฟ)  |                  | (ประวัติ Commit ถาวร)   |
++-----------------------+                  +-----------------------+                  +-----------------------+
+           ^                                                                                      |
+           +----------------------------------- git checkout / restore --------------------------+
+```
+
+1. **Working Directory (พื้นที่ทำงาน):** โฟลเดอร์จริงบนคอมพิวเตอร์ของคุณที่ไฟล์ถูกเปิดอ่านและแก้ไข
+2. **Staging Area / Index (พื้นที่จัดเตรียม):** โต๊ะเตรียมของชั่วคราว เพื่อคัดเลือกเฉพาะไฟล์หรือบรรทัดที่ต้องการบันทึกใน Commit นั้นๆ
+3. **Repository (`.git` directory):** ฐานข้อมูลถาวรของ Git ที่เก็บ Snapshot ประวัติศาสตร์ทั้งหมดของโปรเจกต์ในรูปแบบ Object ที่มี SHA Hash กำกับ
+
+---
+
+## 2. คำสั่งหลักในการทำงานประจำวัน (Daily Git Commands)
+
+### 2.1 เริ่มต้นโปรเจกต์
+```bash
+# สร้าง Git Repository ใหม่ในโฟลเดอร์ปัจจุบัน
+git init -b main
+
+# หรือ Clone โปรเจกต์ที่มีอยู่แล้วจาก GitHub
+git clone https://github.com/smart-butcher/marketplace.git
+cd marketplace
+```
+
+### 2.2 ตรวจสอบสถานะและดูความเปลี่ยนแปลง
+```bash
+# ตรวจสอบสถานะไฟล์ (Untracked, Modified, Staged)
+git status
+
+# ดูความแตกต่างของโค้ดที่แก้เทียบกับ Commit ล่าสุด
+git diff
+
+# ดูความแตกต่างของไฟล์ที่อยู่ใน Staging Area
+git diff --staged
+```
+
+### 2.3 การจัดเตรียมและบันทึกข้อมูล
+```bash
+# เพิ่มไฟล์เฉพาะเจาะจงเข้า Staging Area
+git add src/app/products/page.tsx
+
+# หรือเลือกเพิ่มเฉพาะบางท่อนโค้ด (Interactive Patch)
+git add -p
+
+# เพิ่มไฟล์ที่มีการเปลี่ยนแปลงทั้งหมด
+git add .
+
+# บันทึกเป็น Commit พร้อมข้อความตามมาตรฐาน
+git commit -m "feat(catalog): add premium beef filter options"
+```
+
+### 2.4 การซิงโครไนซ์กับเซิร์ฟเวอร์ปลายทาง (Remote)
+```bash
+# ตรวจสอบรายการ Remote URL
+git remote -v
+
+# ดึงข้อมูลล่าสุดจาก Remote พร้อม Merge เข้ากิ่งปัจจุบัน
+git pull origin main
+
+# ส่ง Commit ในเครื่องขึ้นสู่ GitHub
+git push origin feat/wagyu-catalog
+```
+
+---
+
+## 3. ตัวอย่างการทำงานจริง (Smart Butcher Marketplace)
+
+### สถานการณ์: การเพิ่มฟีเจอร์คำนวณค่าน้ำหนักเนื้อดรายเอจ
+
+```bash filename="terminal_git_flow.sh"
+# 1. แตกกิ่งใหม่จาก main
+git checkout -b feat/dry-aged-calculator
+
+# 2. แก้ไขโค้ดในไฟล์ src/services/meat-calc.ts
+# ตรวจสอบว่าโค้ดบรรทัดไหนเปลี่ยนไปบ้าง
+git status -s
+# ผลลัพธ์:  M src/services/meat-calc.ts
+
+# 3. ตรวจสอบความถูกต้องของโค้ดด้วย diff
+git diff src/services/meat-calc.ts
+
+# 4. นำไฟล์ขึ้น Staging
+git add src/services/meat-calc.ts
+
+# 5. บันทึก Commit ตามมาตรฐาน Conventional Commits
+git commit -m "feat(calculator): implement dry-aged moisture loss formula"
+
+# 6. ส่งกิ่งขึ้นสู่ GitHub เพื่อเปิด Pull Request
+git push -u origin feat/dry-aged-calculator
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+| กรณีปัญหา | แนวทางที่ผิดพลาด (Anti-pattern) | แนวทางที่ถูกต้อง (Best Practice) |
+| :--- | :--- | :--- |
+| **การใช้ `git add .` เสมอ** | สั่ง `git add .` โดยไม่ดูสถานะ ทำให้เผลอใส่ไฟล์ `.env`, `node_modules` หรือไฟล์ขยะขึ้น Git | สร้างไฟล์ `.gitignore` ให้รัดกุม และสั่ง `git status` หรือ `git add -p` ก่อนเสมอ |
+| **Commit ก้อนใหญ่เกินไป** | แก้งาน 5 ฟีเจอร์ตลอดสัปดาห์แล้วรวบเป็น 1 Commit เดียว | ทำ **Atomic Commits** (1 Commit ต่อ 1 วัตถุประสงค์เล็กๆ ที่ทำงานได้สมบูรณ์) |
+| **การลืมตั้งค่า User Info** | Commit โค้ดโดยขึ้นชื่อผู้ใช้เป็น Administrator หรืออีเมลไม่ตรงกับ GitHub | ตั้งค่า `git config --global user.name` และ `user.email` ให้ตรงกับบัญชีจริง |
+
+---
+
+## ดูเพิ่มเติมที่
+- [Commit Conventions](/docs/testing/git/commit-conventions) — คู่มือคำนำหน้า Commit มาตรฐาน
+- [Branching Strategy](/docs/testing/git/branching-strategy) — กลยุทธ์การแตกกิ่งในทีม
+- [Git Hooks](/docs/testing/git-hooks) — ป้องกันการ Commit โค้ดที่ไม่ได้มาตรฐาน

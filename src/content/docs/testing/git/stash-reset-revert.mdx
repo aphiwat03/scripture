@@ -1,0 +1,78 @@
+---
+title: Stash Reset Revert
+category: TESTING & QUALITY
+parentTitle: Git
+version: Git 2.4x
+updatedAt: 2026-10-21
+---
+
+# Stash Reset Revert
+
+(เทคนิคการจัดการและกู้คืนโค้ดในสถานการณ์ฉุกเฉิน: การพักงานด้วย **`git stash`**, การย้อนประวัติด้วย **`git reset`** (`--soft`, `--mixed`, `--hard`), และการยกเลิกอย่างปลอดภัยด้วย **`git revert`**)
+
+---
+
+## 1. การพักงานด่วนด้วย `git stash`
+
+สถานการณ์: คุณกำลังเขียนฟีเจอร์เนื้อวากิวค้างอยู่ครึ่งๆ กลางๆ แล้วมีงานด่วนเข้ามาให้ไปแก้บั๊กบน `main` โดยยังไม่อยาก Commit โค้ดที่ยังไม่เสร็จ:
+
+```bash
+# 1. บันทึกและซ่อนการเปลี่ยนแปลงทั้งหมดใน Working Directory ไว้ในชั้นเก็บของชั่วคราว
+git stash -u   # -u = รวม untracked files ด้วย
+
+# 2. ตอนนี้ Working Tree จะสะอาด สามารถสลับไปกิ่งอื่นได้ทันที
+git switch main
+
+# 3. เมื่อแก้บั๊กเสร็จ สลับกลับมาที่กิ่งเดิม และดึงงานที่พักไว้ออกมาทำต่อ
+git switch feat/wagyu-feature
+git stash pop
+
+# คำสั่งเสริมสำหรับดูและจัดการ Stash
+git stash list      # ดูกล่องพักงานทั้งหมด
+git stash drop      # ทิ้งกล่องพักงานล่าสุด
+git stash clear     # ล้างกล่องพักงานทั้งหมดทิ้ง
+```
+
+---
+
+## 2. การย้อนประวัติด้วย `git reset` (3 โหมดสำคัญ)
+
+เมื่อคุณต้องการย้อนประวัติ Commit กลับไปในอดีต (เช่น ย้อนกลับไป 1 Commit ด้วย `HEAD~1`):
+
+| โหมดของ Reset | สิ่งที่เกิดขึ้นกับ Commit | สิ่งที่เกิดขึ้นกับ Staging Area | สิ่งที่เกิดขึ้นกับ Working Directory (โค้ดจริง) |
+| :--- | :---: | :---: | :---: |
+| **`--soft`** | **ถูกยกเลิก** | **คงอยู่** (ยัง Staged พร้อม Commit ใหม่) | **ปลอดภัย 100%** (โค้ดไม่หาย) |
+| **`--mixed` (Default)** | **ถูกยกเลิก** | **ถูกถอนออก** (กลายเป็น Unstaged) | **ปลอดภัย 100%** (โค้ดยังอยู่บนดิสก์) |
+| **`--hard`** | **ถูกลบทิ้ง** | **ถูกลบทิ้ง** | ⚠️ **สูญหายถาวร!** (โค้ดถูกลบทิ้ง) |
+
+```bash
+# ตัวอย่างการใช้ --soft: เมื่อต้องการแก้ข้อความหรือเพิ่มไฟล์ใน Commit ล่าสุด
+git reset --soft HEAD~1
+git add forgotten-file.ts
+git commit -m "feat(cart): add complete wagyu calculation"
+
+# คำเตือน: หลีกเลี่ยง git reset --hard ยกเว้นคุณมั่นใจ 100% ว่าต้องการทิ้งโค้ดนั้นจริงๆ
+```
+
+---
+
+## 3. การยกเลิกอย่างปลอดภัยด้วย `git revert`
+
+หากโค้ดที่มีบั๊กถูก Push ขึ้นไปบนเซิร์ฟเวอร์ส่วนกลาง (เช่น `main`) เรียบร้อยแล้ว **ห้ามใช้ `git reset` เด็ดขาด!** เพราะจะทำให้ประวัติในเครื่องไม่ตรงกับ Remote
+
+แนวทางที่ปลอดภัยคือใช้ **`git revert <commit-hash>`**:
+- Git จะทำการสร้าง **Commit ใหม่ขึ้นมาอีก 1 ตัว** ซึ่งมีเนื้อหาตรงกันข้ามกับ Commit เก่าทุกบรรทัด เพื่อหักล้างผลลัพธ์ของบั๊กนั้น
+- ประวัติศาสตร์ของโปรเจกต์ยังคงเดินไปข้างหน้าอย่างปลอดภัย ไม่กระทบเพื่อนร่วมทีม
+
+```bash
+# ยกเลิก Commit ที่มีปัญหา และสร้าง Commit แก้ไขใหม่ทันที
+git revert a1b2c3d -m "revert: fix(cart): roll back faulty discount logic"
+git push origin main
+```
+
+---
+
+## ดูเพิ่มเติมที่
+- [Git Basics Flow](/docs/testing/git/basics-flow) — สถาปัตยกรรม 3 สถานะของ Git
+- [Commit Conventions](/docs/testing/git/commit-conventions) — มาตรฐานข้อความ Commit
+- [Merge vs Rebase](/docs/testing/git/merge-vs-rebase) — การรวมกิ่งโค้ดอย่างมืออาชีพ

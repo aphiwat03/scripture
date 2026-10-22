@@ -1,0 +1,61 @@
+---
+title: Git
+category: TESTING & QUALITY
+version: Git 2.4x / GitHub
+updatedAt: 2026-10-21
+---
+
+# Git Version Control
+
+(ระบบควบคุมเวอร์ชันมาตรฐานระดับโลกที่จำเป็นสำหรับนักพัฒนาทุกคน ครอบคลุมตั้งแต่คำสั่งพื้นฐาน, โครงสร้างข้อความ Commit แบบ Conventional Commits, กลยุทธ์การแตก Branch, เทคนิค Merge vs Rebase, การกู้คืนโค้ด, และการทำงานร่วมกันเป็นทีม)
+
+<Callout type="tip" title="ทำไม Git จึงเป็นทักษะที่ขาดไม่ได้ของ Fullstack Developer">
+Git คือระบบ Distributed Version Control System (DVCS) ที่บันทึกประวัติการเปลี่ยนแปลงของไฟล์ในรูปแบบ Snapshot ที่มี Hash ปลอดภัย (SHA-1/SHA-256) การเข้าใจ Git อย่างลึกซึ้งไม่เพียงช่วยให้คุณไม่ทำโค้ดในทีมสูญหาย แต่ยังเป็นหัวใจสำคัญในการวางระบบ **CI/CD Automation**, การทำ **Code Review**, และการสร้าง **Semantic Versioning** อัตโนมัติ
+</Callout>
+
+---
+
+## สารบัญหัวข้อการเรียนรู้เชิงลึก (Learning Directory)
+
+| ลำดับ | หัวข้อย่อย | ขอบเขตเนื้อหาสำคัญ | ลิงก์เข้าสู่บทเรียน |
+| :---: | :--- | :--- | :--- |
+| 1 | **Git Basics Flow** | สถาปัตยกรรม 3 สถานะ (Working, Staging, Repository), `init`, `clone`, `add`, `commit`, `push`, `pull` | [เปิดอ่าน Git Basics Flow](/docs/testing/git/basics-flow) |
+| 2 | **Commit Conventions** | คลังคำนำหน้า Commit ยอดนิยม (`feat`, `fix`, `chore`, `refactor`, `docs`, `perf`, `test` ฯลฯ) พร้อมโครงสร้างมาตรฐาน | [เปิดอ่าน Commit Conventions](/docs/testing/git/commit-conventions) |
+| 3 | **Branching Strategy** | กลยุทธ์การบริหารกิ่งโค้ด: GitHub Flow, Git Flow, และ Trunk-Based Development สำหรับทีมขนาดใหญ่ | [เปิดอ่าน Branching Strategy](/docs/testing/git/branching-strategy) |
+| 4 | **Merge vs Rebase** | เปรียบเทียบ Fast-forward, 3-way merge, Interactive Rebase (`git rebase -i`), และการ Squash Commits | [เปิดอ่าน Merge vs Rebase](/docs/testing/git/merge-vs-rebase) |
+| 5 | **Stash Reset Revert** | การพักงานชั่วคราวด้วย `stash`, การย้อนประวัติด้วย `reset` (soft/mixed/hard), และการยกเลิกอย่างปลอดภัยด้วย `revert` | [เปิดอ่าน Stash Reset Revert](/docs/testing/git/stash-reset-revert) |
+| 6 | **Anti-patterns** | ข้อผิดพลาดที่พบบ่อย (Merge Conflicts, Detached HEAD, Force Push หายนะ) และคำถามสัมภาษณ์งานระดับ Senior | [เปิดอ่าน Anti-patterns](/docs/testing/git/pitfalls) |
+
+---
+
+## สรุปย่อคำนำหน้า Commit ยอดนิยม (Quick Reference)
+
+```text
+<type>(<scope>): <description>
+
+[ตัวอย่าง]
+feat(cart): add wagyu beef weight calculation in checkout
+fix(payment): resolve decimal rounding error in promptpay webhook
+chore(deps): update next from 16.4.1 to 16.4.2
+```
+
+- **`feat`**: ฟีเจอร์ใหม่สำหรับผู้ใช้ (Minor version bump)
+- **`fix`**: แก้ไขข้อผิดพลาดหรือบั๊กในระบบ (Patch version bump)
+- **`chore`**: งานบำรุงรักษาทั่วไป ไม่กระทบโค้ดระบบและไม่ใช่เทสต์
+- **`docs`**: อัปเดตเอกสารคู่มือหรือ README
+- **`style`**: จัดรูปแบบโค้ด เว้นวรรค เซมิโคลอน (ไม่มีผลต่อการทำงาน)
+- **`refactor`**: ปรับโครงสร้างโค้ดภายในโดยไม่เพิ่มฟีเจอร์และไม่แก้บั๊ก
+- **`perf`**: ปรับปรุงประสิทธิภาพความเร็วหรือลดการใช้ Memory
+- **`test`**: เพิ่มหรือแก้ไขชุดทดสอบ Unit/Integration/E2E
+- **`build`**: แก้ไขระบบบิลด์, dependencies, หรือ npm scripts
+- **`ci`**: ปรับแต่งคอนฟิกของ CI/CD เช่น GitHub Actions
+- **`revert`**: ยกเลิก Commit ก่อนหน้า
+
+---
+
+## แหล่งอ้างอิงทางการและดูเพิ่มเติม
+
+- [Git Official Documentation](https://git-scm.com/doc) — คู่มือ Git และ Reference ทางการ
+- [Conventional Commits v1.0.0](https://www.conventionalcommits.org/) — ข้อกำหนดมาตรฐานข้อความ Commit ระดับสากล
+- [Git Hooks (Husky & lint-staged)](/docs/testing/git-hooks) — วางระบบ Quality Gate ดักจับก่อน Commit โค้ด
+- [GitHub Actions CI](/docs/testing/github-actions) — การประกอบ Pipeline ทดสอบและส่งมอบโค้ดอัตโนมัติ

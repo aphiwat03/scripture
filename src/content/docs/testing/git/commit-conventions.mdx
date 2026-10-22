@@ -1,0 +1,229 @@
+---
+title: Commit Conventions
+category: TESTING & QUALITY
+parentTitle: Git
+version: Conventional Commits 1.0.0
+updatedAt: 2026-10-21
+---
+
+# Commit Conventions
+
+(คัมภีร์มาตรฐานข้อความ Commit ระดับสากล **Conventional Commits** รวบรวมตัวย่อและคำนำหน้ายอดนิยมทั้งหมด เช่น `feat`, `chore`, `fix`, `refactor`, `docs`, `perf`, `test`, `build`, `ci` พร้อมความหมาย เกณฑ์การเลือกใช้ ตัวอย่างจริง และความเชื่อมโยงกับ Semantic Versioning)
+
+---
+
+## 1. แนวคิดและความสำคัญ (Concept)
+
+ในทีมพัฒนาซอฟต์แวร์ระดับมืออาชีพ ประวัติการบันทึกโค้ด (`git log`) ที่มีข้อความสั้นๆ เช่น:
+```bash
+# ❌ ประวัติ Commit ที่แย่และไร้ประโยชน์
+git commit -m "update"
+git commit -m "fix bug"
+git commit -m "แก้โค้ดหน่อย"
+git commit -m "final"
+git commit -m "final 2 จริงๆ แล้ว"
+```
+ข้อความเหล่านี้สร้างปัญหาใหญ่หลวงให้กับทีม:
+1. **ไม่สามารถสืบค้นประวัติย้อนหลังได้:** เมื่อระบบบน Production พัง ไม่มีใครรู้ว่า Commit ไหนเป็นตัวก่อปัญหา
+2. **Code Review ทำงานยาก:** ผู้ตรวจโค้ดไม่ทราบเจตนาของผู้เขียน
+3. **ไม่สามารถทำ Automation ได้:** ระบบไม่สามารถสร้าง Release Notes หรือคำนวณเลขเวอร์ชันอัตโนมัติ
+
+**Conventional Commits** จึงถูกกำหนดขึ้นเพื่อสร้างโครงสร้างที่ทั้งมนุษย์อ่านเข้าใจง่าย และคอมพิวเตอร์สามารถใช้ Regular Expression แยกแยะและประมวลผลต่อได้ทันที
+
+---
+
+## 2. โครงสร้างมาตรฐานของ Conventional Commits (Anatomy)
+
+```text
+<type>[optional scope]: <description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+### องค์ประกอบทั้ง 3 ส่วน:
+1. **Header (จำเป็น):**
+   - `<type>`: หมวดหมู่ของการเปลี่ยนแปลง (เช่น `feat`, `fix`, `chore`)
+   - `[optional scope]`: ขอบเขตหรือชื่อโมดูลในระบบ เช่น `(auth)`, `(cart)`, `(payment)`
+   - `<description>`: สรุปสั้นๆ ว่าทำอะไร เป็นภาษาอังกฤษประโยคคำสั่ง (Imperative tone) เช่น `"add wagyu ribeye inventory filter"` (ไม่ใช้ `"added"` หรือ `"adds"`)
+2. **Body (ไม่บังคับ):** อธิบายแรงจูงใจเบื้องหลังว่า **"ทำไมถึงต้องแก้แบบนี้"** และความแตกต่างจากเวอร์ชันก่อนหน้า
+3. **Footer (ไม่บังคับ):** ใช้สำหรับระบุการเปลี่ยนแปลงที่เข้ากันไม่ได้กับโค้ดเดิม (`BREAKING CHANGE`) หรือเลขอ้างอิง Issue เช่น `Closes #142`
+
+---
+
+## 3. สารานุกรมตัวย่อและประเภท Commit ที่ใช้บ่อยทั้งหมด (Master Dictionary)
+
+ตารางสรุปคำนำหน้า Commit ยอดนิยม พร้อมความหมายและผลกระทบต่อเลขเวอร์ชัน SemVer (`MAJOR.MINOR.PATCH`):
+
+| คำนำหน้า (Type) | ความหมาย | เหมาะสำหรับงานประเภทใด | ผลต่อ SemVer |
+| :--- | :--- | :--- | :---: |
+| **`feat`** | Feature | เพิ่มฟังก์ชันหรือฟีเจอร์ใหม่สำหรับผู้ใช้งาน | **MINOR** (`0.X.0`) |
+| **`fix`** | Bug Fix | แก้ไขข้อผิดพลาดหรือบั๊กในโค้ดเดิม | **PATCH** (`0.0.X`) |
+| **`chore`** | Chore / Routine | งานดูแลรักษาทั่วไปที่ไม่กระทบโค้ดระบบและไม่ใช่เทสต์ | ไม่เปลี่ยนเลขเวอร์ชัน |
+| **`refactor`** | Refactoring | ปรับโครงสร้างโค้ดภายในให้สะอาด โดยไม่เพิ่มฟีเจอร์และไม่แก้บั๊ก | **PATCH** หรือไม่เปลี่ยน |
+| **`docs`** | Documentation | แก้ไขเอกสารคู่มือ, README, หรือ TypeDoc/JSDoc | ไม่เปลี่ยนเลขเวอร์ชัน |
+| **`style`** | Code Style | จัดการฟอร์แมต เว้นวรรค เซมิโคลอน (ไม่มีผลต่อการทำงาน) | ไม่เปลี่ยนเลขเวอร์ชัน |
+| **`perf`** | Performance | ปรับปรุงประสิทธิภาพความเร็วหรือลดการกิน Memory | **PATCH** (`0.0.X`) |
+| **`test`** | Testing | เพิ่มหรือปรับปรุง Unit, Integration, หรือ E2E Tests | ไม่เปลี่ยนเลขเวอร์ชัน |
+| **`build`** | Build System | แก้ไขไฟล์คอนฟิกการบิลด์, อัปเกรด Dependencies ใน package.json | ไม่เปลี่ยนเลขเวอร์ชัน |
+| **`ci`** | CI / Automation | ปรับแต่งสคริปต์ CI/CD เช่น GitHub Actions, Docker pipeline | ไม่เปลี่ยนเลขเวอร์ชัน |
+| **`revert`** | Revert Commit | ยกเลิกหรือย้อนกลับ Commit ก่อนหน้า | ขึ้นกับ Commit ที่ถูก Revert |
+| **`security`** | Security Patch | แก้ไขช่องโหว่ความปลอดภัยโดยเฉพาะ (CVE patch) | **PATCH** (`0.0.X`) |
+| **`wip`** | Work In Progress | งานที่ยังทำไม่เสร็จ (ใช้เฉพาะใน Local Branch ส่วนตัว) | ห้ามเข้าสู่ main |
+
+---
+
+## 4. เจาะลึกและตัวอย่างการใช้งานแต่ละประเภท (Smart Butcher Marketplace)
+
+### 4.1 `feat` (Features — ฟีเจอร์ใหม่)
+ใช้เมื่อเพิ่มฟังก์ชันใหม่ที่ผู้ใช้หรือระบบภายนอกสามารถเรียกใช้งานได้:
+```bash
+# ตัวอย่าง:
+git commit -m "feat(cart): add wagyu beef weight cut selector in checkout"
+git commit -m "feat(payment): integrate promptpay qr code webhook notification"
+```
+
+### 4.2 `fix` (Bug Fixes — แก้ไขบั๊ก)
+ใช้เมื่อซ่อมแซมจุดผิดพลาดเพื่อให้ระบบทำงานได้ตามข้อกำหนด:
+```bash
+# ตัวอย่าง:
+git commit -m "fix(pricing): resolve floating point rounding issue in meat discount"
+git commit -m "fix(auth): prevent infinite redirect loop on expired jwt session"
+```
+
+### 4.3 `chore` (Chores — งานดูแลบำรุงรักษา)
+หนึ่งในคำที่ใช้บ่อยที่สุด ใช้กับงานจิปาถะที่ไม่ใช่ฟีเจอร์ ไม่ใช่การแก้บั๊กของโค้ดหลัก และไม่ใช่การเขียนเทสต์ เช่น:
+- อัปเดตไฟล์ `.gitignore`
+- อัปเดตเวอร์ชันของไลบรารีเครื่องมือพัฒนา (DevDependencies)
+- จัดระเบียบโฟลเดอร์หรือลบไฟล์ชั่วคราว
+```bash
+# ตัวอย่าง:
+git commit -m "chore: add .DS_Store and coverage folder to .gitignore"
+git commit -m "chore(deps): bump tailwindcss from 4.0.0 to 4.0.1"
+git commit -m "chore: clean up deprecated asset icons"
+```
+
+### 4.4 `refactor` (Refactoring — ปรับโครงสร้างโค้ด)
+ใช้เมื่อจัดระเบียบโค้ดภายในให้มีประสิทธิภาพ อ่านง่าย หรือแยกเป็นโมดูลย่อย **โดยที่ฟังก์ชันการทำงานภายนอกยังคงเหมือนเดิมทุกประการ**:
+```bash
+# ตัวอย่าง:
+git commit -m "refactor(inventory): extract dry-aged calculation logic into standalone service"
+git commit -m "refactor(order): replace nested if-else with state pattern"
+```
+
+### 4.5 `docs` (Documentation — เอกสาร)
+ใช้เมื่อมีการแก้ไขไฟล์ที่เป็นเอกสารเท่านั้น:
+```bash
+# ตัวอย่าง:
+git commit -m "docs: update API endpoints documentation in README.md"
+git commit -m "docs(swagger): add request and response schema examples for meat cuts"
+```
+
+### 4.6 `style` (Code Style / Formatting)
+<Callout type="warning" title="ข้อควรระวัง: style ไม่ใช่ CSS ของหน้าเว็บ!">
+คำนำหน้า `style` หมายถึง **"สไตล์การเขียนโค้ด (Code Formatting)"** เช่น การจัดย่อหน้าช่องไฟ (Indentation), การเพิ่ม/ลบ Semicolon, หรือการแก้ White-space ตามกฎของ Prettier/ESLint **ไม่ใช่การเขียน CSS ตกแต่งความสวยงามของปุ่มหรือหน้า UI** (หากแต่งสีปุ่ม ให้ใช้ `feat` หรือ `fix`)
+</Callout>
+
+```bash
+# ตัวอย่าง:
+git commit -m "style: format typescript files with prettier"
+git commit -m "style(auth): fix missing semicolon and trailing comma in user dto"
+```
+
+### 4.7 `perf` (Performance — ปรับความเร็ว)
+ใช้เมื่อมีการแก้ไขโค้ดเพื่อเพิ่มความเร็วในการประมวลผล หรือลดการใช้ทรัพยากร CPU/Memory:
+```bash
+# ตัวอย่าง:
+git commit -m "perf(query): add composite index on category_id and price in mysql"
+git commit -m "perf(dashboard): wrap expensive sales chart calculation in useMemo"
+```
+
+### 4.8 `test` (Testing — ชุดทดสอบ)
+ใช้เมื่อเพิ่มหรือแก้ไขไฟล์ทดสอบ Unit, Integration หรือ Playwright E2E:
+```bash
+# ตัวอย่าง:
+git commit -m "test(cart): add unit test coverage for negative stock validation"
+git commit -m "test(e2e): add playwright scenario for guest checkout flow"
+```
+
+### 4.9 `build` (Build System & Tooling)
+ใช้เมื่อแก้ไขไฟล์คอนฟิกของระบบบิลด์ เช่น Vite, Webpack, Dockerfile, Next.js config:
+```bash
+# ตัวอย่าง:
+git commit -m "build(docker): optimize multi-stage build image size with alpine"
+git commit -m "build: configure turbopack memory limit in next.config.ts"
+```
+
+### 4.10 `ci` (Continuous Integration)
+ใช้เมื่อแก้ไขไฟล์ Workflows หรือสคริปต์ทดสอบอัตโนมัติของ CI/CD:
+```bash
+# ตัวอย่าง:
+git commit -m "ci(github): add automated postgres 16 service container to test workflow"
+git commit -m "ci: enforce commitlint gate in pull request review"
+```
+
+### 4.11 `revert` (Revert Previous Commit)
+ใช้เมื่อต้องการยกเลิก Commit เดิมที่เคยทำไปแล้ว โดยระบบจะใส่ SHA ของ Commit เก่าให้อัตโนมัติ:
+```bash
+# ตัวอย่าง:
+git commit -m "revert: feat(payment): roll back promptpay instant settlement"
+```
+
+---
+
+## 5. การระบุ Breaking Changes (การเปลี่ยนที่ทำให้โค้ดเดิมพัง)
+
+หากการเปลี่ยนแปลงนั้นส่งผลให้ API หรือฟังก์ชันเดิมไม่สามารถทำงานร่วมกับของเก่าได้ (Incompatible API change) จะต้องระบุเครื่องหมาย **`!`** หลัง type/scope หรือใส่บล็อก **`BREAKING CHANGE:`** ไว้ใน Footer:
+
+```bash
+# ตัวอย่างแบบที่ 1: ใส่เครื่องหมาย ! ท้าย Scope
+git commit -m "feat(api)!: remove deprecated v1 meat cuts endpoint"
+
+# ตัวอย่างแบบที่ 2: ใส่ข้อความ BREAKING CHANGE ใน Footer เต็มรูปแบบ
+git commit -m "feat(auth): switch from session cookie to jwt bearer token
+
+BREAKING CHANGE: The /auth/login endpoint now returns an 'accessToken' payload instead of setting an HTTP-only session cookie. Mobile clients must update their headers."
+```
+
+ผลลัพธ์: เครื่องมือ Automation จะตรวจพบคำว่า `BREAKING CHANGE` หรือ `!` และจะทำการปรับเลข **MAJOR Version (`X.0.0`)** โดยอัตโนมัติ
+
+---
+
+## 6. ตารางเปรียบเทียบ: ข้อความ Commit ที่แย่ vs ข้อความที่ถูกต้อง
+
+| สถานการณ์ | ❌ ข้อความที่ไม่ดี (Bad Commit) | ✅ ข้อความมาตรฐาน (Conventional Commit) |
+| :--- | :--- | :--- |
+| เพิ่มปุ่มชำระเงินด้วย QR Code | `add qr code` | `feat(checkout): add promptpay qr code payment button` |
+| แก้ไขราคาสินค้าปัดเศษผิด | `fix math bug` | `fix(pricing): correct round-off decimal error in meat subtotal` |
+| อัปเกรดเวอร์ชันของ Next.js | `update packages` | `chore(deps): update next to 16.4.2` |
+| จัดระเบียบโค้ดตัดสต็อก | `cleanup stock code` | `refactor(inventory): simplify wagyu stock reservation logic` |
+| เขียนเทสต์ฟอร์มสั่งซื้อ | `add test` | `test(order): add integration test for order submission with zod` |
+| ปรับแต่ง Dockerfile | `docker change` | `build(docker): reduce image footprint using standalone output` |
+
+---
+
+## 7. คำถามสัมภาษณ์งาน (Senior Interview Q&A)
+
+### ข้อที่ 1: ทำไมบริษัทระดับ Enterprise จึงบังคับใช้ Conventional Commits ร่วมกับเครื่องมือ Semantic Release?
+**แนวคำตอบเชิงลึก:**
+ในระบบ Continuous Delivery ระดับ Enterprise การปล่อยเวอร์ชันของซอฟต์แวร์ (Release) ไม่ควรทำด้วยมือคนอีกต่อไป เมื่อทั้งทีมใช้ Conventional Commits:
+1. เครื่องมืออย่าง `semantic-release` หรือ `changesets` สามารถวิเคราะห์ Git Log ตั้งแต่ Tag ล่าสุดได้ทันที
+2. หากมีเพียง `fix` ระบบจะอัปเกรดเป็น Patch version (`1.2.3` $\rightarrow$ `1.2.4`)
+3. หากมี `feat` ระบบจะอัปเกรดเป็น Minor version (`1.2.3` $\rightarrow$ `1.3.0`)
+4. หากมี `BREAKING CHANGE` หรือ `!` ระบบจะอัปเกรดเป็น Major version (`1.2.3` $\rightarrow$ `2.0.0`)
+5. ระบบจะ Generate ไฟล์ `CHANGELOG.md` จัดหมวดหมู่งานอย่างสวยงาม และสร้าง Git Release Tag ส่งขึ้น GitHub อัตโนมัติใน Pipeline 100% ขจัด Human Error โดยสิ้นเชิง
+
+### ข้อที่ 2: ข้อแตกต่างระหว่าง `chore`, `refactor`, และ `build` คืออะไร และมีเกณฑ์ตัดสินใจอย่างไรเมื่อโค้ดมีความก้ำกึ่ง?
+**แนวคำตอบเชิงลึก:**
+เกณฑ์การแบ่งแยก:
+- **`refactor`:** แก้ไขเฉพาะ **Production Application Code** เท่านั้น โดยที่ Input/Output ของระบบยังคงเดิมทุกอย่าง (เช่น แปลง Callback เป็น Async/Await หรือแยกฟังก์ชันใหญ่เป็นฟังก์ชันย่อย)
+- **`build`:** แก้ไขเฉพาะ **เครื่องมือกระบวนการคอมไพล์หรือแพ็กเกจของระบบ** (เช่น แก้ไข `tsconfig.json`, `vite.config.ts`, `Dockerfile`, หรือติดตั้ง dependencies หลัก)
+- **`chore`:** งานดูแลรักษาโครงสร้างพื้นฐานทั่วไปที่ไม่กระทบ Production Code โดยตรง เช่น การอัปเดต `.gitignore`, ล้าง Cache, หรืออัปเดต DevDependencies
+
+---
+
+## ดูเพิ่มเติมที่
+- [Git Basics Flow](/docs/testing/git/basics-flow) — ขั้นตอนการทำงานพื้นฐานของ Git
+- [Git Hooks (Husky & Commitlint)](/docs/testing/git-hooks) — การตั้งค่า Commitlint ดักจับข้อความ Commit อัตโนมัติ
+- [GitHub Actions CI](/docs/testing/github-actions) — การนำข้อความ Commit ไปควบคุม Pipeline
