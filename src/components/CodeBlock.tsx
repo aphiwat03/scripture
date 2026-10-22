@@ -157,13 +157,13 @@ export default function CodeBlock({
         </button>
       </div>
 
-      {/* Code Lines */}
-      <div className="p-4 sm:p-5 overflow-x-auto">
-        <pre className="font-mono text-[13px] leading-[1.65] text-[#e8e8ed]">
+      {/* Code Lines with responsive horizontal scroll */}
+      <div className="p-3.5 sm:p-5 overflow-x-auto touch-pan-x">
+        <pre className="font-mono text-[12.5px] sm:text-[13px] leading-[1.65] text-[#e8e8ed]">
           <code>
             {lines.map((line, i) => (
               <div key={i} className="table-row">
-                <span className="table-cell pr-4 select-none text-right text-[11px] text-[#6e6e73] w-7">
+                <span className="table-cell pr-3 sm:pr-4 select-none text-right text-[10.5px] sm:text-[11px] text-[#6e6e73] w-6 sm:w-7">
                   {i + 1}
                 </span>
                 <span className="table-cell whitespace-pre">

@@ -82,30 +82,30 @@ export default function DocsLayoutShell({
     <div className="min-h-screen flex flex-col bg-canvas text-ink">
       {/* Sticky Apple Glass Navbar */}
       <header className="sticky top-0 z-40 h-14 apple-glass border-b border-hairline">
-        <div className="max-w-[1440px] mx-auto h-full px-4 sm:px-6 lg:px-8 flex items-center justify-between gap-4">
+        <div className="max-w-[1440px] mx-auto h-full px-3 sm:px-6 lg:px-8 flex items-center justify-between gap-2.5 sm:gap-4">
           {/* Left: Mobile Menu Button + Brand */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             <button
               type="button"
               onClick={() => setMobileMenuOpen(true)}
               aria-label="เปิดเมนูสารบัญ"
-              className="lg:hidden p-2 -ml-1 rounded-xl text-muted hover:text-ink hover:bg-subtle transition duration-200 cursor-pointer"
+              className="lg:hidden p-2 -ml-1 rounded-xl text-muted hover:text-ink hover:bg-subtle transition duration-200 cursor-pointer shrink-0"
             >
               <Menu className="w-5 h-5" />
             </button>
 
             <Link
               href="/docs/nextjs"
-              className="flex items-center gap-2.5 group focus:outline-none"
+              className="flex items-center gap-2 sm:gap-2.5 group focus:outline-none min-w-0 shrink-0"
             >
-              <div className="w-8 h-8 rounded-[10px] bg-ink text-canvas flex items-center justify-center shadow-xs group-hover:opacity-90 transition">
+              <div className="w-8 h-8 rounded-[10px] bg-ink text-canvas flex items-center justify-center shadow-xs group-hover:opacity-90 transition shrink-0">
                 <BookOpen className="w-4 h-4" />
               </div>
-              <div className="flex items-baseline gap-2">
-                <span className="font-semibold text-[17px] tracking-[-0.02em] text-ink">
+              <div className="flex items-baseline gap-2 min-w-0">
+                <span className="font-semibold text-base sm:text-[17px] tracking-[-0.02em] text-ink">
                   Scripture
                 </span>
-                <span className="hidden sm:inline-block text-xs text-muted font-normal">
+                <span className="hidden md:inline-block text-xs text-muted font-normal truncate">
                   Developer Documentation
                 </span>
               </div>
@@ -113,17 +113,17 @@ export default function DocsLayoutShell({
           </div>
 
           {/* Right: Search Trigger + Theme Toggle */}
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
             <button
               type="button"
               onClick={() => setSearchOpen(true)}
-              className="flex items-center justify-between gap-3 px-3 py-1.5 rounded-full bg-subtle hover:bg-hairline/60 border border-hairline text-xs text-muted hover:text-ink transition duration-200 ease-out w-44 sm:w-64 cursor-pointer"
+              className="flex items-center justify-between gap-2 sm:gap-3 px-2.5 sm:px-3 py-1.5 rounded-full bg-subtle hover:bg-hairline/60 border border-hairline text-xs text-muted hover:text-ink transition duration-200 ease-out w-32 xs:w-44 sm:w-64 cursor-pointer min-w-0"
             >
-              <span className="flex items-center gap-2 truncate">
+              <span className="flex items-center gap-1.5 sm:gap-2 truncate">
                 <Search className="w-3.5 h-3.5 text-faint shrink-0" />
-                <span className="truncate">ค้นหาหัวข้อ...</span>
+                <span className="truncate">ค้นหา...</span>
               </span>
-              <kbd className="hidden sm:inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-mono text-faint bg-canvas/70 border border-hairline">
+              <kbd className="hidden sm:inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-mono text-faint bg-canvas/70 border border-hairline shrink-0">
                 <Command className="w-2.5 h-2.5" />K
               </kbd>
             </button>
@@ -133,7 +133,7 @@ export default function DocsLayoutShell({
               onClick={toggleTheme}
               aria-label="สลับโหมดสีมืดและสว่าง"
               title={isDark ? 'สลับเป็นโหมดสว่าง' : 'สลับเป็นโหมดมืด'}
-              className="p-2 rounded-full bg-subtle hover:bg-hairline/60 border border-hairline text-muted hover:text-ink transition duration-200 ease-out cursor-pointer"
+              className="p-2 rounded-full bg-subtle hover:bg-hairline/60 border border-hairline text-muted hover:text-ink transition duration-200 ease-out cursor-pointer shrink-0"
             >
               {isDark ? (
                 <Sun className="w-4 h-4 text-amber-400" />

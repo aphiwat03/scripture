@@ -1,0 +1,5 @@
+# Auto detect text files and perform LF normalization
+* text=auto eol=lf
+
+# Mark MDX files as documentation so GitHub Language Bar highlights TypeScript
+src/content/docs/**/*.mdx linguist-documentation

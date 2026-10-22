@@ -79,13 +79,13 @@ export default function DocsPageContent({
   }, [headings, currentSlug]);
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_240px]">
+    <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_240px] w-full min-w-0">
       {/* Center Main Content (~70-75ch reading width) */}
-      <main className="min-w-0 px-4 sm:px-8 lg:px-12 py-10 sm:py-12">
-        <article className="max-w-[72ch] mx-auto">
+      <main className="min-w-0 w-full px-4 sm:px-8 lg:px-12 py-8 sm:py-12">
+        <article className="max-w-[72ch] mx-auto min-w-0 w-full">
           {/* Topic Header */}
-          <header className="pb-8 mb-8 border-b border-hairline">
-            <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-accent mb-3">
+          <header className="pb-6 sm:pb-8 mb-6 sm:mb-8 border-b border-hairline">
+            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 text-xs font-medium text-accent mb-3">
               <span>{meta.category || meta.categoryLabel}</span>
               {meta.parentTitle && (
                 <>
@@ -96,19 +96,19 @@ export default function DocsPageContent({
               {meta.version && (
                 <>
                   <span className="text-faint">•</span>
-                  <span className="px-2 py-0.5 rounded-full bg-accent-soft text-accent font-mono text-[11px]">
+                  <span className="px-2 py-0.5 rounded-full bg-accent-soft text-accent font-mono text-[11px] truncate max-w-[200px] sm:max-w-none">
                     {meta.version}
                   </span>
                 </>
               )}
             </div>
 
-            <h1 className="text-3xl sm:text-[40px] font-bold tracking-[-0.028em] text-ink leading-[1.18]">
+            <h1 className="text-2xl sm:text-3xl lg:text-[40px] font-bold tracking-[-0.028em] text-ink leading-[1.2] break-words">
               {meta.title}
             </h1>
 
             {meta.summary && (
-              <p className="mt-4 text-base sm:text-[17px] text-muted leading-[1.68]">
+              <p className="mt-3 sm:mt-4 text-sm sm:text-base lg:text-[17px] text-muted leading-[1.68] break-words">
                 {meta.summary}
               </p>
             )}
@@ -116,7 +116,7 @@ export default function DocsPageContent({
 
           {/* Body Content or Queued Topic Notice */}
           {hasFullContent ? (
-            <div className="prose-scripture">{children}</div>
+            <div className="prose-scripture min-w-0 w-full">{children}</div>
           ) : (
             <div className="my-10 apple-card p-6 sm:p-8">
               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-accent-soft text-accent text-xs font-medium mb-4">
@@ -143,46 +143,46 @@ export default function DocsPageContent({
           {/* Previous / Next Footer Navigation */}
           <footer
             aria-label="เปลี่ยนหน้าบทเรียน"
-            className="mt-16 pt-8 border-t border-hairline grid grid-cols-1 sm:grid-cols-2 gap-4"
+            className="mt-14 sm:mt-16 pt-8 border-t border-hairline grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4"
           >
             {prevDoc ? (
               <Link
                 href={prevDoc.href}
-                className="group apple-card p-4 sm:p-5 flex flex-col items-start justify-between hover:border-accent/50 transition duration-200 ease-out"
+                className="group apple-card p-4 sm:p-5 flex flex-col items-start justify-between hover:border-accent/50 transition duration-200 ease-out min-w-0"
               >
                 <span className="inline-flex items-center gap-1 text-xs text-muted group-hover:text-accent transition">
                   <ChevronLeft className="w-3.5 h-3.5" />
                   <span>Previous</span>
                 </span>
-                <span className="mt-1.5 font-semibold text-sm sm:text-base text-ink group-hover:text-accent transition">
+                <span className="mt-1.5 font-semibold text-sm sm:text-base text-ink group-hover:text-accent transition break-words line-clamp-2">
                   {prevDoc.title}
                 </span>
-                <span className="text-[11px] text-faint mt-0.5">
+                <span className="text-[11px] text-faint mt-1 truncate max-w-full">
                   {prevDoc.parentTitle ? `${prevDoc.category} › ${prevDoc.parentTitle}` : prevDoc.category}
                 </span>
               </Link>
             ) : (
-              <div />
+              <div className="hidden sm:block" />
             )}
 
             {nextDoc ? (
               <Link
                 href={nextDoc.href}
-                className="group apple-card p-4 sm:p-5 flex flex-col items-end justify-between hover:border-accent/50 transition duration-200 ease-out text-right"
+                className="group apple-card p-4 sm:p-5 flex flex-col items-start sm:items-end justify-between hover:border-accent/50 transition duration-200 ease-out text-left sm:text-right min-w-0"
               >
                 <span className="inline-flex items-center gap-1 text-xs text-muted group-hover:text-accent transition">
                   <span>Next</span>
                   <ChevronRight className="w-3.5 h-3.5" />
                 </span>
-                <span className="mt-1.5 font-semibold text-sm sm:text-base text-ink group-hover:text-accent transition">
+                <span className="mt-1.5 font-semibold text-sm sm:text-base text-ink group-hover:text-accent transition break-words line-clamp-2">
                   {nextDoc.title}
                 </span>
-                <span className="text-[11px] text-faint mt-0.5">
+                <span className="text-[11px] text-faint mt-1 truncate max-w-full">
                   {nextDoc.parentTitle ? `${nextDoc.category} › ${nextDoc.parentTitle}` : nextDoc.category}
                 </span>
               </Link>
             ) : (
-              <div />
+              <div className="hidden sm:block" />
             )}
           </footer>
         </article>
