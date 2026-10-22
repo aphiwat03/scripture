@@ -1,0 +1,167 @@
+---
+title: DDL Constraints
+category: DATABASE
+parentTitle: SQL
+version: SQL:2023 & PostgreSQL 16
+updatedAt: 2026-10-21
+---
+
+## 1. แนวคิด (Concept)
+**Data Definition Language (DDL)** คือกลุ่มคำสั่งสำหรับกำหนด สร้าง ปรับเปลี่ยน และลบโครงสร้างของออบเจกต์ในฐานข้อมูล (เช่น ตาราง, คอลัมน์, View, Schema) 
+
+ในระบบ **Smart Butcher Marketplace** การออกแบบโครงสร้างตารางไม่ได้มีแค่การตั้งชื่อคอลัมน์และกำหนดชนิดข้อมูล แต่ต้องใส่ **Constraints (ข้อกำหนดความถูกต้อง)** เพื่อป้องกันไม่ให้ข้อมูลที่ผิดเพี้ยนถูกบันทึกลงสู่ดิสก์ เปรียบเสมือนการสร้างตู้แช่เนื้อที่ออกแบบช่องวาง ล็อกสเปกอุณหภูมิ และจำกัดขนาดชิ้นเนื้ออย่างเข้มงวด:
+- **`PRIMARY KEY`**: รหัสประจำแถวที่ไม่ซ้ำและห้ามเป็นค่าว่าง เช่น รหัสสินค้าหรือผู้ใช้งาน
+- **`FOREIGN KEY`**: ความสัมพันธ์ระหว่างตาราง เช่น รายการสินค้าต้องผูกกับหมวดหมู่ที่มีอยู่จริง
+- **`NOT NULL`**: บังคับต้องมีข้อมูล เช่น ชื่อสินค้าและราคา
+- **`UNIQUE`**: บังคับห้ามซ้ำกันในคอลัมน์ เช่น รหัส SKU สินค้า หรือ Email ลูกค้า
+- **`CHECK`**: กฎทางธุรกิจ เช่น ราคาต้องมากกว่า 0 หรือระยะเวลาบ่มดรายเอจต้องไม่ติดลบ
+- **`DEFAULT`**: กำหนดค่าเริ่มต้นอัตโนมัติ เช่น วันที่บันทึกข้อมูล `CURRENT_TIMESTAMP`
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เมื่อเรารันคำสั่ง DDL ใน PostgreSQL 16:
+1. **Catalog Updates**: ข้อมูล Schema จะถูกบันทึกในตารางระบบ (System Catalogs) เช่น `pg_class`, `pg_attribute`, `pg_constraint`
+2. **Transactional DDL**: จุดเด่นที่สุดของ PostgreSQL เหนือ MySQL คือ DDL ส่วนใหญ่ทำงานภายใต้ Transaction ได้ (`BEGIN ... CREATE/ALTER TABLE ... ROLLBACK`) หากเกิดข้อผิดพลาด โครงสร้างจะถูกย้อนกลับทั้งหมด
+3. **Locking Levels**: คำสั่ง DDL มักจะขอ Access Exclusive Lock บนตาราง ซึ่งจะบล็อกทั้งคำสั่ง Read และ Write ในช่วงเวลาที่รันคำสั่ง ดังนั้นการรัน `ALTER TABLE` บน Production จำเป็นต้องวางแผนระวัง Downtime
+
+```text filename="docs/database/ddl-lifecycle.txt"
++-----------------------------------------------------------+
+|              PostgreSQL DDL Execution Engine              |
++-----------------------------------------------------------+
+  คำสั่ง DDL (CREATE / ALTER TABLE)
+       |
+       v
+  [ Lock Table: AccessExclusiveLock ]
+       |
+       v
+  [ Catalog Update (pg_class, pg_constraint) ]
+       |
+       v
+  [ Constraint Validation (เช็คข้อมูลเดิมว่าผ่านกฎหรือไม่) ]
+       |
+       +---> สำเร็จ -> COMMIT (บันทึก Schema ใหม่ลงดิสก์)
+       |
+       +---> ล้มเหลว -> ROLLBACK (ย้อนคืนตารางเดิม 100%)
+```
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสร้างตารางแม่และตารางลูกพร้อม Constraints ครบถ้วน
+สร้างตารางหมวดหมู่สินค้า `categories` และตารางสินค้า `products` พร้อมกำหนด Primary Key, Foreign Key แบบ Cascade, Unique Constraint และ Check Constraint:
+
+```sql filename="sql/create_tables.sql"
+-- 1. สร้างตารางหมวดหมู่เนื้อ
+CREATE TABLE categories (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    slug VARCHAR(120) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_categories_slug UNIQUE (slug)
+);
+
+-- 2. สร้างตารางสินค้าเนื้อสเต๊กพรีเมียม
+CREATE TABLE products (
+    id BIGSERIAL PRIMARY KEY,
+    category_id INT NOT NULL,
+    name VARCHAR(200) NOT NULL,
+    sku VARCHAR(50) NOT NULL,
+    price_per_kg NUMERIC(10, 2) NOT NULL,
+    stock_qty INT NOT NULL DEFAULT 0,
+    dry_aged_days INT NOT NULL DEFAULT 0,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- ข้อกำหนดความถูกต้อง (Constraints)
+    CONSTRAINT uq_products_sku UNIQUE (sku),
+    CONSTRAINT chk_products_price CHECK (price_per_kg > 0),
+    CONSTRAINT chk_products_stock CHECK (stock_qty >= 0),
+    CONSTRAINT chk_products_aging CHECK (dry_aged_days >= 0),
+    CONSTRAINT fk_products_category 
+        FOREIGN KEY (category_id) 
+        REFERENCES categories(id) 
+        ON DELETE RESTRICT 
+        ON UPDATE CASCADE
+);
+```
+
+### ตัวอย่างที่ 2: การปรับปรุงโครงสร้างตารางด้วย `ALTER TABLE` อย่างปลอดภัย
+การเพิ่มคอลัมน์ใหม่และการเพิ่มข้อกำหนด `CHECK` ภายหลัง:
+
+```sql filename="sql/alter_tables.sql"
+-- เพิ่มคอลัมน์ระดับความนุ่ม (marbling_score) ระหว่าง 1-12
+ALTER TABLE products 
+ADD COLUMN marbling_score INT;
+
+-- ผูกข้อกำหนด CHECK ตรวจสอบค่า Marbling Score (BMS 1-12)
+ALTER TABLE products 
+ADD CONSTRAINT chk_products_marbling 
+CHECK (marbling_score IS NULL OR (marbling_score >= 1 AND marbling_score <= 12));
+```
+
+---
+
+## 4. โจทย์ Live Coding และการสัมภาษณ์งานจริง (Interview Challenges)
+
+### โจทย์ที่ 1: E-commerce Order Status State Constraint
+**คำถาม:** จงเขียนคำสั่งสร้างตาราง `orders` สำหรับระบบร้านค้าออนไลน์ โดยต้องบังคับว่า `status` มีได้เฉพาะค่า `'PENDING'`, `'PAID'`, `'SHIPPED'`, `'COMPLETED'`, หรือ `'CANCELLED'` เท่านั้น และหากสถานะเป็น `'COMPLETED'` ฟิลด์ `completed_at` จะต้องไม่เป็นค่าว่าง
+
+```sql filename="sql/challenge_orders_ddl.sql"
+CREATE TABLE orders (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    order_no VARCHAR(64) NOT NULL UNIQUE,
+    total_amount NUMERIC(12, 2) NOT NULL CHECK (total_amount >= 0),
+    status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMPTZ,
+
+    -- Constraint จำกัดค่าของสถานะ
+    CONSTRAINT chk_orders_status 
+        CHECK (status IN ('PENDING', 'PAID', 'SHIPPED', 'COMPLETED', 'CANCELLED')),
+        
+    -- Constraint เช็คความสัมพันธ์ระหว่างสถานะและเวลาสำเร็จ
+    CONSTRAINT chk_orders_completed_time 
+        CHECK (
+            (status = 'COMPLETED' AND completed_at IS NOT NULL) OR 
+            (status <> 'COMPLETED')
+        )
+);
+```
+*คำอธิบายทางเทคนิค:* กรรมการสัมภาษณ์มองหาการใช้ `CHECK` ข้ามคอลัมน์ (Multi-column CHECK) ซึ่งเป็นทักษะที่แสดงความเข้าใจในการรักษาความถูกต้องระดับ Schema แทนการหวังพึ่ง Application Code เพียงอย่างเดียว
+
+---
+
+### โจทย์ที่ 2: Safe Alter Table on Production with Existing Data
+**คำถาม:** หากมีตาราง `users` ขนาด 10 ล้านแถวบน Production ต้องการเพิ่มคอลัมน์ `phone_number VARCHAR(20) NOT NULL` คุณจะเขียนคำสั่งอย่างไรเพื่อไม่ให้ระบบค้างหรือเกิด Table Lock นานจนเว็บล่ม?
+
+```sql filename="sql/challenge_safe_alter.sql"
+-- ขั้นที่ 1: เพิ่มคอลัมน์แบบยินยอมให้เป็น NULL ก่อน (Metadata change เร็ว ไม่เกิด Full Table Rewrite)
+ALTER TABLE users ADD COLUMN phone_number VARCHAR(20);
+
+-- ขั้นที่ 2: ทยอยอัปเดตข้อมูล Default หรือค่าว่างเป็นแบทช์ (Backfill data)
+-- UPDATE users SET phone_number = '000-000-0000' WHERE phone_number IS NULL ...
+
+-- ขั้นที่ 3: ใส่ NOT NULL Constraint ภายหลังจากข้อมูลเติมครบแล้ว
+ALTER TABLE users ALTER COLUMN phone_number SET NOT NULL;
+```
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practice)
+
+| กรณี | ผิด (Anti-pattern) | ถูก (Best Practice) | เหตุผลทางวิศวกรรม |
+| :--- | :--- | :--- | :--- |
+| **การเก็บเงิน** | ใช้ `FLOAT` หรือ `DOUBLE PRECISION` | ใช้ `NUMERIC(12, 2)` หรือ `BIGINT` (สตางค์) | ชนิดทศนิยม Floating point มีปัญหาปัดเศษ IEEE 754 เงินจะหายหรือเกิน |
+| **การตั้งชื่อ Constraint** | ไม่ตั้งชื่อ ปล่อยให้ DB สุ่มชื่อระบบ | ตั้งชื่อชัดเจน เช่น `chk_products_price` | เมื่อมี Error คอนโซลจะบอกชื่อ Constraint ชัดเจน แก้บักง่าย |
+| **ลบตารางหลัก** | ใช้ `ON DELETE CASCADE` กับทุกตาราง | ใช้ `ON DELETE RESTRICT` กับข้อมูลการเงิน | ป้องกันการเผลอลบ Category แล้วสินค้าและประวัติการเงินถูกลบตามทั้งยวง |
+
+---
+
+## 6. Checklist สรุป
+- [ ] ทุกตารางต้องมี `PRIMARY KEY` เสมอ (ใช้ `BIGSERIAL` หรือ `UUIDv7`)
+- [ ] ฟิลด์ที่ไม่ควรว่างต้องใส่ `NOT NULL` เสมอ เพื่อลดความซับซ้อนของ Three-Valued Logic
+- [ ] ตรวจสอบว่าได้กำหนด Foreign Key พร้อม Action ที่ปลอดภัย (`RESTRICT` / `CASCADE` / `SET NULL`)
+- [ ] ใส่ `CHECK` constraint คัดกรองตัวเลขที่ไม่ควรติดลบ เช่น ราคาและสต็อก

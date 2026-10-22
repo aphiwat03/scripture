@@ -1,0 +1,146 @@
+---
+title: Math Aggregates
+category: DATABASE
+parentTitle: SQL
+version: SQL:2023 & PostgreSQL 16
+updatedAt: 2026-10-21
+---
+
+## 1. แนวคิด (Concept)
+**Math & Aggregate Functions** คือชุดคำสั่งสำหรับการคำนวณตัวเลขและสรุปผลสถิติเชิงลึกจากข้อมูลหลายๆ แถว (Row) ออกมาเป็นค่าสรุปเพียงค่าเดียว
+
+ในระบบ **Smart Butcher Marketplace** การคำนวณรายได้ สต็อก และราคาสินค้า เป็นงานที่เกิดขึ้นตลอดเวลา:
+- **`COUNT(*)`**: นับจำนวนแถวทั้งหมด รวมทั้งแถวที่มีค่าว่าง
+- **`COUNT(column)`**: นับเฉพาะแถวที่คอลัมน์นั้นมีข้อมูลอยู่จริง (ข้ามค่า NULL)
+- **`COUNT(DISTINCT column)`**: นับจำนวนข้อมูลที่ไม่ซ้ำกัน เช่น จำนวนลูกค้าที่เคยสั่งซื้อ
+- **`SUM(column)`**: รวมยอดเงิน เช่น ยอดขายรวมของทั้งระบบ
+- **`AVG(column)`**: คำนวณค่าเฉลี่ย เช่น ราคาเนื้อเฉลี่ยต่อกิโลกรัม
+- **`MIN()` / `MAX()`**: ค้นหาค่าต่ำสุดและสูงสุด เช่น ชิ้นเนื้อที่ราคาแพงที่สุดในร้าน
+- **`ROUND()` / `CEIL()` / `FLOOR()`**: การปัดเศษทศนิยมตามหลักการเงินและบัญชี
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **NULL Handling in Aggregates**:
+   - ฟังก์ชันอย่าง `SUM()`, `AVG()`, `MIN()`, `MAX()` จะ **เพิกเฉย (Ignore) ต่อค่า NULL อัตโนมัติ**
+   - ตัวอย่าง: ถ้ามีแถวค่า `100`, `200`, `NULL` ฟังก์ชัน `AVG()` จะคิดจาก `(100 + 200) / 2 = 150` (ไม่ได้หารด้วย 3)
+   - หากทั้งตารางไม่มีข้อมูลเลย หรือข้อมูลทั้งหมดเป็น NULL ฟังก์ชัน `SUM()` และ `AVG()` จะคืนค่าเป็น `NULL` ไม่ใช่ `0` (ควรใช้คู่กับ `COALESCE(SUM(amount), 0)`)
+2. **FILTER Clause in PostgreSQL**:
+   - ใน PostgreSQL 16 เราสามารถใส่เงื่อนไขหลังฟังก์ชัน Aggregate ได้โดยตรงผ่านคำสั่ง `FILTER (WHERE ...)` ซึ่งเร็วกว่าและอ่านง่ายกว่าการเขียน `CASE WHEN` ภายใน Aggregate แบบดั้งเดิม
+3. **Floating Point Rounding Errors**:
+   - การคำนวณ `SUM()` บนคอลัมน์ประเภท `FLOAT` หรือ `DOUBLE PRECISION` จะทำให้ผลรวมเพี้ยนสะสมจากการปัดเศษเลขฐานสอง (IEEE 754) จึงต้องใช้ชนิดข้อมูล `NUMERIC` เสมอในงานธุรกรรมทางการเงิน
+
+```text filename="docs/database/aggregate-pipeline.txt"
++--------------------------------------------------------------+
+|            PostgreSQL Aggregate Execution Pipeline           |
++--------------------------------------------------------------+
+  [ Rows Stream from Scan / Join ]
+                 |
+                 v
+  [ Filter out NULL values for target column ]
+                 |
+                 v
+  [ State Transition Function (sfunc): อัปเดต Accumulator ]
+                 |
+                 v
+  [ Final Function (ffunc): คำนวณผลลัพธ์สุดท้าย (เช่น SUM / COUNT สำหรับ AVG) ]
+                 |
+                 v
+  [ Result Scalar Output ]
+```
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การคำนวณสถิติภาพรวมร้านค้าในคำสั่งเดียว
+สรุปยอดขายรวม, จำนวนคำสั่งซื้อ, ยอดสั่งซื้อเฉลี่ย (ปัดเศษ 2 ตำแหน่ง), และยอดต่ำสุด/สูงสุด:
+
+```sql filename="sql/store_aggregates.sql"
+-- สรุปภาพรวมสถิติการขายของร้านค้า
+SELECT 
+    COUNT(*) AS total_orders,
+    COUNT(DISTINCT user_id) AS unique_customers,
+    COALESCE(SUM(total_amount), 0) AS gross_revenue,
+    ROUND(AVG(total_amount), 2) AS average_order_value,
+    MIN(total_amount) AS smallest_order,
+    MAX(total_amount) AS largest_order
+FROM orders
+WHERE status = 'COMPLETED';
+```
+
+### ตัวอย่างที่ 2: การใช้ `FILTER (WHERE ...)` สำหรับวิเคราะห์หลายเงื่อนไขพร้อมกัน
+คำนวณยอดขายแยกตามประเภทสินค้าในคำสั่งเดียวโดยไม่ต้องใช้ Subquery:
+
+```sql filename="sql/filter_aggregates.sql"
+-- คำนวณยอดขายรวมของเนื้อ A5 เทียบกับเนื้อดรายเอจทั่วไป
+SELECT 
+    COUNT(*) AS total_products,
+    -- รวมยอดสต็อกเฉพาะเนื้อวากิว A5
+    SUM(stock_qty) FILTER (WHERE sku LIKE 'WAG-A5%') AS wagyu_a5_stock,
+    -- รวมยอดสต็อกเฉพาะเนื้อดรายเอจเกิน 30 วัน
+    SUM(stock_qty) FILTER (WHERE dry_aged_days >= 30) AS dry_aged_stock,
+    -- คิดเป็นเปอร์เซ็นต์ของเนื้อพรีเมียม
+    ROUND(
+        (COUNT(*) FILTER (WHERE price_per_kg >= 3000)::NUMERIC / COUNT(*)) * 100, 
+        1
+    ) AS premium_ratio_percentage
+FROM products
+WHERE is_active = TRUE;
+```
+
+---
+
+## 4. โจทย์ Live Coding และการสัมภาษณ์งานจริง (Interview Challenges)
+
+### โจทย์ที่ 1: Handling NULL in Revenue Summary (Classic Interview Trap)
+**คำถาม:** จงเขียนคำสั่งสรุปยอดขายของแต่ละวัน โดยหากวันใดไม่มีคำสั่งซื้อ หรือคำสั่งซื้อถูกยกเลิกทั้งหมด ฟังก์ชันต้องคืนค่าเป็นตัวเลข `0.00` ห้ามคืนค่าเป็น `NULL` เด็ดขาด
+
+```sql filename="sql/challenge_null_revenue.sql"
+SELECT 
+    DATE(created_at) AS order_date,
+    COUNT(id) AS total_orders,
+    -- ป้องกัน NULL ด้วย COALESCE
+    COALESCE(SUM(total_amount), 0.00) AS daily_revenue
+FROM orders
+WHERE status = 'PAID'
+GROUP BY DATE(created_at)
+ORDER BY order_date DESC;
+```
+*จุดที่ผู้ตรวจให้คะแนน:* การใช้ `COALESCE(SUM(...), 0)` เป็นการแสดงความเข้าใจว่าถ้าไม่มีแถวตรงเงื่อนไข `SUM` จะให้ค่า `NULL` ซึ่งถ้าไม่ดักไว้ จะทำให้ระบบหน้าบ้านที่นำตัวเลขไปคำนวณต่อพังหรือแสดงผลว่า `NaN`
+
+---
+
+### โจทย์ที่ 2: Calculate Cancellation Rate
+**คำถาม:** จงคำนวณ "อัตราการยกเลิกออเดอร์ (Cancellation Rate)" ของระบบ โดยคิดเป็นเปอร์เซ็นต์ (ทศนิยม 2 ตำแหน่ง) จากสูตร `(จำนวนออเดอร์ที่สถานะ CANCELLED / จำนวนออเดอร์ทั้งหมด) * 100`
+
+```sql filename="sql/challenge_cancel_rate.sql"
+SELECT 
+    COUNT(*) AS total_orders,
+    COUNT(*) FILTER (WHERE status = 'CANCELLED') AS cancelled_orders,
+    -- ป้องกันปัญหา Integer Division ด้วยการแปลงเป็น NUMERIC
+    ROUND(
+        (COUNT(*) FILTER (WHERE status = 'CANCELLED')::NUMERIC / NULLIF(COUNT(*), 0)) * 100,
+        2
+    ) AS cancellation_rate_pct
+FROM orders;
+```
+*จุดสำคัญ:* ผู้สมัครที่เก่งจะใช้ `NULLIF(COUNT(*), 0)` เพื่อป้องกัน **Division by Zero Error** ในกรณีที่ตารางว่างเปล่า
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practice)
+
+| กรณี | ผิด (Anti-pattern) | ถูก (Best Practice) | เหตุผลทางวิศวรรกรรม |
+| :--- | :--- | :--- | :--- |
+| **นับจำนวนแถว** | `SELECT COUNT(id)` เมื่อ `id` มีโอกาสเป็น NULL | `SELECT COUNT(*)` | `COUNT(*)` ได้รับการปรับแต่งใน Query Planner ให้นับความยาวแถวได้เร็วที่สุดโดยไม่ต้องตรวจค่าในคอลัมน์ |
+| **หารตัวเลข** | `COUNT(a) / COUNT(b)` โดยไม่แปลงชนิดข้อมูล | `COUNT(a)::NUMERIC / COUNT(b)` | ใน SQL การนำ Integer หาร Integer จะได้ผลลัพธ์เป็น Integer เสมอ (เช่น $3 / 4 = 0$ ไม่ใช่ $0.75$) |
+| **รวมยอดที่อาจว่าง** | `SUM(amount)` เพียวๆ | `COALESCE(SUM(amount), 0)` | ป้องกันไม่ให้ผลลัพธ์ส่ง `NULL` ไปยัง Backend API |
+
+---
+
+## 6. Checklist สรุป
+- [ ] ใช้ `COUNT(*)` แทน `COUNT(col)` หากต้องการนับจำนวนแถวทั้งหมดจริงๆ
+- [ ] ครอบ `COALESCE(..., 0)` เสมอกับฟังก์ชัน `SUM()`
+- [ ] ระวังการหารด้วยศูนย์ (Division by zero) โดยใช้ `NULLIF(denominator, 0)` ดักไว้เสมอ
+- [ ] ใช้ `FILTER (WHERE ...)` ของ PostgreSQL 16 เพื่อเขียน Conditional Aggregation ให้อ่านง่ายและทำงานเร็ว

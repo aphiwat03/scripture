@@ -1,0 +1,137 @@
+---
+title: Basic CRUD DML
+category: DATABASE
+parentTitle: SQL
+version: SQL:2023 & PostgreSQL 16
+updatedAt: 2026-10-21
+---
+
+## 1. แนวคิด (Concept)
+**Data Manipulation Language (DML)** คือชุดคำสั่งที่ใช้ในการจัดการและเปลี่ยนแปลงข้อมูลที่อยู่ในตาราง ซึ่งเป็นหัวใจสำคัญของการทำงานแบบ **CRUD (Create, Read, Update, Delete)** ในแอปพลิเคชัน
+
+ในระบบ **Smart Butcher Marketplace** การทำงานของ DML มีหน้าที่รับคำขอจากผู้ใช้งานเพื่ออัปเดตสถานะของสต็อกและออเดอร์:
+- **`INSERT` (Create)**: ลูกค้าใหม่ลงทะเบียนสมาชิก หรือนำเข้าชิ้นเนื้อวากิวล็อตใหม่เข้าสู่คลังสินค้า
+- **`SELECT` (Read)**: การดึงข้อมูลออกมาดู (แยกเรียนในบทถัดไป)
+- **`UPDATE` (Update)**: ปรับลดราคาสินค้าช่วงเทศกาล หรือแก้ไขจำนวนชิ้นเนื้อที่เหลืออยู่ในสต็อก
+- **`DELETE` (Delete)**: การลบข้อมูลที่ไม่ใช้งานแล้ว เช่น ตะกร้าสินค้าที่หมดอายุ หรือข้อความแจ้งเตือนที่อ่านแล้ว
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+เบื้องหลังคำสั่ง DML ใน PostgreSQL 16:
+1. **MVCC (Multi-Version Concurrency Control)**: 
+   - เมื่อสั่ง `UPDATE` ตัวฐานข้อมูล **ไม่ได้ทับที่ข้อมูลเดิม (In-place overwrite)** แต่จะสร้าง Tuple (แถว) เวอร์ชั่นใหม่ขึ้นมา แล้วทำเครื่องหมายว่าแถวเดิมหมดอายุ (`xmax` ถูกเซ็ตค่า)
+   - เมื่อสั่ง `DELETE` แถวนั้นจะไม่ถูกลบทันทีจากดิสก์ แต่จะถูก Mark Dead Tuple ไว้ เพื่อรอให้กระบวนการ **VACUUM** มาเก็บกวาดเนื้อที่คืนในภายหลัง
+2. **WAL (Write-Ahead Logging)**: ทุกการเปลี่ยนแปลงของคำสั่ง DML จะถูกบันทึกเรียงตามลำดับลงใน Write-Ahead Log บนดิสก์ก่อนเสมอ เพื่อการันตีคุณสมบัติ Durability ของ ACID แม้ไฟจะดับข้อมูลก็ไม่สูญหาย
+3. **Transaction Safety**: คำสั่ง `UPDATE` และ `DELETE` ที่ไม่มีเงื่อนไข `WHERE` จะทำงานกับข้อมูลทั้งตารางทันที ซึ่งมักเป็นฝันร้ายที่สุดของผู้พัฒนา
+
+```text filename="docs/database/dml-mvcc.txt"
++--------------------------------------------------------------+
+|             PostgreSQL Tuple Versioning on UPDATE            |
++--------------------------------------------------------------+
+  [ แถวเดิม: ID=1, Price=1500 ]  ---> (ถูก Mark Dead: xmax = Tx101)
+                |
+                +---> สร้างแถวใหม่ใน Data Page เดียวกันหรือใหม่:
+                      [ แถวใหม่: ID=1, Price=1350 ] (xmin = Tx101, xmax = 0)
+```
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การเพิ่มข้อมูลหลายแถวในคำสั่งเดียว (Multi-row INSERT)
+การเพิ่มข้อมูลชิ้นเนื้อวากิวญี่ปุ่น 3 รายการลงในตาราง `products` อย่างมีประสิทธิภาพโดยไม่ต้องยิงทีละคำสั่ง:
+
+```sql filename="sql/batch_insert.sql"
+-- การเพิ่มข้อมูลสินค้าแบบหลายแถว (Bulk Insert)
+INSERT INTO products (
+    category_id, 
+    name, 
+    sku, 
+    price_per_kg, 
+    stock_qty, 
+    dry_aged_days, 
+    is_active
+) VALUES 
+    (1, 'Japanese Wagyu A5 Ribeye', 'WAG-A5-RIB', 4500.00, 15, 0, TRUE),
+    (1, 'Japanese Wagyu A5 Striploin', 'WAG-A5-STR', 4200.00, 20, 0, TRUE),
+    (2, 'Dry-Aged Angus T-Bone 45 Days', 'ANG-TB-45D', 2800.00, 8, 45, TRUE);
+```
+
+### ตัวอย่างที่ 2: การอัปเดตข้อมูลแบบมีเงื่อนไขและคำนวณจากค่าเดิม
+การปรับลดราคาเนื้อและตัดสต็อกเมื่อเกิดการซื้อขาย:
+
+```sql filename="sql/update_records.sql"
+-- 1. ตัดสต็อกสินค้าเมื่อมีการสั่งซื้อ 2 ชิ้น
+UPDATE products 
+SET stock_qty = stock_qty - 2
+WHERE sku = 'WAG-A5-RIB' 
+  AND stock_qty >= 2; -- ป้องกันสต็อกติดลบ
+
+-- 2. ปรับลดราคา 10% สำหรับเนื้อบ่มดรายเอจที่อายุเกิน 40 วัน
+UPDATE products 
+SET price_per_kg = ROUND(price_per_kg * 0.90, 2)
+WHERE dry_aged_days > 40;
+```
+
+### ตัวอย่างที่ 3: การลบข้อมูลอย่างปลอดภัย (DELETE vs TRUNCATE)
+```sql filename="sql/delete_records.sql"
+-- ลบตะกร้าสินค้าที่ไม่มีการเคลื่อนไหวเกิน 30 วัน
+DELETE FROM cart_items 
+WHERE updated_at < CURRENT_TIMESTAMP - INTERVAL '30 days';
+
+-- การลบข้อมูลทั้งหมดและ Reset ค่า Identity Counter (ใช้ตอนเคลียร์ข้อมูลทดสอบ)
+TRUNCATE TABLE test_sandbox_logs RESTART IDENTITY;
+```
+
+---
+
+## 4. โจทย์ Live Coding และการสัมภาษณ์งานจริง (Interview Challenges)
+
+### โจทย์ที่ 1: Safe Inventory Subtraction without Race Condition
+**คำถาม:** จงเขียนคำสั่ง SQL สำหรับตัดสต็อกสินค้า `sku = 'WAG-A5-RIB'` ออก 3 ชิ้น โดยมีข้อแม้ว่า:
+1. หากสินค้ามีไม่พอ ห้ามให้สต็อกติดลบเด็ดขาด
+2. คิวรีต้องคืนค่าจำนวนแถวที่ถูกอัปเดตกลับมา เพื่อให้ระบบ Backend ตรวจสอบได้ว่าการตัดสต็อกสำเร็จหรือไม่
+
+```sql filename="sql/challenge_safe_stock.sql"
+UPDATE products 
+SET stock_qty = stock_qty - 3
+WHERE sku = 'WAG-A5-RIB' 
+  AND stock_qty >= 3;
+```
+*แนวคำตอบสัมภาษณ์:* การใส่เงื่อนไข `stock_qty >= 3` ไว้ใน clause `WHERE` ควบคู่กับการลดค่าเชิงสัมพัทธ์ (`stock_qty = stock_qty - 3`) คือหัวใจของการทำ **Atomic Conditional Update** ในฐานข้อมูล Relational ซึ่งป้องกันปัญหา Overselling ได้ทันทีโดยไม่ต้องดึงค่ามาเช็คใน Application ให้เสี่ยงเกิด Race Condition
+
+---
+
+### โจทย์ที่ 2: Soft Delete vs Hard Delete
+**คำถาม:** ในระบบ E-commerce ทำไมเราจึงนิยมใช้ Soft Delete (การอัปเดตฟิล์ด `deleted_at`) แทนการใช้คำสั่ง `DELETE` จริง? และจงเขียนคำสั่ง Soft Delete สำหรับลูกค้าที่ขอลบบัญชี
+
+```sql filename="sql/challenge_soft_delete.sql"
+-- การทำ Soft Delete
+UPDATE users 
+SET deleted_at = CURRENT_TIMESTAMP,
+    is_active = FALSE
+WHERE id = 105 
+  AND deleted_at IS NULL;
+```
+*เหตุผลที่กรรมการสัมภาษณ์ต้องการได้ยิน:* 
+1. **Audit & Regulatory Compliance:** กฎหมายการเงินและภาษี (เช่น สรรพากร) บังคับให้เก็บหลักฐานการซื้อขายและตัวตนย้อนหลังอย่างน้อย 5-10 ปี หาก Hard Delete ตาราง `orders` ที่ผูกกับ `users` จะพังทันที
+2. **Data Recovery:** หากลูกค้าเปลี่ยนใจหรือเกิดข้อผิดพลาด สามารถกู้คืนข้อมูลได้ง่าย
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practice)
+
+| กรณี | ผิด (Anti-pattern) | ถูก (Best Practice) | เหตุผลทางวิศวกรรม |
+| :--- | :--- | :--- | :--- |
+| **ตัดสต็อก** | อ่านค่ามาคำนวณใน Node.js แล้วเขียนค่าใหม่ทับ `SET stock = 8` | ใช้ Atomic Relative Update: `SET stock = stock - 2 WHERE stock >= 2` | หากมี 2 Request ยิงมาพร้อมกัน การอ่านมาเซ็ตค่าทับจะเกิด Lost Update ทันที |
+| **ลบตารางใหญ่** | ใช้ `DELETE FROM logs;` บนตารางที่มี 10 ล้านแถว | ใช้ `TRUNCATE TABLE logs;` | `DELETE` จะต้องบันทึก Transaction Log ทีละแถวและเกิด Dead Tuples มหาศาล ส่วน `TRUNCATE` เป็นคำสั่ง DDL ที่ Drop Data Pages ทันที |
+| **อัปเดตข้อมูล** | รันคำสั่ง `UPDATE` โดยลืมใส่ `WHERE` | เขียน `SELECT` ตรวจสอบเงื่อนไข `WHERE` ดูก่อน แล้วจึงเปลี่ยนเป็น `UPDATE` | ป้องกันการเผลอแก้ไขข้อมูลทั้งตารางบน Production |
+
+---
+
+## 6. Checklist สรุป
+- [ ] ใส่เงื่อนไข `WHERE` ที่มี Index กำกับเสมอเมื่อใช้คำสั่ง `UPDATE` และ `DELETE`
+- [ ] เมื่ออัปเดตตัวเลขสต็อกหรือยอดเงิน ให้ใช้การคำนวณแบบ Relative (`col = col + n`) เสมอ
+- [ ] เลือกระหว่าง Soft Delete (`deleted_at`) และ Hard Delete ให้ตรงกับข้อกำหนดทางธุรกิจ
+- [ ] ใช้ Multi-row `INSERT` เพื่อลดจำนวน Network Round-trip ไปยังฐานข้อมูล

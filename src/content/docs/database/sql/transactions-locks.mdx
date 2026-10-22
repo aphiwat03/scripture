@@ -1,0 +1,182 @@
+---
+title: Transactions Locks
+category: DATABASE
+parentTitle: SQL
+version: SQL:2023 & PostgreSQL 16
+updatedAt: 2026-10-21
+---
+
+## 1. แนวคิด (Concept)
+**Database Transaction & Concurrency Control** คือกลไกการรับประกันว่าชุดคำสั่ง SQL หลายคำสั่งจะทำงานสำเร็จครบถ้วนทั้งหมด หรือหากมีคำสั่งใดล้มเหลว ระบบจะย้อนคืนสถานะกลับมายังจุดเริ่มต้นโดยสมบูรณ์ตามคุณสมบัติ **ACID (Atomicity, Consistency, Isolation, Durability)**
+
+ในระบบ **Smart Butcher Marketplace** เมื่อลูกค้าสั่งซื้อเนื้อสเต๊กวากิว A5 ชิ้นสุดท้ายพร้อมกันหลายคน:
+- **`BEGIN`**: เริ่มต้นขอบเขตของธุรกรรมทางการเงิน
+- **`COMMIT`**: บันทึกการเปลี่ยนแปลงทั้งหมดลงสู่ดิสก์ถาวรเมื่อทำงานสำเร็จครบทุกขั้นตอน
+- **`ROLLBACK`**: ยกเลิกทุกคำสั่งที่ทำไปแล้วในธุรกรรม หากพบข้อผิดพลาดหรือตัดเงินไม่สำเร็จ
+- **`SAVEPOINT`**: จุดบันทึกชั่วคราวภายใน Transaction เพื่อย้อนกลับเฉพาะบางส่วนได้
+- **`SELECT ... FOR UPDATE`**: การล็อกแถวข้อมูล (Row-level Lock) แบบ Exclusive ป้องกันไม่ให้คำขออื่นเข้ามาอ่านหรือแก้ไขข้อมูลจนกว่า Transaction นี้จะเสร็จสิ้น
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **คุณสมบัติ ACID ใน PostgreSQL 16**:
+   - **Atomicity (อะตอมิก):** All-or-nothing ทำครบหรือย้อนกลับทั้งหมด
+   - **Consistency (ความสอดคล้อง):** ไม่ทำลายเงื่อนไข Foreign Key, Check Constraint และ Unique
+   - **Isolation (การแยกตัว):** คำสั่งที่รันพร้อมกันต้องไม่เห็นข้อมูลกึ่งสุกกึ่งดิบของกันและกัน (ค่าเริ่มต้นใน PostgreSQL คือ `READ COMMITTED`)
+   - **Durability (ความคงทน):** เมื่อ Commit แล้ว ข้อมูลจะถูกเขียนลง Write-Ahead Log (WAL) ทันที ไฟดับก็ไม่หาย
+2. **กลไก Row Locking (`FOR UPDATE` vs `FOR SHARE`)**:
+   - `SELECT ... FOR UPDATE`: ขอ Write Lock (Exclusive) บนแถวที่ถูกเลือก คิวรีอื่นที่ขอ `FOR UPDATE` หรือคำสั่ง `UPDATE/DELETE` จะต้องรอ (Block)
+   - `NOWAIT`: หากแถวถูกล็อกอยู่ ให้โยน Error ทันทีโดยไม่ต้องรอ
+   - `SKIP LOCKED`: ข้ามแถวที่ติดล็อกไปหยิบแถวถัดไป เหมาะสำหรับทำ **Job Queue / Task Processing**
+3. **Deadlock Prevention**: เกิดเมื่อ Transaction 1 ถือ Lock A และรอ Lock B ในขณะที่ Transaction 2 ถือ Lock B และรอ Lock A วิธีแก้คือต้องกำหนดลำดับการล็อกแถวข้อมูลให้เป็นทิศทางเดียวกันเสมอ (เช่น สั่ง `ORDER BY id ASC` ก่อนล็อก)
+
+```text filename="docs/database/transaction-acid.txt"
++--------------------------------------------------------------+
+|            PostgreSQL Transaction Life-cycle & WAL           |
++--------------------------------------------------------------+
+  [ Client 1: BEGIN ]
+         |
+  [ SELECT stock FROM products WHERE id=1 FOR UPDATE ] ---> ล็อกแถว ID=1
+         |
+  [ Client 2: พยายาม UPDATE id=1 ] --------------------> ถูกบล็อก (Waiting...)
+         |
+  [ Client 1: UPDATE products SET stock = stock - 1 ]
+         |
+  [ Client 1: COMMIT ] --------------------------------> เขียน WAL ลงดิสก์
+         |
+  [ คลายล็อกแถว ID=1 ]
+         |
+  [ Client 2: ทำงานต่อได้ด้วยสต็อกล่าสุด ]
+```
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสั่งซื้อและตัดสต็อกสินค้าอย่างปลอดภัยด้วย Transaction
+กระบวนการสั่งซื้อ: เช็คสต็อก $\rightarrow$ ล็อกแถว $\rightarrow$ หักสต็อก $\rightarrow$ สร้างคำสั่งซื้อ $\rightarrow$ บันทึกการจ่ายเงิน:
+
+```sql filename="sql/checkout_transaction.sql"
+-- เริ่มต้น Transaction
+BEGIN;
+
+-- 1. ตรวจสอบสต็อกและล็อกแถวป้องกันคนอื่นมาแย่งซื้อพร้อมกัน
+SELECT id, price_per_kg, stock_qty 
+FROM products 
+WHERE id = 42 
+FOR UPDATE;
+
+-- 2. ตัดสต็อกเนื้อ 1 ชิ้น
+UPDATE products 
+SET stock_qty = stock_qty - 1 
+WHERE id = 42 AND stock_qty >= 1;
+
+-- 3. สร้างออเดอร์ใหม่
+INSERT INTO orders (user_id, order_no, total_amount, status)
+VALUES (105, 'ORD-2026-9921', 4500.00, 'PAID');
+
+-- 4. ยืนยันการทำงานทั้งหมดลงดิสก์
+COMMIT;
+```
+
+### ตัวอย่างที่ 2: การใช้ `SAVEPOINT` เพื่อจัดการข้อผิดพลาดเฉพาะจุด
+การลองตัดเงินผ่านบัตรเครดิต หากล้มเหลวให้เปลี่ยนไปสร้างช่องทางชำระเงินสำรองโดยไม่ต้อง Rollback ทั้งออเดอร์:
+
+```sql filename="sql/savepoint_example.sql"
+BEGIN;
+
+-- สร้างคำสั่งซื้อตั้งต้น
+INSERT INTO orders (user_id, order_no, total_amount, status)
+VALUES (105, 'ORD-2026-9922', 1200.00, 'PENDING');
+
+-- กำหนดจุด Savepoint ก่อนบันทึกการตัดเงิน
+SAVEPOINT before_payment;
+
+-- ลองบันทึกข้อมูลการตัดเงิน
+INSERT INTO payments (order_id, amount, method, status)
+VALUES (currval('orders_id_seq'), 1200.00, 'CREDIT_CARD', 'FAILED');
+
+-- หากพบว่าการจ่ายเงินล้มเหลว ให้ย้อนกลับเฉพาะขั้นตอนการจ่ายเงิน
+ROLLBACK TO SAVEPOINT before_payment;
+
+-- เปลี่ยนเป็นบันทึกแบบรอโอนเงินผ่าน QR Code แทน
+INSERT INTO payments (order_id, amount, method, status)
+VALUES (currval('orders_id_seq'), 1200.00, 'PROMPTPAY', 'PENDING');
+
+-- ยืนยัน Transaction ออเดอร์ยังคงอยู่
+COMMIT;
+```
+
+---
+
+## 4. โจทย์ Live Coding และการสัมภาษณ์งานจริง (Interview Challenges)
+
+### โจทย์ที่ 1: The Flash Sale Overselling Problem (Top Interview Classic)
+**คำถาม:** มีสินค้าเนื้อวากิวเหลือในคลังเพียง 1 ชิ้น (`stock_qty = 1`) และมีผู้ใช้งาน 2 คนกดปุ่ม "ซื้อทันที" ในเสี้ยววินาทีเดียวกัน จงเขียนคำสั่ง SQL เพื่อรับประกันว่าจะไม่มีทางเกิดของขายเกิน (Overselling) และคนที่มาทีหลังจะต้องทราบทันทีว่าสินค้าหมดโดยไม่ต้องรอนาน
+
+```sql filename="sql/challenge_flash_sale.sql"
+BEGIN;
+
+-- ล็อกแถวแบบ NOWAIT ถ้ามีคนกำลังซื้ออยู่แล้ว ให้โยน Error ทันที
+SELECT id, stock_qty 
+FROM products 
+WHERE id = 10 
+  AND stock_qty >= 1 
+FOR UPDATE NOWAIT;
+
+-- ถ้าผ่านบรรทัดบนได้ แสดงว่าเป็นผู้ซื้อคนแรก ให้ตัดสต็อกทันที
+UPDATE products 
+SET stock_qty = stock_qty - 1 
+WHERE id = 10;
+
+-- บันทึกออเดอร์
+INSERT INTO orders (user_id, order_no, total_amount, status)
+VALUES (201, 'FLASH-2026-001', 3500.00, 'PAID');
+
+COMMIT;
+```
+*เหตุผลที่ใช้ `NOWAIT`:* ในช่วง Flash Sale การปล่อยให้ Request คอยต่อคิว Lock จะทำให้ Connection Pool ของ Backend เต็มและระบบล่ม การใช้ `NOWAIT` หรือ `SKIP LOCKED` จะช่วยดีดคำขอที่แย่งไม่ทันออกไปแจ้งหน้าบ้านว่า "มีผู้ใช้อื่นกำลังทำรายการ" ได้ทันที
+
+---
+
+### โจทย์ที่ 2: Safe Bank Transfer with Deadlock Prevention
+**คำถาม:** เขียนคำสั่งโอนเงิน 1,000 บาท จากกระเป๋าเงินบัญชี A (ID=1) ไปยังบัญชี B (ID=2) โดยป้องกันปัญหา Deadlock หากมีอีกคำขอกำลังโอนเงินจาก B ไป A ในเวลาเดียวกัน
+
+```sql filename="sql/challenge_bank_transfer.sql"
+BEGIN;
+
+-- ป้องกัน Deadlock ด้วยการล็อกแถวเรียงตาม ID เสมอ (Lock Ordering)
+-- แม้จะโอนจาก 2 ไป 1 ก็ต้อง SELECT id 1 ก่อน 2 เสมอ
+SELECT id, balance 
+FROM accounts 
+WHERE id IN (1, 2) 
+ORDER BY id ASC 
+FOR UPDATE;
+
+-- ตัดเงินจากบัญชี 1
+UPDATE accounts SET balance = balance - 1000 WHERE id = 1;
+
+-- เพิ่มเงินให้บัญชี 2
+UPDATE accounts SET balance = balance + 1000 WHERE id = 2;
+
+COMMIT;
+```
+*คำอธิบายทางเทคนิค:* Deadlock เกิดจากการแย่งล็อกทรัพยากรสวนทางกัน (A $\rightarrow$ B และ B $\rightarrow$ A) การบังคับให้ทุก Transaction ล็อกแถวด้วย `ORDER BY id ASC` จะทำให้ Transaction ที่สองต้องเข้าคิวรออย่างเป็นระเบียบ ขจัดโอกาสเกิด Deadlock ได้อย่างถาวร
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practice)
+
+| กรณี | ผิด (Anti-pattern) | ถูก (Best Practice) | เหตุผลทางวิศวกรรม |
+| :--- | :--- | :--- | :--- |
+| **ยิง External API ใน Transaction** | ยิงตัดบัตรเครดิต (Stripe/Omise) ข้างในบล็อก `BEGIN...COMMIT` | ตัดบัตรเครดิตให้ผ่านก่อน หรือใช้ Webhook แล้วเปิด Transaction อัปเดต DB ให้สั้นที่สุด | ถ้า Network ของ Payment Gateway ช้า 5 วินาที ตัว Database จะถือ Lock แถวนั้นค้างไว้ 5 วินาที ทำให้ระบบพังทั้งเว็บ |
+| **ลำดับการล็อกข้อมูล** | ล็อกตามลำดับที่ส่งมาจากหน้าบ้าน | เรียงลำดับ `ORDER BY id ASC` ก่อนล็อกเสมอ | ป้องกันปัญหา Circular Deadlock ระหว่าง Concurrently Running Transactions |
+| **ปล่อย Transaction ค้าง** | ลืมส่ง `COMMIT` หรือ `ROLLBACK` เมื่อ Application พ่น Exception | ใช้ `try/finally` หรือ ORM Unit of Work ปิด Transaction เสมอ | ป้องกันปัญหา `idle in transaction` ซึ่งจะบล็อกกระบวนการ VACUUM และกิน Connection จนระบบเต็ม |
+
+---
+
+## 6. Checklist สรุป
+- [ ] ออกแบบ Transaction ให้สั้นที่สุด (ไม่ใส่โค้ดประมวลผลหนักๆ หรือการเรียก Network API ภายนอกไว้ข้างใน)
+- [ ] ใช้ `SELECT ... FOR UPDATE` เมื่อต้องการอ่านค่ามาเพื่อตัดสินใจแก้ไขในสเต็ปถัดไป
+- [ ] จัดลำดับการล็อกแถวด้วย `ORDER BY id ASC` เพื่อป้องกัน Deadlock
+- [ ] ตั้งค่า `idle_in_transaction_session_timeout` เพื่อตัด Connection ที่ค้างทิ้งอัตโนมัติ

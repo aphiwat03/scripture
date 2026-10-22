@@ -1,0 +1,152 @@
+---
+title: Index EXPLAIN
+category: DATABASE
+parentTitle: SQL
+version: SQL:2023 & PostgreSQL 16
+updatedAt: 2026-10-21
+---
+
+## 1. แนวคิด (Concept)
+**Indexing & Query Analysis** คือทักษะขั้นสูงที่สุดของการเขียน SQL ในระดับ Production เพื่อแปลงคำสั่งคิวรีที่ใช้เวลาประมวลผลหลายวินาที (หรือนาที) ให้ตอบสนองกลับมาภายในไม่กี่มิลลิวินาที
+
+ในระบบ **Smart Butcher Marketplace** ที่มีรายการสั่งซื้อหลายล้านแถว:
+- **`B-Tree Index`**: สารบัญดัชนีของฐานข้อมูล ช่วยให้กระโดดไปยังหน้าที่ต้องการได้ทันที โดยไม่ต้องอ่านข้อมูลตั้งแต่หน้าแรกจนถึงหน้าสุดท้าย
+- **`Composite Index`**: ดัชนีที่สร้างครอบคลุมหลายคอลัมน์พร้อมกันตามลำดับการค้นหา
+- **`Partial Index`**: ดัชนีที่เก็บเฉพาะแถวที่ตรงเงื่อนไข เช่น ทำ Index เฉพาะสินค้าที่ยังวางจำหน่าย (`WHERE is_active = TRUE`) เพื่อประหยัดพื้นที่ดิสก์และแรม
+- **`Covering Index (INCLUDE)`**: เก็บข้อมูลคอลัมน์เสริมไว้ในใบไม้ของ B-Tree เพื่อให้ตอบคำสั่งได้โดยไม่ต้องไปเปิดอ่านตารางจริง (Index-Only Scan)
+- **`EXPLAIN` / `EXPLAIN ANALYZE`**: เครื่องมือฉายรังสีเอ็กซเรย์ดูว่า PostgreSQL วางแผนรันคิวรีอย่างไร และใช้เวลาไปกับขั้นตอนไหนมากที่สุด
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **B-Tree Structure (Lehman-Yao Algorithm)**:
+   - PostgreSQL ใช้โครงสร้างต้นไม้ B-Tree ที่มีความลึกเพียง 3-4 ชั้นสำหรับตารางหลักสิบล้านแถว ทำให้การค้นหามีประสิทธิภาพสูงถึง $O(\log N)$
+2. **Scan Methods ใน Execution Plan**:
+   - **Sequential Scan (Seq Scan):** อ่านข้อมูลเรียงตามบล็อกในดิสก์ทีละหน้า (ช้ามากสำหรับตารางขนาดใหญ่ แต่เร็วที่สุดถ้าตารางมีข้อมูลไม่กี่แถว)
+   - **Index Scan:** ค้นหาตำแหน่ง Physical Address (`ctid`) ใน B-Tree แล้ววิ่งไปอ่าน Tuple จริงใน Table Heap
+   - **Bitmap Index Scan:** ดึงตำแหน่งจาก Index มาแปลงเป็น Bitmap Array ในหน่วยความจำ แล้วจัดลำดับอ่านดิสก์แบบ Sequential เพื่อลดการแกว่งของ Disk Head
+   - **Index-Only Scan:** ดึงข้อมูลครบทุกคอลัมน์ที่ร้องขอได้จากตัว B-Tree Index เองโดยตรง ร่วมกับการตรวจ Visibility Map (เร็วที่สุด)
+3. **The Leftmost Prefix Rule (ESR Rule)**:
+   - เมื่อสร้าง Composite Index `(A, B, C)` คิวรีจะใช้ Index ได้อย่างเต็มประสิทธิภาพเมื่อเรียงลำดับเงื่อนไขตามหลัก **Equality $\rightarrow$ Sort $\rightarrow$ Range (ESR)**
+
+```text filename="docs/database/explain-architecture.txt"
++--------------------------------------------------------------+
+|            PostgreSQL Query Execution Cost Model             |
++--------------------------------------------------------------+
+  คำสั่ง SQL
+       |
+       v
+  [ Cost-based Query Planner ]
+       |
+       +---> ทางเลือก 1: Seq Scan (Cost = 8520.50, ช้าเมื่อตารางใหญ่)
+       +---> ทางเลือก 2: Index Scan (Cost = 8.45, เร็ว กระโดดตาม B-Tree)
+       |
+       v
+  [ เลือกทางเลือกที่มี Estimated Total Cost ต่ำที่สุด ]
+       |
+       v
+  [ Executor ประมวลผลจริง และส่งสถิติ Buffers กลับมาเมื่อใช้ ANALYZE ]
+```
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสร้าง Index ขั้นสูง (Partial & Covering Index)
+สร้างดัชนีสำหรับค้นหาออเดอร์ของลูกค้าที่ยังดำเนินการไม่เสร็จ โดยประหยัดพื้นที่ดิสก์ และสร้าง Covering Index สำหรับพิมพ์ใบเสร็จ:
+
+```sql filename="sql/create_indexes.sql"
+-- 1. Partial Index: สร้าง Index เฉพาะออเดอร์ที่สถานะยังค้างอยู่ (PENDING / PAID)
+-- ช่วยประหยัดพื้นที่แรมได้กว่า 90% เพราะไม่อินเด็กซ์ออเดอร์ที่ COMPLETED แล้ว
+CREATE INDEX idx_orders_active_users 
+ON orders (user_id) 
+WHERE status IN ('PENDING', 'PAID');
+
+-- 2. Covering Index: ค้นหาด้วย Category ID แต่ดึงชื่อและราคาไปแสดงผลหน้าเว็บ
+-- ทำให้เกิด Index-Only Scan 100% โดยไม่ต้องอ่าน Table Heap
+CREATE INDEX idx_products_category_covering 
+ON products (category_id) 
+INCLUDE (name, price_per_kg);
+```
+
+### ตัวอย่างที่ 2: การวิเคราะห์คำสั่งด้วย `EXPLAIN (ANALYZE, BUFFERS)`
+ตรวจสอบแผนการทำงานจริง พร้อมดูจำนวน Block ที่อ่านจาก Shared Buffers:
+
+```sql filename="sql/explain_analysis.sql"
+-- รันการวิเคราะห์แผนประมวลผลจริง
+EXPLAIN (ANALYZE, BUFFERS, VERBOSE)
+SELECT id, name, price_per_kg
+FROM products
+WHERE category_id = 2 
+  AND is_active = TRUE
+ORDER BY price_per_kg DESC
+LIMIT 10;
+```
+
+---
+
+## 4. โจทย์ Live Coding และการสัมภาษณ์งานจริง (Interview Challenges)
+
+### โจทย์ที่ 1: Reading and Diagnosing an EXPLAIN Plan
+**คำถาม:** จากผลลัพธ์ของ `EXPLAIN` ด้านล่างนี้ จงระบุว่ามีปัญหาอะไร ทำไมคิวรีจึงช้า และจะปรับปรุงด้วยคำสั่ง SQL ใด?
+
+```text filename="docs/database/explain-sample.txt"
+Seq Scan on orders  (cost=0.00..45280.00 rows=1250 width=48) (actual time=0.085..48.320 rows=12 loops=1)
+  Filter: ((user_id = 105) AND (created_at >= '2026-01-01'::timestamptz))
+  Rows Removed by Filter: 1500000
+  Buffers: shared hit=3250 read=12400
+Planning Time: 0.120 ms
+Execution Time: 52.140 ms
+```
+
+*แนวทางการตอบสัมภาษณ์ระดับ Senior:*
+1. **ปัญหาที่ตรวจพบ:** 
+   - เกิด **Seq Scan** บนตาราง `orders` โดยระบบต้องกวาดอ่านข้อมูลจากดิสก์ทั้งสิ้น 1,500,000 แถว (`Rows Removed by Filter: 1500000`) เพื่อดึงข้อมูลเพียง 12 แถว
+   - มีการอ่านข้อมูลจากดิสก์ (Disk Read) ถึง 12,400 buffers (~96 MB) ส่งผลให้ Execution Time สูงถึง 52 ms
+2. **วิธีแก้ไข:**
+   - สร้าง **Composite B-Tree Index** โดยเรียงลำดับคอลัมน์ตามกฎ ESR (Equality ก่อน Range):
+   ```sql filename="sql/fix_orders_index.sql"
+   CREATE INDEX CONCURRENTLY idx_orders_user_created 
+   ON orders (user_id, created_at DESC);
+   ```
+   - หลังจากสร้าง Index การสแกนจะเปลี่ยนเป็น **Index Scan** หรือ **Bitmap Index Scan** โดยใช้เวลาน้อยกว่า 1 มิลลิวินาที
+
+---
+
+### โจทย์ที่ 2: SARGable vs Non-SARGable Query Refactoring
+**คำถาม:** คำสั่งค้นหาออเดอร์ของปี 2026 ด้านล่างนี้ทำให้ระบบทำงานช้ามาก แม้จะมี Index บนคอลัมน์ `created_at` แล้วก็ตาม จงอธิบายสาเหตุและเขียนคำสั่งใหม่ให้ถูกต้อง:
+
+```sql filename="sql/bad_query.sql"
+-- คำสั่งเดิมที่ช้า (Non-SARGable)
+SELECT id, total_amount 
+FROM orders 
+WHERE EXTRACT(YEAR FROM created_at) = 2026;
+```
+
+*คำตอบและโค้ดที่แก้ไข:*
+```sql filename="sql/sargable_query.sql"
+-- คำสั่งใหม่ที่เป็น SARGable (Search Argument Able)
+SELECT id, total_amount 
+FROM orders 
+WHERE created_at >= '2026-01-01 00:00:00+00' 
+  AND created_at < '2027-01-01 00:00:00+00';
+```
+*เหตุผล:* การครอบฟังก์ชัน `EXTRACT(YEAR FROM ...)` บนคอลัมน์ จะทำให้ฐานข้อมูลไม่สามารถใช้ Index แบบ B-Tree ได้เพราะต้องคำนวณฟังก์ชันทีละแถวทั้งตาราง การเปลี่ยนมาใช้การเปรียบเทียบช่วงด้วยค่าคงที่ (Boundary Range) จะเปิดโอกาสให้ B-Tree Index กระโดดไปยังจุดเริ่มต้นของปีได้ทันที
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practice)
+
+| กรณี | ผิด (Anti-pattern) | ถูก (Best Practice) | เหตุผลทางวิศวกรรม |
+| :--- | :--- | :--- | :--- |
+| **สร้าง Index บน Prod** | รัน `CREATE INDEX ...` ธรรมดา | ใช้ `CREATE INDEX CONCURRENTLY ...` | `CREATE INDEX` ปกติจะขอ ShareLock บล็อกคำสั่งเขียน (`INSERT/UPDATE/DELETE`) ทั้งตารางจนกว่าจะสร้างเสร็จ ส่วน `CONCURRENTLY` จะไม่บล็อกผู้ใช้งาน |
+| **ลำดับ Composite Index** | วางคอลัมน์ Range ไว้หน้า Equality | วางคอลัมน์ Equality ไว้หน้า Range ตามกฎ ESR | ถ้าเอาคอลัมน์ Range (เช่น วันที่) ไว้ตัวแรก ตัว B-Tree จะไม่สามารถใช้คอลัมน์ตัวที่สองในการกรองได้ |
+| **สร้าง Index พร่ำเพรื่อ** | ใส่ Index ครบทุกคอลัมน์ในตาราง | สร้างเฉพาะ Index ที่ตรงกับ Slow Query ในระบบจริง | ทุกๆ Index ที่เพิ่มขึ้นจะทำให้คำสั่ง `INSERT`, `UPDATE`, `DELETE` ช้าลงอย่างมาก (Write Amplification) |
+
+---
+
+## 6. Checklist สรุป
+- [ ] ใช้ `EXPLAIN (ANALYZE, BUFFERS)` เสมอเพื่อดูเวลาและจำนวน I/O จริง (อย่าใช้แค่ `EXPLAIN` ลอยๆ)
+- [ ] สร้าง Composite Index ตามลำดับ Equality ก่อน แล้วตามด้วย Range หรือ Sort
+- [ ] ใช้ `CREATE INDEX CONCURRENTLY` ทุกครั้งบน Production Database
+- [ ] เขียนคำสั่งเงื่อนไขในรูป SARGable เสมอ (ไม่เอาฟังก์ชันไปครอบคอลัมน์ใน `WHERE`)

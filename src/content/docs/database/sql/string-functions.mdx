@@ -1,0 +1,128 @@
+---
+title: String Functions
+category: DATABASE
+parentTitle: SQL
+version: SQL:2023 & PostgreSQL 16
+updatedAt: 2026-10-21
+---
+
+## 1. แนวคิด (Concept)
+**String Functions (ฟังก์ชันจัดการข้อความ)** คือชุดฟังก์ชันที่ใช้ในการแปลง จัดระเบียบ ตัดแต่ง และรวมข้อมูลประเภทตัวอักษร (`VARCHAR`, `TEXT`, `CHAR`) ให้พร้อมสำหรับการแสดงผลบนหน้าบ้าน หรือเพื่อการค้นหาและทำความสะอาดข้อมูล (Data Cleansing)
+
+ในระบบ **Smart Butcher Marketplace** ข้อมูลตัวอักษรมีความหลากหลายและมักมีปัญหา เช่น ผู้ใช้พิมพ์ช่องว่างเกิน, ตัวพิมพ์เล็ก/ใหญ่ไม่ตรงกัน, หรือต้องการรวมชื่อกับนามสกุลเข้าด้วยกัน ฟังก์ชันเหล่านี้ช่วยแก้ปัญหาได้โดยไม่ต้องเขียนโค้ดแปลงใน Application:
+- **`CONCAT()` หรือ `||`**: เชื่อมต่อข้อความ เช่น รวมชื่อ-นามสกุล หรือประกอบรหัสสินค้า
+- **`UPPER()` / `LOWER()`**: แปลงตัวพิมพ์ใหญ่/เล็กเพื่อการเปรียบเทียบข้อความที่แน่นอน
+- **`TRIM()` / `BTRIM()`**: ตัดช่องว่างที่ไม่จำเป็นออกจากหัวและท้ายข้อความ
+- **`SUBSTRING()` / `LEFT()` / `RIGHT()`**: ตัดเอาเฉพาะส่วนที่ต้องการ เช่น รหัสไปรษณีย์ หรือรหัสย่อสินค้า
+- **`REPLACE()`**: แทนที่คำหรือสัญลักษณ์ เช่น ลบขีดออกจากเบอร์โทรศัพท์
+- **`LENGTH()` / `CHAR_LENGTH()`**: นับจำนวนตัวอักษรเพื่อตรวจสอบความยาวตามเงื่อนไข
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+1. **Character Encoding & UTF-8**: PostgreSQL 16 ทำงานกับสตริงโดยอิงตาม Encoding ที่กำหนดในฐานข้อมูล (มาตรฐานคือ `UTF-8`) ฟังก์ชันอย่าง `LENGTH()` จะนับเป็น **จำนวนตัวอักษร (Characters)** ไม่ใช่จำนวนไบต์ ซึ่งรองรับภาษาไทยได้อย่างสมบูรณ์ (เช่น `'เนื้อวัว'` มีความยาว 7 ตัวอักษร)
+2. **String Concatenation with NULL**:
+   - การใช้ตัวดำเนินการ `||` มาตรฐาน SQL: ถ้ามีสตริงใดเป็น `NULL` ผลลัพธ์ทั้งหมดจะกลายเป็น `NULL` ทันที (`'Hello' || NULL` $\rightarrow$ `NULL`)
+   - การใช้ฟังก์ชัน `CONCAT(str1, str2, ...)` ใน PostgreSQL: ฟังก์ชันนี้จะเพิกเฉยต่อค่า `NULL` เสมือนเป็นสตริงว่าง (`CONCAT('Hello', NULL)` $\rightarrow$ `'Hello'`)
+3. **Index Implications (Non-SARGable)**: การครอบฟังก์ชันบนคอลัมน์ใน clause `WHERE` เช่น `WHERE LOWER(name) = 'wagyu'` จะทำให้ PostgreSQL ไม่สามารถใช้ Regular B-Tree Index บนคอลัมน์ `name` ได้ และต้องทำการ Full Table Scan เว้นแต่จะมีการสร้าง **Functional Index / Expression Index** รองรับ
+
+```text filename="docs/database/string-encoding.txt"
++--------------------------------------------------------------+
+|            PostgreSQL Multi-byte String Handling             |
++--------------------------------------------------------------+
+  คำภาษาไทย: 'เนื้อวัว'
+  - LENGTH('เนื้อวัว')      = 7 ตัวอักษร (ตามหลัก Unicode Code Points)
+  - OCTET_LENGTH('เนื้อวัว') = 21 ไบต์ (บน UTF-8 เข้ารหัส 3 ไบต์ต่ออักษร)
+```
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การตัดต่อและแปลงข้อความเพื่อสร้างข้อมูลลูกค้า
+การรวมชื่อ-นามสกุล การแปลงอีเมลเป็นตัวพิมพ์เล็ก และการตัดช่องว่างที่ติดมาตอนสมัครสมาชิก:
+
+```sql filename="sql/string_manipulation.sql"
+-- ทำความสะอาดข้อมูลผู้ใช้งานก่อนแสดงผล
+SELECT 
+    id,
+    -- รวมชื่อและนามสกุลด้วย CONCAT_WS (คั่นด้วยวรรคอัตโนมัติ)
+    CONCAT_WS(' ', TRIM(first_name), TRIM(last_name)) AS full_name,
+    
+    -- ทำให้อีเมลเป็นตัวพิมพ์เล็กเสมอ
+    LOWER(TRIM(email)) AS normalized_email,
+    
+    -- ดึงเฉพาะรหัสย่อ 3 ตัวหน้าจาก SKU สินค้า
+    LEFT(sku, 3) AS sku_prefix,
+    
+    -- แทนที่เครื่องหมายขีดในเบอร์โทรศัพท์
+    REPLACE(phone, '-', '') AS clean_phone
+FROM users
+WHERE is_active = TRUE;
+```
+
+### ตัวอย่างที่ 2: การแยกส่วนข้อความด้วย `SPLIT_PART` และ `POSITION`
+การแยกส่วนของอีเมลเพื่อวิเคราะห์โดเมนผู้ให้บริการ:
+
+```sql filename="sql/split_email_domain.sql"
+-- สรุปจำนวนลูกค้าแยกตามโดเมนอีเมล
+SELECT 
+    SPLIT_PART(email, '@', 2) AS email_domain,
+    COUNT(*) AS total_users
+FROM users
+WHERE email IS NOT NULL
+GROUP BY SPLIT_PART(email, '@', 2)
+ORDER BY total_users DESC;
+```
+
+---
+
+## 4. โจทย์ Live Coding และการสัมภาษณ์งานจริง (Interview Challenges)
+
+### โจทย์ที่ 1: Masking Sensitive Data (การปิดบังข้อมูลส่วนบุคคล)
+**คำถาม:** ในระบบ Smart Butcher Marketplace ฝ่ายความปลอดภัยต้องการให้ซ่อนข้อมูลเบอร์โทรศัพท์ลูกค้าในหน้าแสดงผล โดยเปลี่ยนเบอร์โทรศัพท์รูปแบบ `'0812345678'` ให้แสดงผลเป็น `'081-XXXX-678'` จงเขียนคำสั่ง SQL เพื่อสร้างคอลัมน์ `masked_phone`
+
+```sql filename="sql/challenge_mask_phone.sql"
+SELECT 
+    id,
+    phone,
+    -- ตัด 3 ตัวแรก + ใส่ขีดและ XXXX + ตัด 3 ตัวท้าย
+    CONCAT(
+        LEFT(phone, 3), 
+        '-XXXX-', 
+        RIGHT(phone, 3)
+    ) AS masked_phone
+FROM users;
+```
+*แนวคิดเพิ่มเติม:* หากเบอร์โทรมีรูปแบบความยาวไม่เท่ากัน ให้ใช้ `SUBSTRING(phone FROM 1 FOR 3) || '-XXXX-' || SUBSTRING(phone FROM LENGTH(phone)-2)` เพื่อการคำนวณที่ยืดหยุ่น
+
+---
+
+### โจทย์ที่ 2: Extracting Order Tracking Suffix
+**คำถาม:** รหัสคำสั่งซื้อมีรูปแบบเป็น `'ORD-2026-X8912-EXP'` จงเขียนคำสั่งดึงเฉพาะเลขรหัสสุ่มตรงกลาง (`'X8912'`) ออกมาเพื่อนำไปค้นหาในระบบจัดส่งสินค้า
+
+```sql filename="sql/challenge_split_tracking.sql"
+SELECT 
+    order_no,
+    -- ดึงส่วนที่ 3 เมื่อตัดด้วยเครื่องหมายขีด (-)
+    SPLIT_PART(order_no, '-', 3) AS tracking_token
+FROM orders;
+```
+
+---
+
+## 5. ผิด vs ถูก (Anti-patterns vs Best Practice)
+
+| กรณี | ผิด (Anti-pattern) | ถูก (Best Practice) | เหตุผลทางวิศวกรรม |
+| :--- | :--- | :--- | :--- |
+| **เชื่อมสตริงที่มี NULL** | ใช้ `'คุณ ' || first_name || ' ' || last_name` | ใช้ `CONCAT_WS(' ', first_name, last_name)` | ถ้า `last_name` เป็น NULL การใช้ `||` จะทำให้ทั้งประโยคกลายเป็น NULL ทันที |
+| **ค้นหา Case-insensitive** | `WHERE LOWER(email) = 'user@example.com'` | สร้าง Functional Index: `CREATE INDEX ON users(LOWER(email))` หรือใช้ชนิดข้อมูล `CITEXT` | `LOWER()` บนคอลัมน์จะปิดการใช้งาน Index เดิม ทำให้เกิด Sequential Scan |
+| **ตัดช่องว่าง** | ไม่ใส่ `TRIM()` ในการเปรียบเทียบข้อมูลที่รับจาก Input | ใส่ `TRIM()` หรือคลีนตั้งแต่ขาเข้า | ป้องกันผู้ใช้เผลอกด Spacebar แล้วระบบหาข้อมูลไม่พบ |
+
+---
+
+## 6. Checklist สรุป
+- [ ] ใช้ `CONCAT()` หรือ `CONCAT_WS()` แทน `||` เพื่อป้องกันปัญหาข้อความหายกลายเป็น NULL
+- [ ] ระวังการใช้ Function ครอบคอลัมน์ใน clause `WHERE` เพราะจะทำให้ Index ใช้งานไม่ได้
+- [ ] ใช้ `SPLIT_PART()` สำหรับการแยกข้อความที่มี Delimiter ชัดเจน เช่น อีเมลหรือรหัสสินค้า
+- [ ] ใช้ `LENGTH()` สำหรับนับจำนวนตัวอักษรภาษาไทยได้อย่างแม่นยำ
