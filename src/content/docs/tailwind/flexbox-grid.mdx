@@ -3,7 +3,7 @@ title: Flexbox & Grid
 category: Frontend
 parentTitle: Tailwind CSS v4
 version: Tailwind v4.0 & Next.js 16
-updatedAt: 2026-10-17
+updatedAt: 2026-10-22
 ---
 
 ## 1. แนวคิด (Concept)
@@ -16,22 +16,301 @@ Tailwind CSS v4 นำพลังของทั้งสองโมเดล�
 
 ---
 
-## 2. หลักการเบื้องหลัง (Under the Hood)
+## 2. ผังภาพแสดงหน้าตา Flexbox และ CSS Grid (Visual Diagrams)
 
-### กลไกของ Flexbox และ CSS Grid ใน Tailwind
-1. **Flex Alignment Matrix**:
-   - Main Axis (แกนหลัก): ควบคุมด้วย `justify-*` เช่น `justify-start`, `justify-center`, `justify-between` (`justify-content: space-between`)
-   - Cross Axis (แกนตัด): ควบคุมด้วย `items-*` เช่น `items-center` (`align-items: center`), `items-stretch`
-2. **CSS Grid `minmax(0, 1fr)` Mechanism**:
-   - เมื่อเราเขียน `grid-cols-3` ใน Tailwind คอมไพเลอร์ไม่ได้สร้างแค่ `repeat(3, 1fr)` แบบหยาบๆ แต่สร้าง:
-     ```css
-     grid-template-columns: repeat(3, minmax(0, 1fr));
-     ```
-   - ค่า `minmax(0, 1fr)` มีความสำคัญสูงสุด เพราะป้องกันไม่ให้ข้อความยาวๆ หรือคอนเทนต์ด้านในดันขยายคอลัมน์จน Grid แตก (Flex/Grid blowout bug)
+เพื่อให้เห็นภาพชัดเจนว่า Utility แต่ละตัวแสดงผลบนหน้าจออย่างไร ต่อไปนี้คือแผนผังจำลองหน้าตาและทิศทางการจัดวางกล่อง:
+
+### 2.1 หน้าตาของ Flexbox (1-Dimensional Layout)
+
+Flexbox จัดการของใน 1 แกนหลัก (Main Axis) โดยมีแกนตัด (Cross Axis) ตั้งฉากเสมอ:
+
+```text filename="ผังแสดงหน้าตา flex-row เทียบกับ flex-col"
+[ flex flex-row ]  (แกนหลักแนวนอน -> จัดของจากซ้ายไปขวา)
+┌────────────────────────────────────────────────────────────────────────┐
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐                │
+│  │    Item 1    │   │    Item 2    │   │    Item 3    │     gap-4      │
+│  └──────────────┘   └──────────────┘   └──────────────┘                │
+└────────────────────────────────────────────────────────────────────────┘
+─── Main Axis (แกนหลัก: ซ้าย -> ขวา ควบคุมด้วย justify-*) ────────────────>
+│ Cross Axis (แกนตัด: บน -> ล่าง ควบคุมด้วย items-*)
+▼
+
+[ flex flex-col ]  (แกนหลักแนวตั้ง -> จัดของจากบนลงล่าง)
+┌──────────────────────────────────────┐
+│  ┌────────────────────────────────┐  │
+│  │             Item 1             │  │
+│  └────────────────────────────────┘  │
+│                 ▲                    │
+│               gap-3                  │
+│                 ▼                    │
+│  ┌────────────────────────────────┐  │
+│  │             Item 2             │  │
+│  └────────────────────────────────┘  │
+│                 ▲                    │
+│               gap-3                  │
+│                 ▼                    │
+│  ┌────────────────────────────────┐  │
+│  │             Item 3             │  │
+│  └────────────────────────────────┘  │
+└──────────────────────────────────────┘
+│ Main Axis (แกนหลัก: บน -> ล่าง ควบคุมด้วย justify-*)
+▼
+─── Cross Axis (แกนตัด: ซ้าย -> ขวา ควบคุมด้วย items-*) ─────────────────>
+```
+
+#### หน้าตาการกระจายของใน Flexbox (Justify Alignment บน Main Axis):
+
+```text filename="ผังแสดงหน้าตา justify-between เทียบกับ justify-center และ justify-start"
+[ justify-between ] (นิยมใช้ทำ Navbar / Card Header กระจายซ้ายสุดและขวาสุด)
+┌────────────────────────────────────────────────────────────────────────┐
+│ ┌──────────────┐                                      ┌──────────────┐ │
+│ │  Logo / ซ้าย  │                 (ช่องว่างว่างเปล่า)    │  Button / ขวา │ │
+│ └──────────────┘                                      └──────────────┘ │
+└────────────────────────────────────────────────────────────────────────┘
+
+[ justify-center ] (รวมกล่องไว้กึ่งกลางแนวนอนทั้งหมด)
+┌────────────────────────────────────────────────────────────────────────┐
+│                 ┌──────────────┐      ┌──────────────┐                 │
+│                 │    Item 1    │ gap-4│    Item 2    │                 │
+│                 └──────────────┘      └──────────────┘                 │
+└────────────────────────────────────────────────────────────────────────┘
+
+[ justify-start ] (ชิดซ้ายเริ่มต้นตามธรรมชาติ)
+┌────────────────────────────────────────────────────────────────────────┐
+│ ┌──────────────┐ gap-4┌──────────────┐                                 │
+│ │    Item 1    │      │    Item 2    │                                 │
+│ └──────────────┘      └──────────────┘                                 │
+└────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## 3. ตัวอย่างโค้ด (Tailwind v4 & TSX)
+### 2.2 หน้าตาของ CSS Grid (2-Dimensional Layout)
+
+CSS Grid จัดการทั้ง "แถว (Rows)" และ "คอลัมน์ (Columns)" พร้อมกันในเวลาเดียว ทำให้กล่องทุกกล่องมีขนาดสมมาตรเท่ากันโดยอัตโนมัติ:
+
+```text filename="ผังแสดงหน้าตา grid grid-cols-3 gap-4"
+┌────────────────────────────────────────────────────────────────────────┐
+│                       grid-cols-3 (แบ่ง 3 คอลัมน์เท่ากันเป๊ะ)              │
+│                                                                        │
+│   Col 1 (1fr)               Col 2 (1fr)               Col 3 (1fr)      │
+│ ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐ │
+│ │                     │   │                     │   │                     │ │
+│ │  Product Card 1     │   │  Product Card 2     │   │  Product Card 3     │ │
+│ │                     │   │                     │   │                     │ │
+│ └─────────────────────┘   └─────────────────────┘   └─────────────────────┘ │
+│            ▲                         ▲                         ▲            │
+│          gap-4                     gap-4                     gap-4          │
+│            ▼                         ▼                         ▼            │
+│ ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐ │
+│ │  Product Card 4     │   │  Product Card 5     │   │  Product Card 6     │ │
+│ └─────────────────────┘   └─────────────────────┘   └─────────────────────┘ │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+#### หน้าตา Dashboard Layout แบบ 12 คอลัมน์ (`grid-cols-12`):
+
+```text filename="ผังแสดงหน้าตา grid-cols-12 พร้อม col-span-8 และ col-span-4"
+┌────────────────────────────────────────────────────────────────────────┐
+│ <div className="grid grid-cols-12 gap-6">                              │
+│                                                                        │
+│ ┌────────────────────────────────────────┐  ┌────────────────────────┐ │
+│ │           col-span-8 (66.6%)           │  │   col-span-4 (33.3%)   │ │
+│ │                                        │  │                        │ │
+│ │          Main Analytics Chart          │  │    Recent Activity     │ │
+│ │          (กราฟสถิติยอดขาย)                │  │    (รายการออเดอร์ล่าสุด) │ │
+│ │                                        │  │                        │ │
+│ └────────────────────────────────────────┘  └────────────────────────┘ │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+#### หน้าตา Responsive Grid เปลี่ยนตามขนาดหน้าจอ:
+
+```text filename="ผังแสดงการเปลี่ยนขนาด grid-cols-1 sm:grid-cols-2 lg:grid-cols-3"
+[ จอมือถือ Mobile: grid-cols-1 ]
+┌────────────────────────┐
+│      Card 1 (เต็มจอ)     │
+├────────────────────────┤
+│      Card 2 (เต็มจอ)     │
+├────────────────────────┤
+│      Card 3 (เต็มจอ)     │
+└────────────────────────┘
+            ▼  ขยายเป็นแท็บเล็ต (sm: >= 640px)
+[ จอแท็บเล็ต Tablet: sm:grid-cols-2 ]
+┌────────────────────────┬────────────────────────┐
+│         Card 1         │         Card 2         │
+├────────────────────────┼────────────────────────┤
+│         Card 3         │         Card 4         │
+└────────────────────────┴────────────────────────┘
+            ▼  ขยายเป็นเดสก์ท็อป (lg: >= 1024px)
+[ จอเดสก์ท็อป Desktop: lg:grid-cols-3 ]
+┌──────────────────┬──────────────────┬──────────────────┐
+│      Card 1      │      Card 2      │      Card 3      │
+├──────────────────┼──────────────────┼──────────────────┤
+│      Card 4      │      Card 5      │      Card 6      │
+└──────────────────┴──────────────────┴──────────────────┘
+```
+
+---
+
+## 3. รวม Utility Classes ที่ใช้บ่อยที่สุดในชีวิตจริง (Must-Know Utilities)
+
+ตารางสรุปคลาสสำคัญที่พบเจอและใช้งานจริงกว่า 90% ในโปรเจกต์ระดับ Production:
+
+| Utility Class | CSS เทียบเท่า | หน้าที่และการใช้งานจริง |
+| :--- | :--- | :--- |
+| `flex` | `display: flex;` | เปิดโหมด Flexbox จัดของในแกนเดียว |
+| `flex-row` | `flex-direction: row;` | จัดเรียงจากซ้ายไปขวา (ค่าตั้งต้นของ Flex) |
+| `flex-col` | `flex-direction: column;` | จัดเรียงจากบนลงล่าง เหมาะกับการ์ดและฟอร์ม |
+| `items-center` | `align-items: center;` | จัดกึ่งกลางบนแกนตัด (แนวตั้งใน row, แนวนอนใน col) |
+| `justify-between` | `justify-content: space-between;` | ดันหัว-ท้ายแยกออกจากกันจนสุดขอบ เหมาะกับ Navbar |
+| `justify-center` | `justify-content: center;` | จัดของมารวมกึ่งกลางบนแกนหลัก |
+| `grid` | `display: grid;` | เปิดโหมด CSS Grid จัดของ 2 มิติ |
+| `grid-cols-3` | `repeat(3, minmax(0, 1fr))` | แบ่งเป็น 3 คอลัมน์ที่กว้างเท่ากันเป๊ะ |
+| `gap-4` | `gap: 1rem; (16px)` | เว้นระยะห่างระหว่างลูกทุกกล่องเท่ากัน |
+| `shrink-0` | `flex-shrink: 0;` | ล็อกขนาดไม่ให้ไอคอนหรือรูปถูกบีบแบนเวลาข้อความยาว |
+| `min-w-0` | `min-width: 0;` | ปลดล็อก bug ข้อความยาวล้นจอเพื่อให้ `truncate` ตัดคำได้ |
+| `place-items-center`| `place-items: center;` | ทางลัดจัดกึ่งกลางทั้ง 2 มิติในบรรทัดเดียวสำหรับ Grid |
+| `flex-wrap` | `flex-wrap: wrap;` | ยอมให้ลูกขึ้นบรรทัดใหม่เมื่อเนื้อหาเกินความกว้างจอ |
+
+---
+
+## 4. เจาะลึก 4 รูปแบบโค้ดที่ใช้จริงบ่อยที่สุด (Practical Patterns)
+
+### รูปแบบที่ 1: Responsive Layout Switcher (`flex flex-col sm:flex-row`)
+แพตเทิร์นสากลสำหรับการ์ดหรือแถบค้นหา ที่บนจอมือถือจะวางปุ่มและรูปซ้อนกันแนวตั้ง (`flex-col`) พอจอใหญ่ขึ้นจะเปลี่ยนเป็นแนวนอน (`sm:flex-row`):
+
+```tsx filename="src/components/patterns/ProductBanner.tsx"
+export function ProductBanner() {
+  return (
+    // จอมือถือ: เรียงบนลงล่าง (flex-col) | จอคอม sm ขึ้นไป: เรียงแนวนอน (sm:flex-row)
+    <div className="flex flex-col sm:flex-row items-center justify-between gap-4 rounded-2xl bg-neutral-900 p-6 text-white">
+      <div className="flex items-center gap-4">
+        {/* shrink-0 ป้องกันรูปถูกบีบให้บี้แบน */}
+        <div className="size-12 shrink-0 rounded-xl bg-indigo-500/20 text-indigo-400 grid place-items-center font-bold">
+          🥩
+        </div>
+        <div>
+          <h4 className="font-semibold text-base">เนื้อวากิว A5 Kagoshima Ribeye</h4>
+          <p className="text-xs text-neutral-400">สต็อกพร้อมส่ง สำหรับสเต๊กพรีเมียม</p>
+        </div>
+      </div>
+
+      {/* ปุ่มกด: บนมือถือเต็มความกว้าง (w-full) บนจอคอมขนาดพอดีปุ่ม (sm:w-auto) */}
+      <button className="w-full sm:w-auto shrink-0 rounded-xl bg-indigo-600 px-5 py-2.5 text-xs font-semibold hover:bg-indigo-500 transition">
+        สั่งซื้อทันที
+      </button>
+    </div>
+  );
+}
+```
+
+---
+
+### รูปแบบที่ 2: ป้องกัน Avatar บี้และข้อความล้น (`shrink-0` + `min-w-0 truncate`)
+นี่คือจุดที่พบบั๊กบ่อยที่สุดในการทำระบบ Frontend: เมื่อชื่อลูกค้าหรืออีเมลยาวเกินไป ถ้าไม่ใส่ `shrink-0` รูป Avatar จะถูกบีบเป็นวงรี และถ้าไม่ใส่ `min-w-0` ข้อความจะดันทะลุขอบจอ:
+
+```tsx filename="src/components/patterns/CustomerOrderItem.tsx"
+export function CustomerOrderItem() {
+  return (
+    <div className="flex items-center justify-between gap-4 rounded-xl border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
+      {/* ฝั่งซ้าย: รูปและข้อมูลลูกค้า */}
+      <div className="flex items-center gap-3 min-w-0">
+        {/* รูปโปรไฟล์: บังคับ shrink-0 เสมอ ห้ามบี้แบน */}
+        <div className="size-10 shrink-0 rounded-full bg-emerald-100 text-emerald-700 font-bold grid place-items-center">
+          JD
+        </div>
+
+        {/* ข้อมูล: ต้องครอบด้วย min-w-0 เพื่อให้ truncate ตัดคำด้วยจุดไข่ปลา (...) ได้สำเร็จ */}
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold text-neutral-900 dark:text-white">
+            นายสมศักดิ์ ภักดีสุวรรณมงคลเลิศไพศาล (ลูกค้า VIP ประจำสาขาใหญ่)
+          </p>
+          <p className="truncate text-xs text-neutral-500">
+            somsak.bhakdeesuwan-very-long-email-domain@enterprise-corporation.co.th
+          </p>
+        </div>
+      </div>
+
+      {/* ฝั่งขวา: สถานะและราคา ล็อก shrink-0 ไม่ให้หด */}
+      <div className="shrink-0 text-right">
+        <p className="text-sm font-bold text-neutral-900 dark:text-white">฿3,850</p>
+        <span className="text-[11px] font-medium text-emerald-600">ชำระแล้ว</span>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+### รูปแบบที่ 3: แคตตาล็อกสินค้า Responsive Grid (`grid-cols-1 sm:grid-cols-2 lg:grid-cols-3`)
+การจัดวางการ์ดสินค้าที่ขยายตัวตาม Breakpoint อย่างเป็นระเบียบ:
+
+```tsx filename="src/components/patterns/CatalogGrid.tsx"
+export function CatalogGrid() {
+  const items = [
+    { id: 1, name: "Wagyu Striploin A5", price: "฿2,450", weight: "300g" },
+    { id: 2, name: "Black Angus Tenderloin", price: "฿1,890", weight: "250g" },
+    { id: 3, name: "Dry-Aged Ribeye 45 Days", price: "฿2,100", weight: "350g" },
+  ];
+
+  return (
+    // มือถือ 1 ช่อง -> แท็บเล็ต 2 ช่อง -> คอม 3 ช่อง พร้อม gap เท่ากัน
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+      {items.map((item) => (
+        <div
+          key={item.id}
+          className="flex flex-col justify-between rounded-2xl border border-neutral-200 bg-white p-5 shadow-xs transition hover:shadow-md dark:border-neutral-800 dark:bg-neutral-900"
+        >
+          <div>
+            <div className="aspect-video w-full rounded-xl bg-neutral-100 dark:bg-neutral-800 grid place-items-center text-xs text-neutral-400">
+              [รูปสินค้า {item.weight}]
+            </div>
+            <h3 className="mt-3 font-semibold text-neutral-900 dark:text-white">
+              {item.name}
+            </h3>
+          </div>
+          <div className="mt-4 flex items-center justify-between pt-3 border-t border-neutral-100 dark:border-neutral-800">
+            <span className="text-base font-bold text-indigo-600 dark:text-indigo-400">{item.price}</span>
+            <button className="rounded-lg bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-neutral-800 dark:bg-neutral-100 dark:text-neutral-900">
+              หยิบใส่ตะกร้า
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+---
+
+### รูปแบบที่ 4: กล่อง Empty State ด้วย `grid place-items-center`
+ทางลัดที่สั้นและกระชับที่สุดในการจัดให้ไอคอนและข้อความอยู่กึ่งกลางทั้งแกน X และ Y โดยไม่ต้องเขียน `flex items-center justify-center` ซ้ำๆ:
+
+```tsx filename="src/components/patterns/EmptyState.tsx"
+export function EmptyState() {
+  return (
+    // grid place-items-center จัดกึ่งกลางทั้ง 2 แกนในบรรทัดเดียว
+    <div className="grid place-items-center h-64 rounded-2xl border border-dashed border-neutral-300 bg-neutral-50 p-6 text-center dark:border-neutral-800 dark:bg-neutral-950">
+      <div className="max-w-xs space-y-2">
+        <div className="mx-auto size-12 rounded-full bg-neutral-200 dark:bg-neutral-800 grid place-items-center text-xl">
+          📦
+        </div>
+        <h4 className="text-sm font-semibold text-neutral-900 dark:text-white">ยังไม่มีรายการสินค้า</h4>
+        <p className="text-xs text-neutral-500">
+          เมื่อคุณสั่งซื้อเนื้อพรีเมียม รายการคำสั่งซื้อจะปรากฏขึ้นที่นี่โดยอัตโนมัติ
+        </p>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 5. ตัวอย่างโค้ดระบบเต็ม (Complete Production Components)
 
 ### ตัวอย่างที่ 1: แถบเมนูด้านบน (AppNavbar ด้วย Flexbox)
 
@@ -218,7 +497,22 @@ export function AnalyticsDashboard() {
 
 ---
 
-## 4. เทียบกับ CSS ปกติ
+## 6. หลักการเบื้องหลัง (Under the Hood)
+
+### กลไกของ Flexbox และ CSS Grid ใน Tailwind
+1. **Flex Alignment Matrix**:
+   - Main Axis (แกนหลัก): ควบคุมด้วย `justify-*` เช่น `justify-start`, `justify-center`, `justify-between` (`justify-content: space-between`)
+   - Cross Axis (แกนตัด): ควบคุมด้วย `items-*` เช่น `items-center` (`align-items: center`), `items-stretch`
+2. **CSS Grid `minmax(0, 1fr)` Mechanism**:
+   - เมื่อเราเขียน `grid-cols-3` ใน Tailwind คอมไพเลอร์ไม่ได้สร้างแค่ `repeat(3, 1fr)` แบบหยาบๆ แต่สร้าง:
+     ```css
+     grid-template-columns: repeat(3, minmax(0, 1fr));
+     ```
+   - ค่า `minmax(0, 1fr)` มีความสำคัญสูงสุด เพราะป้องกันไม่ให้ข้อความยาวๆ หรือคอนเทนต์ด้านในดันขยายคอลัมน์จน Grid แตก (Flex/Grid blowout bug)
+
+---
+
+## 7. เปรียบเทียบ Tailwind Utility กับ Native CSS
 
 | Tailwind Utility | Native CSS Equivalent | คำอธิบายหน้าที่ |
 | :--- | :--- | :--- |
@@ -227,10 +521,11 @@ export function AnalyticsDashboard() {
 | `col-span-8` | `grid-column: span 8 / span 8;` | ครอบครองพื้นที่ 8 ช่องจากทั้งหมด |
 | `shrink-0` | `flex-shrink: 0;` | ป้องกันไม่ให้ไอคอนหรือภาพถูกบีบให้เล็กลงเมื่อเนื้อหาล้น |
 | `flex-1 min-w-0` | `flex: 1 1 0%; min-width: 0;` | ขยายเต็มพื้นที่ที่เหลือ พร้อมตัดคำ (truncate) ได้ไม่ล้น |
+| `grid place-items-center` | `display: grid; place-items: center;` | จัดกึ่งกลางทั้ง 2 แกนในบรรทัดเดียว |
 
 ---
 
-## 5. ผิด vs ถูก
+## 8. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
 
 ### จุดที่ 1: สับสนระหว่าง `justify-center` กับ `items-center`
 ```tsx
@@ -260,23 +555,40 @@ export function AnalyticsDashboard() {
 ```
 *เหตุผล*: ตาม CSS Spec ตัวลูกของ Flexbox มีค่าดีฟอลต์เป็น `min-width: auto;` ซึ่งจะไม่ยอมหดตัวต่ำกว่าขนาดของเนื้อหา การใส่ `min-w-0` บังคับให้เบราว์เซอร์อนุญาตให้หดตัวและทำการตัดคำด้วย `truncate` ได้ถูกต้อง
 
+### จุดที่ 3: ไอคอนหรือรูปโปรไฟล์ถูกบีบจนเบี้ยวแบนเมื่อข้อความขยายตัว
+```tsx
+// ❌ ผิด: ไม่ได้ใส่ shrink-0 ที่ Avatar
+<div className="flex items-center gap-3">
+  <img src="/avatar.jpg" className="size-10 rounded-full" />
+  <p className="truncate">ข้อความรายละเอียดยาวๆ...</p>
+</div>
+
+// ✅ ถูก: ล็อก shrink-0 เสมอสำหรับรูปหรือไอคอนคงที่
+<div className="flex items-center gap-3">
+  <img src="/avatar.jpg" className="size-10 rounded-full shrink-0" />
+  <p className="truncate min-w-0">ข้อความรายละเอียดยาวๆ...</p>
+</div>
+```
+
 ---
 
-## 6. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+## 9. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่ (Decision Matrix)
 
 ### ควรใช้ Flexbox (`flex`)
 - แถบเมนู Navbar, Navigation Tabs, Breadcrumbs
 - กล่องปุ่มที่มีไอคอนและข้อความเรียงกัน
 - การจัดตำแหน่งให้อยู่กึ่งกลางหน้าจอแบบด่วน (`flex items-center justify-center`)
+- แถวป้ายแท็กหรือ Badges ที่ต้องการให้ห่อบรรทัดใหม่ตามขนาดคำ (`flex flex-wrap gap-2`)
 
 ### ควรใช้ CSS Grid (`grid`)
-- แคตตาล็อกสินค้า หรือ Photo Gallery ที่ต้องการการ์ดขนาดเท่ากันเป๊ะ
+- แคตตาล็อกสินค้า หรือ Photo Gallery ที่ต้องการการ์ดขนาดเท่ากันเป๊ะ (`grid-cols-1 sm:grid-cols-2 lg:grid-cols-3`)
 - Layout หลักของแอปพลิเคชันที่มี Sidebar, Main Header และ Content
 - โครงสร้าง Dashboard สถิติที่ต้องแบ่งคอลัมน์แบบ 12 ช่อง (`grid-cols-12`)
+- กล่อง Empty State หรือ Icon Box ที่ต้องการกึ่งกลาง 2 มิติอย่างสั้น (`grid place-items-center`)
 
 ---
 
-## 7. คำถามสัมภาษณ์งาน (Interview Questions)
+## 10. คำถามสัมภาษณ์งาน (Interview Questions)
 
 ### Q1: ทำไม Tailwind ถึงกำหนด `grid-template-columns` ให้มีฟังก์ชัน `minmax(0, 1fr)` เช่นในคลาส `grid-cols-3`?
 **แนวทางคำตอบ**: 
@@ -285,3 +597,7 @@ export function AnalyticsDashboard() {
 ### Q2: ในการเขียน Flexbox ร่วมกับข้อความที่ต้องการตัดคำ (`truncate`) ทำไมมักพบปัญหาการตัดคำไม่ทำงาน และแก้ได้อย่างไรใน Tailwind?
 **แนวทางคำตอบ**: 
 ปัญหาเกิดจาก Flex item มีค่าเริ่มต้นของ `min-width` เป็น `auto` ทำให้ Flex child ไม่ยอมหดตัวเล็กกว่าความยาวเนื้อหา ส่งผลให้คลาส `truncate` (`text-overflow: ellipsis`) ไม่มีผล วิธีแก้ไขใน Tailwind คือการใส่คลาส `min-w-0` ให้กับตัวครอบข้อความนั้น เพื่อ override ค่ากลับเป็น `min-width: 0;` ทำให้เบราว์เซอร์อนุญาตให้บล็อกย่อตัวลงตามความกว้างของหน้าจอและแสดงจุดไข่ปลาได้ตามต้องการ
+
+### Q3: เมื่อไหร่ที่ควรตัดสินใจใช้ `grid place-items-center` แทนที่จะเป็น `flex items-center justify-center`?
+**แนวทางคำตอบ**: 
+`grid place-items-center` เป็น CSS shorthand ของ `align-items: center` และ `justify-items: center` เหมาะอย่างยิ่งกับคอนเทนเนอร์ที่มีลูกตรงกลางชิ้นเดียว เช่น กล่อง Modal, กล่อง Empty State, สี่เหลี่ยมไอคอน หรือพื้นที่โหลดข้อมูล (Loader Box) เพราะกระชับ เขียนสั้นลง 1 คลาส และมีความเสถียรบน 2 แกนทันทีโดยไม่ต้องพึ่งแกนหลักหรือแกนตัดของ Flexbox
