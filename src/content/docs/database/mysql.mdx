@@ -1,0 +1,56 @@
+---
+title: MySQL 8.x
+category: DATABASE
+version: MySQL 8.4 LTS / 8.0
+updatedAt: 2026-10-21
+---
+
+# MySQL 8.x
+
+(เอกสารชุดนี้เจาะลึกระบบจัดการฐานข้อมูลเชิงสัมพันธ์ **MySQL 8.x** ครอบคลุมตั้งแต่สถาปัตยกรรม Storage Engine, กลไก InnoDB, ระบบล็อก, การทำดัชนี, จนถึงการปรับแต่งประสิทธิภาพและ High Availability ระดับ Enterprise)
+
+<Callout type="tip" title="ทำไม MySQL จึงครองส่วนแบ่งฐานข้อมูลเว็บแอปพลิเคชันอันดับหนึ่งของโลก">
+MySQL 8 (และ 8.4 LTS) เป็นหัวใจสำคัญของบริษัทยักษ์ใหญ่ระดับโลกอย่าง Meta, GitHub, Uber, YouTube, Shopify และ Netflix ด้วยสถาปัตยกรรม Pluggable Storage Engine อันทรงพลัง โดยเฉพาะเครื่องยนต์ **InnoDB** ที่มี Clustered Index, Row-level Locking, MVCC, และ Crash Recovery ที่เชื่อถือได้สูง ในคู่มือนี้เราจะใช้แพลตฟอร์ม **Smart Butcher Marketplace** (ระบบร้านค้าเนื้อวากิวและเนื้อดรายเอจพรีเมียม) เป็นแกนกลางในการจำลองคำสั่งและวิเคราะห์ปัญหาจริง
+</Callout>
+
+| หัวข้อในบทเรียนนี้ | ขอบเขตเนื้อหาสำคัญ | ลิงก์ข้ามไปยังหัวข้อ |
+| :--- | :--- | :--- |
+| **1. Storage Engines** | สถาปัตยกรรม MySQL และความต่างระหว่าง InnoDB vs MyISAM | [อ่านหัวข้อที่ 1](/docs/database/mysql/storage-engines) |
+| **2. Data Types** | ชนิดข้อมูลเฉพาะตัว `TINYINT(1)`, `UNSIGNED`, `DATETIME` vs `TIMESTAMP` | [อ่านหัวข้อที่ 2](/docs/database/mysql/data-types) |
+| **3. CharSet Collation** | กับดัก `utf8` 3-byte, อิโมจิ, และ Collation `_ci`, `_cs`, `_bin` | [อ่านหัวข้อที่ 3](/docs/database/mysql/charset-collation) |
+| **4. Keys Constraints** | `AUTO_INCREMENT`, Primary Key, Foreign Key, และ Generated Columns | [อ่านหัวข้อที่ 4](/docs/database/mysql/keys-constraints) |
+| **5. mysql CLI Tools** | การใช้คำสั่ง CLI, การสำรองข้อมูล `mysqldump`, และ `SHOW PROCESSLIST` | [อ่านหัวข้อที่ 5](/docs/database/mysql/cli-tools) |
+| **6. Transactions ACID** | กลไก `autocommit`, Undo Log, Redo Log, และ Isolation Levels | [อ่านหัวข้อที่ 6](/docs/database/mysql/transactions-acid) |
+| **7. Locking Mechanics** | Record Lock, Gap Lock, Next-Key Lock, และการป้องกัน Deadlock | [อ่านหัวข้อที่ 7](/docs/database/mysql/locking-mechanics) |
+| **8. InnoDB Indexes** | Clustered Index, Secondary Index, และทำไมห้ามใช้ Random UUID | [อ่านหัวข้อที่ 8](/docs/database/mysql/innodb-indexes) |
+| **9. Query Optimization** | การอ่าน `EXPLAIN FORMAT=TREE`, `EXPLAIN ANALYZE`, และ filesort | [อ่านหัวข้อที่ 9](/docs/database/mysql/query-optimization) |
+| **10. Replication Binlog** | การทำงานของ Binlog, Primary-Replica, และ GTID | [อ่านหัวข้อที่ 10](/docs/database/mysql/replication-binlog) |
+| **11. Server Tuning** | การตั้งค่า `innodb_buffer_pool_size`, Slow Query Log, และ Connections | [อ่านหัวข้อที่ 11](/docs/database/mysql/server-tuning) |
+| **12. Anti-patterns** | สรุปข้อผิดพลาดร้ายแรงใน MySQL พร้อม Checklist และ Senior Q&A | [อ่านหัวข้อที่ 12](/docs/database/mysql/pitfalls) |
+
+---
+
+## สารบัญหัวข้อการเรียนรู้เชิงลึก (Learning Directory)
+
+| ลำดับ | หัวข้อย่อย | ขอบเขตเนื้อหา | ลิงก์เข้าสู่บทเรียน |
+| :---: | :--- | :--- | :--- |
+| 1 | **Storage Engines** | สถาปัตยกรรมระดับเครื่องยนต์ เปรียบเทียบ InnoDB vs MyISAM พร้อมเกณฑ์การตัดสินใจ | [เปิดอ่าน Storage Engines](/docs/database/mysql/storage-engines) |
+| 2 | **Data Types** | การเลือก Data Types ให้ประหยัดเนื้อที่ ปัญหา Year 2038 และการจัดเก็บ JSON | [เปิดอ่าน Data Types](/docs/database/mysql/data-types) |
+| 3 | **CharSet Collation** | เจาะลึก utf8mb4 vs utf8mb3, utf8mb4_0900_ai_ci และความถูกต้องของการเรียงตัวอักษร | [เปิดอ่าน CharSet Collation](/docs/database/mysql/charset-collation) |
+| 4 | **Keys Constraints** | กลไก AUTO_INCREMENT, Cascading Delete และการคำนวณผ่าน Virtual Column | [เปิดอ่าน Keys Constraints](/docs/database/mysql/keys-constraints) |
+| 5 | **mysql CLI Tools** | เทคนิคการใช้งาน Client CLI, การทำ Hot Backup โดยไม่ล็อกตาราง และการตัด Query ค้าง | [เปิดอ่าน mysql CLI Tools](/docs/database/mysql/cli-tools) |
+| 6 | **Transactions ACID** | คุณสมบัติ ACID ใน InnoDB, ผลลัพธ์ของ autocommit และการทำงานของ Undo Log | [เปิดอ่าน Transactions ACID](/docs/database/mysql/transactions-acid) |
+| 7 | **Locking Mechanics** | ระบบล็อก Record, Gap, Next-Key Lock ที่หยุด Phantom Read และการแก้ Deadlock | [เปิดอ่าน Locking Mechanics](/docs/database/mysql/locking-mechanics) |
+| 8 | **InnoDB Indexes** | สถาปัตยกรรม Clustered Index, B+Tree Page Splits และปัญหาประสิทธิภาพของ UUID | [เปิดอ่าน InnoDB Indexes](/docs/database/mysql/innodb-indexes) |
+| 9 | **Query Optimization** | การวิเคราะห์ Execution Plan ด้วย EXPLAIN FORMAT=TREE และเทคนิคแก้ Pagination ช้า | [เปิดอ่าน Query Optimization](/docs/database/mysql/query-optimization) |
+| 10 | **Replication Binlog** | การกระจายโหลดอ่านด้วย Primary-Replica, Binlog ROW format และการแก้ Replication Lag | [เปิดอ่าน Replication Binlog](/docs/database/mysql/replication-binlog) |
+| 11 | **Server Tuning** | การปรับค่าคอนฟิก innodb_buffer_pool_size และการดัก Slow Query ด้วย Long Query Time | [เปิดอ่าน Server Tuning](/docs/database/mysql/server-tuning) |
+| 12 | **Anti-patterns** | สรุปข้อผิดพลาดร้ายแรงที่พบบ่อยใน MySQL และแนวทางสถาปัตยกรรมระดับ Senior | [เปิดอ่าน Anti-patterns](/docs/database/mysql/pitfalls) |
+
+---
+
+## แหล่งอ้างอิงทางการและดูเพิ่มเติม
+
+- [เอกสารทางการของ MySQL 8.4 Reference Manual](https://dev.mysql.com/doc/refman/8.4/en/) — คู่มือและสเปกฉบับสมบูรณ์จาก Oracle
+- [PostgreSQL 16](/docs/database/postgresql) — ศึกษาเปรียบเทียบกับ ORDBMS ยอดนิยมอีกหนึ่งตัว
+- [เนื้อหาในหมวด DATABASE](/) — กลับสู่หน้าหลักสารบัญ

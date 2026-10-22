@@ -1,0 +1,332 @@
+---
+title: Replication Binlog
+category: DATABASE
+parentTitle: MySQL 8.x
+version: MySQL 8.4 LTS / 8.0
+updatedAt: 2026-10-21
+---
+
+# Replication Binlog
+
+การทำสำเนาข้อมูลข้ามเซิร์ฟเวอร์ (Database Replication) ใน **MySQL 8.4 LTS / 8.0** คือสถาปัตยกรรมหลักในการขยายขีดความสามารถการอ่านข้อมูล (Scale-Out Read Traffic) และรองรับความต่อเนื่องทางธุรกิจเมื่อเกิดภัยพิบัติ (High Availability & Disaster Recovery) หัวใจสำคัญของระบบนี้คือ **Binary Log (Binlog)** ซึ่งทำหน้าที่บันทึกประวัติการเปลี่ยนแปลงข้อมูลทั้งหมด ควบคู่กับ **Global Transaction Identifier (GTID)** ที่ช่วยให้การติดตามและสลับบทบาทเซิร์ฟเวอร์ (Failover) เป็นไปได้อย่างแม่นยำและเสถียรภาพสูง
+
+<Callout type="note" title="Replication ไม่ใช่ Backup">
+การทำ Replication คือการซิงก์สถานะข้อมูลแบบเรียลไทม์ หากมีคำสั่งที่เป็นอันตราย เช่น `DROP TABLE orders;` คำสั่งดังกล่าวจะถูกส่งไปทำลายข้อมูลบนเครื่อง Replica ทุกเครื่องทันที ดังนั้นระบบจึงต้องมีการทำ Cold/Physical Backup ควบคู่กับ Replication เสมอ
+</Callout>
+
+---
+
+## 1. แนวคิด (Concept)
+
+ในระบบ **Smart Butcher Marketplace** เมื่อร้านค้าเนื้อวากิวและลูกค้ามีปริมาณทราฟฟิกสูงขึ้น ทราฟฟิกการอ่านแค็ตตาล็อกสินค้า (`products`, `meat_cuts`, `categories`) มักจะมีสัดส่วนสูงถึง 80% - 90% ขณะที่ทราฟฟิกการเขียน (`orders`, `payments`, `order_items`) อยู่ที่ 10% - 20%
+
+สถาปัตยกรรม **Primary-Replica (Single-Primary / Multi-Replica)** อนุญาตให้:
+1. **Primary Server (Source):** รับเฉพาะคำสั่งเขียน (`INSERT`, `UPDATE`, `DELETE`, `DDL`) และบันทึกลงใน Binary Log
+2. **Replica Servers:** รับสำเนา Binary Log มาประมวลผลซ้ำ (Replay) ในเครื่องตัวเอง เพื่อเปิดบริการสำหรับคำสั่งอ่าน (`SELECT`) หรือใช้สำหรับงานออกรายงาน (Analytics/Reporting) โดยเฉพาะ
+
+```text filename="docs/database/mysql-replication-flow.txt"
++-------------------------------------------------------------------------------+
+|                       MySQL 8 Asynchronous Replication                        |
++-------------------------------------------------------------------------------+
+   [ Application Client ]
+       |                 \
+ (Writes: INSERT/UPDATE)  \ (Reads: SELECT products, categories)
+       v                   v
++------------------+    +-----------------------------------------------+
+|  Primary Server  |    |               Replica Server                  |
+|                  |    |                                               |
+|  [ InnoDB Engine]|    |  [ Relay Log ] <---+                          |
+|         |        |    |         |          |                          |
+|         v        |    |         v          |                          |
+|   [ Binary Log ] |    |   [ SQL Applier ]  |                          |
+|         |        |    |         |          | (Network Socket)         |
+|         v        |    |         v          |                          |
+|  [Binlog Dump Th]|--->|---> [ I/O Thread ]--+                          |
+|                  |    |   [ InnoDB Engine]                            |
++------------------+    +-----------------------------------------------+
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 รูปแบบของ Binary Log (Binlog Formats)
+
+MySQL มีรูปแบบการบันทึก Binlog 3 รูปแบบ ซึ่งส่งผลต่อความถูกต้องของข้อมูล (Consistency) และขนาดของ Log:
+
+| รูปแบบ Binlog | ลักษณะการบันทึก | ข้อดี | ข้อเสียและข้อควรระวัง |
+| :--- | :--- | :--- | :--- |
+| **`STATEMENT` (SBR)** | บันทึกตัวคำสั่ง SQL ดั้งเดิมที่ส่งมาจาก Client (เช่น `UPDATE products SET stock = stock - 1`) | ขนาดไฟล์เล็ก ใช้แบนด์วิดท์เครือข่ายน้อยมาก | **อันตรายสูง:** คำสั่งที่เป็น Non-deterministic เช่น `NOW()`, `UUID()`, `RAND()`, หรือ `LIMIT` โดยไม่มี `ORDER BY` จะทำให้ข้อมูลบน Replica ไม่ตรงกับ Primary |
+| **`ROW` (RBR)** *(Default ใน MySQL 8)* | บันทึกการเปลี่ยนแปลงระดับแถวข้อมูลจริง (Row Images: Before & After) | **ปลอดภัย 100%**, Deterministic ข้อมูลถูกต้องสมบูรณ์เสมอ รองรับ Concurrent Execution | ไฟล์ Log มีขนาดใหญ่กว่า เมื่อมีการทำ Bulk Update หรือ Batch Delete ข้อมูลหลายแสนแถว |
+| **`MIXED`** | ใช้ Statement เป็นค่าเริ่มต้น และสลับเป็น Row อัตโนมัติเมื่อตรวจพบ Non-deterministic functions | ประนีประนอมขนาดไฟล์กับความปลอดภัย | คาดเดาขนาดไฟล์ยาก และมีความซับซ้อนในการทำ Audit Log |
+
+<Callout type="tip" title="คำแนะนำระดับ Production สำหรับ MySQL 8">
+ใน MySQL 8.4 LTS และระบบงานระดับองค์กร ควรกำหนด `binlog_format = ROW` และเปิด `binlog_row_image = FULL` (หรือ `MINIMAL` สำหรับประหยัดเนื้อที่) เพื่อรับประกันความถูกต้องของข้อมูลและรองรับ Change Data Capture (CDC) เช่น Debezium
+</Callout>
+
+### 2.2 วงจรการทำงานของ Threads ในการทำ Replication
+
+1. **Primary: Binlog Dump Thread:** เมื่อ Replica เชื่อมต่อเข้ามา Primary จะสร้าง Thread เพื่ออ่านข้อมูลจากไฟล์ Binlog แล้วส่งข้อมูลผ่าน TCP/IP Socket ไปยัง Replica
+2. **Replica: I/O (Receiver) Thread:** รับ Event จาก Primary มาเขียนลงในดิสก์ของเครื่อง Replica เรียกว่า **Relay Log**
+3. **Replica: SQL (Applier) Thread:** อ่าน Event จาก Relay Log แล้วประมวลผลคำสั่งเปลี่ยนแปลงข้อมูลลงในตาราง InnoDB ของ Replica
+
+### 2.3 Global Transaction Identifier (GTID)
+
+ในยุคดั้งเดิม การเชื่อมต่อ Replication ต้องอ้างอิงชื่อไฟล์และตำแหน่งไบต์ เช่น `binlog.000004, position 10580` ซึ่งเปราะบางและเกิดข้อผิดพลาดได้ง่ายเมื่อต้องการทำ Failover
+
+**GTID (Global Transaction Identifier)** เข้ามาแก้ปัญหานี้โดยผูกรหัสเฉพาะหนึ่งตัวเข้ากับทุก Transaction:
+$$\text{GTID} = \text{server\_uuid} : \text{transaction\_id}$$
+*ตัวอย่าง:* `3E11FA47-71CA-11E1-9E33-C80AA9E295A4:1-1250`
+
+- **ข้อได้เปรียบ:** เมื่อตั้งค่า Replica สามารถระบุเพียง `SOURCE_AUTO_POSITION = 1` ระบบจะเจรจากับ Primary เองโดยอัตโนมัติว่า Transaction ใดที่ Replica ยังขาดอยู่ และส่งเฉพาะ Transaction นั้นมา
+- ป้องกันการรัน Transaction ซ้ำ (Idempotency) และช่วยให้การเลื่อน Replica ขึ้นเป็น Primary ทำได้อย่างราบรื่น
+
+### 2.4 ปัญหา Replication Lag (`Seconds_Behind_Master`) และการแก้ปัญหา
+
+Replication Lag คือสภาวะที่ Replica อัปเดตข้อมูลตามหลัง Primary ส่งผลให้การอ่านข้อมูลจาก Replica ได้ข้อมูลที่ล้าสมัย (Stale Data)
+
+#### สาเหตุหลัก:
+1. **Single-threaded Applier Bottleneck:** Primary เขียนข้อมูลแบบ Multi-threaded (มีผู้ใช้หลายร้อยคนเขียนพร้อมกัน) แต่ Replica ดั้งเดิมใช้ SQL Thread เพียงเส้นเดียวในการ Replay ข้อมูล
+2. **Large Transactions (Elephant Transactions):** การสั่ง `DELETE FROM orders WHERE created_at < '2025-01-01'` ก้อนเดียว 5,000,000 แถว จะทำให้ Replica ค้างจนกว่าจะประมวลผลทั้ง Transaction เสร็จสิ้น
+3. **Hardware / Disk I/O 不足:** Replica สเปกต่ำกว่า Primary ขาด NVMe SSD หรือมีขนาด `innodb_buffer_pool_size` เล็กเกินไป
+
+#### แนวทางการแก้ไขระดับสถาปัตยกรรม:
+- **Multi-Threaded Applier (MTS):** เปิดใช้งาน Worker Threads หลายตัวบน Replica ด้วย `replica_parallel_workers = 8`
+- **Writeset Parallel Replication:** ใช้ `binlog_transaction_dependency_tracking = WRITESET` โดย Primary จะคำนวณ Hash ของแถวข้อมูลที่ถูกแก้ไข (Write Set) เพื่อยืนยันว่า Transaction ใดที่ไม่ได้แตะต้องแถวเดียวกัน สามารถ Replay พร้อมกันบน Replica ได้อย่างปลอดภัย
+- **Semi-Synchronous Replication:** Primary จะรอการตอบกลับ (ACK) จาก Replica อย่างน้อย 1 เครื่องว่าได้รับข้อมูลลง Relay Log แล้ว ก่อนจะส่งคำตอบยืนยันการ Commit กลับไปให้แอปพลิเคชัน
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การตั้งค่า Primary & Replica ด้วย GTID และ Multi-Threaded Applier
+
+#### 1. คอนฟิกูเรชันฝั่ง Primary Server (`my.cnf`)
+```ini filename="primary_my.cnf"
+[mysqld]
+# Server Identification
+server_id = 101
+report_host = primary-butcher-db.internal
+
+# Binary Log & GTID Settings
+log_bin = /var/log/mysql/mysql-bin.log
+binlog_format = ROW
+binlog_row_image = FULL
+gtid_mode = ON
+enforce_gtid_consistency = ON
+
+# Multi-Threaded Dependency Tracking for High Throughput Replicas
+binlog_transaction_dependency_tracking = WRITESET
+transaction_write_set_extraction = XXHASH64
+
+# Safety & Durability
+sync_binlog = 1
+innodb_flush_log_at_trx_commit = 1
+```
+
+#### 2. คอนฟิกูเรชันฝั่ง Replica Server (`my.cnf`)
+```ini filename="replica_my.cnf"
+[mysqld]
+# Server Identification
+server_id = 102
+report_host = replica-01-butcher-db.internal
+
+# Read-Only Enforcement (ป้องกันคนเขียนแทรกบน Replica)
+read_only = ON
+super_read_only = ON
+
+# Binary Log & Relay Log Settings
+relay_log = /var/log/mysql/mysql-relay-bin.log
+log_bin = /var/log/mysql/mysql-bin.log
+binlog_format = ROW
+gtid_mode = ON
+enforce_gtid_consistency = ON
+
+# Multi-Threaded Applier (MTS) เพื่อขจัดปัญหา Replication Lag
+replica_parallel_workers = 8
+replica_parallel_type = LOGICAL_CLOCK
+replica_preserve_commit_order = ON
+```
+
+#### 3. คำสั่ง SQL สำหรับตั้งค่าและเปิดการทำงานของ Replica
+```sql filename="01_setup_replica.sql"
+-- 1. สร้างผู้ใช้สำหรับ Replication บนเครื่อง Primary (รันบน Primary)
+CREATE USER 'repl_user'@'%' IDENTIFIED WITH caching_sha2_password BY 'Str0ng_Repl_P@ssw0rd!';
+GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl_user'@'%';
+FLUSH PRIVILEGES;
+
+-- 2. เชื่อมต่อไปยัง Primary โดยใช้ไวยากรณ์มาตรฐาน MySQL 8.4 LTS (รันบน Replica)
+CHANGE REPLICATION SOURCE TO
+    SOURCE_HOST = 'primary-butcher-db.internal',
+    SOURCE_PORT = 3306,
+    SOURCE_USER = 'repl_user',
+    SOURCE_PASSWORD = 'Str0ng_Repl_P@ssw0rd!',
+    SOURCE_AUTO_POSITION = 1,
+    SOURCE_SSL = 1;
+
+-- 3. เริ่มต้นกระบวนการ Replication
+START REPLICA;
+
+-- 4. ตรวจสอบสถานะการทำงานของ Replica
+SHOW REPLICA STATUS\G
+```
+
+#### ผลลัพธ์สำคัญจาก `SHOW REPLICA STATUS\G`:
+```text filename="docs/database/replica-status.txt"
+*************************** 1. row ***************************
+             Replica_IO_State: Waiting for source to send event
+                  Source_Host: primary-butcher-db.internal
+                  Source_User: repl_user
+                  Source_Port: 3306
+                Connect_Retry: 60
+             Source_Log_File: mysql-bin.000008
+         Read_Source_Log_Pos: 1420556
+              Relay_Log_File: mysql-relay-bin.000012
+               Relay_Log_Pos: 8540
+      Relay_Source_Log_File: mysql-bin.000008
+           Replica_IO_Running: Yes
+          Replica_SQL_Running: Yes
+        Seconds_Behind_Source: 0
+           Retrieved_Gtid_Set: 3E11FA47-71CA-11E1-9E33-C80AA9E295A4:1-50200
+            Executed_Gtid_Set: 3E11FA47-71CA-11E1-9E33-C80AA9E295A4:1-50200
+                Auto_Position: 1
+```
+
+---
+
+### ตัวอย่างที่ 2: การจัดการ Read/Write Split และเทคนิค "Read-Your-Own-Writes" ใน Application
+
+ในการใช้งานจริง ระบบต้องแยกคำสั่งอย่างชาญฉลาด หากผู้ใช้เพิ่งสั่งซื้อเนื้อวากิว (`INSERT INTO orders`) แล้วถูก Redirect ไปหน้าตรวจสอบสถานะออเดอร์ทันที หากยิงคำสั่ง `SELECT` ไปที่ Replica ที่มี Lag เพียง 0.5 วินาที ผู้ใช้อาจตกใจเพราะไม่พบรายการสั่งซื้อของตนเอง
+
+```typescript filename="database-router.ts"
+import mysql from 'mysql2/promise';
+
+// กำหนด Pool สำหรับ Primary (Read-Write) และ Replica (Read-Only)
+const primaryPool = mysql.createPool({
+  host: 'primary-butcher-db.internal',
+  user: 'app_user',
+  password: 'app_password',
+  database: 'smart_butcher',
+  waitForConnections: true,
+  connectionLimit: 30,
+});
+
+const replicaPool = mysql.createPool({
+  host: 'replica-01-butcher-db.internal',
+  user: 'app_user',
+  password: 'app_password',
+  database: 'smart_butcher',
+  waitForConnections: true,
+  connectionLimit: 100,
+});
+
+interface QueryOptions {
+  forcePrimary?: boolean;
+  userLastWriteTimestamp?: number; // เทคนิค Read-Your-Own-Writes
+}
+
+export async function executeQuery(
+  sql: string,
+  params: any[],
+  options: QueryOptions = {}
+) {
+  const isWriteOperation = /^\s*(INSERT|UPDATE|DELETE|REPLACE|ALTER|CREATE|DROP)/i.test(sql);
+  const now = Date.now();
+
+  // เงื่อนไขในการส่งคำสั่งเข้า Primary:
+  // 1. เป็นคำสั่งเขียน (INSERT, UPDATE, DELETE)
+  // 2. ถูกบังคับด้วย Flag forcePrimary
+  // 3. ผู้ใช้รายนี้เพิ่งเขียนข้อมูลลงฐานข้อมูลไม่เกิน 2 วินาทีที่ผ่านมา (Sticky Session)
+  const isRecentWrite = options.userLastWriteTimestamp && (now - options.userLastWriteTimestamp < 2000);
+
+  if (isWriteOperation || options.forcePrimary || isRecentWrite) {
+    const connection = await primaryPool.getConnection();
+    try {
+      return await connection.execute(sql, params);
+    } finally {
+      connection.release();
+    }
+  } else {
+    // คำสั่งอ่านทั่วไป ส่งไปยัง Read Replica เพื่อกระจายโหลด
+    const connection = await replicaPool.getConnection();
+    try {
+      return await connection.execute(sql, params);
+    } finally {
+      connection.release();
+    }
+  }
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+### 4.1 การลืมเปิด `super_read_only = ON` บน Replica Server
+- **Anti-pattern:**  
+  เปิดเพียง `read_only = ON` ทำให้ผู้ใช้ที่มีสิทธิ์ระดับ `SUPER` หรือ DBA สามารถเผลอรันคำสั่งเขียนลงบนเครื่อง Replica ได้ ส่งผลให้ข้อมูลบน Replica แตกแยก (Divergence) และทำให้ Replication หยุดชะงักด้วยข้อผิดพลาด `HA_ERR_FOUND_DUPP_KEY` ทันทีเมื่อ Primary ส่งข้อมูลชุดเดียวกันมา
+- **Best Practice:**  
+  เปิดทั้ง `read_only = ON` และ `super_read_only = ON` ในไฟล์ `my.cnf` ของ Replica เสมอ
+
+### 4.2 การทำ Big Batch Transaction ก้อนใหญ่ในคำสั่งเดียว
+- **Anti-pattern:**  
+  สั่งลบประวัติคำสั่งซื้อเนื้อที่หมดอายุความ 5,000,000 แถวด้วยคำสั่งเดียว: `DELETE FROM orders WHERE status = 'CANCELLED' AND created_at < '2024-01-01';` แม้ Primary จะตัดทรานแซกชันได้ แต่ Replica จะเกิด Replication Lag มหาศาลจนระบบหยุดชะงัก
+- **Best Practice:**  
+  ตัดแบ่ง Transaction เป็นก้อนเล็กๆ (Chunky Batching) ก้อนละ 5,000 - 10,000 แถว พร้อมหน่วงเวลาสั้นๆ:
+  ```sql filename="02_chunked_delete.sql"
+  -- รันใน Loop จนกว่าแถวที่ลบได้จะเท่ากับ 0
+  DELETE FROM orders 
+  WHERE status = 'CANCELLED' AND created_at < '2024-01-01' 
+  LIMIT 5000;
+  ```
+
+### 4.3 การใช้ STATEMENT-based Replication กับฟังก์ชันที่คาดเดาไม่ได้
+- **Anti-pattern:**  
+  ใช้ `binlog_format = STATEMENT` ร่วมกับคำสั่งที่มี `UUID()`, `RAND()`, หรือ `SYSDATE()` ทำให้ค่าที่เกิดขึ้นจริงบน Primary ไม่ตรงกับค่าที่ Replica สร้างขึ้น
+- **Best Practice:**  
+  กำหนด `binlog_format = ROW` ในทุกสภาพแวดล้อม Production
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+| สถาปัตยกรรม | เมื่อไหร่ควรใช้ | เมื่อไหร่ไม่ควรใช้ |
+| :--- | :--- | :--- |
+| **Asynchronous Replication (ค่าเริ่มต้น)** | การทำ Read Replicas ทั่วไปสำหรับระบบเว็บ, แค็ตตาล็อกสินค้า, การดึงข้อมูลรายงาน Analytics | ระบบที่ยอมรับการสูญหายของข้อมูลไม่ได้แม้แต่ธุรกรรมเดียวในกรณีที่ Primary ดับกระทันหัน (RPO = 0) |
+| **Semi-Synchronous Replication** | ระบบชำระเงิน (`payments`), กระเป๋าเงินดิจิทัล (Wallet), ธุรกรรมทางการเงินที่ห้ามเกิด Data Loss | เครือข่ายระหว่างเครื่องแม่ข่ายมีความล่าช้าสูง (High Latency WAN) เพราะจะทำให้ Commit Latency บน Primary ช้าลงตาม |
+| **Group Replication (InnoDB Cluster)** | ระบบที่ต้องการ High Availability แบบอัตโนมัติ (Automated Failover) และมุ่งเน้น Multi-Master Write | ตารางที่ไม่มี Primary Key หรือแอปพลิเคชันที่ต้องรันคำสั่ง DDL บ่อยครั้งในขณะที่มีปริมาณเขียนสูง |
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### ข้อ 1: ในระบบ E-Commerce ลูกค้าสั่งซื้อเนื้อสเต็กสำเร็จแล้วกด Refresh หน้าจอทันที แต่กลับไม่เห็นออเดอร์ล่าสุด เกิดจากสาเหตุใดในเชิง Replication และมีสถาปัตยกรรมใดบ้างที่แก้ปัญหานี้ได้?
+**แนวทางการตอบระดับ Senior Database Engineer:**
+1. **สาเหตุเบื้องหลัง:**
+   - เกิดจาก **Replication Lag** ระหว่าง Primary และ Read Replica เนื่องจาก MySQL Asynchronous Replication นั้น เมื่อ Primary ทำการ Commit Transaction ข้อมูลจะถูกบันทึกลงดิสก์ของ Primary ก่อน และส่ง Event ไปให้ Replica ในภายหลัง
+   - เมื่อผู้ใช้กด Refresh คำสั่ง `SELECT` ถูกส่งไปยัง Read Replica ที่ยังรับหรือ Apply Relay Log ไม่ทัน ส่งผลให้เกิดปัญหา **Stale Read**
+2. **แนวทางแก้ไขระดับสถาปัตยกรรม:**
+   - **แนวทางที่ 1 (Read-Your-Own-Writes / Sticky Routing):** บันทึก Timestamp ของการเขียนล่าสุดไว้ใน Session หรือ Cookie ของผู้ใช้ หากมีการอ่านข้อมูลภายในระยะเวลาอันสั้น (เช่น 2-5 วินาที) ให้บังคับ Route คำสั่งไปยัง Primary โดยตรง
+   - **แนวทางที่ 2 (GTID Session Consistency):** ใช้ฟีเจอร์ GTID ในการตรวจสอบว่า Replica มี `Executed_Gtid_Set` ครอบคลุม Transaction ที่ผู้ใช้เพิ่งเขียนไปหรือไม่ผ่านฟังก์ชัน `WAIT_FOR_EXECUTED_GTID_SET()` ใน Application
+   - **แนวทางที่ 3 (Semi-Synchronous Replication):** ยืนยันว่า Replica ได้รับ Log ก่อนส่งการตอบกลับหา Client ซึ่งช่วยลดความล่าช้าในฝั่ง Network I/O ได้ระดับหนึ่ง
+
+---
+
+### ข้อ 2: การทำงานของ Multi-Threaded Replica ใน MySQL 8 แตกต่างกันอย่างไรระหว่าง `binlog_transaction_dependency_tracking = COMMIT_ORDER` กับ `WRITESET` ในระดับโครงสร้างข้อมูล?
+**แนวทางการตอบระดับ Senior Database Engineer:**
+1. **`COMMIT_ORDER` (Schema-level / Group Commit dependency):**
+   - ประเมินความขนานจาก **Binary Log Group Commit (BGC)** บน Primary หาก Transaction กลุ่มใดสามารถ Commit พร้อมกันในรอบเดียวกันบน Primary ได้ แสดงว่า Transaction กลุ่มนั้นไม่มี Lock Contention ซึ่งกันและกัน และจะถูกมอบหมาย `last_committed` หมายเลขเดียวกัน
+   - ข้อจำกัด: หาก Primary มี Write Concurrency ต่ำ หรือ Transaction มาไม่พร้อมกันอย่างสมบูรณ์ Replica ก็จะไม่สามารถประมวลผลแบบขนานได้มากนัก
+2. **`WRITESET` (Row-level dependency tracking):**
+   - ในระดับ InnoDB เมื่อมีการเขียนข้อมูล ระบบจะนำค่า Primary Key, Unique Key, และ Foreign Key ของแถวที่ถูกแก้ไขมาทำการคำนวณค่า Hash 64-bit (ด้วยอัลกอริทึม `XXHASH64`) แล้วบันทึกลงใน Write Set History Buffer
+   - หาก Transaction ถัดไปไม่มีการสัมผัสแถวที่มี Hash ตรงกับ Transaction ใน Buffer เลย แสดงว่าไม่มีความขัดแย้งของข้อมูล (No Row Conflict) Primary จะกำหนดค่า `last_committed` ให้ Transaction นั้นสามารถรันแบบขนานได้ทันที แม้จะ Commit คนละรอบบน Primary
+   - **ผลลัพธ์:** ทำให้ Replica สามารถประมวลผลข้อมูลแบบขนานได้เต็มประสิทธิภาพของ CPU Cores แม้กระทั่งในตารางเดียวกัน ขจัดปัญหา Replication Lag ได้เหนือกว่า `COMMIT_ORDER` อย่างมหาศาล
+
+---
+
+## 7. ดูเพิ่มเติมที่
+
+- [MySQL 8.x Overview](/docs/database/mysql) — สารบัญและภาพรวมสถาปัตยกรรม MySQL ทั้งระบบ
+- [Transactions & ACID In-Depth](/docs/database/transactions) — กลไกการทำงานของ Undo Log, Redo Log และ Two-Phase Commit
+- [Concurrency & Locking Mechanics](/docs/database/concurrency) — การจัดการ Row Lock, Deadlock และ Isolation Levels
+- [Database Backup & Disaster Recovery](/docs/database/backup) — กลยุทธ์การสำรองข้อมูลแบบ Physical vs Logical ร่วมกับ Binlog

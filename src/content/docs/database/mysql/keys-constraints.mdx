@@ -1,0 +1,203 @@
+---
+title: Keys Constraints
+category: DATABASE
+parentTitle: MySQL 8.x
+version: MySQL 8.4 LTS / 8.0
+updatedAt: 2026-10-21
+---
+
+# Keys Constraints
+
+(เจาะลึกระบบคีย์และข้อกำหนดความถูกต้องใน MySQL 8.x ครอบคลุมตั้งแต่กลไก `AUTO_INCREMENT` และการล็อกแบบ Mutex, `PRIMARY KEY` ในฐานะ Clustered Index, `FOREIGN KEY` พร้อมพฤติกรรม Cascading, จนถึง Virtual และ Stored Generated Columns)
+
+## 1. แนวคิด (Concept)
+
+ในระบบจัดการร้านค้าเนื้อพรีเมียม **Smart Butcher Marketplace**:
+- **Constraints เปรียบเสมือนป้อมปราการความถูกต้อง (Data Integrity):** ป้องกันไม่ให้แอปพลิเคชันหรือคำสั่งภายนอกยัดเยียดข้อมูลที่เป็นไปไม่ได้ เช่น ราคาสินค้าติดลบ, การสร้างรายการสั่งซื้อ (`order_items`) ที่อ้างอิงไปยังออเดอร์ที่ไม่มีอยู่จริง, หรือการมีเลขประจำตัวผู้เสียภาษีซ้ำซ้อน
+- **Primary Key ใน MySQL/InnoDB ไม่ใช่แค่ป้ายชื่อ:** ใน InnoDB โครงสร้างกายภาพของตารางจะถูกจัดเก็บตาม Primary Key เสมอ (Index-Organized Table) การเลือกชนิดข้อมูลของ Primary Key จึงส่งผลต่อขนาดและประสิทธิภาพของตารางโดยตรง
+- **Generated Columns ยกระดับความเร็ว:** ช่วยให้เราสร้างคอลัมน์คำนวณ เช่น ราคาสุทธิ (`quantity * unit_price`) โดยไม่ต้องพึ่งพา Application Logic และสามารถสร้าง Index บนคอลัมน์ที่คำนวณได้ทันที
+
+<Callout type="tip" title="ความสัมพันธ์ระหว่าง Keys และ Clustered Index ใน InnoDB">
+หากคุณไม่ได้กำหนด PRIMARY KEY ให้กับตาราง InnoDB ระบบจะพยายามมองหา UNIQUE Index ตัวแรกที่คอลัมน์ทั้งหมดเป็น NOT NULL เพื่อใช้เป็น Clustered Index หากไม่มีเลย InnoDB จะสร้างคอลัมน์ลับขนาด 6 ไบต์ชื่อ `GENCLUST_INDEX` (Row ID) ขึ้นมาเอง ซึ่งใช้ Mutex ส่วนกลางร่วมกันทั้งฐานข้อมูล ส่งผลให้เกิดปัญหาขวดคอขวด (Lock Contention) เมื่อมีคำสั่ง INSERT พร้อมกันจำนวนมาก ดังนั้นทุกตารางใน InnoDB **ต้องมี Explicit PRIMARY KEY เสมอ**
+</Callout>
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. กลไก AUTO_INCREMENT และ `innodb_autoinc_lock_mode`
+เมื่อคอลัมน์ถูกกำหนดเป็น `AUTO_INCREMENT`:
+- MySQL จะใช้เคาน์เตอร์พิเศษในหน่วยความจำเพื่อแจกจ่ายค่าตัวเลขต่อเนื่อง
+- ใน MySQL 8.0 ค่าเริ่มต้นของ `innodb_autoinc_lock_mode = 2` (Interleaved Lock Mode):
+  - ไม่มีการถือ Table-level Auto-inc Lock ตลอดทรานแซกชัน
+  - คำสั่ง `INSERT` แบบ Concurrent สามารถได้รับค่าตัวเลข ID แบบสลับกันได้ (Interleaved) ซึ่งให้ความเร็วสูงสุด
+  - ข้อควรระวัง: อาจทำให้เกิดช่องว่าง (Gaps) ของตัวเลข หากทรานแซกชันถูก Rollback หรือคำสั่ง INSERT ล้มเหลว ซึ่งเป็นพฤติกรรมปกติของระบบฐานข้อมูลความเร็วสูง
+- **Auto-increment Counter Persistence ใน MySQL 8.0:** แตกต่างจาก MySQL 5.7 ที่เก็บเคาน์เตอร์ไว้เฉพาะใน RAM และสแกน `MAX(id)` ใหม่ตอนรีสตาร์ต ใน MySQL 8.0 ตัวเคาน์เตอร์จะถูกบันทึกลง Redo Log ทุกครั้งที่ค่าเปลี่ยนแปลง ทำให้ค่าไม่ถูกนำกลับมาใช้ซ้ำแม้เซิร์ฟเวอร์จะดับกะทันหัน
+
+### 2. Foreign Key และ Referential Integrity ใน InnoDB
+- InnoDB ตรวจสอบ Foreign Key ที่ระดับ Engine โดยตรง
+- เมื่อทำการตรวจสอบหรือลบข้อมูลตารางแม่ (Parent Table) InnoDB จะต้องอ่าน Index บน Foreign Key ของตารางลูก (Child Table)
+- **พฤติกรรม `ON DELETE` / `ON UPDATE`:**
+  - `RESTRICT` / `NO ACTION`: ปฏิเสธการลบ/แก้ไขตารางแม่ทันที หากมีตารางลูกอ้างอิงอยู่
+  - `CASCADE`: ลบหรืออัปเดตแถวในตารางลูกตามไปด้วยโดยอัตโนมัติ
+  - `SET NULL`: ปรับค่าในตารางลูกให้กลายเป็น `NULL` (คอลัมน์ต้องอนุญาต NULL)
+- **กฎเหล็กของ MySQL Foreign Key:** ทั้งตารางแม่และตารางลูกต้องมี Index รองรับคอลัมน์ที่ใช้อ้างอิง หากตารางลูกไม่มี Index ตอนประกาศ Foreign Key ระบบ MySQL จะสร้าง Index ให้โดยอัตโนมัติ
+
+### 3. Generated Columns (VIRTUAL vs STORED)
+MySQL 8.x รองรับคอลัมน์ที่คำนวณค่าจากคอลัมน์อื่นในแถวเดียวกัน:
+- **`VIRTUAL` (ค่าเริ่มต้น):** ไม่เปลืองพื้นที่จัดเก็บในฮาร์ดดิสก์ ค่าจะถูกคำนวณสดในหน่วยความจำทุกครั้งที่มีการอ่านแถวข้อมูล เหมาะกับสูตรคำนวณเบาๆ และสามารถสร้าง Secondary Index ทับได้!
+- **`STORED`:** ค่าจะถูกคำนวณและเขียนลงหน้าเพจข้อมูล (Disk) ทันทีที่มีการ INSERT หรือ UPDATE เปลืองพื้นที่ดิสก์เหมือนคอลัมน์ปกติ แต่เหมาะเมื่อสูตรซับซ้อนและไม่อยากให้ CPU ทำงานซ้ำตอน SELECT
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การออกแบบ Schema พร้อม Keys, Constraints และ Generated Columns
+
+```sql filename="04_butcher_keys_and_constraints.sql"
+-- 1. สร้างตารางหมวดหมู่เนื้อ
+CREATE TABLE categories (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    code VARCHAR(32) NOT NULL UNIQUE,
+    name VARCHAR(100) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;
+
+-- 2. สร้างตารางเนื้อวากิวและชิ้นเนื้อพรีเมียม
+CREATE TABLE products (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    category_id INT UNSIGNED NOT NULL,
+    sku VARCHAR(64) NOT NULL UNIQUE,
+    name VARCHAR(255) NOT NULL,
+    price_per_kg DECIMAL(10, 2) NOT NULL,
+    stock_kg DECIMAL(10, 3) NOT NULL DEFAULT 0.000,
+    dry_aged_days INT UNSIGNED NOT NULL DEFAULT 0,
+    -- CHECK Constraints บังคับกฎทางธุรกิจ
+    CONSTRAINT chk_positive_price CHECK (price_per_kg > 0),
+    CONSTRAINT chk_non_negative_stock CHECK (stock_kg >= 0),
+    CONSTRAINT chk_valid_dry_aged CHECK (dry_aged_days BETWEEN 0 AND 120),
+    -- Foreign Key ไปยังหมวดหมู่
+    CONSTRAINT fk_products_category 
+        FOREIGN KEY (category_id) REFERENCES categories(id) 
+        ON DELETE RESTRICT ON UPDATE CASCADE
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;
+
+-- 3. สร้างตารางออเดอร์
+CREATE TABLE orders (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    order_number VARCHAR(32) NOT NULL UNIQUE,
+    user_id BIGINT UNSIGNED NOT NULL,
+    status ENUM('PENDING', 'PAID', 'PREPARING', 'SHIPPED', 'CANCELLED') NOT NULL DEFAULT 'PENDING',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;
+
+-- 4. สร้างตารางรายการสินค้าในออเดอร์พร้อม Generated Column และ Cascade
+CREATE TABLE order_items (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    order_id BIGINT UNSIGNED NOT NULL,
+    product_id BIGINT UNSIGNED NOT NULL,
+    weight_kg DECIMAL(8, 3) NOT NULL,
+    unit_price_per_kg DECIMAL(10, 2) NOT NULL,
+    discount_rate DECIMAL(4, 3) NOT NULL DEFAULT 0.000, -- เช่น 0.100 คือลด 10%
+    
+    -- VIRTUAL Generated Column: คำนวณยอดเงินรวมหลังหักส่วนลดอัตโนมัติ
+    subtotal DECIMAL(12, 2) AS (
+        ROUND(weight_kg * unit_price_per_kg * (1 - discount_rate), 2)
+    ) VIRTUAL,
+    
+    CONSTRAINT chk_item_weight CHECK (weight_kg > 0),
+    CONSTRAINT chk_item_discount CHECK (discount_rate BETWEEN 0.000 AND 1.000),
+    
+    -- ลบ Order จะลบ Items ทิ้งทั้งหมดทันที
+    CONSTRAINT fk_items_order 
+        FOREIGN KEY (order_id) REFERENCES orders(id) 
+        ON DELETE CASCADE ON UPDATE CASCADE,
+    -- ห้ามลบ Product หากมีประวัติขายอยู่ใน Order Items
+    CONSTRAINT fk_items_product 
+        FOREIGN KEY (product_id) REFERENCES products(id) 
+        ON DELETE RESTRICT ON UPDATE CASCADE
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;
+```
+
+### ตัวอย่างที่ 2: การทดสอบ Integrity Enforcement และการสร้าง Index บน Virtual Column
+
+```sql filename="04_constraints_test_and_virtual_index.sql"
+-- สร้าง Index บน Virtual Column เพื่อให้ค้นหาตามยอด subtotal ได้ด้วยความเร็วสูง
+CREATE INDEX idx_order_items_subtotal ON order_items(subtotal);
+
+-- ทดสอบการใส่ข้อมูลถูกต้อง
+INSERT INTO categories (code, name) VALUES ('WAGYU_A5', 'Japanese Wagyu A5');
+SET @cat_id = LAST_INSERT_ID();
+
+INSERT INTO products (category_id, sku, name, price_per_kg, stock_kg, dry_aged_days)
+VALUES (@cat_id, 'WAGYU-A5-RIBEYE', 'Miyazaki Wagyu Ribeye A5', 4500.00, 25.500, 45);
+SET @prod_id = LAST_INSERT_ID();
+
+INSERT INTO orders (order_number, user_id, status)
+VALUES ('ORD-2026-0001', 101, 'PENDING');
+SET @ord_id = LAST_INSERT_ID();
+
+-- ใส่ Order Item: เนื้อ 1.500 กก. ราคา 4500.00 บาท ส่วนลด 5% (0.050)
+INSERT INTO order_items (order_id, product_id, weight_kg, unit_price_per_kg, discount_rate)
+VALUES (@ord_id, @prod_id, 1.500, 4500.00, 0.050);
+
+-- ตรวจสอบค่า Virtual Column ที่ระบบคำนวณให้อัตโนมัติ: 1.5 * 4500 * 0.95 = 6412.50
+SELECT id, weight_kg, unit_price_per_kg, discount_rate, subtotal 
+FROM order_items 
+WHERE order_id = @ord_id;
+
+-- ทดสอบ CHECK Constraint: ราคาติดลบ (ต้องเกิด Error 3819)
+-- Error Code: 3819. Check constraint 'chk_positive_price' is violated.
+INSERT INTO products (category_id, sku, name, price_per_kg, stock_kg)
+VALUES (@cat_id, 'BAD-PRICE', 'Faulty Beef', -100.00, 10.000);
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| กรณีปัญหา | แนวทางที่ผิดพลาด (Anti-pattern) | แนวทางที่ถูกต้อง (Best Practice) |
+| :--- | :--- | :--- |
+| **การเลือก Primary Key** | ละเลยการกำหนด Primary Key ปล่อยให้ InnoDB สร้าง `GENCLUST_INDEX` ลับในระบบ | กำหนด `BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY` เสมอ เพื่อโครงสร้าง B+Tree ที่เรียงลำดับ |
+| **Foreign Key Indexing** | สร้าง Foreign Key แต่ลืมใส่ Index ในตารางลูก ทำให้คำสั่งลบตารางแม่ต้อง Full Table Scan ตารางลูก | มั่นใจว่าตารางลูกมี Index ที่คอลัมน์ Foreign Key (MySQL สร้างให้อัตโนมัติ แต่ต้องระวังกรณี Composite) |
+| **การคำนวณยอดเงิน** | ให้แอปพลิเคชันคูณยอดเงินรวมแล้วส่งมาบันทึก เสี่ยงข้อมูลเพี้ยนจากบั๊กโปรแกรม | ใช้ `VIRTUAL Generated Column` คำนวณจากคอลัมน์ต้นทาง หรือตรวจสอบด้วย `CHECK` constraint |
+| **Cascading Delete** | ใส่ `ON DELETE CASCADE` กับตารางประวัติธุรกรรมหรือเงิน ส่งผลให้บิลหายเมื่อลบลูกค้า | ใช้ `ON DELETE RESTRICT` กับข้อมูลการเงิน และทำ Soft Delete หรือเก็บบันทึกประวัติแทน |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้:
+- ใช้ `CHECK Constraints` เพื่อดักจับกฎทางธุรกิจที่ตายตัว (ราคาห้ามติดลบ, จำนวนวันบ่มเนื้อต้อง 0-120 วัน)
+- ใช้ `ON DELETE CASCADE` เฉพาะความสัมพันธ์แม่ลูกที่เป็นเนื้อเดียวกันแท้จริง (เช่น `orders` กับ `order_items`)
+- ใช้ `VIRTUAL Generated Columns` เมื่อต้องการสูตรคำนวณมาตรฐานที่ใช้บ่อย และต้องการทำ Index ค้นหาโดยไม่เปลืองพื้นที่ดิสก์
+
+### ไม่ควรใช้:
+- ไม่ควรใช้ `ON DELETE CASCADE` กับตารางความสัมพันธ์ข้ามขอบเขตธุรกิจ เช่น ลบ `users` แล้วพ่วงลบ `orders` และ `payments` ทั้งหมด (จะทำให้สูญเสียประวัติบัญชีและการเงิน)
+- ไม่ควรใช้สูตรที่มีฟังก์ชันไม่คงที่ (Non-deterministic Functions เช่น `NOW()`, `RAND()`) ใน Generated Columns เนื่องจาก MySQL ไม่อนุญาต
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### ข้อที่ 1: ทำไมคำสั่ง INSERT ที่ถูก ROLLBACK จึงทำให้ตัวเลข AUTO_INCREMENT ขาดช่วง (Gaps) และเราควรเขียนโค้ดเพื่อนำเลขที่ขาดช่วงกลับมาใช้ใหม่หรือไม่?
+**แนวคำตอบเชิงลึก:**
+สาเหตุที่ตัวเลข AUTO_INCREMENT เกิดช่องว่าง (Gaps) เนื่องมาจากในระบบ Concurrency สูง InnoDB จะทำงานภายใต้โหมด `innodb_autoinc_lock_mode = 2` ซึ่งตัวจัดสรรตัวเลขจะแจก ID ให้กับแต่ละ Connection ทันทีที่คำสั่ง INSERT เริ่มต้น โดยไม่รอให้ทรานแซกชัน COMMIT หากทรานแซกชันนั้นเกิดข้อผิดพลาดหรือสั่ง ROLLBACK ตัวเลขที่แจกไปแล้วจะไม่ถูกดึงกลับ เพราะหากดึงกลับมาใช้ซ้ำ อาจชนกับ Connection อื่นที่ได้รับเลขถัดไปแล้ว และจะทำให้เกิดการล็อกคอขวดมหาศาล (Serialization Bottleneck) 
+
+ในทางปฏิบัติ **ไม่ควรเขียนโค้ดเพื่อพยายามถมเลขที่ขาดช่วงเด็ดขาด** เพราะจะทำลาย Concurrency ของฐานข้อมูล หากระบบต้องการเลขที่ต่อเนื่อง 100% โดยห้ามมีช่องว่างเด็ดขาด (เช่น เลขที่ใบกำกับภาษีตามกฎหมายบัญชี) ควรแยกตารางจัดการ Sequence ขึ้นมาต่างหากพร้อมการทำ Pessimistic Locking (`SELECT FOR UPDATE`) ในจุดออกเอกสารสุดท้ายเท่านั้น
+
+### ข้อที่ 2: Virtual Column กับ Stored Column ใน MySQL แตกต่างกันอย่างไรในระดับสถาปัตยกรรม และแบบใดที่สามารถสร้าง Index ได้?
+**แนวคำตอบเชิงลึก:**
+ความแตกต่างในระดับสถาปัตยกรรมคือ:
+1. **Virtual Column:** ค่าจะไม่ถูกบันทึกไว้ใน Data Page ของตาราง Leaf Node เลย แต่จะถูกประเมินสดในหน่วยความจำเมื่อมีการอ่านแถวนั้น จึงประหยัดพื้นที่ดิสก์ 100%
+2. **Stored Column:** ค่าจะถูกคำนวณและเขียนลงใน Data Page ของตาราง Leaf Node จริงๆ เหมือนคอลัมน์ปกติ มีต้นทุนพื้นที่จัดเก็บและ Write I/O ตอน INSERT/UPDATE
+
+จุดสำคัญคือ **ทั้ง Virtual Column และ Stored Column สามารถสร้าง Secondary Index ได้ทั้งคู่ใน MySQL 8.x!** เมื่อสร้าง Secondary Index บน Virtual Column ทาง InnoDB จะดึงค่าที่คำนวณได้ไปจัดเก็บบน Leaf Node ของ B+Tree ของ Index นั้นๆ โดยที่ตารางหลัก (Clustered Index) ยังคงไม่ต้องเปลืองเนื้อที่จัดเก็บคอลัมน์ดังกล่าว ทำให้ Virtual Column + Index เป็นเทคนิคระดับสูงที่นิยมใช้ในการจูน Query ที่ซับซ้อน
+
+---
+
+## ดูเพิ่มเติมที่
+- [MySQL Storage Engines](/docs/database/mysql/storage-engines) — สถาปัตยกรรมเครื่องยนต์ InnoDB
+- [MySQL Data Types](/docs/database/mysql/data-types) — การเลือกชนิดข้อมูลที่เหมาะสม
+- [PostgreSQL Constraints](/docs/database/postgresql/constraints) — ศึกษาเปรียบเทียบกับ Constraints ใน PostgreSQL 16
+- [Database Design](/docs/database/database-design) — หลักการออกแบบ Schema และ Normalization

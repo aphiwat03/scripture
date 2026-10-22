@@ -1,0 +1,290 @@
+---
+title: Server Tuning
+category: DATABASE
+parentTitle: MySQL 8.x
+version: MySQL 8.4 LTS / 8.0
+updatedAt: 2026-10-21
+---
+
+# Server Tuning
+
+การปรับแต่งค่าคอนฟิกูเรชันเซิร์ฟเวอร์ (Server Tuning) ใน **MySQL 8.4 LTS / 8.0** คือการกำหนดค่าตัวแปรในระบบให้สอดคล้องกับทรัพยากรฮาร์ดแวร์จริง (CPU, RAM, NVMe SSD) เพื่อปลดล็อกประสิทธิภาพสูงสุดของ **InnoDB Storage Engine** การใช้ค่าเริ่มต้น (Default Configuration) ของ MySQL บน Production Server ขนาดใหญ่ เปรียบเสมือนการขับรถซูเปอร์คาร์ด้วยโหมดประหยัดพลังงาน เพราะค่า Default มักถูกออกแบบมาเพื่อให้รันได้บนเครื่องขนาดเล็กที่มี RAM เพียง 1–2 GB เท่านั้น
+
+<Callout type="warning" title="ความเสี่ยงของการจูนค่าคอนฟิกโดยไม่มีการคำนวณ">
+การปรับเพิ่มค่าตัวแปรประเภท Per-Thread Memory (เช่น `sort_buffer_size`, `join_buffer_size`) มากเกินไป ร่วมกับการตั้งค่า `max_connections` สูงลิ่ว จะทำให้หน่วยความจำรวมของระบบทะลุขีดจำกัดของ RAM จริง และกระตุ้นให้ Linux Kernel **Out-Of-Memory (OOM) Killer** สั่งสังหาร Process `mysqld` กะทันหัน
+</Callout>
+
+---
+
+## 1. แนวคิด (Concept)
+
+สถาปัตยกรรมหน่วยความจำของ MySQL แบ่งออกเป็น 2 ส่วนหลักที่ต้องบริหารจัดการอย่างสมดุล:
+
+```text filename="docs/database/mysql-memory-architecture.txt"
++-------------------------------------------------------------------------------+
+|                       MySQL Server Total Memory Footprint                     |
++-------------------------------------------------------------------------------+
+| 1. Global Shared Buffers (จัดสรรครั้งเดียวเมื่อเริ่มต้น Start Server)         |
+|    +--------------------------------------------------------------------+     |
+|    |  InnoDB Buffer Pool (60% - 80% ของ RAM)                            |     |
+|    |  - Data Pages (Clean/Dirty)                                        |     |
+|    |  - Index Pages                                                     |     |
+|    |  - Undo Pages & Change Buffer                                      |     |
+|    +--------------------------------------------------------------------+     |
+|    |  Redo Log Buffer (innodb_log_buffer_size = 16MB - 64MB)            |     |
+|    |  Table Open Cache & Performance Schema Memory Footprint            |     |
+|    +--------------------------------------------------------------------+     |
++-------------------------------------------------------------------------------+
+| 2. Per-Connection Buffers (จัดสรรตามจำนวน Connection ที่เชื่อมต่อจริง)       |
+|    +--------------------------------------------------------------------+     |
+|    |  Sort Buffer  |  Join Buffer  |  Read Buffer  |  Read Rnd Buffer   |     |
+|    |  Thread Stack |  Net Buffer   |  Internal In-Memory Temp Tables    |     |
+|    +--------------------------------------------------------------------+     |
+|    สูตร: Max Per-Thread Memory = max_connections x Sum(Thread Buffers)         |
++-------------------------------------------------------------------------------+
+```
+
+ในระบบ **Smart Butcher Marketplace** การตั้งค่าเซิร์ฟเวอร์ต้องรองรับทั้งการประมวลผลคำสั่งซื้อและตัดสต็อกเนื้อสดที่รวดเร็ว (High Write Throughput) ควบคู่กับการเรียกดูแค็ตตาล็อกสินค้าแบบไม่มีสะดุด (Sub-millisecond Read Cache)
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 `innodb_buffer_pool_size`: หัวใจของประสิทธิภาพ InnoDB
+InnoDB เป็นเครื่องยนต์ที่พึ่งพาหน่วยความจำหลักเป็นหลัก โดยหน้าข้อมูล (Data Pages ขนาดมาตรฐาน 16KB) ทั้งหมดจะถูกโหลดขึ้นมาทำงานใน **Buffer Pool**
+- **สูตรคำนวณสำหรับ Dedicated Database Server:**
+  $$\text{innodb\_buffer\_pool\_size} \approx 60\% - 80\% \times \text{Physical RAM}$$
+  *(เว้นพื้นที่ 20% - 40% ไว้สำหรับ OS Kernel, Filesystem Cache, และ Per-connection Buffers)*
+- **`innodb_buffer_pool_instances`:** 
+  ในกรณีที่ Buffer Pool มีขนาดใหญ่กว่า 1 GB ควรกำหนดให้มีหลาย Instances (เช่น 8 หรือ 16) เพื่อลดปัญหา Lock/Mutex Contention ของโครงสร้าง LRU List ภายใน
+
+### 2.2 `innodb_redo_log_capacity` / `innodb_log_file_size`: คอขวดของการเขียนข้อมูล
+Redo Log ทำหน้าที่บันทึกการเปลี่ยนแปลงตามหลัก **Write-Ahead Logging (WAL)** เพื่อรับประกันความทนทาน (Durability)
+- **การเปลี่ยนแปลงใน MySQL 8.0.30+ และ 8.4 LTS:** 
+  ตัวแปร `innodb_log_file_size` และ `innodb_log_files_in_group` ถูกแทนที่ด้วยตัวแปร **`innodb_redo_log_capacity`** ซึ่งสามารถปรับขนาดได้แบบ Dynamic ในขณะที่ฐานข้อมูลยังทำงานอยู่ โดยไม่ต้อง Restart Server
+- **Checkpoint Age & Flush Spikes:** 
+  หากขนาดของ Redo Log เล็กเกินไป ระบบจะต้องทำ **Synchronous Flushing (Sharp Checkpoint)** บ่อยครั้ง ส่งผลให้ I/O ทำงานค้างและคิวรีทั้งระบบชะงัก (Write Stalls)
+- **สูตรคำนวณ:** ขนาดรวมของ Redo Log ควรเพียงพอต่อการรองรับปริมาณการเขียนข้อมูลในช่วงที่ทราฟฟิกสูงสุด (Peak Hour) อย่างน้อย 1 ชั่วโมง
+
+### 2.3 `innodb_flush_log_at_trx_commit`: สมดุลระหว่าง ACID กับ Throughput
+ตัวแปรนี้ควบคุมกลไกการเขียน Redo Log Buffer ลงในดิสก์จริงเมื่อมีคำสั่ง `COMMIT`:
+
+| ค่าที่ตั้ง | พฤติกรรมเมื่อสั่ง `COMMIT` | ระดับความปลอดภัยของข้อมูล (ACID) | ประสิทธิภาพ (Throughput) |
+| :---: | :--- | :--- | :--- |
+| **`1`** *(Default)* | เขียนลง OS Cache และสั่ง **`fsync()` บังคับบันทึกลงดิสก์ทันที** ทุก Transaction | **สูงสุด (Full ACID):** ปลอดภัย 100% ข้อมูลไม่สูญหายแม้เซิร์ฟเวอร์ไฟดับ | Latency สูงสุด เพราะถูกจำกัดด้วยความเร็ว Disk I/O |
+| **`0`** | บันทึกเฉพาะใน Log Buffer ในหน่วยความจำ แล้วสั่ง Flush ลงดิสก์ **วินาทีละครั้ง** ผ่าน Master Thread | **ต่ำ:** ข้อมูลใน 1 วินาทีล่าสุดสูญหายได้หาก MySQL Crash หรือไฟดับ | Latency ต่ำสุด เร็วที่สุด |
+| **`2`** | เขียนลง **OS Page Cache ทุก Commit** แต่สั่ง `fsync()` ลงดิสก์จริง **วินาทีละครั้ง** | **ปานกลาง:** ทนทานต่อ MySQL Crash (ข้อมูลไม่หายหาก OS ยังทำงานอยู่) แต่เสี่ยงเมื่อไฟดับ | Latency ต่ำมาก เหมาะกับระบบที่ยอมรับข้อมูลหาย 1 วินาทีได้ |
+
+<Callout type="note" title="เกณฑ์การเลือกใช้งาน">
+สำหรับระบบเงินและคำสั่งซื้อ (`orders`, `payments`) ใน Smart Butcher Marketplace ต้องใช้ค่า `1` เสมอ ห้ามปรับเป็น `0` หรือ `2` เด็ดขาดเพื่อแลกกับความเร็ว
+</Callout>
+
+### 2.4 `max_connections` และความเสี่ยงต่อ OOM Killer
+การตั้ง `max_connections` สูงเกินไปเป็นสาเหตุอันดับหนึ่งที่ทำให้ MySQL โดนระบบปฏิบัติการ Linux ฆ่าทิ้ง (OOM Kill):
+$$\text{Max Possible Memory} = \text{Global Buffers} + \Big(\text{max\_connections} \times \sum \text{Per-Thread Buffers}\Big)$$
+- หากตั้ง `max_connections = 2000` และแต่ละเธรดมีการใช้ `sort_buffer_size`, `join_buffer_size`, `read_buffer_size` รวมกัน 16 MB 
+- ในช่วงทราฟฟิกพุ่งสูง หน่วยความจำสำหรับ Per-Thread อาจพุ่งขึ้นไปถึง $2,000 \times 16\text{ MB} = 32\text{ GB}$ หากรวมกับ Buffer Pool ที่จองไว้ 24 GB เครื่องที่มี RAM 32 GB จะหมดตัวทันที
+
+### 2.5 Slow Query Log: เครื่องมือตรวจจับอาการเสื่อมถอย
+การเปิด Slow Query Log ช่วยให้สามารถระบุคิวรีที่เป็นปัญหาได้ก่อนที่ลูกค้าจะร้องเรียน:
+- **`slow_query_log = 1`**: เปิดใช้งานระบบบันทึก
+- **`long_query_time = 0.5`**: บันทึกคำสั่งที่ประมวลผลนานเกิน 500 มิลลิวินาที (ใน MySQL 8 รองรับทศนิยมระดับ Microsecond เช่น `0.1` หรือ `0.05`)
+- **`log_queries_not_using_indexes = 1`**: ดักจับคำสั่งที่ทำ Full Table Scan
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: ไฟล์คอนฟิกูเรชัน `my.cnf` ระดับ Production (สำหรับ Server RAM 32GB, 8 Cores, NVMe)
+
+```ini filename="production_my.cnf"
+[mysqld]
+# ==============================================================================
+# 1. Server Basics & Character Encoding
+# ==============================================================================
+user                           = mysql
+pid-file                       = /var/run/mysqld/mysqld.pid
+socket                         = /var/run/mysqld/mysqld.sock
+port                           = 3306
+basedir                        = /usr
+datadir                        = /var/lib/mysql
+character-set-server           = utf8mb4
+collation-server               = utf8mb4_0900_ai_ci
+default_time_zone              = '+07:00'
+
+# ==============================================================================
+# 2. Connection Management & Per-Thread Memory Controls
+# ==============================================================================
+# ป้องกัน OOM โดยจำกัด Connection และใช้ Connection Pooler ฝั่ง Application
+max_connections                = 300
+max_connect_errors             = 10000
+thread_cache_size              = 64
+table_open_cache               = 4096
+table_definition_cache         = 2048
+
+# Per-Thread Buffers (ไม่ตั้งค่าสูงเกินไปเพื่อป้องกัน Memory Spikes)
+sort_buffer_size               = 2M
+join_buffer_size               = 2M
+read_buffer_size               = 1M
+read_rnd_buffer_size           = 1M
+thread_stack                   = 512K
+
+# ==============================================================================
+# 3. InnoDB Storage Engine Optimization (RAM 32GB)
+# ==============================================================================
+# จัดสรร 70% ของ RAM (ประมาณ 22GB)
+innodb_buffer_pool_size        = 22G
+innodb_buffer_pool_instances    = 8
+innodb_buffer_pool_dump_at_shutdown = ON
+innodb_buffer_pool_load_at_startup  = ON
+
+# Redo Log Capacity (MySQL 8.4 LTS / 8.0.30+)
+innodb_redo_log_capacity       = 4G
+innodb_log_buffer_size         = 64M
+
+# ACID Durability & Disk I/O Settings สำหรับ NVMe SSD
+innodb_flush_log_at_trx_commit = 1
+innodb_flush_method            = O_DIRECT
+innodb_io_capacity             = 4000
+innodb_io_capacity_max         = 8000
+innodb_page_cleaners           = 8
+
+# ==============================================================================
+# 4. Slow Query Logging & Diagnostics
+# ==============================================================================
+slow_query_log                 = 1
+slow_query_log_file            = /var/log/mysql/mysql-slow.log
+long_query_time                = 0.5
+log_queries_not_using_indexes  = 1
+min_examined_row_limit         = 100
+log_error                      = /var/log/mysql/mysql-error.log
+log_error_verbosity            = 3
+```
+
+---
+
+### ตัวอย่างที่ 2: สคริปต์ SQL ตรวจสอบสุขภาพและประสิทธิภาพ Server ใน Runtime
+
+สคริปต์นี้ใช้ตรวจสอบ Buffer Pool Hit Ratio, Redo Log Write Activity, และ Connection Overhead ของร้านค้าเนื้อพรีเมียม
+
+```sql filename="server_health_check.sql"
+-- 1. ตรวจสอบ InnoDB Buffer Pool Hit Ratio (เป้าหมายระดับ Production: > 99%)
+SELECT 
+    ROUND((1.0 - (SUM(IF(variable_name = 'Innodb_buffer_pool_reads', variable_value, 0)) / 
+           SUM(IF(variable_name = 'Innodb_buffer_pool_read_requests', variable_value, 0)))) * 100, 3) 
+           AS buffer_pool_hit_ratio_percent
+FROM performance_schema.global_status
+WHERE variable_name IN ('Innodb_buffer_pool_reads', 'Innodb_buffer_pool_read_requests');
+
+-- 2. ตรวจสอบปริมาณการใช้ Connections จริงเทียบกับขีดจำกัด
+SELECT 
+    variable_name, 
+    variable_value
+FROM performance_schema.global_status
+WHERE variable_name IN (
+    'Threads_connected', 
+    'Threads_running', 
+    'Max_used_connections', 
+    'Aborted_connects'
+);
+
+-- 3. ตรวจสอบปริมาณการเขียนข้อมูลลง Redo Log (คำนวณไบต์ที่เขียนต่อวินาที)
+SELECT 
+    variable_name,
+    ROUND(variable_value / 1024 / 1024, 2) AS written_mb
+FROM performance_schema.global_status
+WHERE variable_name = 'Innodb_os_log_written';
+
+-- 4. ตรวจสอบ Transaction ที่รันค้างเกิน 10 วินาที (ป้องกัน Undo Log Bloat)
+SELECT 
+    trx_id, 
+    trx_state, 
+    trx_started, 
+    TIMESTAMPDIFF(SECOND, trx_started, NOW()) AS duration_sec,
+    trx_mysql_thread_id, 
+    trx_query
+FROM information_schema.innodb_trx
+WHERE TIMESTAMPDIFF(SECOND, trx_started, NOW()) > 10;
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+### 4.1 การตั้ง `innodb_buffer_pool_size = 90%` บนเซิร์ฟเวอร์ที่มี Service อื่น
+- **Anti-pattern:**  
+  รัน MySQL ร่วมกับ Node.js API หรือ Redis บนเซิร์ฟเวอร์เดียวกัน แล้วตั้ง `innodb_buffer_pool_size` ไว้ 90% ของ RAM
+- **ผลกระทบ:**  
+  เมื่อ Node.js มีการประมวลผลเพิ่มขึ้น หรือ Redis ขยายขนาด RAM จะถูกใช้งานจนหมด ส่งผลให้ Linux OS สั่ง Kill `mysqld` ทำให้ระบบล่ม
+- **Best Practice:**  
+  หากเป็นเครื่องที่มีหลาย Service ให้คำนวณ Buffer Pool ไม่เกิน 40% - 50% หรือแยก Dedicated Server สำหรับ Database เสมอ
+
+### 4.2 การปรับ `sort_buffer_size` แบบบ้าคลั่งในระดับ Global
+- **Anti-pattern:**  
+  พบปัญหา `Using filesort` ช้า จึงปรับ `sort_buffer_size = 128M` ในไฟล์ `my.cnf`
+- **ผลกระทบ:**  
+  Sort buffer เป็นหน่วยความจำแบบ **Per-Connection/Per-Sort** หากมีคิวรีที่ต้องทำการเรียงลำดับพร้อมกัน 100 คอนเนกชัน เซิร์ฟเวอร์ต้องจัดสรรแรมชั่วคราวเพิ่มขึ้นเกือบ 13 GB ทันที
+- **Best Practice:**  
+  ปล่อย `sort_buffer_size` ระดับ Global ไว้ที่ 2M - 4M หากมีคำสั่ง Batch Job เฉพาะที่จำเป็นต้องเรียงลำดับ ให้ปรับเฉพาะระดับ Session ในคิวรีนั้นๆ:
+  ```sql filename="session_tuning.sql"
+  SET SESSION sort_buffer_size = 64 * 1024 * 1024;
+  -- รัน Batch Reporting Query สำหรับสรุปยอดขายเนื้อรายปี
+  ```
+
+### 4.3 การละเลยการตั้งค่า `innodb_io_capacity` บน Storage แบบ NVMe SSD
+- **Anti-pattern:**  
+  ใช้ดิสก์ NVMe SSD ความเร็วสูงระดับ 100,000 IOPS แต่ปล่อยให้ `innodb_io_capacity = 200` (ค่าเริ่มต้นดั้งเดิมสำหรับดิสก์จานหมุน HDD 7200 RPM)
+- **ผลกระทบ:**  
+  InnoDB จะจำกัดอัตราการ Flush Dirty Pages ลงดิสก์ไว้ต่ำมาก ทำให้เกิด Dirty Page สะสมเต็ม Buffer Pool จนเกิด Write Stall เมื่อหน่วยความจำเต็ม
+- **Best Practice:**  
+  ปรับ `innodb_io_capacity = 4000` ถึง `10000` และ `innodb_io_capacity_max = 8000` ถึง `20000` สำหรับระบบที่ใช้ NVMe SSD
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+| ค่า Configuration | สถานการณ์ที่แนะนำให้ใช้ | สถานการณ์ที่ไม่ควรใช้ |
+| :--- | :--- | :--- |
+| **`innodb_flush_log_at_trx_commit = 1`** | **ระบบ Production ทุกระบบ**, ระบบชำระเงิน, งานสั่งซื้อ, งานตัดสต็อกสินค้า | การ Import ข้อมูลขนาดใหญ่ครั้งแรกใน Staging Environment (สามารถปรับเป็น `0` ชั่วคราวเพื่อความเร็ว) |
+| **`innodb_flush_log_at_trx_commit = 2`** | เครื่อง Replica ที่ใช้สำหรับอ่านอย่างเดียว, ระบบบันทึก Log การเข้าชมเว็บไซต์ | เครื่อง Primary ที่เก็บธุรกรรมสำคัญระดับการเงิน |
+| **`innodb_redo_log_capacity = 8G`** | ระบบที่มี Write Throughput สูงลิ่ว เช่น งาน Flash Sale หรือการบันทึก IoT Data | สภาพแวดล้อม Development บนเครื่องส่วนตัวที่มีดิสก์จำกัด |
+| **Connection Pooler (ProxySQL)** | แอปพลิเคชันฝั่ง Client ที่สร้าง Connection สูงเกิน 500 connections (เช่น สถาปัตยกรรม Microservices หรือ Serverless) | ระบบ Monolith ขนาดเล็กที่มี Connection คงที่และไม่เกิน 100 connections |
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### ข้อ 1: เซิร์ฟเวอร์ MySQL เกิด Crash ดับไปเองอย่างกะทันหันในช่วงเที่ยงวันศุกร์ เมื่อตรวจสอบคำสั่ง `dmesg -T` พบข้อความ `Out of memory: Kill process (mysqld) score 850...` คุณจะมีกระบวนการตรวจวิเคราะห์หาสาเหตุ และกำหนดแนวทางปรับจูนคอนฟิกอย่างไร?
+**แนวทางการตอบระดับ Senior Database Engineer:**
+1. **การตรวจวิเคราะห์สาเหตุเชิงลึก:**
+   - เกิดจาก Linux Kernel OOM Killer ทำงานเมื่อ Memory รวมของระบบเหลือน้อยเกินขีดจำกัดปลอดภัย (`vm.min_free_kbytes`)
+   - คำนวณขีดจำกัดหน่วยความจำสูงสุดที่เป็นไปได้:
+     $$\text{Max Allowed Memory} = \text{innodb\_buffer\_pool\_size} + \text{innodb\_log\_buffer\_size} + (\text{max\_connections} \times \text{Per-Thread Buffers})$$
+   - ตรวจสอบ `mysql-error.log` และตรวจสอบสถานะ `Max_used_connections` ในขณะนั้นว่าชนเพดานหรือไม่ รวมถึงตรวจสอบการเติบโตของ `temptable_max_ram` ว่ามีการสร้าง Temp Table ในหน่วยความจำจนบวมหรือไม่
+2. **แนวทางการแก้ไขและการปรับแต่ง:**
+   - ปรับลด `innodb_buffer_pool_size` ลงให้อยู่ในช่วงไม่เกิน 70% ของ RAM เพื่อให้มี Safety Margin สำหรับ OS อย่างน้อย 20% - 25%
+   - ปรับลด `max_connections` (เช่น จาก 2,000 เหลือ 300) และบังคับติดตั้ง Application Connection Pooler (เช่น HikariCP หรือ ProxySQL) เพื่อควบคุมไม่ให้ Client ยิง Connection เข้ามาแบบไร้ขีดจำกัด
+   - ตรวจสอบและลดขนาด Per-Thread Buffers (`sort_buffer_size`, `join_buffer_size`) ให้กลับมาอยู่ในค่าที่สมเหตุสมผล (1M - 2M)
+   - ปรับแต่ง Linux Kernel Parameter: กำหนดค่า `vm.swappiness = 1` หรือ `10` เพื่อป้องกันไม่ให้ OS ดึง Swap Memory มาใช้จนระบบช้า แต่ยังมีพื้นที่สำรองฉุกเฉิน
+
+---
+
+### ข้อ 2: ทำไมการตั้งค่า `innodb_redo_log_capacity` ให้มีขนาดใหญ่เพียงพอ จึงช่วยลดปัญหา Write Stall หรือ Latency Spikes ในช่วงเทศกาลลดราคา (Flash Sale) ได้อย่างมีนัยสำคัญ?
+**แนวทางการตอบระดับ Senior Database Engineer:**
+1. **กลไก Fuzzy Checkpoint vs Sharp Checkpoint:**
+   - เมื่อมีการแก้ไขข้อมูลใน Buffer Pool หน้านั้นจะกลายเป็น **Dirty Page** และประวัติจะถูกเขียนลง Redo Log อย่างต่อเนื่อง
+   - InnoDB ใช้ระบบ **Fuzzy Checkpoint** ใน Background โดยคำนวณสิ่งที่เรียกว่า **Checkpoint Age** (ระยะห่างระหว่างจุด Checkpoint ล่าสุด กับจุดเขียน Redo Log ปัจจุบัน)
+   - หาก Checkpoint Age เข้าใกล้ 75% ของขนาด Redo Log ทั้งหมด (Async Flush Point) หรือเกิน 87.5% (Sync Flush Point) เครื่องยนต์จะบังคับให้เธรดการทำงานทั้งหมดหยุดเพื่อเร่งเขียน Dirty Pages ลงดิสก์ทันที เรียกว่า **Sharp Checkpoint / Write Stall**
+2. **ประโยชน์ของ Redo Log ขนาดใหญ่:**
+   - การขยายขนาด `innodb_redo_log_capacity` (เช่น 4GB - 8GB) จะเพิ่มระยะกันชน (Buffer Margin) ให้ Checkpoint Age สามารถขยายตัวได้โดยไม่แตะจุดอันตราย
+   - เปิดโอกาสให้ Page Cleaner Threads สามารถทยอยเขียน Dirty Pages ลงดิสก์แบบราบรื่น (Smooth Background Flushing) ตามอัตรา `innodb_io_capacity`
+   - ส่งผลให้คิวรี `INSERT` และ `UPDATE` ในช่วงที่มีธุรกรรมหนาแน่น (เช่น การตัดสต็อกเนื้อวากิวพร้อมกันพันรายการ) ตอบสนองได้รวดเร็วอย่างสม่ำเสมอ โดยไม่เกิดอาการสะดุดค้างเป็นจังหวะ
+
+---
+
+## 7. ดูเพิ่มเติมที่
+
+- [MySQL 8.x Overview](/docs/database/mysql) — สถาปัตยกรรมและสารบัญเนื้อหา MySQL ฉบับเต็ม
+- [Query Optimization Techniques](/docs/database/mysql/query-optimization) — การอ่านแผนการประมวลผลและการจูนคิวรีช้า
+- [Replication & High Availability](/docs/database/mysql/replication-binlog) — การทำสำเนาข้อมูลข้ามระบบด้วย Binlog และ GTID
+- [Connection Pooling Architecture](/docs/database/connection-pooling) — การออกแบบและควบคุมจำนวน Connection สู่ฐานข้อมูล

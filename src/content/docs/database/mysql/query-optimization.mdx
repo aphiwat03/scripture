@@ -1,0 +1,298 @@
+---
+title: Query Optimization
+category: DATABASE
+parentTitle: MySQL 8.x
+version: MySQL 8.4 LTS / 8.0
+updatedAt: 2026-10-21
+---
+
+# Query Optimization
+
+การปรับแต่งประสิทธิภาพคิวรี (Query Optimization) ใน **MySQL 8.4 LTS / 8.0** คือทักษะขั้นสูงของ Database Engineer ในการแปลงคำสั่ง SQL ที่ใช้เวลาประมวลผลนานหลายวินาทีให้ตอบสนองกลับมาภายในไม่กี่มิลลิวินาที หัวใจสำคัญไม่ได้อยู่ที่การเดาหรือลองผิดลองถูก แต่อยู่ที่การทำความเข้าใจสถาปัตยกรรม **Cost-Based Optimizer (CBO)**, การวิเคราะห์แผนการทำงาน (Execution Plan) ด้วย `EXPLAIN`, `EXPLAIN FORMAT=TREE`, และเครื่องมือฉายรังสีเอ็กซเรย์ที่แม่นยำที่สุดอย่าง `EXPLAIN ANALYZE`
+
+<Callout type="tip" title="กฎเหล็กของ Query Optimization ใน MySQL">
+คิวรีที่เร็วที่สุดคือคิวรีที่ไม่ต้องอ่านข้อมูลจากดิสก์ และคิวรีที่ประหยัดที่สุดคือคิวรีที่ไม่ต้องกวาดอ่านข้อมูลแถวที่ไม่จำเป็นเข้ามาใน Buffer Pool เป้าหมายของเราคือการลด Logical I/O Reads และหลีกเลี่ยงการประมวลผลซ้ำซ้อนให้เหลือน้อยที่สุด
+</Callout>
+
+---
+
+## 1. แนวคิด (Concept)
+
+เมื่อแอปพลิเคชันส่งคำสั่ง SQL ไปยัง MySQL Server คำสั่งนั้นจะต้องผ่านหลายขั้นตอนก่อนจะได้ผลลัพธ์:
+1. **Parser & Preprocessor**: ตรวจสอบไวยากรณ์ (Syntax) และสิทธิ์การเข้าถึง พร้อมจับคู่ชื่อตารางและคอลัมน์กับ Data Dictionary
+2. **Cost-Based Optimizer (CBO)**: คำนวณทางเลือกในการประมวลผล (Access Paths) ทั้งหมด ประเมินต้นทุนการคำนวณ (Query Cost) จากสถิติของตารางและดัชนี แล้วเลือกแผนการทำงานที่ใช้ทรัพยากรน้อยที่สุด
+3. **Execution Engine**: นำแผนการทำงานที่ได้ไปประสานงานกับ Storage Engine (เช่น **InnoDB**) เพื่อดึงข้อมูลจากหน่วยความจำ (Buffer Pool) หรือดิสก์จริง
+
+```text filename="docs/database/mysql-query-pipeline.txt"
++-------------------------------------------------------------------------+
+|                  MySQL 8 Query Execution Pipeline                       |
++-------------------------------------------------------------------------+
+  SQL Query (e.g., SELECT ... FROM orders WHERE ...)
+       |
+       v
+  [ Parser & Preprocessor ] ----> Syntax & Semantic Verification
+       |
+       v
+  [ Cost-Based Optimizer (CBO) ]
+       |---> Table & Index Statistics (mysql.innodb_index_stats)
+       |---> Calculate Access Path Costs (Disk I/O + CPU Cost)
+       v
+  [ Chosen Execution Plan ]
+       |
+       +---> EXPLAIN (Tabular overview: type, key, rows, extra)
+       +---> EXPLAIN FORMAT=TREE (Hierarchical iterator structure)
+       +---> EXPLAIN ANALYZE (Executes query & returns actual ms + row counts)
+       |
+       v
+  [ Storage Engine: InnoDB ]
+       |---> Clustered Index B+Tree Walk
+       |---> Secondary Index -> Clustered Index PK Lookup
+       v
+  Client Result Set
+```
+
+ในระบบ **Smart Butcher Marketplace** ที่มีรายการสั่งซื้อเนื้อวากิวและเนื้อสเต็กระดับพรีเมียมหลายล้านแถว คิวรีที่มีปัญหาเพียงคำสั่งเดียวสามารถดูดกลืน CPU จนเต็ม 100% และทำให้ InnoDB Buffer Pool เกิดอาการ Cache Churn ซึ่งส่งผลกระทบต่อระบบงานทั้งหมด
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 วิวัฒนาการของเครื่องมือวิเคราะห์ Execution Plan
+
+MySQL 8 ได้ยกระดับการตรวจสอบประสิทธิภาพอย่างก้าวกระโดดผ่าน 3 รูปแบบคำสั่ง:
+
+| รูปแบบคำสั่ง | ลักษณะข้อมูลที่แสดง | เหมาะสำหรับงาน | ข้อจำกัด |
+| :--- | :--- | :--- | :--- |
+| **`EXPLAIN`** | ตารางสถิติแบบดั้งเดิม (`type`, `key`, `rows`, `Extra`) | สรุปภาพรวม Index ที่ใช้และการสแกน | ไม่บอกลำดับการรันจริงที่แน่นอน และไม่มีเวลา ms |
+| **`EXPLAIN FORMAT=TREE`** | แผนผังต้นไม้ของ Iterators (Iterator Engine) | ดูลำดับความสัมพันธ์ของ Join และ Filter | ยังคงเป็นตัวเลขประมาณการ (Estimation) |
+| **`EXPLAIN ANALYZE`** | รันคำสั่งจริง พร้อมวัดเวลาเริ่มต้น, เวลาสิ้นสุด, จำนวนแถวจริง และลูป | หาสาเหตุคอขวดที่แท้จริงระดับ Production | คำสั่งรันจริง (ระวังผลกระทบหากใช้กับ `UPDATE`/`DELETE`) |
+
+#### โครงสร้าง Iterator Engine ใน MySQL 8
+ตั้งแต่ MySQL 8.0.18 เป็นต้นมา MySQL ได้เขียนส่วน Execution Engine ใหม่เป็น **Volcano Iterator Model** โดยแต่ละโหนดในแผนงานจะส่งข้อมูลต่อกันผ่านอินเทอร์เฟซ `Init()`, `Read()`, `Close()` 
+
+ผลลัพธ์ของ `EXPLAIN ANALYZE` จะประกอบด้วยตัวเลขสำคัญ 4 ตัวในแต่ละ Node:
+- **`actual time=X..Y`**: $X$ คือเวลาเป็นมิลลิวินาที (ms) จนกระทั่งได้แถวแรก (Time to First Row) และ $Y$ คือเวลาจนกระทั่งประมวลผลแถวสุดท้ายของ Node นั้นเสร็จสิ้น
+- **`rows=N`**: จำนวนแถวที่ส่งคืนจริงจากการประมวลผล
+- **`loops=M`**: จำนวนรอบที่ Node นั้นถูกเรียกซ้ำ (เช่น ใน Nested Loop Join) เวลาจริงต่อ 1 loop จะเท่ากับค่าเฉลี่ย $Y / M$
+
+### 2.2 สัญญาณอันตรายใน Execution Plan (Execution Red Flags)
+
+เมื่อตรวจสอบคอลัมน์ `type` และ `Extra` ใน `EXPLAIN` หรือข้อความใน `TREE` ต้องระวัง 4 จุดตายต่อไปนี้:
+
+1. **`type: ALL` (Full Table Scan)**:
+   - เครื่องยนต์ต้องสแกนอ่านทุก Leaf Page ของ Clustered Index ตั้งแต่หน้าแรกจนถึงหน้าสุดท้าย
+   - ผลกระทบ: สิ้นเปลือง Disk I/O มหาศาล และทำให้หน้าเพจใน Buffer Pool ถูกเบียดตกแคช
+2. **`Extra: Using filesort`**:
+   - MySQL ไม่สามารถนำการจัดเรียงจาก B+Tree Index มาใช้ตอบสนองเงื่อนไข `ORDER BY` ได้ จึงต้องดึงข้อมูลเข้าไปจัดเรียงในหน่วยความจำ **Sort Buffer**
+   - หากข้อมูลมีขนาดเกินกว่า `sort_buffer_size` ระบบจะตัดแบ่งข้อมูลเขียนลงไฟล์ชั่วคราวบนดิสก์ (`spill to disk`) ทำให้ประสิทธิภาพลดลงอย่างรุนแรง
+3. **`Extra: Using temporary`**:
+   - MySQL ต้องสร้างตารางชั่วคราวในหน่วยความจำ (Internal Temporary Table โดยใช้ Storage Engine ชนิด TempTable หรือ Memory) เพื่อประมวลผลคำสั่ง `GROUP BY`, `DISTINCT`, หรือ Window Functions
+   - หากข้อมูลเกินขีดจำกัด `temptable_max_ram` จะถูกแปลงเป็นตาราง InnoDB บนดิสก์ทันที
+4. **`type: index` (Full Index Scan)**:
+   - ดีกว่า `ALL` เล็กน้อยเพราะสแกนบน Secondary Index ซึ่งมีขนาดเล็กกว่าตารางจริง แต่ยังคงเป็นการกวาดอ่านข้อมูลทั้ง B+Tree Index โดยไม่มีการกระโดดข้าม (No Seek)
+
+### 2.3 ปัญหา Deep Pagination (`LIMIT offset, count`)
+
+หนึ่งในปัญหาคลาสสิกที่ทำให้เซิร์ฟเวอร์ฐานข้อมูลล่มบ่อยที่สุดคือการทำ Pagination แบบดั้งเดิม:
+```sql
+SELECT * FROM orders ORDER BY id ASC LIMIT 1000000, 20;
+```
+- **กลไกภายใน:** MySQL ไม่สามารถกระโดดข้าม 1,000,000 แถวแรกได้ เครื่องยนต์จะต้องอ่านและดึงข้อมูลเต็มแถว (รวมถึงคอลัมน์ขนาดใหญ่) จำนวน 1,000,020 แถวขึ้นมาในหน่วยความจำ จากนั้นจึงคัดทิ้ง 1,000,000 แถวแรก และส่งกลับเฉพาะ 20 แถวสุดท้าย
+- **แนวทางแก้ไขระดับ Production:**
+  - **Deferred Join (Late Row Lookups):** ใช้ Covering Index ดึงเฉพาะ Primary Key ขึ้นมาก่อน แล้วค่อย JOIN ตารางเดิมเพื่อดึงคอลัมน์ที่เหลือ
+  - **Keyset Cursor Pagination (Seek Method):** จำตำแหน่งของเรกคอร์ดสุดท้าย (`last_seen_id`) แล้วสืบค้นด้วยเงื่อนไข `WHERE id > last_seen_id LIMIT 20` ซึ่งเป็นการทำ B+Tree Index Seek $O(\log N)$ อย่างแท้จริง
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ระบบ **Smart Butcher Marketplace** จำเป็นต้องรองรับคำสั่งซื้อเนื้อพรีเมียม (วากิว A5, ดรายเอจโทมาฮอว์ก) และการรายงานยอดขายของร้านค้าพันธมิตร
+
+### ตัวอย่างที่ 1: การตรวจจับ `Using filesort` และจูนด้วย Composite Index ตามหลัก ESR
+
+ต้องการดึงรายการคำสั่งซื้อของลูกค้าเฉพาะราย ที่มียอดชำระเงินมากกว่า 5,000 บาท เรียงจากคำสั่งซื้อล่าสุด 10 รายการ
+
+```sql filename="01_create_schema_and_bad_query.sql"
+-- 1. โครงสร้างตาราง orders
+CREATE TABLE orders (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT UNSIGNED NOT NULL,
+    total_amount DECIMAL(12, 2) NOT NULL,
+    status VARCHAR(30) NOT NULL,
+    created_at DATETIME NOT NULL,
+    notes TEXT,
+    INDEX idx_user_id (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- 2. คำสั่งค้นหาที่ทำงานช้าเมื่อตารางมีข้อมูล 5,000,000 แถว
+EXPLAIN FORMAT=TREE
+SELECT id, user_id, total_amount, created_at
+FROM orders
+WHERE user_id = 4502
+  AND total_amount >= 5000.00
+ORDER BY created_at DESC
+LIMIT 10;
+```
+
+#### ผลลัพธ์จาก `EXPLAIN FORMAT=TREE` (ก่อนจูน):
+```text filename="docs/database/explain-tree-bad.txt"
+-> Limit: 10 row(s)  (cost=1840.45 rows=10)
+    -> Sort: orders.created_at DESC, limit input to 10 row(s)  (cost=1840.45 rows=1820)
+        -> Filter: ((orders.total_amount >= 5000.00) and (orders.user_id = 4502))  (cost=1840.45 rows=1820)
+            -> Index lookup on orders using idx_user_id (user_id=4502)  (cost=1840.45 rows=3640)
+```
+
+<Callout type="warning" title="วิเคราะห์ปัญหาในแผนงาน">
+จากแผนงานด้านบน พบ Node `Sort: orders.created_at DESC` ซึ่งทำให้เกิด **Using filesort** ในหน่วยความจำ เนื่องจาก Index เดิม `idx_user_id` รองรับเฉพาะเงื่อนไขความเท่ากัน (`user_id = 4502`) แต่ไม่ได้เรียงลำดับเวลา `created_at` ไว้ใน B+Tree Leaf Node
+</Callout>
+
+#### วิธีแก้: สร้าง Composite Index ตามกฎ ESR (Equality -> Sort -> Range)
+- **Equality:** `user_id`
+- **Sort:** `created_at DESC`
+- **Range:** `total_amount`
+
+```sql filename="02_optimize_with_composite_index.sql"
+-- สร้าง Index ที่ครอบคลุมเงื่อนไขและการเรียงลำดับ
+CREATE INDEX idx_orders_user_created_amount 
+ON orders (user_id, created_at DESC, total_amount);
+
+-- รันวิเคราะห์คำสั่งเดิมด้วย EXPLAIN ANALYZE
+EXPLAIN ANALYZE
+SELECT id, user_id, total_amount, created_at
+FROM orders
+WHERE user_id = 4502
+  AND total_amount >= 5000.00
+ORDER BY created_at DESC
+LIMIT 10;
+```
+
+#### ผลลัพธ์จาก `EXPLAIN ANALYZE` (หลังจูน):
+```text filename="docs/database/explain-analyze-good.txt"
+-> Limit: 10 row(s)  (actual time=0.042..0.058 rows=10 loops=1)
+    -> Filter: (orders.total_amount >= 5000.00)  (actual time=0.041..0.056 rows=10 loops=1)
+        -> Index lookup on orders using idx_orders_user_created_amount (user_id=4502)  (actual time=0.038..0.052 rows=14 loops=1)
+```
+- **เวลาลดลงเหลือ:** 0.058 ms (จากเดิมที่ต้องใช้ filesort ร่วมกับ Table Lookup นานกว่า 24.3 ms)
+- **Filesort หายไป 100%:** ข้อมูลถูกอ่านเรียงตาม `created_at DESC` จาก B+Tree Index โดยตรง และหยุดอ่านทันทีเมื่อครบ 10 แถว (`Limit: 10`)
+
+---
+
+### ตัวอย่างที่ 2: การแก้ปัญหา Deep Pagination ในหน้าประวัติการสั่งตัดเนื้อ (`meat_cuts`)
+
+ในระบบแผงเนื้อ ลูกค้าต้องการเปิดดูประวัติรายการสั่งตัดเนื้อย้อนหลังที่หน้า 5,000 (Offset 100,000)
+
+```sql filename="03_deep_pagination_comparison.sql"
+-- 1. แบบดั้งเดิม (Anti-pattern): สแกนอ่าน 100,020 แถว แล้วโยนทิ้ง 100,000 แถว
+EXPLAIN ANALYZE
+SELECT id, product_id, cut_type, thickness_cm, aging_days, price, customer_notes
+FROM meat_cuts
+ORDER BY id ASC
+LIMIT 100000, 20;
+-- Actual time=118.420..142.650 ms, rows=20, loops=1 (อ่านดิสก์มหาศาล)
+
+-- 2. ทางออกที่ 1: Deferred Join (Late Row Lookups)
+-- สแกนเฉพาะ Primary Key ผ่าน Index ก่อน แล้วค่อย JOIN ดึงคอลัมน์ใหญ่เฉพาะ 20 แถว
+EXPLAIN ANALYZE
+SELECT m.id, m.product_id, m.cut_type, m.thickness_cm, m.aging_days, m.price, m.customer_notes
+FROM meat_cuts m
+INNER JOIN (
+    SELECT id
+    FROM meat_cuts
+    ORDER BY id ASC
+    LIMIT 100000, 20
+) AS sub ON m.id = sub.id;
+-- Actual time=14.120..15.080 ms (เร็วกว่าเดิมเกือบ 10 เท่า เพราะ Subquery ทำ Index-Only Scan)
+
+-- 3. ทางออกที่ 2: Keyset Cursor Pagination (ดีที่สุด - O(1) Seek)
+-- แอปพลิเคชันส่ง ID ล่าสุดของหน้าที่แล้วมา (เช่น last_seen_id = 145920)
+EXPLAIN ANALYZE
+SELECT id, product_id, cut_type, thickness_cm, aging_days, price, customer_notes
+FROM meat_cuts
+WHERE id > 145920
+ORDER BY id ASC
+LIMIT 20;
+-- Actual time=0.031..0.045 ms (เร็วคงที่ไม่ว่าจะอยู่หน้าไหนของฐานข้อมูล)
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+### 4.1 การนำฟังก์ชันไปครอบคอลัมน์ในเงื่อนไข `WHERE` (Non-SARGable Query)
+- **Anti-pattern:**  
+  ```sql filename="04_non_sargable.sql"
+  -- MySQL ไม่สามารถใช้ Index บน created_at ได้ เพราะฟังก์ชัน DATE() เปลี่ยนค่าที่ส่งเข้าค้นหา
+  SELECT id, total_amount FROM orders WHERE DATE(created_at) = '2026-10-21';
+  ```
+- **Best Practice:**  
+  ```sql filename="05_sargable_range.sql"
+  -- เขียนเป็นเงื่อนไขช่วงเวลา (SARGable) ทำให้ B+Tree Index Scan ทำงานได้เต็มประสิทธิภาพ
+  SELECT id, total_amount FROM orders 
+  WHERE created_at >= '2026-10-21 00:00:00' 
+    AND created_at < '2026-10-22 00:00:00';
+  ```
+
+### 4.2 การสับสนระหว่าง `rows` ใน EXPLAIN กับแถวที่ดึงจริง
+- **Anti-pattern:**  
+  ประเมินความเร็วคิวรีจากค่า `rows` ใน `EXPLAIN` แบบเดิม ซึ่งเป็นเพียงสถิติประมาณการ (Estimation) ที่คำนวณจาก HyperLogLog หรือ Random Page Dives ใน `mysql.innodb_table_stats`
+- **Best Practice:**  
+  ใช้ `EXPLAIN ANALYZE` บนสภาพแวดล้อม Staging ที่มีข้อมูลเสมือนจริง เพื่อดูค่า `actual time` และ `actual rows` ที่เกิดขึ้นจริงในหน่วยความจำ
+
+### 4.3 ลืมคำนวณ Hidden Cost ของ `Using filesort` ร่วมกับ `LIMIT`
+- เมื่อมี `ORDER BY` โดยไม่มี Index แม้จะมี `LIMIT 10` MySQL ต้องอ่านแถวทั้งหมดที่ตรงกับ `WHERE` เข้ามาใน Sort Buffer ก่อนทำการเรียงลำดับ Top-N หากตารางมีข้อมูลนับล้านแถว คิวรีจะค้างและใช้ CPU เต็มพิกัด
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+| เทคนิคการปรับปรุง | เมื่อไหร่ควรใช้ | เมื่อไหร่ไม่ควรใช้ |
+| :--- | :--- | :--- |
+| **`EXPLAIN ANALYZE`** | ตรวจสอบ Slow Query ที่วิเคราะห์ยาก, ดู Actual Time และ Memory ของ Hash Join | **ห้ามใช้บนคำสั่ง `UPDATE` / `DELETE` บน Production** โดยไม่ระวัง เพราะคำสั่งจะถูกดำเนินการจริงและเกิด Lock ข้อมูล! |
+| **Deferred Join** | หน้าจอที่จำเป็นต้องกระโดดไปยังหน้าใดก็ได้ (Random Page Jump) เช่น ระบบ Back-office ของ Admin | ไม่จำเป็นต้องใช้เมื่อตารางมีจำนวนแถวน้อยกว่าหลักหมื่นแถว หรือดึงข้อมูลแบบ Infinite Scroll |
+| **Keyset Pagination** | ฟีดสินค้า, แค็ตตาล็อกเนื้อวากิว, Mobile API, Infinite Scroll ที่ผู้ใช้เลื่อนหน้าลงต่อเนื่อง | เมื่อผู้ใช้ต้องการระบุ "ไปที่หน้า 450" ทันที โดยไม่ทราบ Cursor ของหน้าก่อนหน้า |
+| **Composite Index (ESR)** | คิวรีที่มีเงื่อนไขทั้ง Equality (`=`), Range (`>`, `<`), และต้องการผลลัพธ์แบบเรียงลำดับ | คอลัมน์ที่มี Cardinality ต่ำมาก (เช่น ค่าบูลีน `is_active` หรือ `gender`) เว้นแต่นำไปผสมในลำดับที่เหมาะสม |
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### ข้อ 1: ในผลลัพธ์ของ `EXPLAIN ANALYZE` ตัวเลข `actual time=0.125..24.530 rows=500 loops=3` หมายความว่าอย่างไร และจะวิเคราะห์ได้อย่างไรว่าคิวรีติดปัญหาที่ CPU หรือ I/O?
+**แนวทางการตอบระดับ Senior Database Engineer:**
+1. **การแปลความหมายของตัวเลข:**
+   - `0.125`: เวลาเฉลี่ยเป็นมิลลิวินาที (ms) ในการประมวลผลจนกระทั่ง Node นี้ส่งแถวแรกออกมา (Time to First Row)
+   - `24.530`: เวลาเฉลี่ยในการประมวลผลจนจบการส่งแถวสุดท้ายของแต่ละ Loop
+   - `rows=500`: จำนวนแถวเฉลี่ยที่ส่งออกมาในแต่ละ Loop
+   - `loops=3`: Node นี้ถูกเรียกทำงานซ้ำ 3 ครั้ง (มักเกิดในด้าน Inner Table ของ Nested Loop Join)
+   - **เวลารวมทั้งหมดของ Node นี้** จะเท่ากับ $24.530 \times 3 = 73.59\text{ ms}$ และจำนวนแถวรวมที่ส่งออกมาคือ $500 \times 3 = 1,500\text{ แถว}$
+2. **การแยกแยะระหว่างปัญหา CPU vs I/O:**
+   - หากความต่างระหว่าง Time to First Row (`0.125 ms`) กับ Total Time (`24.530 ms`) สูงมาก แสดงว่าเวลาส่วนใหญ่หมดไปกับการวนลูปประมวลผลในหน่วยความจำ (CPU-bound เช่น การประมวลผลนิพจน์ซับซ้อน หรือ Hash Join)
+   - หาก Time to First Row สูงมาก (เช่น `actual time=85.120..85.200 ms`) แสดงว่าระบบติดคอขวดที่การรออ่านบล็อกข้อมูลชุดแรกจากดิสก์ (I/O-bound เช่น Buffer Pool Miss หรือ Disk Seeks ใน Clustered Index)
+
+---
+
+### ข้อ 2: ทำไมคำสั่ง `SELECT * FROM orders ORDER BY created_at DESC LIMIT 20;` ถึงเกิด `Using filesort` ทั้งที่มี Index บนคอลัมน์ `created_at` แล้ว และจะแก้ปัญหานี้อย่างไร?
+**แนวทางการตอบระดับ Senior Database Engineer:**
+1. **สาเหตุเบื้องหลังของ Cost-Based Optimizer:**
+   - ดัชนีบน `created_at` เป็น **Secondary Index** ซึ่งภายใน B+Tree Leaf Node จะเก็บเฉพาะค่า `(created_at, id)` ไม่ได้เก็บคอลัมน์อื่นๆ ที่อยู่ใน `SELECT *`
+   - เมื่อเราสั่ง `SELECT *` หาก Optimizer เลือกใช้ Index บน `created_at` มันจะต้องหยิบ `id` แต่ละแถววิ่งกลับไปค้นหาข้อมูลทั้งแถวใน Clustered Index เรียกว่า **Random Bookmark Lookup (Row Fetch)**
+   - หาก Optimizer ประเมินว่าต้นทุน (I/O Cost) ของการวิ่งไป-กลับ Clustered Index หลายครั้งสูงกว่า มันจะตัดสินใจทำ **Full Table Scan บน Clustered Index** โดยตรง แล้วส่งข้อมูลทั้งหมดไปจัดเรียงใหม่ใน Sort Buffer ส่งผลให้เกิด `Using filesort` แทน!
+2. **แนวทางแก้ไข:**
+   - **แนวทางที่ 1 (Covering Index):** หากดึงเฉพาะคอลัมน์ที่จำเป็น ให้สร้าง Composite Index ที่ครอบคลุมคอลัมน์เหล่านั้น เพื่อให้เกิด **Index-Only Scan** โดยไม่ต้องทำ Bookmark Lookup
+   - **แนวทางที่ 2 (Force Index):** หากมั่นใจว่าการอ่านผ่าน Index คุ้มค่ากว่า สามารถใช้ Optimizer Hint `/*+ INDEX(orders created_at) */` แต่ไม่แนะนำเป็นแนวทางหลัก
+   - **แนวทางที่ 3 (Deferred Join):** ดึงเฉพาะ `id` ด้วย Index ก่อน แล้วค่อย JOIN กลับมาหาตารางเดิม:
+     ```sql filename="06_deferred_join_fix.sql"
+     SELECT o.* 
+     FROM orders o
+     JOIN (
+         SELECT id FROM orders ORDER BY created_at DESC LIMIT 20
+     ) sub ON o.id = sub.id;
+     ```
+
+---
+
+## 7. ดูเพิ่มเติมที่
+
+- [MySQL 8.x Overview](/docs/database/mysql) — ภาพรวมสถาปัตยกรรมและการทำงานของระบบจัดการฐานข้อมูล MySQL
+- [Query Performance Analysis](/docs/database/query-performance) — การวัดค่า latency, execution cost และการจูนคิวรีระดับระบบ
+- [Database Indexing Mechanics](/docs/database/indexing) — โครงสร้าง B-Tree, Composite Index และการหลีกเลี่ยง Index Bloat
+- [Concurrency & Locking](/docs/database/concurrency) — กลไกการล็อกระดับแถว และการป้องกัน Lock Contention

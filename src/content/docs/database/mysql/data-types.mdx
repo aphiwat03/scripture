@@ -1,0 +1,361 @@
+---
+title: Data Types
+category: DATABASE
+parentTitle: MySQL 8.x
+version: MySQL 8.4 LTS / 8.0
+updatedAt: 2026-10-21
+---
+
+# Data Types
+
+การเลือกชนิดข้อมูล (Data Types) ใน MySQL ไม่ใช่เพียงแค่การกำหนดประเภทตัวแปรให้ตรงกับโค้ดแอปพลิเคชัน แต่เป็นการตัดสินใจระดับ **ฮาร์ดแวร์และหน่วยความจำ** ที่ส่งผลโดยตรงต่อขนาดของ InnoDB Buffer Pool, การทำ B+Tree Index Leaf Page Splitting, ค่าใช้จ่าย IO บนดิสก์ และความถูกต้องทางบัญชีระดับทศนิยม
+
+<Callout type="tip" title="กฎเหล็กของ Senior Database Engineer ในการเลือกชนิดข้อมูล">
+จงเลือกชนิดข้อมูลที่ **เล็กที่สุดที่ปลอดภัย** (Smallest Safe Type) และ **มีความหมายเฉพาะเจาะจงที่สุด** (Most Specific Type) เสมอ เพราะใน InnoDB ทุกข้อมูลที่กว้างเกินจำเป็น จะกินพื้นที่ในแคช Buffer Pool 16 KB ส่งผลให้อัตรา Cache Miss สูงขึ้น และทำให้ Database ทำงานช้าลงทั้งระบบ
+</Callout>
+
+---
+
+## 1. แนวคิด (Concept)
+
+ในระบบ **Smart Butcher Marketplace** เราต้องจัดการข้อมูลหลากหลายมิติ ตั้งแต่น้ำหนักเนื้อวากิวระดับกรัม, ราคาต่อกิโลกรัม, ประวัติการดรายเอจ, วันหมดอายุ, ข้อมูลโภชนาการแบบไดนามิก ไปจนถึงสถานะสต็อก
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        Smart Butcher Data Modeling                     │
+├───────────────────┬───────────────────┬────────────────────────────────┤
+│ ชนิดข้อมูลใน MySQL  │ ตัวอย่างในโดเมนร้านเนื้อ │ ผลกระทบทางสถาปัตยกรรม          │
+├───────────────────┼───────────────────┼────────────────────────────────┤
+│ TINYINT(1)        │ is_halal, is_dry_aged│ เก็บ 1 ไบต์ (ไม่มี Native BOOL)    │
+│ INT UNSIGNED      │ stock_pieces, views  │ 0 ถึง 4.2 พันล้าน (ไม่เสียบิตติดลบ)│
+│ DECIMAL(10, 2)    │ price_per_kg, total  │ ตัวเลขฐานสิบแม่นยำ ไม่ปัดเศษเพี้ยน │
+│ VARCHAR(100)      │ cut_name, sku        │ ผันแปรตามความยาวจริง ไม่บวม        │
+│ TEXT              │ cooking_guide_html   │ ข้อมูลยาว เก็บใน Overflow Pages   │
+│ DATETIME(6)       │ slaughter_date, aged │ เก็บตรงๆ ไม่พังปี 2038              │
+│ JSON              │ wagyu_specifications │ เก็บ Binary Document ทำ Index ได้ │
+└───────────────────┴───────────────────┴────────────────────────────────┘
+```
+
+การเข้าใจโครงสร้างภายในของ Data Types แต่ละตัว จะช่วยป้องกันปัญหาคลาสสิก เช่น เงินหายจาก Floating Point, บั๊กเวลาเพี้ยนจาก Timezone, และระบบล่มจาก Year 2038 Overflow
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 TINYINT(1) สำหรับ Boolean
+MySQL **ไม่มีชนิดข้อมูล `BOOLEAN` แท้จริงในระดับ Engine**:
+- คำว่า `BOOL` หรือ `BOOLEAN` ใน MySQL เป็นเพียงไวยากรณ์ย่อ (Alias) ของ **`TINYINT(1)`** ซึ่งใช้พื้นที่จัดเก็บ 1 ไบต์ (-128 ถึง 127 หรือ 0 ถึง 255)
+- ตัวเลข `(1)` ด้านหลังไม่ได้หมายถึงขนาดข้อมูล 1 บิต แต่เป็นเพียง **Display Width Hint** สำหรับ Client เก่า (ซึ่งถูก Deprecated ไปแล้วใน MySQL 8.0.17+ สำหรับประเภท Integer อื่นๆ แต่ยังคงเก็บไว้สำหรับ `TINYINT(1)` เพื่อให้ไดรเวอร์อย่าง JDBC, Prisma หรือ TypeORM รู้ว่าควรแมปคอลัมน์นี้เป็น `boolean` ในภาษาโค้ด)
+- ในทางตรรกะของ MySQL ค่า `0` จะถูกประเมินเป็น `FALSE` และค่าตัวเลขที่ไม่ใช่ศูนย์ทั้งหมด (`1`, `2`, `-5`) จะถูกประเมินเป็น `TRUE`
+- หากไม่ใส่เงื่อนไข `CHECK (is_active IN (0, 1))` ข้อมูลในช่อง Boolean อาจมีเลข `99` หลุดเข้าไปได้
+
+---
+
+### 2.2 INT vs INT UNSIGNED
+ชนิดข้อมูลตระกูล Integer ใน MySQL มีขนาดหน่วยความจำคงที่:
+
+| ชนิดข้อมูล (Data Type) | ขนาด (Bytes) | ช่วงข้อมูล Signed (ค่าเริ่มต้น) | ช่วงข้อมูล UNSIGNED |
+| :--- | :---: | :--- | :--- |
+| **`TINYINT`** | 1 | -128 ถึง 127 | 0 ถึง 255 |
+| **`SMALLINT`** | 2 | -32,768 ถึง 32,767 | 0 ถึง 65,535 |
+| **`MEDIUMINT`** | 3 | -8,388,608 ถึง 8,388,607 | 0 ถึง 16,777,215 |
+| **`INT`** | 4 | -2,147,483,648 ถึง 2,147,483,647 (~2.1 พันล้าน) | **0 ถึง 4,294,967,295 (~4.2 พันล้าน)** |
+| **`BIGINT`** | 8 | -9.22 × 10¹⁸ ถึง 9.22 × 10¹⁸ | 0 ถึง 1.84 × 10¹⁹ |
+
+**ทำไม Primary Key และปริมาณสต็อกควรใช้ `UNSIGNED`?**
+- รหัส ID และปริมาณสินค้าไม่มีทางติดลบ การเติมคีย์เวิร์ด `UNSIGNED` ช่วยขยายความจุของ `INT` จาก 2.1 พันล้านเป็น **4.29 พันล้านแถว** โดยไม่เสียพื้นที่ฮาร์ดดิสก์และแคช Buffer Pool เพิ่มแม้แต่ไบต์เดียว
+- **กับดักที่ต้องระวัง (Unsigned Subtraction Overflow):** หากนำค่า Unsigned สองตัวมาลบกันแล้วผลลัพธ์ติดลบ (เช่น `stock_qty - requested_qty` โดยที่สต็อกน้อยกว่า) MySQL จะเกิดข้อผิดพลาด:
+  `ERROR 1690 (22003): BIGINT UNSIGNED value is out of range` ยกเว้นจะเปิดโหมด `NO_UNSIGNED_SUBTRACTION`
+
+---
+
+### 2.3 DECIMAL(M, D) สำหรับเงินและน้ำหนักทองคำ/เนื้อพรีเมียม
+ห้ามใช้ `FLOAT` หรือ `DOUBLE` ในการเก็บเงินเด็ดขาด!
+- `FLOAT` (4 ไบต์) และ `DOUBLE` (8 ไบต์) ใช้การจัดเก็บตามมาตรฐาน **IEEE 754 Floating-Point** ซึ่งเป็นการประมาณค่าทางคณิตศาสตร์แบบฐาน 2 ทำให้ไม่สามารถแทนค่าทศนิยมฐานสิบบางค่าได้ตรงเป๊ะ (เช่น `0.1 + 0.2` จะกลายเป็น `0.30000000000000004`)
+- **`DECIMAL(M, D)` (หรือ `NUMERIC`):** คือ Exact Fixed-Point Type
+  - `M` (Precision): จำนวนตัวเลขทั้งหมด (สูงสุด 65 หลัก)
+  - `D` (Scale): จำนวนตำแหน่งทศนิยมหลังจุด (สูงสุด 30 หลัก)
+  - **การจัดเก็บภายใน:** MySQL บีบอัดตัวเลขทุกๆ 9 หลักให้มีขนาด **4 ไบต์** ส่วนตัวเลขที่เหลือจะใช้พื้นที่ตามจำนวนจริง (เช่น 1-2 หลัก = 1 ไบต์, 3-4 หลัก = 2 ไบต์)
+  - ตัวอย่าง: `DECIMAL(10, 2)` มีเลขหน้าจุด 8 หลัก (4 ไบต์) + เลขหลังจุด 2 หลัก (1 ไบต์) = รวมกินพื้นที่ **5 ไบต์** ต่อแถว คำนวณถูกต้องแม่นยำ 100%
+
+---
+
+### 2.4 VARCHAR(M) character vs byte และขีดจำกัด 65,535 ไบต์
+- ตั้งแต่ MySQL 5.0 เป็นต้นมา ค่า `M` ใน `VARCHAR(M)` หมายถึง **จำนวนตัวอักษร (Characters)** ไม่ใช่จำนวนไบต์!
+- หากกำหนด `VARCHAR(50) CHARACTER SET utf8mb4`:
+  - เก็บรหัสภาษาอังกฤษ 1 ตัว = 1 ไบต์
+  - เก็บตัวอักษรภาษาไทย 1 ตัว = 3 ไบต์
+  - เก็บอิโมจิเนื้อ 🥩 หรือมีด 🔪 1 ตัว = 4 ไบต์
+  - แต่ละแถวจะใช้พื้นที่จริงตามความยาวของข้อมูลที่ใส่เข้ามา บวกด้วย **Length Prefix 1 หรือ 2 ไบต์** (หาก $M \le 255$ ใช้ Prefix 1 ไบต์, หาก $M > 255$ ใช้ Prefix 2 ไบต์)
+- **ขีดจำกัดขนาดแถวของตาราง (Max Row Size 65,535 Bytes):**
+  ใน MySQL ผลรวมความกว้างของคอลัมน์ทั้งหมดในหนึ่งแถว (ไม่รวม BLOB/TEXT ที่หลุดไป Off-page) จะต้องไม่เกิน 65,535 ไบต์ หากคุณใช้ `utf8mb4` ซึ่งใช้สูงสุด 4 ไบต์ต่อตัวอักษร คุณจะไม่สามารถสร้างตารางที่มี `VARCHAR(20000)` ได้ เพราะ $20000 \times 4 = 80,000$ ไบต์ ซึ่งเกินขีดจำกัดของระบบ
+
+---
+
+### 2.5 TEXT vs VARCHAR: Off-page Storage และ Temporary Tables
+- `VARCHAR` จะถูกจัดเก็บอยู่ภายใน **B+Tree Leaf Node (In-page)** ตราบเท่าที่ขนาดทั้งแถวไม่เกินขีดจำกัดประมาณ 8,126 ไบต์ (ครึ่งหนึ่งของ Page 16 KB) ทำให้การอ่านข้อมูลไม่ต้องกระโดดข้าม Disk Block
+- `TEXT` / `BLOB` เป็นคอลัมน์ชนิด LOB (Large Object):
+  - ภายใน B+Tree Page ของ InnoDB จะเก็บเพียง **Pointer ขนาด 20 ไบต์** ที่ชี้ไปยัง **Off-page Overflow Pages**
+  - การอ่าน `SELECT *` ที่มีคอลัมน์ `TEXT` จะทำให้เครื่องยนต์ต้องเสีย IOPS พิเศษในการตามไปหยิบหน้านอก B+Tree
+  - **ผลกระทบต่อ Temp Table:** ใน MySQL ยุคก่อน เมื่อ Query มีการใช้ `GROUP BY` หรือ `ORDER BY` ที่ต้องสร้าง Internal Temporary Table ตารางชั่วคราวใน RAM จะไม่รองรับคอลัมน์ `TEXT` ส่งผลให้ต้องแปลงเป็น Disk-based Temporary Table ทันที แม้ใน MySQL 8.0 จะมี **TempTable Storage Engine** มาช่วย แต่การใช้ `TEXT` พร่ำเพรื่อยังคงผลาญ RAM มหาศาลเมื่อเทียบกับ `VARCHAR` ที่ระบุความยาวชัดเจน
+
+---
+
+### 2.6 DATETIME vs TIMESTAMP และหายนะ Year 2038 Problem
+
+| ประเด็นเปรียบเทียบ | `DATETIME` (แนะนำสำหรับ Production) | `TIMESTAMP` |
+| :--- | :--- | :--- |
+| **ขนาดการจัดเก็บ** | 5 ไบต์ (ใน MySQL 5.6+ รวมทศนิยมวินาที) | 4 ไบต์ |
+| **ช่วงเวลาที่รองรับ** | **'1000-01-01 00:00:00' ถึง '9999-12-31 23:59:59'** | **'1970-01-01 00:00:01' UTC ถึง '2038-01-19 03:14:07' UTC** |
+| **การแปลง Timezone** | **ไม่แปลง** (ป้อนค่าอะไร เก็บค่านั้นอย่างถาวร) | **แปลงอัตโนมัติ** (แปลงจากเวลาเซสชันเป็น UTC เมื่อเซฟ และแปลงกลับเป็นเวลาเซสชันเมื่ออ่าน) |
+| **ปัญหา Year 2038** | **ปลอดภัย 100%** | **เกิดสภาวะ 32-bit Integer Overflow พังทันที** |
+
+```
+TIMESTAMP (32-bit signed int นับวินาทีจาก Unix Epoch 1970):
+1970 ──────────────────────── 2026 ─────────── 2038-01-19 03:14:07 UTC 💥 OVERFLOW!
+                                                  (ค่าจะตีกลับเป็นติดลบปี 1901)
+
+DATETIME (จัดเก็บแบบ Packed Integer 5 ไบต์):
+1000 ──────────────────────────────────────────────────────────────── 9999 ✅ ปลอดภัย
+```
+
+---
+
+### 2.7 ชนิดข้อมูล JSON
+MySQL 5.7+ และ 8.x รองรับ Native JSON Data Type ที่จัดเก็บแบบ **Binary JSON Format** (โครงสร้างคล้าย BSON):
+- ไม่ได้เก็บเป็นข้อความ String ดิบ แต่แปลงเป็น Binary Tree ทำให้สามารถเข้าถึง Key ด้านในได้ในเวลาเฉลี่ย $O(1)$ หรือ $O(\log N)$ โดยไม่ต้อง Parse ข้อความใหม่ทั้งเอกสาร
+- รองรับ Operator:
+  - `->` : `JSON_EXTRACT` (คืนค่าเป็น JSON Data พร้อมเครื่องหมายคำพูด)
+  - `->>` : Inline Unquote `JSON_UNQUOTE(JSON_EXTRACT)` (คืนค่าเป็น Plain Text พร้อมใช้งาน)
+- สามารถสร้าง **Generated Columns** ดึงฟิลด์ใน JSON ออกมาทำ B-Tree Index ได้อย่างรวดเร็ว
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การออกแบบ Schema ร้านเนื้อพรีเมียมด้วย Data Types ระดับ Production
+
+```sql filename="01_butcher_production_datatypes.sql"
+-- สร้างฐานข้อมูลตัวอย่าง
+CREATE DATABASE IF NOT EXISTS smart_butcher_db
+    CHARACTER SET utf8mb4
+    COLLATE utf8mb4_0900_ai_ci;
+
+USE smart_butcher_db;
+
+-- 1. ตาราง categories
+CREATE TABLE categories (
+    category_id SMALLINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(80) NOT NULL,
+    slug VARCHAR(80) NOT NULL UNIQUE,
+    is_active TINYINT(1) NOT NULL DEFAULT 1,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_category_active CHECK (is_active IN (0, 1))
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
+
+-- 2. ตาราง products (สินค้าเนื้อเกรดพรีเมียม)
+CREATE TABLE products (
+    product_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    category_id SMALLINT UNSIGNED NOT NULL,
+    sku VARCHAR(32) NOT NULL UNIQUE,
+    name VARCHAR(150) NOT NULL,
+    
+    -- ราคาต่อกิโลกรัม: รองรับได้ถึง 99,999,999.99 บาท ไม่มีปัญหาเรื่องปัดเศษ
+    price_per_kg DECIMAL(10, 2) NOT NULL,
+    
+    -- สต็อกเป็นจำนวนชิ้น และน้ำหนักสต็อกรวมเป็นกิโลกรัม
+    stock_pieces INT UNSIGNED NOT NULL DEFAULT 0,
+    stock_weight_kg DECIMAL(8, 3) NOT NULL DEFAULT 0.000,
+    
+    -- จำนวนวันทำ Dry-aged (0-365 วัน ใช้ TINYINT UNSIGNED พอดีและประหยัด)
+    dry_aged_days SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+    
+    -- สเปกเฉพาะของเนื้อ เช่น สายพันธุ์, Marble Score, แคว้นต้นกำเนิด เก็บเป็น JSON
+    attributes JSON NOT NULL,
+    
+    -- คำอธิบายสินค้าขนาดยาว เก็บใน TEXT
+    description TEXT NULL,
+    
+    -- วันที่นำเข้าและเชือด (ใช้ DATETIME ป้องกันบั๊ก Year 2038)
+    slaughter_date DATE NOT NULL,
+    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    
+    CONSTRAINT fk_products_category FOREIGN KEY (category_id)
+        REFERENCES categories(category_id) ON DELETE RESTRICT,
+    CONSTRAINT chk_positive_price CHECK (price_per_kg > 0),
+    CONSTRAINT chk_valid_aging CHECK (dry_aged_days <= 365)
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
+
+-- 3. ตาราง orders (คำสั่งซื้อ)
+CREATE TABLE orders (
+    order_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    order_no VARCHAR(36) NOT NULL UNIQUE,
+    user_id INT UNSIGNED NOT NULL,
+    
+    -- สถานะออเดอร์: ใช้ TINYINT แมป Enum หรือ VARCHAR สั้น
+    status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+    
+    -- ยอดรวมเงินต้องใช้ DECIMAL เพื่อความถูกต้องระดับสตางค์
+    subtotal_amount DECIMAL(12, 2) NOT NULL,
+    vat_amount DECIMAL(10, 2) NOT NULL,
+    grand_total DECIMAL(12, 2) NOT NULL,
+    
+    -- บันทึกเวลาที่ลูกค้าชำระเงิน
+    paid_at DATETIME NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    CONSTRAINT chk_totals CHECK (grand_total >= 0)
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
+```
+
+---
+
+### ตัวอย่างที่ 2: การสืบค้น JSON Path, การแก้ปัญหา Unsigned Subtraction และการทำ Index บนฟิลด์ JSON
+
+```sql filename="02_json_and_advanced_types.sql"
+-- เพิ่มข้อมูลตัวอย่างเนื้อวากิวญี่ปุ่นระดับพรีเมียม
+INSERT INTO products (
+    category_id, sku, name, price_per_kg, stock_pieces, stock_weight_kg, 
+    dry_aged_days, attributes, description, slaughter_date
+) VALUES (
+    1, 
+    'WAGYU-MIYA-A5-RIB', 
+    'Miyazaki Wagyu A5 Ribeye', 
+    4500.00, 
+    25, 
+    75.500, 
+    0, 
+    '{
+        "breed": "Kuroge Washu",
+        "origin": {
+            "country": "Japan",
+            "prefecture": "Miyazaki"
+        },
+        "grading": {
+            "beef_marbling_score": 11,
+            "meat_quality_grade": "A5"
+        },
+        "certifications": ["HALAL", "GI_JAPAN"]
+    }',
+    'สุดยอดเนื้อริบอายวากิวลายหินอ่อนระดับ BMS 11 จากจังหวัดมิยาซากิ นุ่มละลายในปาก',
+    '2026-09-15'
+);
+
+-- 1. การดึงข้อมูลจากฟิลด์ JSON ด้วย -> และ ->>
+SELECT 
+    name,
+    price_per_kg,
+    -- -> คืนค่าเป็น JSON string (มีเครื่องหมายคำพูด เช่น "Japan")
+    attributes->'$.origin.country' AS country_json,
+    -- ->> คืนค่าเป็น Plain Text แท้จริง (เช่น Japan ไม่มี quote)
+    attributes->>'$.origin.prefecture' AS prefecture,
+    -- ดึงตัวเลข BMS ออกมาคำนวณ
+    CAST(attributes->>'$.grading.beef_marbling_score' AS UNSIGNED) AS bms_score
+FROM products
+WHERE attributes->>'$.grading.meat_quality_grade' = 'A5';
+
+-- 2. สร้าง Virtual Generated Column จาก JSON แล้วทำ Index เพื่อให้ค้นหาได้เร็ว 100x
+ALTER TABLE products
+ADD COLUMN bms_score TINYINT UNSIGNED 
+    GENERATED ALWAYS AS (CAST(attributes->>'$.grading.beef_marbling_score' AS UNSIGNED)) VIRTUAL,
+ADD INDEX idx_products_bms (bms_score);
+
+-- ตรวจสอบว่า Query วิ่งผ่าน Index ที่สร้างจาก JSON หรือไม่
+EXPLAIN SELECT name, price_per_kg 
+FROM products 
+WHERE bms_score >= 10;
+
+-- 3. สาธิตปัญหา Unsigned Underflow และวิธีป้องกัน
+-- การตัดสต็อกเนื้อ: หากสต็อกมี 25 แล้วมีคนพยายามซื้อ 30
+-- กรณีผิดพลาด: SELECT stock_pieces - 30 FROM products WHERE sku = 'WAGYU-MIYA-A5-RIB'; 
+-- ผลลัพธ์: Error 1690 (22003): BIGINT UNSIGNED value is out of range
+
+-- วิธีเขียนคำสั่งป้องกันที่ปลอดภัยตามมาตรฐาน:
+UPDATE products
+SET stock_pieces = stock_pieces - 5,
+    stock_weight_kg = stock_weight_kg - 15.000
+WHERE sku = 'WAGYU-MIYA-A5-RIB' AND stock_pieces >= 5;
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+### ❌ Anti-pattern 1: ใช้ `FLOAT` หรือ `DOUBLE` ในการจัดเก็บเงินหรือยอดคำสั่งซื้อ
+การใช้ `DOUBLE` บันทึกยอดเงิน `1899.99` เมื่อนำมารวมกับภาษี `7%` ในหลายพันออเดอร์ จะเกิดเศษทศนิยมคลาดเคลื่อนระดับสตางค์ (Penny Drift) ทำให้รอบบัญชีตอนสิ้นเดือนยอดเงินในฐานข้อมูลไม่ตรงกับสเตทเมนต์ของธนาคาร
+
+```sql filename="03_antipattern_money.sql"
+-- ❌ ผิดมหันต์: ใช้ FLOAT เก็บเงิน
+CREATE TABLE bad_orders (
+    total_amount FLOAT NOT NULL
+);
+
+-- ✅ ถูกต้อง: ใช้ DECIMAL(12, 2) เสมอ
+CREATE TABLE good_orders (
+    total_amount DECIMAL(12, 2) NOT NULL
+);
+```
+
+### ❌ Anti-pattern 2: ใช้ `TIMESTAMP` สำหรับข้อมูลประวัติศาสตร์ระยะยาวหรือบันทึกสัญญาในอนาคต
+ในวันที่ 19 มกราคม 2038 เวลา 03:14:07 UTC ตัวแปร `TIMESTAMP` จะนับเลขชนขอบเขต 32 บิต (`0x7FFFFFFF`) ทันที ส่งผลให้เวลาตีกลับกลายเป็นปี 1901 หากเก็บวันหมดอายุเนื้อดรายเอจ, ประวัติการเกิดของโคพันธุ์ดี, หรือวันสิ้นสุดสัญญาระยะยาว ข้อมูลจะเสียทันที
+
+```sql filename="04_antipattern_timestamp.sql"
+-- ❌ ผิด: วันหมดอายุเนื้อดรายเอจอาจเจอปัญหา 2038
+CREATE TABLE bad_inventory (
+    expiry_date TIMESTAMP NOT NULL
+);
+
+-- ✅ ถูกต้อง: ใช้ DATETIME หรือ DATE ที่รองรับถึงปี 9999
+CREATE TABLE good_inventory (
+    expiry_date DATETIME NOT NULL
+);
+```
+
+### ❌ Anti-pattern 3: สาด `VARCHAR(255)` ให้กับทุกคอลัมน์โดยไม่คิด
+นักพัฒนาจำนวนมากตั้งค่า `VARCHAR(255)` ให้กับฟิลด์อย่าง `status`, `country_code`, `currency` หรือ `postal_code`:
+- แม้ `VARCHAR` จะกินพื้นที่ดิสก์ตามจริง แต่เมื่อ MySQL ประมวลผลคำสั่งที่ซับซ้อน เช่น `ORDER BY` หรือ `GROUP BY` มันจะต้องจัดสรรหน่วยความจำใน RAM ตามความกว้างสูงสุดที่เป็นไปได้ของคอลัมน์นั้น (Worst-case Memory Allocation) ส่งผลให้กิน RAM และเกิด Disk Spill โดยไม่จำเป็น
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### สรุปคำแนะนำการเลือกใช้งาน:
+1. **`DECIMAL(M, D)`**: ใช้กับเงิน, ยอดภาษี, ราคาต่อหน่วย, และน้ำหนักชั่งซื้อขาย ห้ามใช้ `FLOAT` เด็ดขาด
+2. **`DATETIME`**: ใช้เป็นค่าเริ่มต้นสำหรับ Timestamp ในระบบทั่วไป เช่น `created_at`, `updated_at`, `expired_at` (ยกเว้นระบบที่ต้องอิง Timezone Conversion อัตโนมัติระดับ Global Session จริงๆ จึงพิจารณา `TIMESTAMP` แต่ต้องวางแผนรับมือปี 2038)
+3. **`INT UNSIGNED`**: ใช้กับ Primary Key และ Counter ที่ไม่มีวันติดลบ เพื่อเพิ่มความจุเป็น 2 เท่า
+4. **`TINYINT(1)` พร้อม CHECK constraint**: ใช้แทน Boolean
+5. **`VARCHAR(N)` ขนาดพอดีคำ**: ใช้กับข้อความสั้นที่มีความยาวจำกัดชัดเจน เช่น รหัส SKU, Email, ชื่อ-นามสกุล
+6. **`TEXT`**: ใช้เฉพาะเมื่อข้อความมีความยาวเกินกว่าจะอยู่ในตารางหลักได้จริง เช่น บทความ, Markdown Recipe, หรือ Logs รายละเอียด
+7. **`JSON`**: ใช้กับข้อมูลกึ่งมีโครงสร้าง (Semi-structured data) ที่ฟิลด์เปลี่ยนแปลงบ่อยตามประเภทสินค้า (เช่น คุณลักษณะเฉพาะของเนื้อแต่ละสายพันธุ์) แต่ไม่ควรนำฟิลด์ที่เป็นเงื่อนไขหลักในการ Join ตารางไปเก็บไว้ใน JSON
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### Q1: ทำไมใน MySQL 8.x วิศวกรจึงนิยมใช้ `DATETIME` มากกว่า `TIMESTAMP` ในการเก็บเวลาของระบบ และทั้งคู่มีพฤติกรรมต่อ Timezone ต่างกันอย่างไร?
+**แนวคำตอบเชิงลึก:**
+"เหตุผลหลักมี 2 ประการครับ:
+1. **ปัญหา Year 2038 Problem (Y2038):** `TIMESTAMP` ถูกจัดเก็บเป็นตัวเลข 32-bit Signed Integer นับวินาทีจาก Unix Epoch (1970-01-01 00:00:00 UTC) ทำให้ค่าสูงสุดที่รองรับได้คือวันที่ 19 มกราคม 2038 เวลา 03:14:07 UTC หากเกินจากนั้นระบบจะเกิด Integer Overflow ค่าจะกลายเป็นติดลบและย้อนกลับไปปี 1901 ในขณะที่ `DATETIME` ใน MySQL 5.6+ ใช้พื้นที่ 5 ไบต์และรองรับตั้งแต่วันที่ '1000-01-01' ถึง '9999-12-31' จึงปลอดภัยจากปัญหานี้ 100%
+2. **พฤติกรรมด้าน Timezone:** `TIMESTAMP` จะทำการแปลงค่าเวลาที่ได้รับจาก Client Connection Timezone ให้กลายเป็น **UTC** เสมอก่อนบันทึกลงดิสก์ และเมื่ออ่านค่าออกมา มันจะแปลงกลับเป็น Timezone ของเซสชันที่เชื่อมต่ออยู่ ซึ่งหากมีการย้ายเซิร์ฟเวอร์หรือตั้งค่า Timezone ของ DB ผิดพลาด อาจส่งผลให้เวลาเพี้ยนได้ ในขณะที่ `DATETIME` จะบันทึกค่าตัวเลขปี-เดือน-วัน-เวลาแบบ Literal ตรงไปตรงมา
+
+ในงาน Production สมัยใหม่ เราจึงนิยมใช้ `DATETIME` และกำหนดมาตรฐานให้แอปพลิเคชันส่งเวลาเป็นเวลา UTC เข้ามาบันทึกเสมอ เพื่อความโปร่งใสและหลีกเลี่ยงปัญหาปี 2038 ครับ"
+
+---
+
+### Q2: ใน MySQL การระบุ `VARCHAR(255)` มีความสำคัญอย่างไรในแง่ของขนาดการจัดเก็บ (Length Prefix) และเหตุใดตัวเลข 255 จึงเป็นขีดแบ่งสำคัญในหน่วยความจำ?
+**แนวคำตอบเชิงลึก:**
+"ตัวเลข 255 เป็นจุดตัดสำคัญของการจัดเก็บ **Length Prefix Byte** ของ `VARCHAR` ใน MySQL ครับ:
+1. **Length Prefix บนดิสก์:** ทุกคอลัมน์ที่เป็น `VARCHAR(M)` MySQL จะต้องเก็บความยาวของข้อความจริงไว้ด้านหน้าข้อมูล:
+   - หากความยาวสูงสุด $M \le 255$ ตัวอักษร ระบบจะใช้พื้นที่ Length Prefix เพียง **1 ไบต์** (เพราะ 1 ไบต์แทนค่าได้ 0-255)
+   - หากความยาวสูงสุด $M > 255$ ตัวอักษร (เช่น `VARCHAR(256)`) ระบบจะต้องขยับไปใช้ Length Prefix ขนาด **2 ไบต์** ทันที เพื่อรองรับความยาวได้ถึง 65,535 ตัวอักษร
+2. **ผลต่อการจัดสรร Memory ในการประมวลผล:** เมื่อ MySQL ต้องการจัดเรียงข้อมูล (Sorting) หรือทำ Temporary Table ในหน่วยความจำโดยใช้ Memory Engine หรืออัลกอริทึมจัดเรียงบางประเภท ระบบอาจทำการจองบัฟเฟอร์ในแรมตามขนาดสูงสุดของคอลัมน์ (Fixed-width Buffer Allocation) หากเราตั้ง `VARCHAR(255)` แทนที่จะเป็น `VARCHAR(30)` สำหรับฟิลด์รหัสสั้นๆ จะทำให้สิ้นเปลือง RAM ในการรันคำสั่ง Sort และอาจส่งผลให้ Sort Buffer ล้น จนต้องกลายเป็นการ Sort บนฮาร์ดดิสก์ (Using filesort on disk) ส่งผลให้ความเร็วตกฮวบครับ"
+
+---
+
+## ดูเพิ่มเติมที่
+- [MySQL 8.x Storage Engines](/docs/database/mysql/storage-engines) - ศึกษาโครงสร้างและการทำงานของ InnoDB Buffer Pool
+- [PostgreSQL Data Types](/docs/database/postgresql/data-types) - เปรียบเทียบกับชนิดข้อมูลใน PostgreSQL
+- [SQL Best Practices](/docs/database/sql) - มาตรฐานการเขียนคำสั่งและการคำนวณในระบบฐานข้อมูล
+- [Database Design Normalization](/docs/database/database-design) - การออกแบบคอลัมน์และโครงสร้างตาราง
+- [Database Indexing Mechanics](/docs/database/indexing) - การทำ Index บนชนิดข้อมูลต่างๆ

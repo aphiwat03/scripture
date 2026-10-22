@@ -1,0 +1,304 @@
+---
+title: CharSet Collation
+category: DATABASE
+parentTitle: MySQL 8.x
+version: MySQL 8.4 LTS / 8.0
+updatedAt: 2026-10-21
+---
+
+# CharSet Collation
+
+ในระบบจัดการฐานข้อมูล MySQL เรื่องชุดอักขระ (**Character Set**) และการเรียงลำดับเปรียบเทียบ (**Collation**) มักเป็นหนึ่งในหัวข้อที่วิศวกรซอฟต์แวร์มองข้ามบ่อยที่สุด จนกระทั่งเจอปัญหาข้อมูลตัดทอน (Data Truncation), คำค้นหาเพี้ยน, สัญลักษณ์อิโมจิทำให้ Transaction พัง หรือการ Join ตารางข้ามกันแล้วดัชนีไม่ทำงาน (Index Invalidation) จากปัญหาการแปลง Collation ข้ามรูปแบบ
+
+<Callout type="tip" title="คำจำกัดความสั้นกระชับที่ต้องจำให้ขึ้นใจ">
+**Character Set** คือ "กฎการเข้ารหัสตัวอักษรให้เป็นเลขฐานสอง (Bytes)" ว่าสัญลักษณ์หนึ่งตัวใช้กี่ไบต์ <br />
+**Collation** คือ "กฎการเปรียบเทียบและการจัดเรียง (Sort & Compare)" ของตัวอักษรเหล่านั้น ว่าตัวอักษรใดถือว่าเท่ากัน หรือตัวใดมาก่อน-หลัง
+</Callout>
+
+---
+
+## 1. แนวคิด (Concept)
+
+สำหรับมาร์เก็ตเพลสเนื้อพรีเมียม **Smart Butcher Marketplace**:
+- หากลูกค้าชาวญี่ปุ่นพิมพ์ค้นหาคำว่า `"WAGYU"` ด้วยตัวพิมพ์ใหญ่ หรือลูกค้าหน้าร้านพิมพ์ `"wagyu"` ด้วยตัวพิมพ์เล็ก ระบบควรค้นเจอสินค้าชิ้นเดียวกันหรือไม่? (**Case Sensitivity**)
+- หากมีลูกค้าพิมพ์ชื่อเนื้อพร้อมอิโมจิ `"Dry-Aged Wagyu 🥩 A5"` แต่ฐานข้อมูลกลับพังและโยนข้อผิดพลาด `Incorrect string value` ทิ้งทั้งออเดอร์ (**Character Set Mismatch**)
+- หากพ่อค้าค้นหาเนื้อวัวพันธุ์พิเศษที่มีสระกำกับสำเนียงภาษาฝรั่งเศส เช่น `"Bœuf"` หรือ `"Café"` ระบบจะมองตัว `é` เท่ากับ `e` หรือไม่? (**Accent Sensitivity**)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       Character Set                         │
+│                  utf8mb4 (1 ถึง 4 ไบต์)                      │
+│   'A' -> 0x41 (1 byte)  |  'ก' -> 0xE0B881 (3 bytes)       │
+│                '🥩' -> 0xF09F93A9 (4 bytes)                 │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│                          Collation                          │
+│               utf8mb4_0900_ai_ci (MySQL 8 Default)          │
+│   'A' == 'a'   (Case Insensitive: _ci)                      │
+│   'e' == 'é'   (Accent Insensitive: _ai)                    │
+│   ตามมาตรฐาน Unicode Collation Algorithm เวอร์ชัน 9.0.0 (0900)  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+การตั้งค่า Character Set และ Collation ให้ถูกต้องตั้งแต่เริ่มต้นออกแบบสคีมา จึงเป็นเกราะป้องกันปัญหาข้อความเพี้ยนและอาการ Index หลุดอันเนื่องมาจากความขัดแย้งของ Collation (Collation Conflict)
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 กับดักมหันต์: `utf8` (utf8mb3) vs `utf8mb4`
+หนึ่งในข้อผิดพลาดเชิงประวัติศาสตร์ที่โด่งดังที่สุดของ MySQL คือการสร้างชุดอักขระที่ชื่อว่า `utf8`:
+- ย้อนกลับไปในปี 2002 ก่อนที่มาตรฐาน RFC 3629 จะกำหนดว่า UTF-8 สามารถมีความยาวได้สูงสุด 4 ไบต์ ทีมพัฒนา MySQL ได้นำรหัส UTF-8 เข้ามาใช้งาน แต่จำกัดขนาดไว้เพียง **สูงสุด 3 ไบต์ต่อตัวอักษร** (ครอบคลุมเฉพาะ Unicode Basic Multilingual Plane: U+0000 ถึง U+FFFF)
+- ต่อมา เมื่อโลกอินเทอร์เน็ตเข้าสู่ยุคสมาร์ทโฟน มีการนำตัวอักษรในกลุ่ม **Supplementary Multilingual Plane (SMP)** มาใช้อย่างแพร่หลาย เช่น สัญลักษณ์อิโมจิ (🥩, 🔪, 🔥, ⭐) และอักษรโบราณ/คันจิพิเศษ ซึ่งต้องใช้พื้นที่ **4 ไบต์**
+- **ผลลัพธ์ของกับดัก `utf8`:** เมื่อแอปพลิเคชันพยายาม `INSERT` ข้อความที่มีอิโมจิลงในตารางที่เป็น `utf8` ใน MySQL จะเกิดข้อผิดพลาด:
+  `ERROR 1366 (HY000): Incorrect string value: '\xF0\x9F\xA5\xA9...' for column 'notes'`
+  หรือหากเปิดโหมดผ่อนปรน ข้อมูลตั้งแต่ตำแหน่งอิโมจิเป็นต้นไปจะถูก **ตัดทอนทิ้งทั้งหมด (Silent Data Truncation)**
+- **การแก้ไขใน MySQL 8.x:**
+  - `utf8mb3`: คือชื่อทางการของ utf8 3-byte แบบเก่า (ถูก Deprecated และเตรียมตัดออกในอนาคต)
+  - `utf8mb4`: คือมาตรฐาน UTF-8 แท้จริง 4 ไบต์ รองรับตัวอักษรทุกชนิดบนโลก และเป็น **Default Character Set** ของ MySQL 8.0 ขึ้นไป
+
+---
+
+### 2.2 ถอดรหัสคำลงท้ายของ Collation (Suffixes Deep Dive)
+ชื่อของ Collation ใน MySQL ถูกออกแบบมาอย่างมีแบบแผน ตัวอย่างเช่น `utf8mb4_0900_ai_ci`:
+
+```
+utf8mb4  _  0900  _  ai  _  ci
+   │          │       │      │
+   │          │       │      └─ ci: Case Insensitive (ไม่แยกตัวพิมพ์เล็ก-ใหญ่)
+   │          │       │         cs: Case Sensitive (แยกตัวพิมพ์เล็ก-ใหญ่)
+   │          │       │         bin: Binary (เปรียบเทียบระดับเลขฐานสองดิบ)
+   │          │       │
+   │          │       └──────── ai: Accent Insensitive (ไม่แยกระหว่าง e กับ é)
+   │          │                 as: Accent Sensitive (แยกความต่างของวรรณยุกต์/Accent)
+   │          │
+   │          └──────────────── เวอร์ชันของ Unicode Collation Algorithm (UCA 9.0.0)
+   │
+   └─────────────────────────── ชุดอักขระหลัก (UTF-8 4-Byte)
+```
+
+| คำลงท้าย (Suffix) | ความหมาย | ตัวอย่างผลการเปรียบเทียบ |
+| :--- | :--- | :--- |
+| **`_ci`** | Case Insensitive | `'Ribeye'` **เท่ากับ** `'ribeye'` |
+| **`_cs`** | Case Sensitive | `'Ribeye'` **ไม่เท่ากับ** `'ribeye'` |
+| **`_ai`** | Accent Insensitive | `'Entrecôte'` **เท่ากับ** `'Entrecote'` |
+| **`_as`** | Accent Sensitive | `'Entrecôte'` **ไม่เท่ากับ** `'Entrecote'` |
+| **`_bin`** | Binary | เปรียบเทียบรหัสไบนารีโดยตรง เร็วที่สุด ปลอดภัยสำหรับ Password Hash หรือรหัส Token |
+
+---
+
+### 2.3 วิวัฒนาการสู่มาตรฐาน `utf8mb4_0900_ai_ci` ใน MySQL 8
+ในอดีตเราอาจคุ้นเคยกับ `utf8mb4_general_ci` หรือ `utf8mb4_unicode_ci` แต่ใน MySQL 8 ได้กำหนดให้ **`utf8mb4_0900_ai_ci`** เป็นค่าเริ่มต้น:
+
+1. **`utf8mb4_general_ci` (โบราณ):** ใช้วิธีลัดเปรียบเทียบตัวอักษรแบบ 1-to-1 เพื่อประหยัด CPU ในยุค 20 ปีก่อน ทำให้เรียงลำดับภาษาในยุโรปและเอเชียหลายภาษาผิดเพี้ยนตามหลักภาษาศาสตร์สากล
+2. **`utf8mb4_unicode_ci` (ยุคกลาง):** ยึดตามมาตรฐาน UCA 4.0.0 เรียงถูกต้องแต่ประมวลผลช้ากว่า
+3. **`utf8mb4_0900_ai_ci` (ปัจจุบัน):**
+   - พัฒนาตามมาตรฐาน **Unicode 9.0.0** รองรับการเรียงลำดับภาษาได้อย่างถูกต้องแม่นยำสูงสุด
+   - ประสิทธิภาพสูงขึ้นอย่างก้าวกระโดด เพราะทีมพัฒนา MySQL ออกแบบการประมวลผลเปรียบเทียบสตริงใหม่ทั้งหมด รองรับการประมวลผลระดับ SIMD Vectorization ของ CPU ยุคใหม่ จึงเร็วกว่า `utf8mb4_unicode_ci` อย่างชัดเจน
+
+---
+
+### 2.4 ระดับชั้นการสืบทอด (Collation Inheritance Hierarchy)
+MySQL มีลำดับชั้นการสืบทอด Character Set และ Collation ทั้งหมด 4 ระดับ:
+
+```
+[ 1. Server Default ] 
+         │ (หากตอนสร้าง Database ไม่ได้ระบุ จะดึงจาก Server)
+         ▼
+[ 2. Database Default ]
+         │ (หากตอนสร้าง Table ไม่ได้ระบุ จะดึงจาก Database)
+         ▼
+[ 3. Table Default ]
+         │ (หากตอนประกาศ Column ไม่ได้ระบุ จะดึงจาก Table)
+         ▼
+[ 4. Column Level ] (ระดับเฉพาะเจาะจงที่สุด ชนะทุกระดับด้านบน)
+```
+
+นอกจากนี้ ยังมีระดับ **Client Connection Layer** ได้แก่:
+- `character_set_client`: ชุดอักขระที่ Client ส่งเข้ามา
+- `character_set_connection`: ชุดอักขระที่ Server ใช้ประมวลผลคำสั่ง
+- `character_set_results`: ชุดอักขระที่ Server ส่งผลลัพธ์กลับไปยัง Client
+หากสามตัวนี้ไม่ตรงกัน MySQL จะทำการแปลง Character Set อัตโนมัติในทุกๆ Request ซึ่งทำให้เปลือง CPU โดยไม่จำเป็น
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การกำหนด Character Set และ Collation ระดับฐานข้อมูล ตาราง และคอลัมน์เฉพาะทาง
+
+```sql filename="01_charset_schema_setup.sql"
+-- 1. สร้างฐานข้อมูลสำหรับร้านเนื้อโดยกำหนดมาตรฐาน utf8mb4 และ utf8mb4_0900_ai_ci
+CREATE DATABASE IF NOT EXISTS smart_butcher_market
+    DEFAULT CHARACTER SET utf8mb4
+    DEFAULT COLLATE utf8mb4_0900_ai_ci;
+
+USE smart_butcher_market;
+
+-- ตรวจสอบตัวแปรการเข้ารหัสของเซสชันปัจจุบัน
+SHOW VARIABLES LIKE 'character_set_%';
+SHOW VARIABLES LIKE 'collation_%';
+
+-- 2. สร้างตารางผู้ใช้งาน (users)
+-- สังเกตการใช้ Collation พิเศษสำหรับ password_hash และ email
+CREATE TABLE users (
+    user_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    
+    -- email: ใช้ utf8mb4_0900_as_cs เพื่อให้ Case-Sensitive สำหรับโดเมนบางประเภท
+    -- หรือคงไว้ซึ่งความแน่นอน หรือใช้ _ci หากต้องการให้ user@test.com ซ้ำกับ USER@test.com ไม่ได้
+    email VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL,
+    
+    -- password_hash และ auth_token: ควรใช้ utf8mb4_bin หรือ VARBINARY 
+    -- เพื่อให้การเปรียบเทียบระดับไบนารีตรงเป๊ะ และไม่มีปัญหาเรื่องความต่างของวรรณยุกต์
+    password_hash VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    
+    full_name VARCHAR(150) NOT NULL, -- สืบทอด utf8mb4_0900_ai_ci จากตาราง
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    UNIQUE KEY uq_user_email (email)
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
+
+-- 3. สร้างตารางเนื้อพรีเมียม (meat_cuts) รองรับอิโมจิและคำบรรยายหลายภาษา
+CREATE TABLE meat_cuts (
+    cut_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    
+    -- รหัส SKU สินค้า: ต้องเป็น Case-Sensitive และเปรียบเทียบไวที่สุด ใช้ _bin
+    cut_code VARCHAR(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    
+    -- ชื่อเนื้อ: ต้องการค้นหาแบบ Case-Insensitive และ Accent-Insensitive
+    -- พิมพ์ "entrecote" หรือ "Entrecôte" ต้องเจอชิ้นเดียวกัน
+    name VARCHAR(150) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL,
+    
+    -- คำอธิบายสินค้า: รองรับอิโมจิ 🥩, 🔪, 🇯🇵, ⭐ ได้อย่างสมบูรณ์แบบ
+    marketing_notes TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL,
+    
+    price_per_kg DECIMAL(10, 2) NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    UNIQUE KEY uq_cut_code (cut_code),
+    INDEX idx_meat_name (name)
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
+```
+
+---
+
+### ตัวอย่างที่ 2: การทดสอบความถูกต้องของอิโมจิ พฤติกรรมการเปรียบเทียบ และหายนะ Collation Mismatch
+
+```sql filename="02_charset_testing_and_pitfalls.sql"
+-- 1. ทดสอบการบันทึกข้อมูลเนื้อที่มีอิโมจิและอักขระพิเศษภาษาฝรั่งเศส/ญี่ปุ่น
+INSERT INTO meat_cuts (cut_code, name, marketing_notes, price_per_kg)
+VALUES 
+    ('CUT-WAG-01', 'Miyazaki A5 Wagyu Ribeye', 'สุดยอดเนื้อลายหินอ่อนละลายในปาก 🥩🔥 ระดับ A5 จากญี่ปุ่น 🇯🇵', 4200.00),
+    ('CUT-FR-02', 'Bœuf Entrecôte Dry-Aged', 'เนื้อแองกัสดรายเอจสไตล์ฝรั่งเศส 45 วัน 🔪 หอมเนยเข้มข้น', 2100.00);
+
+-- 2. ทดสอบความสามารถของ Accent-Insensitive (_ai)
+-- ค้นหาด้วยคำว่า 'Boeuf Entrecote' (ไม่มีสระ œ หรือหมวก ô)
+SELECT cut_code, name, price_per_kg 
+FROM meat_cuts 
+WHERE name = 'Boeuf Entrecote';
+-- ผลลัพธ์: จะค้นเจอแถว 'Bœuf Entrecôte Dry-Aged' อย่างถูกต้อง!
+
+-- 3. ทดสอบความแตกต่างระหว่าง _bin กับ _ci
+-- ค้นหา cut_code (Collation: utf8mb4_bin)
+SELECT cut_code, name FROM meat_cuts WHERE cut_code = 'cut-wag-01';
+-- ผลลัพธ์: Empty set (เพราะเป็น _bin แยกตัวพิมพ์เล็กใหญ่ชัดเจน)
+
+SELECT cut_code, name FROM meat_cuts WHERE cut_code = 'CUT-WAG-01';
+-- ผลลัพธ์: คืนค่าแถว 'Miyazaki A5 Wagyu Ribeye' ถูกต้อง
+
+-- 4. จำลองข้อผิดพลาด Collation Conflict (Illegal mix of collations)
+-- การเชื่อมตารางหรือเปรียบเทียบสตริงที่มี Collation ต่างกันโดยไม่แปลงค่า
+-- สมมติมีตัวแปรระบบหรือฟิลด์ตารางอื่นที่มี Collation เป็น utf8mb4_general_ci:
+SET @legacy_code = 'CUT-WAG-01' COLLATE utf8mb4_general_ci;
+
+-- คำสั่งนี้อาจทำให้เกิด Error หรือ Index ไม่ทำงาน:
+-- SELECT * FROM meat_cuts WHERE cut_code = @legacy_code;
+-- Error 1267 (HY000): Illegal mix of collations (utf8mb4_bin,IMPLICIT) and (utf8mb4_general_ci,EXPLICIT)
+
+-- ✅ วิธีแก้ไขเมื่อจำเป็นต้องเปรียบเทียบข้าม Collation:
+SELECT cut_code, name 
+FROM meat_cuts 
+WHERE cut_code = (@legacy_code COLLATE utf8mb4_bin);
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+### ❌ Anti-pattern 1: ยังคงใช้ `utf8` โบราณในการสร้างตารางใหม่
+การระบุ `CHARACTER SET utf8` ใน MySQL มีค่าเท่ากับ `utf8mb3`:
+- เมื่อลูกค้าใส่ชื่อที่อยู่หรือหมายเหตุการจัดส่งว่า `"ฝากเนื้อไว้ที่ป้อมยามหน้าบ้าน 🥩 ขอบคุณครับ"`
+- ฐานข้อมูลจะตัดสตริงทิ้งทันที หรือโยน Fatal Error ทำให้กระบวนการ Checkout ล้มเหลว ลูกค้าจ่ายเงินไม่สำเร็จ
+
+```sql filename="03_antipattern_utf8.sql"
+-- ❌ ผิด: ใช้ utf8 โบราณ
+CREATE TABLE bad_orders (
+    customer_notes VARCHAR(255) CHARACTER SET utf8
+);
+
+-- ✅ ถูกต้อง: ใช้ utf8mb4 เสมอ
+CREATE TABLE good_orders (
+    customer_notes VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci
+);
+```
+
+### ❌ Anti-pattern 2: ใช้ Collation ต่างกันระหว่างตารางแม่กับตารางลูกในการ Join
+หากตาราง `orders` มีคอลัมน์ `user_email VARCHAR(255) COLLATE utf8mb4_general_ci` แต่ตาราง `users` มีคอลัมน์ `email VARCHAR(255) COLLATE utf8mb4_0900_ai_ci`:
+- เมื่อสั่ง `JOIN users ON orders.user_email = users.email`
+- MySQL **จะไม่สามารถใช้งาน B-Tree Index บนคอลัมน์ `email` ได้เลย!**
+- ตัว Query Optimizer จะถูกบังคับให้ทำการแปลงสตริงในหน่วยความจำทีละแถว และตกไปเป็น **Full Table Scan (ALL)** ทำให้คิวรีช้าลงนับร้อยเท่าทันทีเมื่อข้อมูลมีหลักแสนแถว
+
+### ❌ Anti-pattern 3: ใช้ `utf8mb4_bin` กับฟิลด์ค้นหาของมนุษย์
+การนำ `_bin` ไปใช้กับชื่อสินค้าหรือชื่อหมวดหมู่เนื้อ จะทำให้เมื่อลูกค้าค้นหาคำว่า `"wagyu"` ระบบจะไม่แสดงสินค้าที่มีชื่อว่า `"Wagyu"` ส่งผลเสียต่อยอดขายทันที ควรสงวน `_bin` ไว้เฉพาะรหัสระบบ Token, Hash, หรือรหัสตัวพิมพ์จำเพาะเท่านั้น
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### สรุปข้อแนะนำการเลือกใช้งาน Collation ในระบบ Production:
+1. **`utf8mb4_0900_ai_ci`**: ใช้เป็นค่ามาตรฐานสากล (Default) สำหรับคอลัมน์ข้อความทั่วไปในระบบ, ชื่อสินค้า, ที่อยู่, รายละเอียด, และข้อความค้นหา เพราะเรียงภาษาถูกต้องตามมาตรฐาน Unicode 9 และทำงานร่วมกับ CPU สมัยใหม่ได้รวดเร็ว
+2. **`utf8mb4_bin` (หรือ `VARBINARY`)**: ใช้กับคอลัมน์ที่ต้องการความแม่นยำระดับบิตตรงเป๊ะ และต้องไวที่สุด เช่น:
+   - Password Hashing (Argon2 / bcrypt)
+   - UUID ที่เก็บเป็นตัวอักษร 36 ตัว
+   - Session Tokens และ API Keys
+   - SKU หรือ รหัสสินค้าที่เป็น Case-Sensitive
+3. **`utf8mb4_0900_as_cs`**: ใช้กับข้อความที่ต้องการให้มองตัวอักษรใหญ่-เล็กต่างกัน แต่ยังต้องการการจัดเรียงลำดับพจนานุกรมที่ถูกต้องตามหลักภาษาศาสตร์ (ไม่ใช่ลำดับรหัสบิตของไบนารี)
+4. **หลีกเลี่ยง `utf8mb4_general_ci` ในโครงการใหม่**: ไม่มีเหตุผลด้านประสิทธิภาพที่ต้องยอมแลกกับความผิดเพี้ยนของการจัดเรียงตัวอักษรอีกต่อไปใน MySQL 8
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### Q1: อะไรคือความแตกต่างระหว่าง `utf8` (utf8mb3) และ `utf8mb4` ใน MySQL และทำไมการรันคำสั่ง `ALTER TABLE ... CONVERT TO CHARACTER SET utf8mb4` บนตารางขนาดใหญ่จึงอาจทำให้ Index พังจากข้อจำกัดความยาว Index Key Prefix?
+**แนวคำตอบเชิงลึก:**
+"ใน MySQL ชุดอักขระ `utf8` แบบดั้งเดิม (ซึ่งปัจจุบันเรียกว่า `utf8mb3`) รองรับการเข้ารหัสอักขระได้สูงสุดเพียง **3 ไบต์ต่อตัวอักษร** ซึ่งไม่ครอบคลุมช่วง Supplementary Characters เช่น สัญลักษณ์อิโมจิ หรืออักษรเอเชียบางประเภท ในขณะที่ `utf8mb4` รองรับการเข้ารหัสได้สูงสุดถึง **4 ไบต์ต่อตัวอักษร** ตามมาตรฐาน UTF-8 แท้จริง
+
+ส่วนประเด็นเรื่อง Index Key Prefix:
+- ในเครื่องยนต์ InnoDB จะมีขีดจำกัดความยาวของ Index Key อยู่ที่ **767 ไบต์** สำหรับตารางที่ใช้ Row Format แบบเก่าอย่าง `COMPACT` หรือ `REDUNDANT` (และ **3072 ไบต์** สำหรับ Row Format แบบ `DYNAMIC` หรือ `COMPRESSED`)
+- สมมติว่าในอดีตเราสร้างคอลัมน์ `VARCHAR(255)` ด้วย `utf8mb3` ขนาดความยาวสูงสุดที่คำนวณสำหรับ Index คือ $255 \times 3 = 765$ ไบต์ ซึ่งรอดขีดจำกัด 767 ไบต์พอดี
+- แต่เมื่อเราแปลงตารางเป็น `utf8mb4` ขนาดสูงสุดจะถูกคำนวณใหม่เป็น $255 \times 4 = 1020$ ไบต์ทันที! หากตารางนั้นยังใช้ Row Format แบบ `COMPACT` จะเกิดข้อผิดพลาด:
+  `ERROR 1071 (42000): Specified key was too long; max key length is 767 bytes`
+  ทำให้คำสั่ง ALTER ตารางล้มเหลวทันที 
+
+วิธีแก้คือต้องปรับตารางให้ใช้ `ROW_FORMAT=DYNAMIC` หรือลดความยาวของคอลัมน์ลงให้เหมาะสมครับ"
+
+---
+
+### Q2: ในการเขียนคำสั่ง SQL JOIN ข้ามสองตาราง หากคอลัมน์ที่ใช้เชื่อมมีความหมายเหมือนกัน (เช่น `order.user_id = user.id`) แต่ตารางหนึ่งใช้ Collation `utf8mb4_0900_ai_ci` ขณะที่อีกตารางใช้ `utf8mb4_bin` จะส่งผลกระทบต่อประสิทธิภาพการทำงานของ Database อย่างไร?
+**แนวคำตอบเชิงลึก:**
+"จะส่งผลกระทบต่อประสิทธิภาพอย่างรุนแรงมากครับ เกิดจากปรากฏการณ์ **Collation Precedence and Implicit Type Casting**:
+1. **Index กลายเป็นโมฆะ (Index Invalidation):** แม้ว่าคอลัมน์ทั้งสองจะมี B-Tree Index ติดตั้งอยู่ก็ตาม แต่เนื่องจากโครงสร้างการเรียงลำดับของ B-Tree Index นั้นถูกสร้างขึ้นโดยอิงตาม Collation เฉพาะตัวของตารางนั้นๆ (ตัวหนึ่งเรียงตามลำดับ Unicode 9.0 Case-Insensitive อีกตัวหนึ่งเรียงตามลำดับไบต์ Binary)
+2. **เกิด Full Table Scan:** เมื่อ MySQL ต้องนำข้อมูลสองชุดนี้มาเปรียบเทียบกัน เครื่องยนต์จะต้องทำการแปลงค่า Collation ของแถวข้อมูลแบบ Runtime ในทุกๆ แถวผ่านฟังก์ชันแปลงภายใน ส่งผลให้ไม่สามารถกระโดดค้นหาผ่าน B-Tree Index ได้โดยตรง ทำให้ Query Optimizer ต้องเปลี่ยน Execution Plan ไปเป็น **Full Table Scan (ALL)** หรือ Hash Join เต็มรูปแบบ
+3. **CPU และ Latency พุ่งสูง:** เซิร์ฟเวอร์ต้องเสียพลังประมวลผล CPU อย่างมหาศาลในการทำ Type Coercion ในหน่วยความจำ
+
+ดังนั้น กฎเหล็กของสถาปัตยกรรมฐานข้อมูลคือ คอลัมน์ที่ต้องนำมา Join กัน หรือ Foreign Key ทุกตัว จะต้องมีทั้ง Data Type, Character Set และ Collation ที่ตรงกัน 100% เสมอครับ"
+
+---
+
+## ดูเพิ่มเติมที่
+- [MySQL 8.x Data Types](/docs/database/mysql/data-types) - รายละเอียดชนิดข้อมูล VARCHAR, TEXT และขนาดจัดเก็บ
+- [MySQL Storage Engines Architecture](/docs/database/mysql/storage-engines) - โครงสร้างตาราง InnoDB และ Row Formats
+- [Database Indexing Principles](/docs/database/indexing) - กลไก B-Tree Index และผลกระทบจาก Collation
+- [PostgreSQL Overview](/docs/database/postgresql) - เปรียบเทียบระบบ Encoding และ LC_COLLATE ของ PostgreSQL
+- [SQL Mastery Guide](/docs/database/sql) - มาตรฐานการเขียนคำสั่งและการใช้งานฟังก์ชันสตริง

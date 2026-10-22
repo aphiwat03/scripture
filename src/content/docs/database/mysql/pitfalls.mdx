@@ -1,0 +1,182 @@
+---
+title: Anti-patterns
+category: DATABASE
+parentTitle: MySQL 8.x
+version: MySQL 8.4 LTS / 8.0
+updatedAt: 2026-10-21
+---
+
+# Anti-patterns
+
+(รวบรวม 10 ข้อผิดพลาดร้ายแรงที่พบบ่อยในการพัฒนาและดูแล MySQL ในระบบ Production จริง พร้อมการวิเคราะห์สาเหตุเชิงลึกระดับสถาปัตยกรรม InnoDB, Checklist ตรวจสอบความพร้อมก่อน Go-Live, และแนวคำตอบสัมภาษณ์งานระดับ Senior Database Engineer)
+
+## 1. แนวคิด (Concept)
+
+MySQL 8.x เป็นระบบจัดการฐานข้อมูลที่มีความเร็วสูงและยืดหยุ่นมาก แต่ความยืดหยุ่นนี้มักกลายเป็น "กับดัก" สำหรับนักพัฒนาที่ไม่เข้าใจกลไกภายในของ Storage Engine:
+- **กับดักที่มองไม่เห็นในระดับโค้ด:** หลายครั้งที่โค้ด SQL ทำงานได้ถูกต้องในเครื่อง Development หรือมีข้อมูลเพียงไม่กี่พันแถว แต่เมื่อนำขึ้นระบบจริงที่มีทรานแซกชันพร้อมกันนับพันครั้งต่อวินาทีและตารางขนาดสิบล้านแถว ระบบอาจเกิดอาการค้าง (Hang), หน้าจอขาว (Deadlock), หรือดิสก์บวมจนเต็มกะทันหัน
+- **เข้าใจสถาปัตยกรรม InnoDB คือทางรอด:** การเลือก Primary Key, การตั้งค่า Character Set, การควบคุม Index และขนาด Transaction ไม่ใช่แค่เรื่องสวยงาม แต่คือเรื่องความอยู่รอดของทั้งระบบ ในบทนี้เราจะวิเคราะห์ 10 ข้อผิดพลาดคลาสสิกผ่านสถาปัตยกรรมของร้านค้า **Smart Butcher Marketplace**
+
+---
+
+## 2. 10 ข้อผิดพลาดร้ายแรงที่พบบ่อย (Top 10 MySQL Pitfalls)
+
+### 1. ใช้ Character Set `utf8` เดิม (utf8mb3) แทนที่จะเป็น `utf8mb4`
+- **ปัญหา:** `utf8` ดั้งเดิมของ MySQL รองรับสูงสุดเพียง 3 ไบต์ต่ออักขระ หากมีผู้ใช้พิมพ์ชื่อสินค้าที่มี Emoji (เช่น 🥩, 🔪, 🐄) หรือตัวอักษรภาษาจีน/โบราณ คำสั่ง INSERT จะล้มเหลวทันทีด้วย Error `Incorrect string value` หรือข้อความจะถูกตัดทอนหายไป
+- **วิธีแก้:** บังคับใช้ `utf8mb4` ร่วมกับ Collation `utf8mb4_0900_ai_ci` ทุกตารางในระบบ
+
+### 2. ใช้ Random UUID v4 เป็น Clustered Primary Key ใน InnoDB
+- **ปัญหา:** InnoDB จัดเก็บข้อมูลตามลำดับของ Primary Key (B+Tree Leaf Nodes) เมื่อใส่ UUID v4 ที่สุ่มค่าแบบไร้ทิศทาง ข้อมูลจะถูกยัดลงหน้าเพจแบบสุ่ม ทำให้เกิด **B+Tree Page Split (ผ่าหน้าเพจ 50:50)**, พื้นที่ดิสก์บวมกว่าเท่าตัว, แคช Buffer Pool ถูกกวาดทิ้ง (Cache Thrashing), และ Secondary Index ทุกตัวในตารางจะบวมตามขนาด 36 ตัวอักษรของ UUID
+- **วิธีแก้:** ใช้ `BIGINT UNSIGNED AUTO_INCREMENT` หรือใช้ **UUID v7** (มี Timestamp นำหน้า เรียงลำดับได้) ในรูปแบบ `BINARY(16)`
+
+### 3. ทำ Pagination ด้วย `LIMIT offset, count` ขนาดใหญ่
+- **ปัญหา:** คำสั่ง `SELECT * FROM orders ORDER BY id LIMIT 500000, 20` บังคับให้ MySQL ต้องสแกนและโหลดข้อมูลขึ้นมาถึง 500,020 แถว แล้วทิ้ง 500,000 แถวแรกไปอย่างสิ้นเปลือง ส่งผลให้ Query ยิ่งหน้าลึกยิ่งช้าจน Time out
+- **วิธีแก้:** ใช้ **Keyset (Cursor-based) Pagination** (`WHERE id > :last_seen_id LIMIT 20`) หรือ **Deferred Join**
+
+### 4. ลืมสร้าง Index บน Foreign Key Columns
+- **ปัญหา:** เมื่อทำการลบหรือแก้ไขแถวในตารางแม่ (เช่น `DELETE FROM categories WHERE id = 5`) InnoDB จำเป็นต้องตรวจสอบตารางลูก (`products`) หากตารางลูกไม่มี Index บนคอลัมน์ Foreign Key ระบบจะต้องทำ Full Table Scan ตารางลูก และอาจล็อกตารางลูกทั้งตาราง บล็อกทุกทรานแซกชันในระบบ
+- **วิธีแก้:** ตรวจสอบว่าตารางลูกมี Index ที่ครอบคลุมคอลัมน์ Foreign Key เสมอ
+
+### 5. ใช้ Storage Engine `MyISAM` สำหรับระบบที่มี Transactions หรือเงิน
+- **ปัญหา:** MyISAM ไม่รองรับคุณสมบัติ ACID, ไม่รองรับ Crash Recovery, และล็อกข้อมูลระดับตารางทั้งตาราง (Table-level Locking) เมื่อมีคำสั่ง UPDATE หรือ INSERT เข้ามาพร้อมกัน
+- **วิธีแก้:** แปลงทุกตารางในระบบเป็น `ENGINE = InnoDB` 100%
+
+### 6. ใช้ `SELECT *` ร่วมกับตารางที่มีคอลัมน์ JSON หรือ TEXT ขนาดใหญ่
+- **ปัญหา:** ป้องกันไม่ให้ Optimizer ใช้ Covering Index และทำให้ MySQL ต้องดึงหน้าเพจ Off-page Overflow Pages ขึ้นมาสู่ Buffer Pool เปลืองแบนด์วิดท์เครือข่ายและแรมมหาศาล
+- **วิธีแก้:** ระบุชื่อคอลัมน์ที่ต้องการใช้จริงเสมอ (Projection)
+
+### 7. ลืมตั้งค่า Timeout และปล่อยให้ Connection ถือ Transaction ค้าง (Long-running Transactions)
+- **ปัญหา:** ทรานแซกชันที่เปิดค้างไว้จะทำให้ Undo Log ไม่สามารถถูกเก็บกวาดได้ (Purge Thread ถูกบล็อก) ส่งผลให้ Undo Tablespace บวมโต และการทำ MVCC Read View ของเซสชันอื่นช้าลงอย่างต่อเนื่อง
+- **วิธีแก้:** ออกแบบทรานแซกชันให้สั้นที่สุด และตั้งค่า `max_execution_time` เพื่อตัดคำสั่งที่ค้าง
+
+### 8. ตั้งค่า `max_connections` สูงเกินไปจนเซิร์ฟเวอร์โดน OOM Killer สังหาร
+- **ปัญหา:** แต่ละ Connection ใน MySQL จะมีการจองหน่วยความจำเฉพาะตัว (Thread Stack, Sort Buffer, Read Buffer) การตั้ง `max_connections = 5000` บนเซิร์ฟเวอร์ที่มี RAM 8GB เมื่อเกิดโหลดพุ่งพร้อมกัน แรมจะหมดทันทีจน Linux Kernel สั่ง Kill กระบวนการ `mysqld`
+- **วิธีแก้:** ใช้ Connection Pooling จากฝั่งแอปพลิเคชัน และตั้งค่า `max_connections` ให้สอดคล้องกับขนาดแรมที่คำนวณได้จริง
+
+### 9. ปิด Slow Query Log หรือไม่ใส่ใจคำเตือน `Using filesort`
+- **ปัญหา:** คำสั่งคิวรีที่ติด `Using filesort` หรือ `Using temporary` หมายถึง MySQL ต้องจัดสรร Sort Buffer หรือเขียนข้อมูลลงดิสก์ชั่วคราวเพื่อเรียงลำดับข้อมูล
+- **วิธีแก้:** เปิดใช้งาน Slow Query Log (`slow_query_log = 1`, `long_query_time = 0.5`) และสร้าง Composite Index ให้ครอบคลุมทั้ง `WHERE` และ `ORDER BY`
+
+### 10. ทำ DDL เปลี่ยน Schema ขนาดใหญ่บน Production โดยไม่ใช้ Online DDL
+- **ปัญหา:** คำสั่งอย่าง `ALTER TABLE orders ADD COLUMN ...` บนตารางที่มีสิบล้านแถวในรูปแบบเดิม อาจล็อกตารางเป็นชั่วโมง ทำให้ระบบหยุดทำงาน (Downtime)
+- **วิธีแก้:** ตรวจสอบ `ALGORITHM=INPLACE, LOCK=NONE` ของ MySQL 8 หรือใช้เครื่องมือระดับองค์กร เช่น `gh-ost` หรือ `pt-online-schema-change`
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การแก้ปัญหา UUID Primary Key และ Pagination ช้า
+
+```sql filename="12_pitfall_fixes_schema.sql"
+-- =========================================================================
+-- ปัญหาที่ 1: การใช้ Random UUID v4 ในตารางประวัติธุรกรรม
+-- แก้ไข: ใช้ BIGINT UNSIGNED AUTO_INCREMENT เป็น Clustered PK 
+-- และเก็บ UUID v7 ไว้เป็น Secondary Unique Key
+-- =========================================================================
+
+CREATE TABLE customer_orders (
+    -- Clustered Primary Key เรียงลำดับตามเวลาแบบ Mono-increasing ประหยัดพื้นที่ดิสก์
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    
+    -- Public-facing Order UUID v7 (ขนาด 16 ไบต์แบบ Binary)
+    order_uuid BINARY(16) NOT NULL UNIQUE,
+    
+    user_id BIGINT UNSIGNED NOT NULL,
+    total_amount DECIMAL(12, 2) NOT NULL,
+    status ENUM('PENDING', 'PAID', 'CANCELLED') NOT NULL DEFAULT 'PENDING',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    INDEX idx_user_status_created (user_id, status, created_at)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;
+
+-- =========================================================================
+-- ปัญหาที่ 2: Pagination ด้วย OFFSET มหาศาล
+-- เปรียบเทียบ: แบบเดิม (ช้ามาก) vs Keyset Cursor Pagination (เสี้ยววินาที)
+-- =========================================================================
+
+-- ❌ แบบผิดพลาด (Anti-pattern): สแกน 200,020 แถวแล้วทิ้ง 200,000 แถวแรก
+-- SELECT * FROM customer_orders ORDER BY id ASC LIMIT 200000, 20;
+
+-- ✅ แบบถูกต้อง (Keyset Pagination): กระโดดตรงผ่าน B+Tree Clustered Index สแกนเพียง 20 แถว
+SELECT id, BIN_TO_UUID(order_uuid) AS order_id, total_amount, status, created_at
+FROM customer_orders
+WHERE id > 200000
+ORDER BY id ASC
+LIMIT 20;
+```
+
+### ตัวอย่างที่ 2: สคริปต์ตรวจจับ Missing Foreign Key Indexes และ Long Transactions
+
+```sql filename="12_diagnostics_audit.sql"
+-- 1. ค้นหา Foreign Key ที่ไม่มี Index รองรับในตารางลูก (เสี่ยง Full Table Lock ตอนลบ)
+SELECT 
+    kcu.TABLE_SCHEMA,
+    kcu.TABLE_NAME,
+    kcu.COLUMN_NAME,
+    kcu.CONSTRAINT_NAME,
+    kcu.REFERENCED_TABLE_NAME,
+    kcu.REFERENCED_COLUMN_NAME
+FROM information_schema.KEY_COLUMN_USAGE kcu
+LEFT JOIN information_schema.STATISTICS s
+    ON kcu.TABLE_SCHEMA = s.TABLE_SCHEMA
+    AND kcu.TABLE_NAME = s.TABLE_NAME
+    AND kcu.COLUMN_NAME = s.COLUMN_NAME
+    AND s.SEQ_IN_INDEX = 1
+WHERE kcu.REFERENCED_TABLE_NAME IS NOT NULL
+  AND kcu.TABLE_SCHEMA = 'smart_butcher'
+  AND s.INDEX_NAME IS NULL;
+
+-- 2. ค้นหาทรานแซกชันที่เปิดค้างไว้เกิน 30 วินาที (ขัดขวาง Undo Log Purging)
+SELECT 
+    trx.trx_id,
+    trx.trx_mysql_thread_id AS connection_id,
+    trx.trx_state,
+    trx.trx_started,
+    TIMESTAMPDIFF(SECOND, trx.trx_started, NOW()) AS duration_seconds,
+    ps.PROCESSLIST_USER,
+    ps.PROCESSLIST_HOST,
+    ps.PROCESSLIST_INFO AS current_statement
+FROM information_schema.INNODB_TRX trx
+JOIN performance_schema.threads th ON trx.trx_mysql_thread_id = th.PROCESSLIST_ID
+JOIN performance_schema.processlist ps ON th.PROCESSLIST_ID = ps.ID
+WHERE TIMESTAMPDIFF(SECOND, trx.trx_started, NOW()) > 30;
+```
+
+---
+
+## 4. Checklist ตรวจสอบก่อนนำ MySQL ขึ้น Production
+
+- [ ] **Character Set:** ตารางและฐานข้อมูลทั้งหมดตั้งค่าเป็น `utf8mb4` และ collation `utf8mb4_0900_ai_ci`
+- [ ] **Primary Key:** ทุกตารางมี Explicit `PRIMARY KEY` ที่เป็นชนิดข้อมูลเรียงลำดับ (เช่น `BIGINT AUTO_INCREMENT` หรือ `UUID v7`)
+- [ ] **Foreign Key Indexes:** คอลัมน์ Foreign Key ทั้งหมดมี Index รองรับ
+- [ ] **Engine Verification:** ตารางทั้งหมดใช้เครื่องยนต์ `InnoDB` (ไม่มี MyISAM ปะปน)
+- [ ] **Buffer Pool Allocation:** ค่า `innodb_buffer_pool_size` ตั้งไว้ที่ 60-75% ของหน่วยความจำ RAM บนเซิร์ฟเวอร์
+- [ ] **Durability Setting:** ตัวแปร `innodb_flush_log_at_trx_commit = 1` บนเซิร์ฟเวอร์หลักที่ต้องการความปลอดภัยของข้อมูล
+- [ ] **Slow Query Log:** เปิดใช้งาน `slow_query_log = 1` พร้อมตั้ง `long_query_time = 0.5`
+- [ ] **Connection Limits:** คำนวณ `max_connections` และใช้งาน Connection Pool (เช่น HikariCP, Prisma pool) โดยไม่เปิดเสรี
+- [ ] **Backup Automation:** ตั้งเวลา `mysqldump --single-transaction --quick` หรือ Percona XtraBackup และมีการทดสอบ Restore ประจำเดือน
+
+---
+
+## 5. คำถามสัมภาษณ์งานระดับ Senior (Senior Interview Q&A)
+
+### ข้อที่ 1: ทำไมการใช้ UUID v4 แบบ Random เป็น Primary Key ใน MySQL/InnoDB ถึงส่งผลเสียต่อ Write Performance มากกว่าใน PostgreSQL?
+**แนวคำตอบเชิงลึก:**
+ความแตกต่างอยู่ที่สถาปัตยกรรมโครงสร้างการจัดเก็บข้อมูล:
+- **ใน PostgreSQL (Heap-based Table):** แถวข้อมูลจริงจะถูกเขียนลงหน้าเพจว่างตัวแรกในตาราง (Heap Page) โดยไม่จำเป็นต้องเรียงตาม Primary Key ตัว B-Tree Index ของ Primary Key เป็นเพียง Secondary Pointer ที่ชี้มายัง Heap TID เท่านั้น
+- **ใน MySQL/InnoDB (Index-Organized Table / Clustered Index):** แถวข้อมูลจริงทั้งหมดถูกบรรจุอยู่ที่ Leaf Node ของ B+Tree ของ Primary Key โดยตรง ดังนั้นเมื่อเราสุ่มค่า UUID v4 เข้ามา ข้อมูลจะต้องถูกยัดลงไปกึ่งกลางของ Leaf Node ที่มีอยู่แล้ว หากหน้าเพจขนาด 16 KB นั้นเต็ม InnoDB จะต้องทำ **Page Split** โดยแบ่งข้อมูล 50% ไปใส่หน้าเพจใหม่ และเชื่อมโยง Pointer สองทิศทางใหม่ทั้งหมด กระบวนการนี้ทำให้เกิด Random Disk I/O มหาศาล ข้อมูลแตกกระจาย (Fragmentation) และแคช Buffer Pool ต้องคอยสลับหน้าเพจเข้าออกตลอดเวลา (Cache Thrashing) นอกจากนี้ Secondary Index ทุกตัวในตาราง InnoDB จะต้องบรรจุค่า Primary Key ขนาด 36 ไบต์นี้ไว้ที่ Leaf Node ทำให้ Index ทุกตัวในตารางบวมขึ้นอีกเท่าตัว
+
+### ข้อที่ 2: หากระบบมีโหลดการอ่านสูงมาก และเริ่มพบว่า Slave/Replica มีปัญหา Replication Lag (`Seconds_Behind_Master` เพิ่มขึ้นเรื่อยๆ) คุณจะวิเคราะห์หาสาเหตุและแก้ไขอย่างไร?
+**แนวคำตอบเชิงลึก:**
+ลำดับการวิเคราะห์และแก้ไขระดับ Senior:
+1. **ตรวจสอบ Slow Query / Lock บน Replica:** คำสั่ง SELECT ขนาดใหญ่ที่รันบน Replica อาจติด Metadata Lock หรือแย่ง Buffer Pool กับ Replication SQL Thread
+2. **เปิดใช้งาน Multi-Threaded Replication (MTR):** ใน MySQL 8.0 ให้ตั้งค่า `replica_parallel_workers` (เช่น 4-8 workers) และใช้ `replica_parallel_type = LOGICAL_CLOCK` เพื่อให้คำสั่งที่คอมมิตพร้อมกันบน Primary สามารถประมวลผลพร้อมกันบน Replica ได้
+3. **ตรวจสอบ Write Amplification บน Primary:** คำสั่ง UPDATE/DELETE ก้อนใหญ่ก้อนเดียว (Bulk Write) บน Master จะถูกเขียนลง Binlog เป็นชิ้นเดียว ทำให้ Replica ต้องรันคำสั่งใหญ่ก้อนนั้นตามลำดับแบบ Single Thread ในการแก้ปัญหาต้องแบ่ง Bulk Write เป็น Batch ละ 1,000 แถว
+4. **ตรวจสอบ Disk I/O บน Replica:** ปรับค่า `innodb_flush_log_at_trx_commit = 2` หรือ `0` บน Replica ชั่วคราว เนื่องจากหาก Replica ดับ เราสามารถสร้างใหม่หรือซิงค์จาก Master ได้ เพื่อลด I/O Overhead ในการบันทึก Redo Log
+
+---
+
+## ดูเพิ่มเติมที่
+- [MySQL Storage Engines](/docs/database/mysql/storage-engines) — สถาปัตยกรรมเครื่องยนต์ InnoDB
+- [MySQL InnoDB Indexes](/docs/database/mysql/innodb-indexes) — เจาะลึก Clustered และ Secondary Index
+- [MySQL Query Optimization](/docs/database/mysql/query-optimization) — การอ่าน EXPLAIN และจูน Execution Plan
+- [Database Performance](/docs/database/query-performance) — การปรับปรุงประสิทธิภาพคิวรีระดับระบบ
