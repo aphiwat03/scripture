@@ -1,0 +1,280 @@
+---
+title: SSG (Static Site Generation)
+category: Frontend
+parentTitle: Next.js 16
+version: v16.4
+updatedAt: 2026-10-21
+---
+
+# SSG (Static Site Generation)
+
+(เจาะลึกเทคนิค Static Site Generation, Static Rendering, การใช้งาน `generateStaticParams`, การต่อยอดสู่ ISR, และการควบคุม Dynamic Params ในสถาปัตยกรรม Next.js 16 App Router)
+
+## 1. คืออะไร และแก้ปัญหาอะไร (Concept)
+
+**SSG (Static Site Generation)** หรือ **Static Rendering** คือกระบวนการที่ Next.js ประมวลผลและสร้างไฟล์ HTML พร้อมทั้ง React Server Component (RSC) Payload ตั้งแต่ **ขั้นตอนการบิลด์ (Build Time)** ผ่านคำสั่ง `next build` แทนที่จะต้องรอให้ผู้ใช้ส่งคำขอ (Request) เข้ามาแล้วค่อยประมวลผลบนเซิร์ฟเวอร์แบบ SSR
+
+### ทำไม SSG ถึงเป็นวิธีที่เร็วที่สุดในโลกเว็บแอปพลิเคชัน?
+1. **Time to First Byte (TTFB) ระดับเสี้ยววินาที:** เมื่อมีผู้ใช้เข้าชม ไฟล์ HTML คงที่ที่ถูกเตรียมไว้แล้วจะถูกเสิร์ฟผ่าน **CDN Edge Cache** ทันที โดยไม่ต้องรอให้ Node.js ประมวลผลโค้ดหรือเชื่อมต่อฐานข้อมูล
+2. **ประหยัดต้นทุนเซิร์ฟเวอร์ (Zero Compute per Request):** ไม่ว่าจะมีผู้ใช้เข้าชมพร้อมกัน 1 คน หรือ 1,000,000 คน เซิร์ฟเวอร์หลักแทบไม่ต้องรับโหลดการประมวลผล (No Database Overload)
+3. **คะแนน Core Web Vitals และ SEO สมบูรณ์แบบ:** ตัวบอตของ Search Engines (Googlebot) สามารถอ่านเนื้อหาทั้งหมดได้ทันทีตั้งแต่มิลลิวินาทีแรก และค่า LCP (Largest Contentful Paint) จะต่ำที่สุดเท่าที่จะเป็นไปได้
+
+```text
+[Build Time: next build]
+Database / API ---> Next.js Engine ---> static HTML + RSC Payload ---> CDN Edge Network
+                                                                              |
+[User Request Time]                                                           |
+User Browser ------------------ เสิร์ฟไฟล์ตรงจาก CDN Edge (⚡ <10ms) <--------+
+```
+
+---
+
+## 2. กลไกและฟังก์ชันหลักใน Next.js 16 (Under the Hood)
+
+ใน Next.js 16 App Router: **ทุกหน้าจะถูกประมวลผลแบบ Static Rendering เป็นค่าเริ่มต้น (Default)** ตราบใดที่หน้านั้นไม่ได้เรียกใช้ Dynamic Functions
+
+### 1. อะไรที่ทำให้หน้าหลุดจาก Static กลายเป็น Dynamic?
+หากหน้าเว็บหรือคอมโพเนนต์ย่อยมีการเรียกใช้ฟังก์ชันเหล่านี้ Next.js จะเปลี่ยนโหมดการเรนเดอร์เป็น On-demand Server Rendering (SSR) ทันที:
+- `await cookies()` หรือ `await headers()`
+- `searchParams` ใน Page Props
+- ฟังก์ชัน `connection()` จาก `next/server`
+- คำสั่ง `fetch(..., { cache: 'no-store' })`
+
+### 2. `generateStaticParams` (หัวใจของ Dynamic Routes แบบ SSG)
+มาแทนที่ฟังก์ชัน `getStaticPaths` ใน Pages Router เดิม ใช้สำหรับคืนค่ารายการพารามิเตอร์ของ Dynamic Route (เช่น `[slug]` หรือ `[id]`) เพื่อให้ Next.js สร้างหน้า HTML คงที่ของทุกรายการไว้ล่วงหน้าตอนบิลด์:
+
+| คำสั่ง / ออปชัน | หน้าที่และการทำงาน |
+| :--- | :--- |
+| `generateStaticParams()` | คืนค่า Array ของ Object เช่น `[{ slug: 'wagyu-a5' }, { slug: 'dry-aged-ribeye' }]` เพื่อสร้างหน้าล่วงหน้า |
+| `export const dynamicParams = true` | (ค่าเริ่มต้น) หากผู้ใช้ขอ URL ที่ไม่มีใน `generateStaticParams` ให้เรนเดอร์หน้านั้นแบบ SSR สดๆ แล้วบันทึกแคชไว้ |
+| `export const dynamicParams = false` | หากผู้ใช้ขอ URL ที่ไม่อยู่ใน `generateStaticParams` ให้ส่งหน้า 404 (Not Found) ทันทีโดยไม่ต้องรันเซิร์ฟเวอร์ |
+| `export const dynamic = 'force-static'` | บังคับให้หน้านี้เป็น Static แม้จะมีการตรวจพบ Dynamic Functions (จะส่งค่าว่างหรือ Default ให้) |
+| `export const revalidate = 3600` | ต่อยอดเป็น **ISR (Incremental Static Regeneration)** สร้างใหม่เบื้องหลังทุกๆ 1 ชั่วโมง |
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: หน้ารายละเอียดเนื้อพรีเมียมด้วย `generateStaticParams`
+
+สร้างหน้ารายละเอียดชิ้นเนื้อ `src/app/products/[slug]/page.tsx` โดยดึงข้อมูลสินค้าทั้งหมดมาทำ Pre-rendering ล่วงหน้าตอน Build Time:
+
+```tsx filename="src/app/products/[slug]/page.tsx"
+import { notFound } from 'next/navigation';
+import type { Metadata } from 'next';
+
+interface Product {
+  id: string;
+  slug: string;
+  name: string;
+  cutType: string;
+  pricePerKg: number;
+  description: string;
+  origin: string;
+}
+
+// กำหนดว่าหากเปิดหน้าที่ไม่มีใน generateStaticParams ให้โยนไปหน้า 404 ทันที
+export const dynamicParams = false;
+
+// 1. ฟังก์ชันสร้าง Static HTML ล่วงหน้าทุกชิ้นเนื้อตอน Build Time
+export async function generateStaticParams() {
+  const res = await fetch(`${process.env.BACKEND_API_URL}/products/all-slugs`);
+  if (!res.ok) return [];
+
+  const products: { slug: string }[] = await res.json();
+  
+  // คืนค่ารูปแบบ: [{ slug: 'wagyu-a5-ribeye' }, { slug: 'australian-tomahawk' }]
+  return products.map((item) => ({
+    slug: item.slug,
+  }));
+}
+
+// 2. ฟังก์ชันดึงข้อมูลสินค้าเฉพาะชิ้น (Next.js จะแคชผลลัพธ์นี้ให้อัตโนมัติระหว่างบิลด์)
+async function getProductBySlug(slug: string): Promise<Product | null> {
+  const res = await fetch(`${process.env.BACKEND_API_URL}/products/${slug}`, {
+    // กำหนดให้แคชผลลัพธ์เพื่อใช้สร้าง Static Page
+    cache: 'force-cache',
+  });
+
+  if (!res.ok) return null;
+  return res.json();
+}
+
+// 3. Dynamic Metadata สำหรับ SEO
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ slug: string }>;
+}): Promise<Metadata> {
+  const { slug } = await params;
+  const product = await getProductBySlug(slug);
+
+  if (!product) {
+    return { title: 'Product Not Found | Smart Butcher' };
+  }
+
+  return {
+    title: `${product.name} | Smart Butcher Marketplace`,
+    description: `เนื้อพรีเมียมเกรดพิเศษ ${product.origin} ราคา ฿${product.pricePerKg}/กก.`,
+  };
+}
+
+// 4. หน้า Page Component
+export default async function ProductDetailPage({
+  params,
+}: {
+  params: Promise<{ slug: string }>;
+}) {
+  const { slug } = await params;
+  const product = await getProductBySlug(slug);
+
+  if (!product) {
+    notFound();
+  }
+
+  return (
+    <article className="max-w-4xl mx-auto p-6 space-y-6">
+      <div className="border-b pb-4">
+        <span className="text-sm font-semibold uppercase tracking-wider text-amber-600">
+          {product.origin} — {product.cutType}
+        </span>
+        <h1 className="text-3xl font-extrabold text-neutral-900 mt-1">
+          {product.name}
+        </h1>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+        <div className="bg-neutral-100 rounded-xl p-8 flex items-center justify-center">
+          <span className="text-6xl">🥩</span>
+        </div>
+
+        <div className="space-y-4">
+          <p className="text-neutral-700 leading-relaxed">
+            {product.description}
+          </p>
+
+          <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg">
+            <span className="text-sm text-amber-800">ราคาจำหน่ายพิเศษ:</span>
+            <p className="text-2xl font-bold text-amber-900">
+              ฿{product.pricePerKg.toLocaleString('th-TH')} / กิโลกรัม
+            </p>
+          </div>
+
+          <button className="w-full bg-neutral-900 text-white font-medium py-3 rounded-lg hover:bg-neutral-800 transition">
+            เพิ่มลงตะกร้าสั่งตัดพิเศษ
+          </button>
+        </div>
+      </div>
+    </article>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: การอัปเกรด SSG เป็น ISR ด้วย Time-based Revalidation
+
+สำหรับหน้าแคตตาล็อกสินค้าที่ต้องการความเร็วแบบ Static แต่ต้องการให้อัปเดตราคาและสต็อกอัตโนมัติทุกๆ 60 วินาที โดยไม่ต้องกด Deploy เว็บใหม่:
+
+```tsx filename="src/app/catalog/page.tsx"
+// บังคับ Revalidate หน้าคงที่นี้ทุก 60 วินาที (ISR)
+export const revalidate = 60;
+
+interface ButcherProduct {
+  id: string;
+  name: string;
+  pricePerKg: number;
+  inStock: boolean;
+}
+
+export default async function CatalogPage() {
+  const res = await fetch(`${process.env.BACKEND_API_URL}/products`, {
+    next: { tags: ['products-catalog'] }, // กำหนด Cache Tag สำหรับ On-demand Invalidation
+  });
+
+  const products: ButcherProduct[] = await res.json();
+
+  return (
+    <main className="max-w-6xl mx-auto p-6">
+      <div className="flex justify-between items-center mb-6">
+        <h1 className="text-2xl font-bold">คลังเนื้อพรีเมียม (Static with ISR)</h1>
+        <span className="text-xs text-neutral-500">
+          แคชจะถูกรีเฟรชเบื้องหลังทุก 60 วินาที
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+        {products.map((item) => (
+          <div key={item.id} className="border rounded-lg p-4 shadow-sm">
+            <h2 className="font-semibold text-lg">{item.name}</h2>
+            <p className="text-neutral-600 mt-1">
+              ฿{item.pricePerKg.toLocaleString()} / กก.
+            </p>
+            <span className={`inline-block mt-2 text-xs px-2 py-1 rounded ${
+              item.inStock ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+            }`}>
+              {item.inStock ? 'พร้อมจัดส่ง' : 'สินค้าหมด'}
+            </span>
+          </div>
+        ))}
+      </div>
+    </main>
+  );
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| กรณีปัญหา | แนวทางที่ผิดพลาด (Anti-pattern) | แนวทางที่ถูกต้อง (Best Practice) |
+| :--- | :--- | :--- |
+| **การใช้ Cookie ในหน้า Static** | เรียกใช้ `cookies()` เพื่อเช็กว่าล็อกอินหรือไม่ในหน้า Product Detail ทำให้ทั้งหน้ากลายเป็น Dynamic SSR ช้าลงทันที | ทำหน้าสินค้าเป็น SSG 100% แล้วแยกคอมโพเนนต์ปุ่ม User Profile เล็กๆ เป็น Client Component ที่ดึง Session แยกต่างหาก |
+| **การลืมฟังก์ชัน `generateStaticParams`** | สร้าง Dynamic Route `[slug]` แต่ไม่ใส่ `generateStaticParams` ส่งผลให้หน้าแรกที่เปิดต้องรอ SSR นาน | ใส่ `generateStaticParams()` เสมอสำหรับรายการสำคัญ เช่น สินค้า Top 100 หรือบทความยอดนิยม |
+| **การเปิด `dynamicParams = true` โดยไม่ระวัง** | ปล่อยให้ผู้ใช้ยิง slug สุ่มมั่วๆ จนเซิร์ฟเวอร์โดนถล่มรัน SSR สร้างเพจขยะไม่รู้จบ (DDoS vulnerability) | ใช้ `dynamicParams = false` หากรายการสินค้ามีขอบเขตแน่นอน หรือตรวจเช็กสิทธิ์ก่อนสร้างเพจใหม่ |
+| **Fetch ในหลาย Component ซ้ำซ้อน** | กังวลว่าส่งฟังก์ชัน fetch เดียวกันใน `generateMetadata` และ `Page` จะยิง API สองรอบ | วางใจระบบ **Request Memoization** ของ Next.js ซึ่งจะรวมคำขอ URL เดียวกันให้ยิงจริงเพียงครั้งเดียวตลอดรอบการเรนเดอร์ |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ SSG:
+- **หน้ารายละเอียดสินค้า (Product Detail Pages):** ข้อมูลไม่เปลี่ยนทุกวินาที ต้องการโหลดเร็วที่สุดบนมือถือ และต้องการคะแนน SEO เต็มร้อย
+- **หน้าบทความและบล็อก (Blog & Content Marketing):** เนื้อหาถูกเขียนไว้ล่วงหน้า
+- **หน้า Landing Page & Pricing:** หน้าแรกของเว็บไซต์ที่ต้องการ First Impression ที่เร็วแบบสายฟ้าแลบ
+- **เอกสารคู่มือ (Documentation Sites):** เช่นเดียวกับเว็บไซต์นี้ที่ทุกหน้าถูกสร้างเป็น Static เพื่อให้เปิดอ่านได้ทันที
+
+### ไม่ควรใช้ SSG:
+- **หน้าแดชบอร์ดส่วนตัว (Personalized Dashboard):** ข้อมูลของใครของมัน ต้องอ่าน Token และ Cookie ส่วนบุคคล (ควรใช้ SSR หรือ Client-side Fetching)
+- **หน้าตะกร้าสินค้า (Checkout & Cart):** มีการเปลี่ยนแปลงสถานะตลอดเวลา
+- **ระบบคัดกรองแบบ Real-time ตามพิกัด GPS ของผู้ใช้**
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### ข้อที่ 1: ใน Next.js 16 App Router ฟังก์ชัน `generateStaticParams` แตกต่างจาก `getStaticPaths` ของ Pages Router ดั้งเดิมอย่างไร?
+**แนวคำตอบเชิงลึก:**
+ความแตกต่างสำคัญมี 3 ประการ:
+1. **Nested Architecture (ทำงานร่วมกันเป็นชั้นๆ):** ใน App Router ฟังก์ชัน `generateStaticParams` สามารถประกาศได้ทั้งใน `layout.tsx` และ `page.tsx` ที่ซ้อนกันอยู่หลายชั้น โดยตัวลูกจะสืบทอดค่า params จากตัวแม่มาใช้สร้าง Route แบบผสมผสานได้อย่างอัตโนมัติ (เช่น `/catalog/[category]/[slug]`)
+2. **Simplified Return Structure:** คืนค่าเป็น Array ของ Object ตรงๆ ได้เลย ไม่ต้องห่อหุ้มด้วย `{ paths: [...], fallback: true/false }` แบบเดิม โดยการควบคุม Fallback จะแยกไปใช้ตัวแปร `export const dynamicParams = true | false` แทน ซึ่งอ่านง่ายและตรงไปตรงมากว่า
+3. **Automatic Request Memoization:** ข้อมูลที่ดึงใน `generateStaticParams` หากมีการเรียกใช้ซ้ำในคอมโพเนนต์ `Page` หรือ `generateMetadata` ทาง Next.js จะดึงจาก Cache ให้โดยอัตโนมัติ ไม่ต้องส่งข้อมูลผ่าน Props ก้อนใหญ่เหมือนใน Pages Router
+
+### ข้อที่ 2: หากเรามีสินค้าในระบบร้านค้า 50,000 ชิ้น เราควรสั่งให้ `generateStaticParams` สร้างครบทั้ง 50,000 หน้าในขั้นตอน `next build` หรือไม่?
+**แนวคำตอบเชิงลึก:**
+**ไม่ควรทำแบบนั้นเด็ดขาด** เพราะการสร้าง 50,000 หน้าพร้อมกันตอน Build จะทำให้:
+1. เวลาในการ Build (Build Duration) นานขึ้นเป็นชั่วโมงและอาจทำให้กระบวนการ CI/CD Time out
+2. เปลืองหน่วยความจำ (RAM) ของเครื่อง Build Server และเสี่ยงต่อการถูกแบน Rate Limit จากหลังบ้าน (Database/API)
+
+**แนวทางระดับ Senior ที่ถูกต้องคือใช้กลยุทธ์ "Hybrid Static Generation":**
+- สั่งให้ `generateStaticParams` คืนค่าเฉพาะ **สินค้าขายดี 500-1,000 ชิ้นแรก (Top Products)** ที่มีคนเข้าชมบ่อยที่สุด เพื่อให้พร้อมเสิร์ฟบน CDN ทันทีหลัง Deploy
+- ตั้งค่า `export const dynamicParams = true`
+- สำหรับสินค้าอีก 49,000 ชิ้นที่เหลือนั้น เมื่อมีผู้ใช้เข้าชมเป็นครั้งแรก ระบบจะเรนเดอร์แบบ On-demand (เหมือน SSR) ในครั้งแรกเพียงครั้งเดียว และบันทึกไฟล์ Static HTML เก็บไว้บน CDN อัตโนมัติ ผู้ใช้คนที่สองเป็นต้นไปจะได้ความเร็วแบบ SSG ทันที
+
+---
+
+## ดูเพิ่มเติมที่
+- [Next.js SSR](/docs/nextjs/ssr) — การเรนเดอร์เนื้อหาแบบ Dynamic บนเซิร์ฟเวอร์
+- [Next.js RSC vs Client](/docs/nextjs/rsc-client) — แยกแยะ Server Components และ Client Components
+- [Next.js Data Fetching](/docs/nextjs/data-fetching) — การควบคุม Caching และ Revalidation
+- [Next.js Optimization](/docs/nextjs/optimization) — การเพิ่มประสิทธิภาพรูปภาพ ตัวอักษร และ SEO

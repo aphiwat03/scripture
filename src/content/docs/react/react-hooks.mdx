@@ -1,0 +1,668 @@
+---
+title: React Hook
+category: Frontend
+parentTitle: React 19
+version: v19.0
+updatedAt: 2026-10-21
+---
+
+# React Hook
+
+(คัมภีร์รวบรวม **React Hooks ทุกตัวที่ใช้งานจริงใน React 19** ครอบคลุมตั้งแต่ Basic State, Side Effects, Refs, Performance Memoization, Context, จนถึง React 19 Modern Hooks ชุดใหม่ล่าสุด พร้อมหลักการทำงานเบื้องหลังและตัวอย่างโค้ด TypeScript อย่างละเอียด)
+
+<Callout type="tip" title="กฎเหล็กของ React Hooks (Rules of Hooks)">
+1. **เรียกที่ระดับบนสุดของคอมโพเนนต์เท่านั้น:** ห้ามเรียกใช้ Hook ภายในเงื่อนไข `if`, ลูป `for`, หรือฟังก์ชันซ้อน (ยกเว้นฟังก์ชันใหม่ `use()` ใน React 19 ที่สามารถอยู่ใน `if` ได้) เพื่อให้ React ลำดับการจัดเก็บ State ใน Memory ได้ถูกต้อง
+2. **เรียกจาก React Function Components หรือ Custom Hooks เท่านั้น:** ห้ามเรียกใช้ในฟังก์ชัน JavaScript ธรรมดา
+</Callout>
+
+---
+
+## สารบัญคลัง React Hooks แบ่งตามกลุ่มการใช้งาน
+
+| กลุ่มการใช้งาน | Hooks ทั้งหมดในกลุ่มนี้ | วัตถุประสงค์หลัก |
+| :--- | :--- | :--- |
+| **1. State & Data Hooks** | `useState`, `useReducer` | จัดการข้อมูลและการอัปเดตสถานะภายในคอมโพเนนต์ |
+| **2. Side Effect Hooks** | `useEffect`, `useLayoutEffect`, `useInsertionEffect` | ซิงโครไนซ์กับระบบภายนอก จัดการ DOM Layout และ CSS-in-JS |
+| **3. Ref & DOM Hooks** | `useRef`, `useImperativeHandle` | เก็บค่า Mutable โดยไม่ Re-render และควบคุม DOM Node จริง |
+| **4. Performance & Memo Hooks** | `useMemo`, `useCallback`, `useTransition`, `useDeferredValue` | แคชผลลัพธ์ แคชฟังก์ชัน และจัดลำดับความสำคัญของงานหนัก |
+| **5. Context & Identity Hooks** | `useContext`, `useId` | แชร์ข้อมูลข้ามคอมโพเนนต์ และสร้าง Unique ID สำหรับ A11y |
+| **6. React 19 Modern Hooks** | `use()`, `useActionState`, `useOptimistic`, `useFormStatus` | จัดการ Asynchronous Data, Server Actions และ Form UI ยุคใหม่ |
+| **7. Store Integration Hooks** | `useSyncExternalStore`, `useDebugValue` | เชื่อมต่อ External State ป้องกัน Tearing และช่วยดีบัก |
+
+---
+
+## 1. หมวด State & Data Hooks
+
+### 1.1 `useState`
+- **แนวคิด:** Hook พื้นฐานที่สุดสำหรับเก็บข้อมูลที่เมื่อเปลี่ยนค่าแล้วต้องการให้คอมโพเนนต์วาดหน้าจอใหม่ (Re-render)
+- **ตัวอย่างโค้ด (ระบบนับจำนวนชิ้นเนื้อวากิว):**
+
+```tsx filename="components/WagyuCounter.tsx"
+'use client';
+
+import { useState } from 'react';
+
+export function WagyuCounter() {
+  const [steaks, setSteaks] = useState<number>(1);
+
+  // Functional Update: ป้องกัน Race Condition เมื่อกดรัวๆ
+  const handleIncrease = () => {
+    setSteaks((prev) => prev + 1);
+  };
+
+  const handleDecrease = () => {
+    setSteaks((prev) => (prev > 1 ? prev - 1 : 1));
+  };
+
+  return (
+    <div className="flex items-center gap-3 p-4 border rounded-xl">
+      <button onClick={handleDecrease} className="px-3 py-1 bg-neutral-100 rounded">-</button>
+      <span className="font-semibold text-lg">{steaks} ชิ้น</span>
+      <button onClick={handleIncrease} className="px-3 py-1 bg-neutral-100 rounded">+</button>
+    </div>
+  );
+}
+```
+
+---
+
+### 1.2 `useReducer`
+- **แนวคิด:** เหมาะสำหรับคอมโพเนนต์ที่มี State หลายตัวที่ต้องอัปเดตพร้อมกัน หรือมีเงื่อนไขการเปลี่ยนแปลงที่ซับซ้อนตามประเภทเหตุการณ์ (Action) โดยแยก "สิ่งที่จะทำ (Action)" ออกจาก "วิธีคำนวณผลลัพธ์ (Pure Reducer Function)"
+- **ตัวอย่างโค้ด (ระบบจัดการตะกร้าสินค้า Smart Butcher Marketplace):**
+
+```tsx filename="components/ButcherCartReducer.tsx"
+'use client';
+
+import { useReducer } from 'react';
+
+interface CartItem {
+  id: string;
+  name: string;
+  weightKg: number;
+  pricePerKg: number;
+}
+
+interface CartState {
+  items: CartItem[];
+  appliedCoupon: string | null;
+  discountRate: number;
+}
+
+type CartAction =
+  | { type: 'ADD_ITEM'; payload: CartItem }
+  | { type: 'REMOVE_ITEM'; payload: { id: string } }
+  | { type: 'APPLY_COUPON'; payload: { code: string; rate: number } }
+  | { type: 'CLEAR_CART' };
+
+function cartReducer(state: CartState, action: CartAction): CartState {
+  switch (action.type) {
+    case 'ADD_ITEM':
+      return { ...state, items: [...state.items, action.payload] };
+    case 'REMOVE_ITEM':
+      return { ...state, items: state.items.filter((i) => i.id !== action.payload.id) };
+    case 'APPLY_COUPON':
+      return { ...state, appliedCoupon: action.payload.code, discountRate: action.payload.rate };
+    case 'CLEAR_CART':
+      return { items: [], appliedCoupon: null, discountRate: 0 };
+    default:
+      return state;
+  }
+}
+
+export function ButcherCartManager() {
+  const [state, dispatch] = useReducer(cartReducer, {
+    items: [],
+    appliedCoupon: null,
+    discountRate: 0,
+  });
+
+  const totalRaw = state.items.reduce((sum, item) => sum + item.weightKg * item.pricePerKg, 0);
+  const netTotal = totalRaw * (1 - state.discountRate);
+
+  return (
+    <div className="p-4 border rounded-xl space-y-3">
+      <h3 className="font-bold">รายการเนื้อในตะกร้า ({state.items.length})</h3>
+      <button
+        onClick={() => dispatch({
+          type: 'ADD_ITEM',
+          payload: { id: 'w1', name: 'Miyazaki A5 Ribeye', weightKg: 0.5, pricePerKg: 4500 }
+        })}
+        className="px-3 py-1.5 bg-amber-600 text-white text-sm rounded-lg"
+      >
+        + เพิ่มเนื้อ A5 Ribeye
+      </button>
+      <button
+        onClick={() => dispatch({ type: 'APPLY_COUPON', payload: { code: 'VIP10', rate: 0.1 } })}
+        className="ml-2 px-3 py-1.5 bg-neutral-800 text-white text-sm rounded-lg"
+      >
+        ใช้คูปองลด 10%
+      </button>
+      <div className="font-mono text-sm pt-2">
+        ยอดสุทธิ: ฿{netTotal.toLocaleString()} {state.appliedCoupon && `(ใช้โค้ด ${state.appliedCoupon})`}
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 2. หมวด Side Effect Hooks
+
+### 2.1 `useEffect`
+- **แนวคิด:** ใช้สำหรับซิงโครไนซ์คอมโพเนนต์กับ **ระบบภายนอก (External Systems)** เช่น Browser APIs, การเชื่อมต่อ WebSocket, หรือ Event Listeners จะทำงานหลังจากที่เบราว์เซอร์ Paint หน้าจอเสร็จสิ้นแล้ว (Non-blocking)
+- **ตัวอย่างโค้ด (การตรวจจับหน้าจอและ Cleanup Event Listener):**
+
+```tsx filename="components/WindowResizeTracker.tsx"
+'use client';
+
+import { useState, useEffect } from 'react';
+
+export function WindowResizeTracker() {
+  const [width, setWidth] = useState<number>(0);
+
+  useEffect(() => {
+    // 1. ซิงค์ค่าเริ่มต้น
+    setWidth(window.innerWidth);
+
+    const onResize = () => setWidth(window.innerWidth);
+    window.addEventListener('resize', onResize);
+
+    // 2. สำคัญที่สุด: Cleanup Function ป้องกัน Memory Leak เมื่อ Unmount
+    return () => {
+      window.removeEventListener('resize', onResize);
+    };
+  }, []); // [] = รันครั้งเดียวตอน Mount
+
+  return <p className="text-sm">ขนาดจอปัจจุบัน: {width}px</p>;
+}
+```
+
+---
+
+### 2.2 `useLayoutEffect`
+- **แนวคิด:** ทำงานแบบ Synchronous ทันทีหลังจาก React อัปเดต Real DOM แต่ **ก่อนที่เบราว์เซอร์จะ Paint ภาพขึ้นหน้าจอ** ใช้สำหรับวัดขนาดตำแหน่งของ DOM (เช่น `getBoundingClientRect()`) และปรับตำแหน่ง Tooltip หรือ Modal เพื่อป้องกันอาการหน้าจอกระตุกหรือสลับที่ (Layout Flickering)
+
+```tsx filename="components/TooltipPositioner.tsx"
+'use client';
+
+import { useState, useRef, useLayoutEffect } from 'react';
+
+export function TooltipPositioner({ text }: { text: string }) {
+  const [tooltipHeight, setTooltipHeight] = useState(0);
+  const tooltipRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    // วัดขนาดความสูงจริงของกล่องข้อความก่อนที่ผู้ใช้จะมองเห็น
+    if (tooltipRef.current) {
+      setTooltipHeight(tooltipRef.current.getBoundingClientRect().height);
+    }
+  }, []);
+
+  return (
+    <div ref={tooltipRef} style={{ top: `-${tooltipHeight + 8}px` }} className="absolute bg-neutral-900 text-white p-2 rounded text-xs">
+      {text}
+    </div>
+  );
+}
+```
+
+---
+
+### 2.3 `useInsertionEffect`
+- **แนวคิด:** ออกแบบมาสำหรับผู้พัฒนาไลบรารี CSS-in-JS (เช่น styled-components, emotion) เพื่อแทรก `<style>` tags ลงใน DOM ก่อนที่ Layout Effects จะทำงาน นักพัฒนาแอปพลิเคชันทั่วไปแทบไม่ต้องเรียกใช้ตัวนี้โดยตรง
+
+---
+
+## 3. หมวด Ref & DOM Hooks
+
+### 3.1 `useRef`
+- **แนวคิด:** กล่องเก็บค่าที่ไม่ทำให้เกิด Re-render เมื่อค่าข้างในเปลี่ยน หรือใช้เก็บตัวอ้างอิงไปยัง Real DOM Node
+- **ตัวอย่างโค้ด (สั่ง Focus ช่องค้นหาเนื้อ และเก็บตัวนับการคลิก):**
+
+```tsx filename="components/MeatSearchInput.tsx"
+'use client';
+
+import { useRef } from 'react';
+
+export function MeatSearchInput() {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const clickCountRef = useRef<number>(0);
+
+  const handleFocus = () => {
+    clickCountRef.current += 1;
+    console.log(`Focus ไปแล้ว ${clickCountRef.current} ครั้ง`);
+    inputRef.current?.focus();
+  };
+
+  return (
+    <div className="flex gap-2">
+      <input ref={inputRef} type="text" placeholder="ค้นหาเนื้อวากิว, โทมาฮอว์ก..." className="border p-2 rounded-lg" />
+      <button onClick={handleFocus} className="bg-neutral-900 text-white px-3 py-1.5 rounded-lg">
+        ค้นหา
+      </button>
+    </div>
+  );
+}
+```
+
+---
+
+### 3.2 `useImperativeHandle`
+- **แนวคิด:** ใช้ร่วมกับ `forwardRef` (หรือ Ref ใน React 19) เพื่อจำกัดและเปิดเผยเฉพาะฟังก์ชันที่ต้องการให้คอมโพเนนต์แม่เรียกใช้ แทนที่จะเปิดให้เข้าถึง DOM Node ทั้งหมด
+
+```tsx filename="components/CustomVideoPlayer.tsx"
+'use client';
+
+import { useRef, useImperativeHandle } from 'react';
+
+export interface VideoHandle {
+  playVideo: () => void;
+  pauseVideo: () => void;
+}
+
+export function CustomVideoPlayer({ ref }: { ref: React.Ref<VideoHandle> }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useImperativeHandle(ref, () => ({
+    playVideo: () => videoRef.current?.play(),
+    pauseVideo: () => videoRef.current?.pause(),
+  }));
+
+  return <video ref={videoRef} src="/meat-aging.mp4" />;
+}
+```
+
+---
+
+## 4. หมวด Performance & Memo Hooks
+
+### 4.1 `useMemo`
+- **แนวคิด:** แคชผลลัพธ์ของการคำนวณที่ใช้ CPU หนักๆ (Expensive Calculation) จะคำนวณใหม่เฉพาะเมื่อ Dependencies เปลี่ยนแปลงเท่านั้น
+- **ตัวอย่างโค้ด (การคำนวณสรุปยอดสั่งซื้อเนื้อดรายเอจ):**
+
+```tsx filename="components/OrderSummary.tsx"
+'use client';
+
+import { useMemo } from 'react';
+
+interface OrderItem {
+  id: string;
+  price: number;
+  weight: number;
+}
+
+export function OrderSummary({ items, taxRate }: { items: OrderItem[]; taxRate: number }) {
+  // คำนวณใหม่เฉพาะเมื่อ items หรือ taxRate เปลี่ยน
+  const financialReport = useMemo(() => {
+    console.log('🔄 คำนวณตัวเลขภาษีและกำไรขั้นต้น (Heavy Task)...');
+    const subtotal = items.reduce((acc, item) => acc + item.price * item.weight, 0);
+    const tax = subtotal * taxRate;
+    const grandTotal = subtotal + tax;
+    return { subtotal, tax, grandTotal };
+  }, [items, taxRate]);
+
+  return (
+    <div className="p-3 bg-neutral-50 rounded-lg text-sm">
+      <p>ยอดรวม: ฿{financialReport.subtotal.toLocaleString()}</p>
+      <p>ภาษี: ฿{financialReport.tax.toLocaleString()}</p>
+      <p className="font-bold text-base">ยอดสุทธิ: ฿{financialReport.grandTotal.toLocaleString()}</p>
+    </div>
+  );
+}
+```
+
+---
+
+### 4.2 `useCallback`
+- **แนวคิด:** แคช **ตัวฟังก์ชันเดิม (Function Identity)** ไว้ระหว่างรอบการ Render เพื่อไม่ให้เกิด Function Reference ใหม่ ส่งไปให้คอมโพเนนต์ลูกที่ครอบด้วย `React.memo` เพื่อป้องกันการ Re-render โดยไม่จำเป็น
+
+```tsx filename="components/ProductFilterContainer.tsx"
+'use client';
+
+import { useState, useCallback, memo } from 'react';
+
+// คอมโพเนนต์ลูกจะไม่ Re-render หากฟังก์ชัน onSelect คงที่
+const CategoryFilterButton = memo(function CategoryFilterButton({
+  category,
+  onSelect,
+}: {
+  category: string;
+  onSelect: (cat: string) => void;
+}) {
+  console.log(`Render ปุ่มหมวดหมู่: ${category}`);
+  return <button onClick={() => onSelect(category)} className="border px-2 py-1 rounded">{category}</button>;
+});
+
+export function ProductCatalog() {
+  const [selectedCat, setSelectedCat] = useState('ALL');
+
+  // useCallback รักษา Memory Address เดิมของฟังก์ชัน
+  const handleSelectCategory = useCallback((category: string) => {
+    setSelectedCat(category);
+  }, []);
+
+  return (
+    <div className="space-y-2">
+      <CategoryFilterButton category="WAGYU" onSelect={handleSelectCategory} />
+      <CategoryFilterButton category="DRY_AGED" onSelect={handleSelectCategory} />
+      <p>หมวดที่เลือก: {selectedCat}</p>
+    </div>
+  );
+}
+```
+
+---
+
+### 4.3 `useTransition`
+- **แนวคิด:** แยกการอัปเดต State ออกเป็น 2 ระดับ: **Urgent Update** (เช่น การพิมพ์ข้อความในช่อง Input ที่ต้องตอบสนองทันที) กับ **Transition Update** (เช่น การคำนวณและฟิลเตอร์รายการเนื้อ 10,000 รายการ) ทำให้หน้าจอไม่ค้างขณะพิมพ์
+
+```tsx filename="components/ConcurrentMeatSearch.tsx"
+'use client';
+
+import { useState, useTransition } from 'react';
+
+export function ConcurrentMeatSearch({ allMeats }: { allMeats: string[] }) {
+  const [query, setQuery] = useState('');
+  const [filtered, setFiltered] = useState(allMeats);
+  const [isPending, startTransition] = useTransition();
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const text = e.target.value;
+    setQuery(text); // 1. Urgent: แสดงตัวอักษรทันที
+
+    startTransition(() => {
+      // 2. Non-blocking Transition: ประมวลผลเบื้องหลัง
+      setFiltered(allMeats.filter((item) => item.toLowerCase().includes(text.toLowerCase())));
+    });
+  };
+
+  return (
+    <div className="space-y-3">
+      <input value={query} onChange={handleChange} placeholder="พิมพ์ค้นหา..." className="border p-2 rounded" />
+      {isPending && <span className="text-xs text-amber-600 animate-pulse">กำลังคำนวณ...</span>}
+      <ul className="text-sm">
+        {filtered.slice(0, 5).map((m, idx) => <li key={idx}>{m}</li>)}
+      </ul>
+    </div>
+  );
+}
+```
+
+---
+
+### 4.4 `useDeferredValue`
+- **แนวคิด:** หน่วงเวลาการอัปเดตค่าตัวแปรในส่วน UI ที่หนัก โดยปล่อยให้ส่วนอื่นของหน้าจอแสดงผลไปก่อน คล้ายกับ Debounce ในระดับ React Fiber
+
+```tsx filename="components/DeferredProductList.tsx"
+'use client';
+
+import { useDeferredValue } from 'react';
+
+export function DeferredProductList({ query }: { query: string }) {
+  // ค่า deferredQuery จะตามหลัง query จริงเล็กน้อยหากเครื่องกำลังประมวลผลหนัก
+  const deferredQuery = useDeferredValue(query);
+
+  return (
+    <div style={{ opacity: query !== deferredQuery ? 0.6 : 1 }}>
+      <p>กำลังค้นหาผลลัพธ์ของ: {deferredQuery}</p>
+    </div>
+  );
+}
+```
+
+---
+
+## 5. หมวด Context & Identity Hooks
+
+### 5.1 `useContext`
+- **แนวคิด:** เข้าถึงข้อมูล Global หรือ Shared State ที่ถูกกระจายผ่าน `<Context.Provider>` โดยไม่ต้องส่ง Props ต่อกันเป็นทอดๆ (Prop Drilling)
+
+```tsx filename="components/ThemeToggle.tsx"
+'use client';
+
+import { createContext, useContext, useState } from 'react';
+
+const ThemeContext = createContext<{ dark: boolean; toggle: () => void }>({
+  dark: false,
+  toggle: () => {},
+});
+
+export function ThemeButton() {
+  const { dark, toggle } = useContext(ThemeContext);
+  return (
+    <button onClick={toggle} className="p-2 border rounded">
+      ธีมปัจจุบัน: {dark ? 'Dark 🌙' : 'Light ☀️'}
+    </button>
+  );
+}
+```
+
+---
+
+### 5.2 `useId`
+- **แนวคิด:** สร้าง Unique ID ที่ตรงกัน 100% ระหว่างฝั่ง Server และ Client (ขจัดปัญหา Hydration Mismatch) นิยมใช้ผูก `<label htmlFor={id}>` กับ `<input id={id}>`
+
+```tsx filename="components/AccessibleInput.tsx"
+'use client';
+
+import { useId } from 'react';
+
+export function AccessibleInput({ label }: { label: string }) {
+  const id = useId();
+  return (
+    <div className="space-y-1">
+      <label htmlFor={id} className="text-sm font-medium">{label}</label>
+      <input id={id} type="text" className="border p-2 rounded w-full" />
+    </div>
+  );
+}
+```
+
+---
+
+## 6. หมวด React 19 Modern Hooks (ยุคใหม่ล่าสุด)
+
+### 6.1 `use()` API
+- **ความพิเศษ:** เป็น Hook ชนิดพิเศษที่สามารถเรียกใช้ **ภายในเงื่อนไข `if` หรือ Loop ได้!** สามารถอ่านค่าจาก Promise หรือ Context ได้โดยตรง และจะ Suspense หน้าจอให้อัตโนมัติ
+
+```tsx filename="components/WagyuDetailAsync.tsx"
+'use client';
+
+import { use, Suspense } from 'react';
+
+interface BeefCut {
+  name: string;
+  origin: string;
+}
+
+function MeatInfo({ promise, showExtra }: { promise: Promise<BeefCut>; showExtra: boolean }) {
+  // สามารถเรียก use() ภายใน if condition ได้!
+  if (showExtra) {
+    const meat = use(promise);
+    return <p className="text-sm text-green-700">แหล่งกำเนิด: {meat.origin}</p>;
+  }
+  return <p className="text-sm text-neutral-500">ซ่อนข้อมูลเพิ่มเติม</p>;
+}
+```
+
+---
+
+### 6.2 `useActionState`
+- **แนวคิด:** หัวใจใหม่ของ React 19 ในการส่ง Form และจัดการ Server Actions คืนค่า `[state, formAction, isPending]` อัตโนมัติ โดยไม่ต้องเขียน `useState` จัดการ loading และ error อีกต่อไป
+
+```tsx filename="components/UpdateMeatStockForm.tsx"
+'use client';
+
+import { useActionState } from 'react';
+
+// Action Function
+async function updateStockAction(prevState: { error?: string; success?: boolean }, formData: FormData) {
+  const stock = formData.get('stock');
+  if (Number(stock) < 0) {
+    return { error: 'สต็อกเนื้อห้ามติดลบ!' };
+  }
+  // จำลองบันทึกข้อมูล
+  await new Promise((r) => setTimeout(r, 800));
+  return { success: true };
+}
+
+export function UpdateMeatStockForm() {
+  const [state, formAction, isPending] = useActionState(updateStockAction, {});
+
+  return (
+    <form action={formAction} className="p-4 border rounded-xl space-y-3 max-w-sm">
+      <label className="block text-sm font-medium">เพิ่มสต็อกเนื้อวากิว (กก.):</label>
+      <input name="stock" type="number" defaultValue="10" className="border p-2 rounded w-full" />
+      
+      <button disabled={isPending} className="w-full bg-neutral-900 text-white py-2 rounded-lg">
+        {isPending ? 'กำลังบันทึกข้อมูล...' : 'อัปเดตสต็อก'}
+      </button>
+
+      {state.error && <p className="text-sm text-red-600">{state.error}</p>}
+      {state.success && <p className="text-sm text-green-600">อัปเดตสต็อกสำเร็จ!</p>}
+    </form>
+  );
+}
+```
+
+---
+
+### 6.3 `useOptimistic`
+- **แนวคิด:** ทำ **Optimistic UI Update** ทันที เพื่อให้ผู้ใช้รู้สึกว่าระบบเร็วแบบทันตาเห็น (เช่น กด Like ปุ๊บ ตัวเลขขึ้นปั๊บ) หากเซิร์ฟเวอร์ตอบกลับว่า Error ตัว React จะ Rollback คืนค่าเดิมให้อัตโนมัติ
+
+```tsx filename="components/OptimisticCartBadge.tsx"
+'use client';
+
+import { useOptimistic } from 'react';
+
+export function OptimisticCartBadge({ serverCount }: { serverCount: number }) {
+  // optimisticCount จะอัปเดตทันทีที่เรียก setOptimisticCount
+  const [optimisticCount, setOptimisticCount] = useOptimistic(
+    serverCount,
+    (current, added: number) => current + added
+  );
+
+  const handleQuickAdd = async () => {
+    // 1. อัปเดต UI ทันที
+    setOptimisticCount(1);
+
+    // 2. ยิง API หลังบ้านจริง
+    await fetch('/api/cart/add', { method: 'POST' });
+  };
+
+  return (
+    <div className="flex items-center gap-3">
+      <span className="bg-amber-600 text-white text-xs px-2 py-1 rounded-full">
+        ตะกร้า: {optimisticCount} รายการ
+      </span>
+      <button onClick={handleQuickAdd} className="text-sm underline">
+        + สั่งเนื้อเพิ่มด่วน
+      </button>
+    </div>
+  );
+}
+```
+
+---
+
+### 6.4 `useFormStatus`
+- **แนวคิด:** อ่านสถานะของ Parent `<form>` จากคอมโพเนนต์ลูก เช่น ปุ่ม Submit เพื่อแสดง Spinner หรือสั่ง Disable ปุ่มขณะส่งข้อมูล โดยไม่ต้องส่ง Props `isPending` ลงมา
+
+```tsx filename="components/SubmitMeatButton.tsx"
+'use client';
+
+import { useFormStatus } from 'react-dom';
+
+export function SubmitMeatButton() {
+  const { pending } = useFormStatus();
+
+  return (
+    <button
+      type="submit"
+      disabled={pending}
+      className="bg-amber-600 disabled:bg-neutral-400 text-white px-4 py-2 rounded-lg"
+    >
+      {pending ? 'กำลังตัดยอดเนื้อ...' : 'ยืนยันสั่งซื้อ'}
+    </button>
+  );
+}
+```
+
+---
+
+## 7. หมวด Store Integration Hooks
+
+### 7.1 `useSyncExternalStore`
+- **แนวคิด:** สำหรับนักพัฒนา Library หรือเชื่อมต่อกับ State ภายนอก React (เช่น Zustand, Redux, หรือ `window.navigator.onLine`) ป้องกันปัญหา **Visual Tearing** เมื่อเรนเดอร์ร่วมกับ Concurrent Features
+
+```tsx filename="components/NetworkStatusIndicator.tsx"
+'use client';
+
+import { useSyncExternalStore } from 'react';
+
+function subscribe(callback: () => void) {
+  window.addEventListener('online', callback);
+  window.addEventListener('offline', callback);
+  return () => {
+    window.removeEventListener('online', callback);
+    window.removeEventListener('offline', callback);
+  };
+}
+
+export function NetworkStatusIndicator() {
+  const isOnline = useSyncExternalStore(
+    subscribe,
+    () => navigator.onLine,
+    () => true // ค่าเริ่มต้นบน Server (SSR)
+  );
+
+  return (
+    <span className={`text-xs px-2 py-1 rounded ${isOnline ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+      {isOnline ? 'ออนไลน์ (เชื่อมต่อคลังเนื้อ)' : 'ออฟไลน์'}
+    </span>
+  );
+}
+```
+
+---
+
+## 8. ตารางสรุปการเลือกใช้ React Hooks ให้ถูกงาน
+
+| ปัญหาหรือโจทย์การพัฒนา | Hook ที่ควรเลือกใช้ | เหตุผล |
+| :--- | :--- | :--- |
+| เก็บค่าสต็อกชิ้นเนื้อ 1 ตัวแปร | `useState` | เรียบง่ายและตรงไปตรงมาที่สุด |
+| ระบบตะกร้าสินค้ามี Action หลายเงื่อนไข | `useReducer` | แยกตรรกะคำนวณออกจาก UI ทำให้เขียน Unit Test ง่าย |
+| เชื่อมต่อ WebSocket สตรีมราคาเนื้อ | `useEffect` | มีวงจรการ Mount และ Cleanup ป้องกันการต่อ Socket ซ้ำ |
+| วัดขนาดป๊อปอัปก่อนวาดลงจอ | `useLayoutEffect` | รันก่อน Paint หน้าจอ ขจัดปัญหากล่องกระพริบ |
+| อ้างอิง DOM Node หรือจับเวลา | `useRef` | แก้ค่าได้ทันทีโดยไม่กระตุ้นให้คอมโพเนนต์ Re-render |
+| ฟิลเตอร์รายการเนื้อ 5,000 รายการ | `useMemo` | คำนวณเฉพาะเมื่อรายการสินค้าหรือคำค้นหาเปลี่ยน |
+| ส่งฟังก์ชันไปให้ลูกที่ครอบ `React.memo` | `useCallback` | รักษา Function Reference เดิม ไม่ให้ลูก Re-render ฟรี |
+| ส่งฟอร์มและต้องการ Loading อัตโนมัติ | `useActionState` | ฟีเจอร์มาตรฐาน React 19 ลดโค้ด `isPending` และ `error` |
+| กดปุ่มสั่งซื้อแล้วตัวเลขในตะกร้าเปลี่ยนทันที | `useOptimistic` | ให้ประสบการณ์ผู้ใช้เร็วระดับ Instant UI Feedback |
+
+---
+
+## 9. คำถามสัมภาษณ์งาน (Senior Interview Q&A)
+
+### ข้อที่ 1: `useMemo` กับ `useCallback` ทำงานต่างกันอย่างไรในระดับ Memory และเมื่อไหร่ที่ไม่ควรใส่ Memoization?
+**แนวคำตอบเชิงลึก:**
+- **ความต่าง:** `useMemo` จะเรียกฟังก์ชันที่ส่งเข้าไปและแคช **"ผลลัพธ์ของการคำนวณ (Return Value)"** ไว้ ส่วน `useCallback` จะแคช **"ตัวฟังก์ชันเอง (Function Definition / Memory Reference)"**
+- **เมื่อไหร่ที่ไม่ควรใช้:** 
+  1. การคำนวณระดับพื้นฐานทั่วไป (เช่น บวกเลข กรองอาร์เรย์สั้นๆ ไม่กี่สิบตัว) ต้นทุนในการสร้าง Array Dependencies และให้ React เปรียบเทียบค่า (`Object.is`) มักสูงกว่าเวลาที่ใช้คำนวณใหม่สดๆ
+  2. ฟังก์ชันที่ส่งให้ Native HTML Elements เช่น `<button onClick={cb}>` ไม่ได้ประโยชน์จาก `useCallback` เพราะ Native Elements ไม่มีกลไกป้องกัน Re-render แบบ `React.memo` อยู่แล้ว
+
+### ข้อที่ 2: ทำไม React 19 ถึงแนะนำให้ใช้ `useActionState` แทนการเขียน `useState` ควบคุมฟอร์มแบบเดิม?
+**แนวคำตอบเชิงลึก:**
+ในการเขียนแบบเดิม นักพัฒนาต้องประกาศ `const [isPending, setIsPending] = useState(false)`, `const [error, setError] = useState(null)`, และต้องเขียน `try...catch...finally` ทุกจุดเพื่อสลับค่า ซึ่งยาวและเสี่ยงต่อการลืม Reset State ใน React 19 ตัว `useActionState` ผูกเข้ากับระบบ **React Transitions** โดยตรง ทำให้:
+1. การอัปเดตสถานะ `isPending` เป็นแบบ Non-blocking ไม่ทำให้หน้าค้าง
+2. ทำงานร่วมกับ Progressive Enhancement ได้ หาก JavaScript หน้าบ้านยังโหลดไม่เสร็จ ฟอร์มยังสามารถ Submit ไปที่เซิร์ฟเวอร์ได้
+3. บูรณาการร่วมกับ `<form action={formAction}>` และ `useFormStatus` ในคอมโพเนนต์ลูกได้อย่างราบรื่น
+
+---
+
+## ดูเพิ่มเติมที่
+- [React State & Render](/docs/react/state-render) — วงจรชีวิตและกระบวนการ Commit ของ React
+- [React Custom Hooks](/docs/react/custom-hooks) — วิธีการสกัดตรรกะออกเป็น Custom Hook นำกลับมาใช้ซ้ำ
+- [React 19 New Features](/docs/react/react-19-features) — เจาะลึกฟีเจอร์ระดับสถาปัตยกรรมของ React 19
+- [React Performance Optimization](/docs/react/performance) — เทคนิคการปรับจูนความเร็วและลด Re-render
