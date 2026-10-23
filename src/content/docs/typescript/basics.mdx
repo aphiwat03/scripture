@@ -20,7 +20,8 @@ updatedAt: 2026-10-23
   - [1.1 เครื่องหมาย `:` (Colon) มีกี่บทบาท](#11-เครื่องหมาย--colon-มีกี่บทบาท)
   - [1.2 เครื่องหมาย `=>` (Fat Arrow) ในฝั่ง Type vs โค้ดจริง](#12-เครื่องหมาย--fat-arrow-ในฝั่ง-type-vs-โค้ดจริง)
   - [1.3 ความแตกต่างระหว่าง `()` (Parentheses) กับ `{}` (Curly Braces)](#13-ความแตกต่างระหว่าง--parentheses-กับ--curly-braces)
-  - [1.4 สัญลักษณ์สำคัญอื่นๆ ที่พบบ่อย: `?`, `!`, `|`, `&`, `<>`](#14-สัญลักษณ์สำคัญอื่นๆ-ที่พบบ่อย)
+  - [1.4 ปริศนาเครื่องหมาย Dollar Sign ($): ทำไมต้องใส่ และมีบทบาทอะไรบ้าง?](#14-ปริศนาเครื่องหมาย-dollar-sign--ทำไมต้องใส่-และมีบทบาทอะไรบ้าง)
+  - [1.5 สัญลักษณ์สำคัญอื่นๆ ที่พบบ่อย: `?`, `!`, `|`, `&`, `<>`](#15-สัญลักษณ์สำคัญอื่นๆ-ที่พบบ่อย)
 - [2. ชนิดข้อมูลพื้นฐาน (Primitive Types)](#2-ชนิดข้อมูลพื้นฐาน-primitive-types)
 - [3. ชนิดข้อมูลระดับระบบ: any vs unknown vs never](#3-ชนิดข้อมูลระดับระบบ-any-vs-unknown-vs-never)
 - [4. ตัวอย่างโค้ดระบบ Smart Butcher Marketplace](#4-ตัวอย่างโค้ดระบบ-smart-butcher-marketplace)
@@ -183,7 +184,67 @@ const calculateVat: (amount: number) => number = (amount) => amount * 0.07;
 
 ---
 
-### 1.4 สัญลักษณ์สำคัญอื่นๆ ที่พบบ่อย
+### 1.4 ปริศนาเครื่องหมาย Dollar Sign ($): ทำไมต้องใส่ และมีบทบาทอะไรบ้าง?
+
+หลายคนมักสงสัยเมื่อเห็นเครื่องหมาย `$` ปรากฏในลูป `.map()` หรือในโค้ดฟังก์ชัน เช่น:
+```typescript
+const labels = meatInventory.map(
+  (item) => `${item.name} - ฿${item.pricePerKg.toLocaleString()}/kg`
+);
+```
+
+เครื่องหมาย `$` ใน JavaScript & TypeScript มีหน้าที่สำคัญ 4 ประการ:
+
+#### 1) Template Literal Interpolation: `${expression}` (การแทรกตัวแปรลงในสตริง)
+นี่คือสาเหตุที่พบบ่อยที่สุด!  
+- **ทำไมต้องมี `$`?**: หากเราเขียนข้อความด้วย Backtick แล้วใส่แค่ปีกกา เช่น `` `สวัสดี {item.name}` `` ตัวเอนจิน JavaScript จะไม่รู้ว่า `{item.name}` คือตัวแปร หรือเป็นแค่วงเล็บปีกกาธรรมดาที่เราอยากพิมพ์โชว์  
+- **กฎไวยากรณ์:** การใส่ `$` นำหน้าปีกกาเป็นสัญลักษณ์พิเศษ **`${...}`** เพื่อสั่งว่า **"ให้ถอดค่าของตัวแปร หรือรันคำสั่ง JavaScript ภายในนี้ แล้วนำผลลัพธ์มาประกบเป็นข้อความ"**
+- **ข้อควรระวังคลาสสิก:** ต้องใช้คู่กับ **Backticks (`` ` ``)** เท่านั้น! หากเผลอใช้ Single Quote (`'...'`) หรือ Double Quote (`"..."`) ตัว `${...}` จะกลายเป็นตัวอักษรธรรมดาทันที
+
+```typescript filename="template-literals.ts"
+const cut = "Wagyu A5";
+const price = 3800;
+
+// ❌ โบราณ: ต่อข้อความด้วยเครื่องหมาย + (อ่านยาก หลุดง่าย)
+const oldWay = "เนื้อ: " + cut + " ราคา: " + price + " บาท";
+
+// ❌ ผิด: ใช้ Single Quote ทำให้ ${} ไม่ทำงาน
+const wrongWay = 'เนื้อ: ${cut} ราคา: ${price} บาท'; 
+// ผลลัพธ์: "เนื้อ: ${cut} ราคา: ${price} บาท" (กลายเป็นตัวอักษรดิบ)
+
+// ✅ ถูกต้อง: ใช้ Backtick ร่วมกับ ${}
+const modernWay = `เนื้อ: ${cut} ราคา: ${price.toLocaleString()} บาท`;
+// ผลลัพธ์: "เนื้อ: Wagyu A5 ราคา: 3,800 บาท"
+
+// 💡 ภายใน ${...} สามารถใส่การคำนวณ หรือ Ternary Operator ได้อิสระ
+const receipt = `ยอดสุทธิ: ฿${price > 3000 ? price * 0.9 : price} (รวมส่วนลดแล้ว)`;
+```
+
+#### 2) ตัวอักษรสำหรับตั้งชื่อตัวแปรและฟังก์ชัน (Valid Identifier)
+ใน JavaScript/TypeScript ตัวอักษร `$` มีสถานะทางกฎไวยากรณ์เทียบเท่ากับตัวอักษร `A-Z`, `a-z`, และ `_` สามารถใช้ตั้งชื่อตัวแปรหรือฟังก์ชันได้ตามปกติ:
+```typescript filename="dollar-identifier.ts"
+// ตั้งชื่อตัวแปรด้วย $ ได้ถูกกฎ 100%
+const $ = "jQuery Legacy";
+const $totalPrice = 5000;
+```
+
+#### 3) ธรรมเนียมการตั้งชื่อ (Naming Conventions) ในโลกจริง
+- **Prisma ORM Methods:** Prisma ใช้ `$` นำหน้าฟังก์ชันพิเศษ เช่น `prisma.$transaction()`, `prisma.$queryRaw()`, และ `prisma.$disconnect()` เพื่อป้องกันไม่ให้ชื่อไปชนกับ Model ในฐานข้อมูล
+- **RxJS Streams (Reactive Programming):** นักพัฒนานิยมใส่ `$` ไว้ **ท้ายชื่อตัวแปร** เช่น `orders$` หรือ `userStream$` เพื่อเป็นสัญญาณเตือนว่าตัวแปรนี้คือ **Observable Stream** ที่ต้องใช้ `.subscribe()` หรือ async pipe
+- **DOM Elements:** สไตล์การเขียนโค้ดของหลายทีมจะใส่ `$` หน้าชื่อตัวแปร เช่น `const $modalBackdrop = document.querySelector('#backdrop')` เพื่อแยกให้ออกทันทีว่านี่คือ HTML Element ไม่ใช่ตัวแปรข้อมูลทั่วไป
+
+#### 4) Capture Groups ใน Regular Expression (`replace`)
+เมื่อใช้งานร่วมกับ String Replace สัญลักษณ์ `$1`, `$2` จะหมายถึงกลุ่มคำที่จับคู่ได้จากวงเล็บของ Regex:
+```typescript filename="regex-dollar.ts"
+const rawSku = "WAGYU-A5-2026";
+// สลับตำแหน่งกลุ่มคำด้วย $1, $2
+const formatted = rawSku.replace(/([A-Z]+)-([A-Z0-9]+)/, "$2-$1"); 
+// "A5-WAGYU-2026"
+```
+
+---
+
+### 1.5 สัญลักษณ์สำคัญอื่นๆ ที่พบบ่อย
 
 | สัญลักษณ์ | ชื่อเรียก | ความหมายใน TypeScript | ตัวอย่างโค้ดจริง |
 | :---: | :--- | :--- | :--- |
