@@ -2,148 +2,539 @@
 title: Display & Position
 category: Frontend
 parentTitle: CSS
-version: CSS3 / Modern CSS
-updatedAt: 2026-10-17
+version: CSS3 / Modern CSS (Tailwind v4 ready)
+updatedAt: 2026-10-23
 ---
 
-## 1. แนวคิด (Concept)
+# Display & Position: คู่มือวิเคราะห์เจาะลึกทุกค่าแบบละเอียด
 
-การควบคุมพิกัดและพฤติกรรมการปรากฏตัวของ Element บนหน้าจอถูกขับเคลื่อนด้วย 2 พร็อพเพอร์ตี้หลัก:
-- **`display`**: กำหนดประเภทของกล่อง (`block`, `inline`, `inline-block`, `none`)
-- **`position`**: กำหนดพิกัดอ้างอิงและการดึงออกจาก Normal Document Flow:
-  - `static`: ค่าเริ่มต้น ไหลไปตามกระแสเอกสารปกติ (ไม่ตอบสนองต่อ `top/left/z-index`)
-  - `relative`: คงตำแหน่งเดิมใน Flow ไว้ แต่สามารถเลื่อนตำแหน่งจากจุดเดิมได้ และ **ทำหน้าที่เป็นจุดอ้างอิงพิกัด (Reference Anchor) ให้แก่ลูกที่เป็น `absolute`**
-  - `absolute`: หลุดออกจาก Flow ลอยอิสระ โดยอิงพิกัดจาก **Ancestor ที่มี `position` ที่ไม่ใช่ static ที่ใกล้ที่สุด**
-  - `fixed`: ลอยตรึงติดกับ Viewport (หน้าต่างเบราว์เซอร์) เสมอ ไม่เลื่อนตามการ Scroll
-  - `sticky`: ไฮบริดอัจฉริยะ! ไหลไปตามหน้าปกติ แต่เมื่อเลื่อนหน้าจอมาชนพิกัดที่กำหนด (เช่น `top: 0`) มันจะเกาะติดค้างไว้จนกว่าจะสิ้นสุดขอบเขตของกล่องแม่
+การควบคุมการจัดวาง Layout และพิกัดตำแหน่งบนหน้าเว็บขึ้นอยู่กับ 2 คุณสมบัติรากฐานที่สำคัญที่สุดใน CSS:
+1. **`display`**: กำหนดพฤติกรรมของกล่อง (Box Behavior) ว่าจะกินพื้นที่อย่างไร ขึ้นบรรทัดใหม่หรือไม่ และปฏิสัมพันธ์กับเนื้อหารอบข้างอย่างไร
+2. **`position`**: กำหนดพิกัดอ้างอิงและการดึง Element ออกจากกระแสเอกสารปกติ (Normal Document Flow)
 
 ---
 
-## 2. หลักการเบื้องหลัง (Under the Hood)
+## สารบัญเนื้อหาในหน้านี้
 
-### ทำไม `z-index: 99999` ถึงยังจมอยู่ใต้ Element อื่น? (Stacking Context)
-นี่คือบั๊กยอดฮิตอันดับ 1 ของนักพัฒนา CSS! 
-
-`z-index` ไม่ได้เปรียบเทียบกันแบบ Global ทั่วทั้งหน้าจอ แต่จะเปรียบเทียบกัน **"ภายใน Stacking Context (ระนาบมิติ) เดียวกันเท่านั้น"**
-- หากกล่องแม่ถูกกำหนดให้อยู่ในระนาบที่ต่ำ (เช่น มี `z-index: 1`) ต่อให้กล่องลูกข้างในจะใส่ `z-index: 999999` ขนาดไหน มันก็ไม่มีวันลอยขึ้นมาเหนือกล่องข้างเคียงที่มี `z-index: 2` ได้เลย!
-- สิ่งที่สร้าง Stacking Context ใหม่: การใส่ `position` คู่กับ `z-index`, การใส่ `opacity < 1`, การใส่ `transform`, `filter`, หรือการประกาศ **`isolation: isolate;`** อย่างตั้งใจ
+- [1. เจาะลึก Display ทุกค่าทีละตัว](#1-เจาะลึก-display-ทุกค่าทีละตัว)
+  - [1.1 display: block](#11-display-block)
+  - [1.2 display: inline](#12-display-inline)
+  - [1.3 display: inline-block](#13-display-inline-block)
+  - [1.4 display: flex และ inline-flex](#14-display-flex-และ-inline-flex)
+  - [1.5 display: grid และ inline-grid](#15-display-grid-และ-inline-grid)
+  - [1.6 display: none vs visibility: hidden vs opacity: 0](#16-display-none-vs-visibility-hidden-vs-opacity-0)
+  - [1.7 display: contents (Modern CSS)](#17-display-contents)
+  - [1.8 display: flow-root (BFC Generator)](#18-display-flow-root)
+- [2. เจาะลึก Position ทุกค่าทีละตัว](#2-เจาะลึก-position-ทุกค่าทีละตัว)
+  - [2.1 position: static](#21-position-static)
+  - [2.2 position: relative](#22-position-relative)
+  - [2.3 position: absolute](#23-position-absolute)
+  - [2.4 position: fixed](#24-position-fixed)
+  - [2.5 position: sticky](#25-position-sticky)
+- [3. ตระกูลคำสั่ง Inset (top, right, bottom, left)](#3-ตระกูลคำสั่ง-inset-top-right-bottom-left)
+- [4. กลไก Stacking Context และกับดัก z-index: 99999](#4-กลไก-stacking-context-และกับดัก-z-index-99999)
+- [5. ตารางเปรียบเทียบ Native CSS กับ Tailwind CSS v4](#5-ตารางเปรียบเทียบ-native-css-กับ-tailwind-css-v4)
+- [6. ตัวอย่างโค้ดใช้งานจริง (Smart Butcher Marketplace)](#6-ตัวอย่างโค้ดใช้งานจริง-smart-butcher-marketplace)
+- [7. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)](#7-ข้อผิดพลาดที่พบบ่อย-anti-patterns)
+- [8. คำถามสัมภาษณ์งานระดับ Senior (Interview Q&A)](#8-คำถามสัมภาษณ์งานระดับ-senior-interview-qa)
 
 ---
 
-## 3. ตัวอย่างโค้ด (Modern CSS)
+## 1. เจาะลึก Display ทุกค่าทีละตัว
 
-### ตัวอย่างที่ 1: การใช้ `position: relative` เป็นจุดอ้างอิงให้ Badge แจ้งเตือน
+### 1.1 `display: block`
+- **พฤติกรรม (Behavior):**
+  - กินพื้นที่เต็มความกว้างของกล่องแม่เสมอ (`width: 100%` โดยอัตโนมัติ)
+  - บังคับขึ้นบรรทัดใหม่เสมอ (มี Line Break อัตโนมัติทั้งก่อนหน้าและหลังจบกล่อง)
+  - สามารถกำหนด `width`, `height`, `min-width`, `max-width` ได้สมบูรณ์
+  - ตอบสนองต่อ `margin` และ `padding` ครบทั้ง 4 ด้าน (บน, ล่าง, ซ้าย, ขวา)
+  - เกิดปรากฏการณ์ **Margin Collapsing** (ขอบ Margin แนวตั้งระหว่างสองบล็อกจะยุบรวมเข้าด้วยกันโดยยึดค่าที่มากกว่า)
+- **HTML Elements พื้นฐาน:** `<div>`, `<p>`, `<h1>`-`<h6>`, `<section>`, `<article>`, `<header>`, `<footer>`, `<main>`
+- **Tailwind Class:** `block`
 
-```css filename="notification-badge.css"
-/* กล่องแม่: ต้องเป็น relative เพื่อเป็นจุดอ้างอิงพิกัดให้ลูก */
-.icon-button {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 44px;
-  height: 44px;
-  background-color: #f1f5f9;
-  border-radius: 50%;
-  cursor: pointer;
-}
-
-/* จุดแจ้งเตือนสีแดง: absolute ลอยไปเกาะมุมขวาบนของปุ่ม */
-.badge-count {
-  position: absolute;
-  top: -4px;
-  right: -4px;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 4px;
-  background-color: #ef4444; /* แดง */
-  color: white;
-  font-size: 11px;
-  font-weight: 700;
-  border-radius: 9999px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  /* เส้นขอบสีขาวช่วยตัดกับปุ่มด้านหลัง */
-  border: 2px solid #ffffff;
-}
-```
-
-### ตัวอย่างที่ 2: Sticky Header และการตัดปัญหา z-index ด้วย `isolation: isolate`
-
-```css filename="layout.css"
-/* Sticky Header เกาะติดขอบบนเมื่อเลื่อนจอ */
-.site-header {
-  position: sticky;
-  top: 0;
-  z-index: 40;
-  height: 56px;
-  background-color: rgba(255, 255, 255, 0.85);
-  backdrop-filter: blur(12px);
-  border-bottom: 1px solid #e2e8f0;
-}
-
-/* ป้องกันปัญหา z-index รั่วไหลของ Modal ด้วย isolation */
-.modal-overlay {
-  position: fixed;
-  inset: 0; /* top: 0; right: 0; bottom: 0; left: 0; */
-  z-index: 50;
-  background-color: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  /* สร้าง Stacking Context อิสระ ไม่ตีกับสไตล์อื่น */
-  isolation: isolate; 
-}
+```html filename="example-block.html"
+<!-- แต่ละก้อนจะกินเต็มบรรทัด และต่อเรียงกันในแนวดิ่ง -->
+<div class="block bg-amber-100 p-4 mb-4">กล่องเนื้อสเต๊กชิ้นที่ 1 (กว้าง 100%)</div>
+<div class="block bg-amber-200 p-4">กล่องเนื้อสเต๊กชิ้นที่ 2 (ขึ้นบรรทัดใหม่)</div>
 ```
 
 ---
 
-## 4. โค้ดที่มักเขียนผิด vs โค้ดที่ถูกต้อง
+### 1.2 `display: inline`
+- **พฤติกรรม (Behavior):**
+  - ไหลไปตามแนวนอนร่วมกับตัวหนังสือในบรรทัดเดียวกัน **ไม่ขึ้นบรรทัดใหม่**
+  - ขนาดความกว้างและความสูงขึ้นอยู่กับปริมาณเนื้อหาภายในเท่านั้น (Shrink-to-fit)
+  - **ข้อจำกัดสำคัญ:** ไม่สามารถกำหนด `width` และ `height` ได้ (ต่อให้ใส่ค่าลงไป เบราว์เซอร์จะไม่นำมาคิด)
+  - `margin-top` และ `margin-bottom` **ไม่มีผลในการดันองค์ประกอบอื่น**
+  - `padding-top` และ `padding-bottom` เรนเดอร์สีพื้นหลังได้ แต่ **ไม่ดันบรรทัดอื่นออกห่าง** ทำให้สีพื้นหลังล้นไปทับบรรทัดข้างเคียง
+  - `margin-left`, `margin-right`, `padding-left`, `padding-right` ทำงานได้ตามปกติ
+- **HTML Elements พื้นฐาน:** `<span>`, `<a>`, `<strong>`, `<em>`, `<code>`, `<label>`
+- **Tailwind Class:** `inline`
 
-### ❌ โค้ดที่ผิด: ลืมใส่ `position: relative` ที่กล่องแม่
+```html filename="example-inline.html"
+<p>
+  ราคาเนื้อริบอายพรีเมียม 
+  <!-- กำหนด w-32 h-10 จะไม่มีผลใดๆ บน inline -->
+  <span class="inline font-bold text-red-600 bg-red-50 px-2">฿1,890 / kg</span> 
+  พร้อมบริการจัดส่ง
+</p>
+```
 
-```html
-<!-- ผิด: กล่องแม่ไม่ได้ประกาศ position ทำให้ .close-btn หลุดไปอิงขอบหน้าจอ <body> นอกสุดแทน! -->
-<div class="card">
-  <button class="close-btn" style="position: absolute; top: 8px; right: 8px;">✕</button>
-  <h3>รายละเอียดสินค้า</h3>
+---
+
+### 1.3 `display: inline-block`
+- **พฤติกรรม (Behavior):**
+  - ผสมผสานข้อดีของ `inline` และ `block` เข้าด้วยกันอย่างลงตัว
+  - **เหมือน Inline:** สามารถวางเรียงต่อกันในแนวนอนได้โดยไม่บังคับขึ้นบรรทัดใหม่
+  - **เหมือน Block:** สามารถกำหนด `width`, `height`, `padding`, `margin` ได้ครบทุกด้านอย่างแม่นยำ
+  - **กับดักที่ต้องระวัง (White-space Bug):** ช่องว่าง (Whitespace) หรือการเคาะ Enter ในโค้ด HTML ระหว่าง Element ที่เป็น `inline-block` จะถูกเบราว์เซอร์เรนเดอร์เป็นช่องว่างประมาณ 4px เสมอ (แก้ไขได้ด้วยการตั้ง `font-size: 0` ที่ตัวแม่ หรือหันไปใช้ `flexbox` แทน)
+- **HTML Elements พื้นฐาน:** `<button>`, `<input>`, `<select>`, `<img>`
+- **Tailwind Class:** `inline-block`
+
+```html filename="example-inline-block.html"
+<!-- วางเรียงต่อกันในแนวนอน แต่กำหนดขนาดกล่องได้ตามต้องการ -->
+<button class="inline-block w-36 h-10 bg-slate-900 text-white rounded-lg">หยิบใส่ตะกร้า</button>
+<button class="inline-block w-36 h-10 border border-slate-300 rounded-lg ml-2">สั่งซื้อด่วน</button>
+```
+
+---
+
+### 1.4 `display: flex` และ `inline-flex`
+- **พฤติกรรม (Behavior):**
+  - เปิดใช้งานโมเดลการจัดหน้าแบบ 1 มิติ (One-Dimensional Layout Model) โดยจัดสรรพื้นที่ตามแนวแกนหลัก (Main Axis) หรือแกนขวาง (Cross Axis)
+  - `display: flex`: ตัวแม่ทำตัวเป็น **Block** (กว้างเต็มบรรทัด) แต่ลูกข้างในจะกลายเป็น Flex Items
+  - `display: inline-flex`: ตัวแม่ทำตัวเป็น **Inline** (กว้างเท่าเนื้อหาลูก) แต่ลูกข้างในยังคงเป็น Flex Items
+  - ควบคุมการจัดวางด้วย `justify-content`, `align-items`, `flex-direction`, และ `gap`
+  - ขจัดปัญหา Margin Collapsing ของลูกข้างในทั้งหมด
+- **Tailwind Class:** `flex`, `inline-flex`
+
+```html filename="example-flex.html"
+<!-- flex แม่กินเต็มบรรทัด ลูกจัดชิดซ้ายขวาด้วย justify-between -->
+<div class="flex items-center justify-between p-4 bg-slate-50 border rounded-xl">
+  <span class="font-bold">เนื้อสันนอกออสเตรเลีย</span>
+  <span class="inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-100 text-emerald-800 rounded-full text-xs">
+    มีสินค้าพร้อมส่ง
+  </span>
 </div>
 ```
 
-### ✅ โค้ดที่ถูกต้อง: ประกาศ `position: relative` ที่ตัวแม่เสมอ
+---
 
-```html
-<!-- ถูกต้อง: .card มี position: relative กล่องลูกจะเกาะมุมของการ์ดพอดี -->
-<div class="card" style="position: relative;">
-  <button class="close-btn" style="position: absolute; top: 8px; right: 8px;">✕</button>
-  <h3>รายละเอียดสินค้า</h3>
+### 1.5 `display: grid` และ `inline-grid`
+- **พฤติกรรม (Behavior):**
+  - เปิดใช้งานโมเดลการจัดหน้าแบบ 2 มิติ (Two-Dimensional Layout Model) ควบคุมทั้งแถว (Rows) และคอลัมน์ (Columns) พร้อมกันในคราวเดียว
+  - `display: grid`: ตัวแม่กินเต็มความกว้างแบบ Block
+  - `display: inline-grid`: ตัวแม่กว้างเท่าเนื้อหาแบบ Inline
+  - กำหนดโครงสร้างด้วย `grid-template-columns`, `grid-template-rows`, `grid-auto-flow`, และ `gap`
+- **Tailwind Class:** `grid`, `inline-grid`
+
+```html filename="example-grid.html"
+<!-- ตารางสินค้า 3 คอลัมน์ที่ตอบสนองอัตโนมัติ -->
+<div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+  <div class="p-4 border rounded-xl bg-white shadow-sm">วากิว A5</div>
+  <div class="p-4 border rounded-xl bg-white shadow-sm">แองกัส ดรายเอจ</div>
+  <div class="p-4 border rounded-xl bg-white shadow-sm">โทมาฮอว์ก</div>
 </div>
 ```
 
 ---
 
-## 5. เทียบกับ Tailwind CSS v4
+### 1.6 `display: none` vs `visibility: hidden` vs `opacity: 0`
+สามคำสั่งนี้มักทำให้เกิดความสับสนในการซ่อน Element:
 
-| Modern CSS Property | Tailwind CSS v4 Utility |
-| :--- | :--- |
-| `position: relative;` | `relative` |
-| `position: absolute;` | `absolute` |
-| `position: sticky; top: 0;` | `sticky top-0` |
-| `top: 0; right: 0; bottom: 0; left: 0;` | `inset-0` |
-| `isolation: isolate;` | `isolate` |
-| `z-index: 50;` | `z-50` |
+| คุณสมบัติ | `display: none` | `visibility: hidden` | `opacity: 0` |
+| :--- | :--- | :--- | :--- |
+| **พื้นที่บนหน้าจอ (Layout Space)** | **หายไปโดยสิ้นเชิง** (กล่องอื่นเลื่อนมาแทน) | **ยังคงจองพื้นที่ว่างไว้เท่าเดิม** | **ยังคงจองพื้นที่ว่างไว้เท่าเดิม** |
+| **การโต้ตอบ (Pointer Events / Click)** | คลิกไม่ได้ | **คลิกไม่ได้** | **ยังคงคลิกได้ปกติ** (เว้นแต่จะใส่ `pointer-events-none`) |
+| **Screen Reader (A11y)** | ถูกละเว้น ไม่ถูกอ่าน | ถูกละเว้น | ยังคงถูกอ่านออกเสียง |
+| **CSS Transitions / Animation** | ทำ Transition นุ่มนวลไม่ได้ | ทำ Transition ได้จำกัด | **ทำ Transition / Fade in-out ได้สมบูรณ์** |
+| **Tailwind Class** | `hidden` | `invisible` | `opacity-0` |
 
 ---
 
-## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+### 1.7 `display: contents` (Modern CSS)
+- **พฤติกรรม (Behavior):**
+  - เป็นคำสั่งพิเศษที่ทำให้ **กล่องตัวแม่ "เสมือนหายตัวไปจากมิติ Layout"**
+  - ตัวแม่จะไม่ถูกเรนเดอร์ขอบ, พื้นหลัง, padding, หรือ margin ใดๆ
+  - แต่ **Element ลูกทั้งหมดจะถูกยกขึ้นมาเป็นลูกของกล่องชั้นถัดไปโดยตรง**
+  - มีประโยชน์มหาศาลเมื่อต้องการสร้าง Wrapper Component ใน React เพื่อใส่ Logic แต่ไม่ต้องการให้ Wrapper นั้นไปทำลายโครงสร้าง Flexbox หรือ CSS Grid ของชั้นบน
+- **Tailwind Class:** `contents`
 
-### Q1: Stacking Context คืออะไร และทำไมบางครั้งการใส่ `z-index: 9999` จึงไม่สามารถทำให้ Element ลอยขึ้นมาอยู่ชั้นบนสุดได้?
-**แนวทางคำตอบ**: Stacking Context คือแนวคิดเรื่องมิติตามแนวแกน Z สมมติในหน่วยความจำของเบราว์เซอร์ ซึ่งจัดลำดับเป็นชั้นๆ (Hierarchy) หาก Element แม่ถูกจัดให้อยู่ใน Stacking Context ที่มีระดับความสำคัญต่ำกว่า Element อื่น ต่อให้ Element ลูกข้างในจะกำหนด `z-index` เป็นค่ามหาศาลขนาดไหน ขอบเขตอำนาจของ `z-index` นั้นก็จะมีผลแค่การเปรียบเทียบกับพี่น้องใน Stacking Context เดียวกันเท่านั้น ไม่สามารถทะลุขึ้นไปชนะ Element ข้างนอกที่อยู่ใน Stacking Context ที่สูงกว่าได้
+```tsx filename="ProductListWrapper.tsx"
+// ตัวแม่เป็น contents ทำให้การ์ดสินค้าทั้งสองกลายเป็นลูกตรงของ Grid ด้านนอกทันที
+<div className="contents">
+  <div className="card">เนื้อชิ้นที่ 1</div>
+  <div className="card">เนื้อชิ้นที่ 2</div>
+</div>
+```
 
-### Q2: `position: sticky` ทำงานอย่างไร และอะไรคือสาเหตุที่ทำให้มันไม่ยอมเกาะติด (Sticky Fails)?
-**แนวทางคำตอบ**: `position: sticky` จะทำตัวเป็น `relative` ปกติในขณะที่เลื่อนหน้าจอ แต่เมื่อตำแหน่งของมันเคลื่อนมาถึงจุด Offset ที่ระบุไว้ (เช่น `top: 0`) มันจะล็อกตัวเองไว้เสมือนเป็น `fixed` จนกว่าหน้าจอจะเลื่อนพ้นขอบล่างของกล่องแม่ (Parent Container) 
-สาเหตุที่พบบ่อยที่สุดที่ทำให้ sticky ไม่ทำงาน:
-1. **ลืมใส่พิกัดทิศทาง**: เช่น ใส่แค่ `position: sticky` แต่ไม่ได้ระบุ `top: 0`
-2. **กล่องแม่หรือบรรพบุรุษมี `overflow: hidden`, `auto`, หรือ `scroll`**: ซึ่งจะตัดขอบเขตการคำนวณ Scroll Container ทันที
-3. **กล่องแม่มีความสูงเท่ากับตัวมันพอดี**: ทำให้ไม่มีพื้นที่เหลือให้เคลื่อนที่ตาม
+---
+
+### 1.8 `display: flow-root`
+- **พฤติกรรม (Behavior):**
+  - สร้าง **Block Formatting Context (BFC)** ขึ้นมาใหม่ภายใน Element
+  - เคลียร์ปัญหาความสูงพังทลายจาก Float Elements (ใช้แทน Clearfix Hack แบบโบราณ)
+  - ป้องกันปัญหา **Margin Collapsing** ไม่ให้ Margin ของลูกทะลุออกไปตีกับ Margin ของแม่
+- **Tailwind Class:** `flow-root`
+
+---
+
+## 2. เจาะลึก Position ทุกค่าทีละตัว
+
+### 2.1 `position: static`
+- **พฤติกรรม (Behavior):**
+  - เป็น **ค่าเริ่มต้น (Default)** ของทุก HTML Element ในเบราว์เซอร์
+  - Element จะวางตัวและไหลไปตาม **Normal Document Flow** ตามลำดับก่อนหลังในไฟล์ HTML
+  - **คุณสมบัติสำคัญ:** จะ **ไม่ตอบสนอง** ต่อคำสั่งพิกัดใดๆ ทั้งสิ้น (`top`, `right`, `bottom`, `left`, `inset`)
+  - ไม่สามารถกำหนด `z-index` ได้ (ไม่มีผล)
+- **Tailwind Class:** `static`
+
+```html filename="example-static.html"
+<!-- top-10 และ z-50 จะไม่มีผลใดๆ เนื่องจากเป็น static -->
+<div class="static top-10 z-50 bg-gray-100 p-4">
+  วางอยู่ตามลำดับปกติในหน้าจอ
+</div>
+```
+
+---
+
+### 2.2 `position: relative`
+- **พฤติกรรม (Behavior):**
+  - ตัว Element **ยังคงอยู่ใน Normal Document Flow 100%**
+  - **พื้นที่ตำแหน่งเดิมจะยังคงถูกจองไว้เสมอ** ไม่มีองค์ประกอบอื่นเลื่อนขึ้นมาแทนที่
+  - สามารถขยับเลื่อนพิกัดของตัวมันเองออกจากตำแหน่งเดิมได้ผ่าน `top`, `right`, `bottom`, `left` โดยอิงจาก **"ตำแหน่งเดิมของตัวมันเอง"**
+  - สามารถกำหนด `z-index` ได้
+  - **บทบาทที่สำคัญที่สุดในโลก Front-end:** ทำหน้าที่เป็น **Reference Anchor (จุดอ้างอิงพิกัด)** ให้แก่ Element ลูกหลานที่มี `position: absolute`
+- **Tailwind Class:** `relative`
+
+```html filename="example-relative.html"
+<!-- ขยับเลื่อนลงมา 20px จากตำแหน่งเดิม แต่พื้นที่เดิม 80px ยังคงถูกจองไว้ -->
+<div class="relative top-5 bg-blue-100 p-4">
+  ขยับพิกัดได้ และทำหน้าที่เป็นตัวแม่ให้ลูก absolute
+</div>
+```
+
+---
+
+### 2.3 `position: absolute`
+- **พฤติกรรม (Behavior):**
+  - **หลุดออกจาก Normal Document Flow โดยสิ้นเชิง (Out of Flow)**
+  - พื้นที่เดิมจะหายไปทันที องค์ประกอบอื่นข้างใต้จะเลื่อนขึ้นมาแทนที่เสมือนว่า Element นี้ไม่มีตัวตนอยู่
+  - ความกว้างเริ่มต้นจะหดเท่าเนื้อหาข้างใน (Shrink-to-fit) เว้นแต่จะระบุ `width` หรือใช้ `inset-0` กางออก
+  - **พิกัดอ้างอิง (Containing Block):** จะวัดระยะห่าง `top/bottom/left/right` โดยอิงกับ **"บรรพบุรุษ (Ancestor) ที่ใกล้ที่สุดที่มี position ไม่ใช่ static"**
+  - หากค้นหาย้อนขึ้นไปแล้วไม่เจอบรรพบุรุษตัวใดมี `position` เลย มันจะอิงกับ **Initial Containing Block** (ขอบเขตของหน้าต่าง Viewport / `<html>`)
+  - สามารถกำหนด `z-index` เพื่อสลับชั้นเลเยอร์การมองเห็นได้
+- **Tailwind Class:** `absolute`
+
+```html filename="example-absolute.html"
+<!-- ตัวแม่: ต้องประกาศ relative เป็นจุดตรึงพิกัด -->
+<div class="relative w-64 h-40 bg-slate-100 rounded-xl p-4">
+  <h4>การ์ดเนื้อริบอาย</h4>
+  <!-- ตัวลูก: absolute ลอยไปเกาะมุมขวาบนของตัวแม่ -->
+  <span class="absolute top-3 right-3 bg-red-600 text-white text-xs px-2 py-0.5 rounded-full font-bold">
+    SALE 20%
+  </span>
+</div>
+```
+
+---
+
+### 2.4 `position: fixed`
+- **พฤติกรรม (Behavior):**
+  - **หลุดออกจาก Normal Document Flow** ไม่กินพื้นที่เดิม
+  - **พิกัดอ้างอิง:** อิงกับ **Viewport (หน้าต่างเบราว์เซอร์)** เสมอ
+  - เมื่อผู้ใช้ทำการ Scroll เลื่อนหน้าจอ Element นี้จะไม่ขยับตาม แต่จะ **ลอยตรึงติดอยู่กับหน้าจอ ณ พิกัดเดิมตลอดเวลา**
+  - **กับดักระดับตำนาน (The Fixed Trap):** หากมีบรรพบุรุษตัวใดตัวหนึ่งมี CSS `transform`, `perspective`, หรือ `filter` ที่ไม่ใช่ `none` ตัว `position: fixed` จะ **หยุดอิงกับ Viewport** และจะเปลี่ยนไปอิงพิกัดกับบรรพบุรุษตัวนั้นแทนทันที!
+  - ใช้งานบ่อยสำหรับ: Navigation Bar ด้านบน, Floating Action Button (ปุ่มทักแชทมุมขวาล่าง), Modal Backdrop (ม่านดำคลุมจอ)
+- **Tailwind Class:** `fixed`
+
+```html filename="example-fixed.html"
+<!-- ตรึงปุ่มแชทไว้ที่มุมขวาล่างของหน้าจอเสมอ แม้จะเลื่อนหน้าไปไกลแค่ไหน -->
+<button class="fixed bottom-6 right-6 z-50 bg-emerald-600 text-white p-4 rounded-full shadow-2xl hover:scale-105 transition">
+  💬 สอบถามคนตัดเนื้อ
+</button>
+```
+
+---
+
+### 2.5 `position: sticky`
+- **พฤติกรรม (Behavior):**
+  - เป็น **ไฮบริดระหว่าง `relative` และ `fixed`** ที่ทรงพลังมาก
+  - **ในสถานะปกติ:** ทำตัวเหมือน `relative` ไหลไปตามหน้าเว็บปกติ จองพื้นที่เดิมไว้
+  - **เมื่อ Scroll หน้าจอมาถึงจุด Offset ที่ระบุ (เช่น `top: 0`):** จะแปลงร่างเป็นเหมือน `fixed` ทันที เกาะติดค้างอยู่กับหน้าจอ
+  - **ขอบเขตการทำงาน (Boundary Limit):** มันจะเกาะติด **เฉพาะภายในพื้นที่ของกล่องแม่ (Parent Container) เท่านั้น!** เมื่อผู้ใช้ Scroll เลื่อนหน้าจอจนพ้นขอบล่างของกล่องแม่ ตัว sticky element จะถูกขอบล่างของกล่องแม่ผลักหลุดลอยขึ้นไปตามธรรมชาติ
+- **3 สาเหตุยอดฮิตที่ทำให้ Sticky ไม่ยอมทำงาน (Sticky Fails):**
+  1. **ไม่ได้ระบุพิกัด Offset:** เช่น เขียนแค่ `position: sticky;` แต่ลืมใส่ `top: 0;` (เบราว์เซอร์จะไม่รู้ว่าให้เริ่มเกาะที่จุดไหน)
+  2. **กล่องแม่หรือบรรพบุรุษมี `overflow: hidden`, `overflow: auto`, หรือ `overflow: scroll`:** ซึ่งจะตัดขาด Scroll Context ทันที
+  3. **กล่องแม่มีความสูงเท่ากับตัว Sticky Element พอดี:** เช่น อยู่ใน Flex Container ที่ไม่ได้ปรับ alignment ทำให้ไม่มีระยะทางเหลือให้เกาะวิ่ง
+- **Tailwind Class:** `sticky`
+
+```html filename="example-sticky.html"
+<!-- กล่องแม่ต้องมีความสูงมากพอให้ sticky เกาะวิ่ง -->
+<div class="relative flex gap-8">
+  <main class="flex-1 space-y-6">
+    <!-- รายการสินค้าเนื้อยาวๆ -->
+    <div class="h-96 bg-gray-50 p-4">รายการสินค้ากลุ่มที่ 1</div>
+    <div class="h-96 bg-gray-50 p-4">รายการสินค้ากลุ่มที่ 2</div>
+  </main>
+
+  <!-- กล่องสรุปราคา ตรึงติดขอบบนระยะ 24px ขณะเลื่อนดูสินค้า -->
+  <aside class="sticky top-6 h-fit w-80 bg-white border rounded-2xl p-6 shadow-md">
+    <h3 class="font-bold text-lg mb-4">สรุปตะกร้าสินค้า</h3>
+    <p class="text-slate-600">ยอดรวม: ฿4,500</p>
+    <button class="w-full mt-4 bg-red-600 text-white py-2.5 rounded-xl font-bold">ชำระเงิน</button>
+  </aside>
+</div>
+```
+
+---
+
+## 3. ตระกูลคำสั่ง Inset (top, right, bottom, left)
+
+ใน CSS ยุคใหม่ คุณสมบัติ `inset` คือ **Shorthand Property** ที่ใช้ควบคุมระยะห่างของ `position` ทั้ง 4 ด้านพร้อมกัน:
+
+```css
+/* การเขียนแบบเดิม */
+top: 0;
+right: 0;
+bottom: 0;
+left: 0;
+
+/* เขียนด้วย Modern CSS Inset */
+inset: 0; /* คลุมทั้ง 4 ด้าน */
+inset-inline: 0; /* เฉพาะแนวนอน ซ้าย-ขวา */
+inset-block: 0;  /* เฉพาะแนวตั้ง บน-ล่าง */
+```
+
+### การจับคู่กับ Tailwind CSS:
+- `inset-0` $\rightarrow$ `top: 0; right: 0; bottom: 0; left: 0;` (มักใช้ทำ Full Cover Overlay หรือ Backdrop)
+- `inset-x-0` $\rightarrow$ `left: 0; right: 0;` (กางเต็มความกว้างแนวนอน)
+- `inset-y-0` $\rightarrow$ `top: 0; bottom: 0;` (กางเต็มความสูงแนวตั้ง)
+- `-inset-2` $\rightarrow$ ค่าติดลบ ดันขอบขยายออกนอกพื้นที่กล่อง 8px (นิยมใช้ขยาย Hit Area จุดสัมผัสบนสมาร์ทโฟน)
+
+---
+
+## 4. กลไก Stacking Context และกับดัก z-index: 99999
+
+ทำไมการใส่ `z-index: 99999` บางครั้งจึงยังจมอยู่ใต้ Element อื่น?
+
+```
+Root Stacking Context (หน้าจอหลัก)
+├── Parent A (z-index: 1)
+│   └── Child A1 (z-index: 999999) <── ยังคงอยู่ใต้ Parent B!
+└── Parent B (z-index: 2)
+```
+
+1. **Stacking Context คือขอบเขตอำนาจในแกน Z:** การเปรียบเทียบ `z-index` จะเกิดขึ้นเฉพาะระหว่าง Element ที่อยู่ใน **Stacking Context เดียวกันเท่านั้น**
+2. หาก `Parent A` มี `z-index: 1` และ `Parent B` มี `z-index: 2` ลูกหลานทั้งหมดของ A จะไม่มีวันลอยขึ้นมาเหนือ B ได้ ต่อให้ลูกของ A จะใส่ `z-index: 99999999` ก็ตาม!
+3. **สิ่งที่สร้าง Stacking Context ใหม่ขึ้นมา:**
+   - การใส่ `position: relative/absolute/fixed/sticky` ร่วมกับ `z-index` ที่ไม่ใช่ `auto`
+   - การใส่ `opacity` น้อยกว่า 1
+   - การใส่ `transform`, `filter`, `perspective`, หรือ `clip-path`
+   - การประกาศใช้คำสั่ง **`isolation: isolate;`** อย่างตั้งใจเพื่อตัดขาด Stacking Context ไม่ให้ตีกับภายนอก
+
+---
+
+## 5. ตารางเปรียบเทียบ Native CSS กับ Tailwind CSS v4
+
+| หมวดหมู่ | CSS Property ดั้งเดิม | Tailwind CSS v4 Utility | คำอธิบายการใช้งาน |
+| :--- | :--- | :--- | :--- |
+| **Display** | `display: block;` | `block` | กินเต็มความกว้าง ขึ้นบรรทัดใหม่ |
+| | `display: inline;` | `inline` | ไหลตามข้อความ ปรับขนาด w/h ไม่ได้ |
+| | `display: inline-block;` | `inline-block` | ไหลตามข้อความแต่กำหนด w/h ได้ |
+| | `display: flex;` | `flex` | จัด Layout 1 มิติ (แม่เป็น block) |
+| | `display: inline-flex;` | `inline-flex` | จัด Layout 1 มิติ (แม่เป็น inline) |
+| | `display: grid;` | `grid` | จัด Layout 2 มิติแถวและคอลัมน์ |
+| | `display: none;` | `hidden` | ซ่อนและลบพื้นที่ว่างออก |
+| | `display: contents;` | `contents` | ตัวแม่หายตัวไป ดึงลูกขึ้นมาแทน |
+| | `display: flow-root;` | `flow-root` | สร้าง BFC ป้องกัน margin collapse |
+| **Position** | `position: static;` | `static` | ค่าเริ่มต้น ไม่ตอบสนองต่อพิกัด |
+| | `position: relative;` | `relative` | ขยับจากจุดเดิม และเป็นจุดอ้างอิงให้ลูก |
+| | `position: absolute;` | `absolute` | หลุดจาก Flow อิงพิกัดกับบรรพบุรุษ |
+| | `position: fixed;` | `fixed` | หลุดจาก Flow ตรึงติดหน้าจอ Viewport |
+| | `position: sticky;` | `sticky` | เลื่อนตามปกติ แล้วเกาะค้างในกรอบแม่ |
+| **Inset** | `inset: 0;` | `inset-0` | ดึงชิดขอบทั้ง 4 ทิศทาง (top/right/bottom/left = 0) |
+| | `left: 0; right: 0;` | `inset-x-0` | ดึงชิดขอบแนวนอนซ้าย-ขวา |
+| | `top: 0; bottom: 0;` | `inset-y-0` | ดึงชิดขอบแนวตั้งบน-ล่าง |
+| | `top: 1rem;` | `top-4` | ระยะห่างจากขอบบน 16px |
+| **Stacking** | `isolation: isolate;` | `isolate` | สร้าง Stacking Context อิสระ |
+| | `z-index: 50;` | `z-50` | ลำดับชั้นเลเยอร์การทับซ้อน |
+
+---
+
+## 6. ตัวอย่างโค้ดใช้งานจริง (Smart Butcher Marketplace)
+
+### ระบบการ์ดสินค้าเนื้อสเต๊กพรีเมียมพร้อม Modal รายละเอียดด่วน (Quick View)
+
+ตัวอย่างนี้รวบรวมการผสานพลังของ `display` และ `position` หลากหลายรูปแบบในสถานการณ์จริง:
+
+```tsx filename="src/components/MeatProductCard.tsx"
+import React, { useState } from "react";
+import Image from "next/image";
+
+interface MeatProduct {
+  id: string;
+  name: string;
+  grade: string;
+  price: number;
+  imageUrl: string;
+  isBestSeller?: boolean;
+}
+
+export function MeatProductCard({ product }: { product: MeatProduct }) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  return (
+    <>
+      {/* 
+        1. relative: เพื่อเป็น Reference Anchor ให้ป้าย Badge ด้านใน
+        2. flex flex-col: จัดวางเนื้อหาภายในการ์ดในแนวดิ่ง
+      */}
+      <div className="relative flex flex-col justify-between overflow-hidden rounded-2xl border border-slate-200 bg-white p-4 shadow-sm hover:shadow-md transition">
+        
+        {/* ป้าย Badge ขายดี: absolute ลอยไปเกาะมุมซ้ายบน */}
+        {product.isBestSeller && (
+          <span className="absolute top-3 left-3 z-10 rounded-full bg-amber-500 px-2.5 py-1 text-[11px] font-bold text-slate-900 shadow-sm">
+            ★ สินค้ายอดนิยม
+          </span>
+        )}
+
+        {/* รูปภาพสินค้า พร้อมลูกเล่น Absolute Inset Overlay */}
+        <div className="relative h-48 w-full overflow-hidden rounded-xl bg-slate-100 group">
+          <Image
+            src={product.imageUrl}
+            alt={product.name}
+            fill
+            className="object-cover group-hover:scale-105 transition-transform duration-300"
+          />
+          {/* overlay ไล่เฉดสีดำบางๆ ตอน hover */}
+          <div className="absolute inset-0 bg-gradient-to-t from-black/40 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+        </div>
+
+        {/* ข้อมูลเนื้อ */}
+        <div className="mt-4 flex-1">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wider text-amber-700 bg-amber-50 px-2 py-0.5 rounded">
+              {product.grade}
+            </span>
+            <span className="text-sm font-bold text-slate-900">฿{product.price.toLocaleString()}</span>
+          </div>
+          <h3 className="mt-2 text-base font-bold text-slate-900">{product.name}</h3>
+        </div>
+
+        {/* ปุ่ม Quick View */}
+        <button
+          onClick={() => setIsOpen(true)}
+          className="mt-4 w-full rounded-xl bg-slate-900 py-2.5 text-xs font-semibold text-white hover:bg-slate-800 active:scale-[0.98] transition"
+        >
+          ดูรายละเอียดด่วน
+        </button>
+      </div>
+
+      {/* 
+        MODAL BACKDROP & DIALOG
+        1. fixed inset-0: ดึงตรึงคลุมเต็มหน้าจอคอมพิวเตอร์
+        2. isolation: isolate: ป้องกันปัญหา z-index ไปตีกับ Navbar อื่น
+        3. flex items-center justify-center: จัดกึ่งกลางจอ
+      */}
+      {isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 isolation-isolate">
+          {/* ม่านดำหลัง Modal */}
+          <div 
+            onClick={() => setIsOpen(false)}
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity" 
+          />
+
+          {/* กล่องเนื้อหา Modal */}
+          <div className="relative z-10 w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl">
+            <button
+              onClick={() => setIsOpen(false)}
+              className="absolute top-4 right-4 rounded-full p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+            >
+              ✕
+            </button>
+            <h2 className="text-xl font-bold text-slate-900">{product.name} ({product.grade})</h2>
+            <p className="mt-2 text-sm text-slate-600">
+              เนื้อวากิวนำเข้าเกรดพรีเมียม ลายไขมันแทรกสม่ำเสมอ ตัดแต่งโดยช่างฝีมือผู้เชี่ยวชาญ พร้อมซีลสุญญากาศและควบคุมความเย็นตลอดการจัดส่ง
+            </p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                onClick={() => setIsOpen(false)}
+                className="rounded-xl px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+              >
+                ปิดหน้าต่าง
+              </button>
+              <button className="rounded-xl bg-red-600 px-5 py-2 text-xs font-semibold text-white hover:bg-red-700">
+                เพิ่มลงตะกร้า ฿{product.price.toLocaleString()}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+```
+
+---
+
+## 7. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+### ❌ ผิดพลาดที่ 1: ลืมใส่ `position: relative` ที่กล่องแม่ แต่ใส่ `absolute` ที่ลูก
+```html
+<!-- ❌ ผิด: .card ไม่มี position ทำให้ .badge หลุดไปอิงขอบหน้าจอ <body> นอกสุดแทน! -->
+<div class="card w-64 h-40">
+  <span class="absolute top-2 right-2">NEW</span>
+</div>
+
+<!-- ✅ ถูกต้อง: ประกาศ relative ที่กล่องแม่เสมอ -->
+<div class="card relative w-64 h-40">
+  <span class="absolute top-2 right-2">NEW</span>
+</div>
+```
+
+### ❌ ผิดพลาดที่ 2: พยายามกำหนด `width` และ `height` ให้กับ `display: inline`
+```html
+<!-- ❌ ผิด: <span> เป็น inline ไม่รับความกว้างและความสูง -->
+<span class="inline w-48 h-12 bg-red-500">คลิกที่นี่</span>
+
+<!-- ✅ ถูกต้อง: เปลี่ยนเป็น inline-block หรือ inline-flex -->
+<span class="inline-block w-48 h-12 bg-red-500 text-center leading-[48px]">คลิกที่นี่</span>
+```
+
+### ❌ ผิดพลาดที่ 3: Sticky Header ไม่ยอมเกาะ เพราะบรรพบุรุษมี `overflow: hidden`
+```html
+<!-- ❌ ผิด: overflow-hidden จะตัดการคำนวณ Scroll Container ทำให้ sticky หลุดการทำงาน -->
+<div class="overflow-hidden">
+  <header class="sticky top-0">เมนูนำทาง</header>
+</div>
+
+<!-- ✅ ถูกต้อง: ปลด overflow-hidden ออกจากบรรพบุรุษที่ครอบ sticky element -->
+<div class="overflow-visible">
+  <header class="sticky top-0 z-40">เมนูนำทาง</header>
+</div>
+```
+
+---
+
+## 8. คำถามสัมภาษณ์งานระดับ Senior (Interview Q&A)
+
+### Q1: จงอธิบายความแตกต่างระหว่าง `display: none`, `visibility: hidden` และ `opacity: 0` ทั้งในแง่ของ DOM, Performance, Reflow/Repaint และ Accessibility (A11y)
+**แนวทางคำตอบ:**
+1. **`display: none`**: Element จะถูกตัดออกจาก Render Tree โดยสิ้นเชิง ทำให้เบราว์เซอร์เกิดทั้ง **Reflow (Layout) และ Repaint** พื้นที่ว่างจะหดตัวลง และโปรแกรมอ่านหน้าจอ (Screen Reader) จะข้ามไม่สนใจการอ่าน Element นี้
+2. **`visibility: hidden`**: Element ยังคงอยู่ใน Render Tree และ **ยังคงจองพื้นที่ Layout ว่างไว้เท่าเดิม** จึงไม่ก่อให้เกิด Reflow แต่เกิดเพียง **Repaint** ไม่สามารถรับคลิกหรือเหตุการณ์ใดๆ ได้ และ Screen Reader มักจะละเว้นไม่พูดถึง
+3. **`opacity: 0`**: Element ยังคงเรนเดอร์ปกติ จองพื้นที่เท่าเดิม แต่ถูกเรนเดอร์แบบโปร่งแสง 100% การเปลี่ยนแปลงค่า opacity เป็นหนึ่งในคุณสมบัติที่ประมวลผลบน GPU (Composite layer) จึงเป็นมิตรต่อประสิทธิภาพสูงสุด และที่สำคัญคือ **ผู้ใช้ยังสามารถกดคลิกโดนปุ่มได้** และ Screen Reader ยังคงอ่านออกเสียงตามปกติ
+
+### Q2: ทำไม `position: fixed` จึงหยุดเกาะติดกับ Viewport เมื่อบรรพบุรุษมีคำสั่ง `transform` หรือ `filter`?
+**แนวทางคำตอบ:**
+ตามข้อกำหนดมาตรฐานของ W3C CSS Transforms Specification: การกำหนดค่า `transform` (รวมถึง `filter`, `perspective`, หรือ `will-change: transform`) ที่ไม่ใช่ค่า `none` ให้กับบรรพบุรุษ จะเป็นการบังคับสร้าง **Local Coordinate System (กรอบพิกัดเฉพาะที่)** ขึ้นมาใหม่สำหรับลูกหลานทั้งหมด ส่งผลให้ Element ที่ประกาศ `position: fixed` ภายในกิ่งนั้น ถูกเปลี่ยนพิกัดอ้างอิง (Containing Block) จากเดิมที่เป็น Viewport ไปยึดกับกรอบของบรรพบุรุษตัวที่มี `transform` แทน
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+1. พื้นฐานสไตล์โมเดิร์น: [CSS Fundamentals](/docs/css/syntax-selectors)
+2. ระบบสีและเอฟเฟกต์: [Colors & Effects](/docs/tailwind/colors-effects)
+3. การจัดสัดส่วนและระยะห่าง: [Spacing & Sizing](/docs/tailwind/spacing-sizing)
+4. การจัดเลย์เอาต์ขั้นสูง: [Flexbox & Grid](/docs/tailwind/flexbox-grid)
+5. สถาปัตยกรรมคอมโพเนนต์: [Component Architecture](/docs/react/architecture)
