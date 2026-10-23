@@ -2,133 +2,368 @@
 title: Primitives & Types
 category: Frontend
 parentTitle: TypeScript
-version: v5.6
-updatedAt: 2026-10-17
+version: TypeScript 5.x
+updatedAt: 2026-10-23
 ---
 
-## 1. แนวคิด (Concept)
+# TypeScript Basics: สัญลักษณ์พื้นฐาน (Symbols) และ Primitives
 
-ใน JavaScript ดั้งเดิม ตัวแปรสามารถเปลี่ยนชนิดข้อมูลไปมาได้อย่างอิสระ (Dynamically Typed) เช่น เริ่มต้นเป็นตัวเลข แล้วถูกเปลี่ยนเป็นข้อความ ซึ่งมักก่อให้เกิดบั๊กยอดฮิตอย่าง `TypeError: Cannot read properties of undefined` ตอนรันบนโปรดักชัน
+ใน TypeScript การเขียนโค้ดมักมีสัญลักษณ์พิเศษที่ผู้เริ่มต้นและนักพัฒนาจำนวนมากสงสัยว่า **"ทำไมต้องเขียนแบบนี้?"** เช่น เครื่องหมายโคลอน `:`, ลูกศร `=>`, วงเล็บมน `()` เทียบกับวงเล็บปีกกา `{}` รวมถึงสัญลักษณ์ `?`, `!`, `|`, `&`, และ `<>`
 
-**TypeScript Primitive & Core Types** เปรียบเหมือน "ป้ายกำกับเตือนภัย" ที่บังคับให้ตัวแปรแต่ละตัวต้องเก็บข้อมูลเฉพาะชนิดที่กำหนดไว้เท่านั้น ได้แก่ `string`, `number`, `boolean`, `null`, `undefined`, และชนิดข้อมูลพิเศษอย่าง `any`, `unknown`, `never`
-
----
-
-## 2. หลักการเบื้องหลัง (Type Erasure)
-
-- **Compile Time**: TypeScript Compiler (`tsc`) จะตรวจสอบการกำหนดค่า การเรียกใช้งานเมธอด (เช่น `.toUpperCase()` บนตัวเลขจะโดนดักจับทันที)
-- **Runtime**: ทุก Type Annotation เช่น `: string`, `: number[]` จะ **ถูกลบทิ้งไปทั้งหมด (Type Erasure)** ตัวโค้ดที่รันจริงในเบราว์เซอร์หรือ Node.js จะกลายเป็น JavaScript ธรรมดา 100%
+เอกสารนี้จะเจาะลึกความหมายและหลักการเบื้องหลังของสัญลักษณ์ทั้งหมด พร้อมทั้งปูพื้นฐาน Primitives และ Core Types อย่างละเอียด
 
 ---
 
-## 3. ตัวอย่างโค้ด (TypeScript)
+## สารบัญเนื้อหาในหน้านี้
 
-### ตัวอย่างที่ 1: Primitives, Arrays, และ Tuples
+- [1. เจาะลึกสัญลักษณ์พื้นฐาน: ทำไมต้องเขียนแบบนี้?](#1-เจาะลึกสัญลักษณ์พื้นฐาน-ทำไมต้องเขียนแบบนี้)
+  - [1.1 เครื่องหมาย `:` (Colon) มีกี่บทบาท](#11-เครื่องหมาย--colon-มีกี่บทบาท)
+  - [1.2 เครื่องหมาย `=>` (Fat Arrow) ในฝั่ง Type vs โค้ดจริง](#12-เครื่องหมาย--fat-arrow-ในฝั่ง-type-vs-โค้ดจริง)
+  - [1.3 ความแตกต่างระหว่าง `()` (Parentheses) กับ `{}` (Curly Braces)](#13-ความแตกต่างระหว่าง--parentheses-กับ--curly-braces)
+  - [1.4 สัญลักษณ์สำคัญอื่นๆ ที่พบบ่อย: `?`, `!`, `|`, `&`, `<>`](#14-สัญลักษณ์สำคัญอื่นๆ-ที่พบบ่อย)
+- [2. ชนิดข้อมูลพื้นฐาน (Primitive Types)](#2-ชนิดข้อมูลพื้นฐาน-primitive-types)
+- [3. ชนิดข้อมูลระดับระบบ: any vs unknown vs never](#3-ชนิดข้อมูลระดับระบบ-any-vs-unknown-vs-never)
+- [4. ตัวอย่างโค้ดระบบ Smart Butcher Marketplace](#4-ตัวอย่างโค้ดระบบ-smart-butcher-marketplace)
+- [5. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)](#5-ข้อผิดพลาดที่พบบ่อย-anti-patterns)
+- [6. คำถามสัมภาษณ์งานระดับ Senior (Interview Q&A)](#6-คำถามสัมภาษณ์งานระดับ-senior-interview-qa)
 
-```typescript
-// 1. Primitive types
-const customerName: string = 'Somchai Prasert';
-const orderAmount: number = 2450.50;
-const isVipCustomer: boolean = true;
+---
 
-// 2. Arrays: ระบุชนิดข้อมูลของสมาชิกในอาเรย์
-const productSkus: string[] = ['SKU-001', 'SKU-002', 'SKU-003'];
-const prices: Array<number> = [190, 450, 1200];
+## 1. เจาะลึกสัญลักษณ์พื้นฐาน: ทำไมต้องเขียนแบบนี้?
 
-// 3. Tuple: อาเรย์ความยาวคงที่และระบุตำแหน่งของแต่ละ Type ชัดเจน (เช่น พิกัด GPS หรือ [Key, Value])
-const storeCoordinate: [latitude: number, longitude: number] = [13.7563, 100.5018];
-const userRolePair: [userId: string, role: string] = ['usr-99', 'MANAGER'];
-```
+### 1.1 เครื่องหมาย `:` (Colon) มีกี่บทบาท
 
-### ตัวอย่างที่ 2: Enum vs Union of String Literals, any vs unknown vs never
+เครื่องหมาย `:` มีการใช้งานหลัก 4 บริบทที่แตกต่างกันอย่างสิ้นเชิง:
 
-```typescript
-// ทางเลือก A: TypeScript Enum (จะถูกแปลงเป็น JavaScript IIFE Object ตอน runtime)
-export enum OrderStatusEnum {
-  PENDING = 'PENDING',
-  PAID = 'PAID',
-  SHIPPED = 'SHIPPED',
-}
+#### 1) Type Annotation (ป้ายกำกับชนิดข้อมูลใน TypeScript)
+เมื่ออยู่หลังชื่อตัวแปรหรือพารามิเตอร์ `:` ทำหน้าที่บอกว่า **"ตัวแปรนี้มีชนิดข้อมูลเป็น (is of type)..."**
 
-// ทางเลือก B: Union of Literals (แนะนำมากกว่า! เบากว่าและไม่สร้างโค้ดส่วนเกินตอน runtime)
-export type OrderStatus = 'PENDING' | 'PAID' | 'SHIPPED';
+```typescript filename="type-annotation.ts"
+// ตัวแปร price มีชนิดข้อมูลเป็น number
+const price: number = 2500;
 
-// any vs unknown vs never:
-// 1. any: ปิดการทำงานของ TypeScript ทันที (อันตรายที่สุด)
-let unsafePayload: any = JSON.parse('{}');
-unsafePayload.nonExistentMethod(); // TS ไม่เตือนอะไรเลย แต่โปรแกรมจะแครชตอนรัน!
-
-// 2. unknown: ปลอดภัยกว่า any เพราะบังคับให้ตรวจสอบ Type ก่อนนำไปใช้งาน
-let rawApiResponse: unknown = fetchUserData();
-// rawApiResponse.toUpperCase(); // ❌ TS Error: 'rawApiResponse' is of type 'unknown'
-
-if (typeof rawApiResponse === 'string') {
-  console.log(rawApiResponse.toUpperCase()); // ✅ ปลอดภัยหลังจาก Narrowing แล้ว
-}
-
-// 3. never: ชนิดข้อมูลของสิ่งที่ไม่สามารถเกิดขึ้นได้ (เช่น ฟังก์ชันที่ throw error เสมอ หรือ infinite loop)
-function fail(message: string): never {
-  throw new Error(`System Failure: ${message}`);
+// พารามิเตอร์ weight มีชนิดข้อมูลเป็น number และฟังก์ชันคืนค่ากลับมาเป็น string
+function formatMeatWeight(weight: number): string {
+  return `${weight}g`;
 }
 ```
 
----
+#### 2) Object Key-Value Separator (การจับคู่คีย์กับค่าใน JavaScript Runtime)
+เมื่ออยู่ใน Object Literal เครื่องหมาย `:` คือตัวคั่นระหว่าง **"ชื่อ Key"** กับ **"Value"**
 
-## 4. ผิด vs ถูก (Common Mistakes)
-
-### กรณีที่ 1: การใช้ `any` หนีปัญหา Type Error
-```typescript
-// ❌ ผิด: ใช้ any เพื่อให้โค้ดผ่าน ทำให้สูญเสียประโยชน์ของ TypeScript ทั้งหมด
-function calculateTotal(order: any) {
-  return order.items.reduce((sum: any, item: any) => sum + item.cost, 0);
-  // ถ้า backend เปลี่ยนชื่อฟิลด์จาก cost เป็น price โปรแกรมจะแครชเงียบๆ!
-}
-
-// ✅ ถูก: นิยาม Type ที่ชัดเจน หรือใช้ unknown ถ้าไม่แน่ใจ
-interface OrderItem {
-  id: string;
-  price: number;
-  quantity: number;
-}
-
-interface Order {
-  id: string;
-  items: OrderItem[];
-}
-
-function calculateTotal(order: Order): number {
-  return order.items.reduce((sum, item) => sum + item.price * item.quantity, 0);
-}
+```typescript filename="object-literal.ts"
+const meatProduct = {
+  name: "Wagyu A5 Striploin", // key: value
+  price: 3800,
+  inStock: true,
+};
 ```
-*Compiler Error หากเขียนผิด*: หากเผลอพิมพ์ `item.cost` ในโค้ดที่ถูก คอมไพเลอร์จะแจ้งเตือนทันที: `Property 'cost' does not exist on type 'OrderItem'. Did you mean 'price'?`
 
-### กรณีที่ 2: ใช้ Enum ตัวเลขดั้งเดิม (Numeric Enum) ที่ยอมรับตัวเลขแปลกปลอม
-```typescript
-// ❌ ผิด: Numeric Enum ยอมให้ส่งตัวเลขที่ไม่ได้รับอนุญาตเข้ามาได้
-enum Status { Inactive, Active }
-let myStatus: Status = 999; // คอมไพล์ผ่านไม่มีปัญหา แต่ค่าผิดในทางธุรกิจ!
+#### 3) Ternary Operator (เงื่อนไข ย่อของ if-else)
+ใช้คู่กับ `?` ในการตัดสินใจเลือกค่า
 
-// ✅ ถูก: ใช้ String Literal Union
-type Status = 'INACTIVE' | 'ACTIVE';
-let myStatus: Status = 'ACTIVE';
+```typescript filename="ternary.ts"
+// ถ้า isVip เป็นจริงได้ 0.15 ถ้าเป็นเท็จได้ 0
+const discountRate = isVip ? 0.15 : 0;
+```
+
+#### 4) การเปลี่ยนชื่อตัวแปรตอนแตกค่า (Destructuring Alias)
+> [!WARNING] กับดักที่คนเข้าใจผิดบ่อยที่สุด!  
+> ในการทำ Destructuring เครื่องหมาย `:` **ไม่ใช่การใส่ Type** แต่เป็นการเปลี่ยนชื่อตัวแปร!
+
+```typescript filename="destructuring-trap.ts"
+const product = { title: "T-Bone Steak", price: 950 };
+
+// ❌ หลายคนเข้าใจผิดคิดว่า : newPrice คือการกำหนด Type ให้ title
+// แต่ในความเป็นจริง มันคือการเปลี่ยนชื่อตัวแปรจาก title เป็น newPrice!
+const { title: newTitle } = product;
+console.log(newTitle); // "T-Bone Steak"
+
+// ✅ หากต้องการใส่ Type ให้กับ Object ที่ทำ Destructuring ต้องใส่แยกหลังปีกกาทั้งหมด:
+const { title }: { title: string } = product;
 ```
 
 ---
 
-## 5. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+### 1.2 เครื่องหมาย `=>` (Fat Arrow) ในฝั่ง Type vs โค้ดจริง
 
-- **`unknown`**: ควรใช้รับข้อมูลจากภายนอกที่ไม่ทราบโครงสร้างล่วงหน้า (เช่น ข้อมูลจาก `JSON.parse()`, Third-party API)
-- **`any`**: ห้ามใช้เป็นอันขาด ยกเว้นกรณี Migration โค้ด JavaScript เก่าอย่างเร่งด่วน
-- **Union of Literals**: ควรใช้แทน `enum` ในโปรเจกต์สมัยใหม่เพราะโค้ดสะอาดกว่า ไม่สร้าง JS Object แปลกปลอมตอน compile
+หลายคนมักสับสนว่าทำไมเครื่องหมาย `=>` จึงปรากฏทั้งฝั่งซ้าย (Type) และฝั่งขวา (Implementation) ของเครื่องหมายเท่ากับ `=`:
+
+```typescript filename="fat-arrow-breakdown.ts"
+//           [ ฝั่ง Type (Type Signature) ]           [ ฝั่ง Code จริง (Implementation) ]
+const calculateVat: (amount: number) => number = (amount) => amount * 0.07;
+```
+
+| ตำแหน่งที่เขียน | บทบาทและหน้าที่ | ตัวอย่างโค้ด | คำอธิบายภาษาคน |
+| :--- | :--- | :--- | :--- |
+| **ฝั่งซ้าย (Type Level)** | กำหนด **Type Signature** ของฟังก์ชัน | `type CookFn = (minutes: number) => boolean;` | "ฟังก์ชันนี้รับ `minutes` แล้ว **จะส่งค่ากลับมาเป็น** `boolean`" |
+| **ฝั่งขวา (Runtime Code)** | สร้าง **Arrow Function** ตัวจริงเพื่อรันงาน | `const cook = (minutes) => minutes > 10;` | "รับค่า `minutes` เข้ามา แล้ว **ส่งไปประมวลผลคำนวณ** `minutes > 10`" |
 
 ---
 
-## 6. คำถามสัมภาษณ์งาน (Interview Questions)
+### 1.3 ความแตกต่างระหว่าง `()` (Parentheses) กับ `{}` (Curly Braces)
 
-### Q1: ความแตกต่างระหว่าง `any` กับ `unknown` คืออะไร?
-**แนวทางคำตอบ**: ทั้งคู่รับค่าได้ทุกชนิดข้อมูล แต่ `any` จะเป็นการปิดระบบ Type Check ทั้งหมด อนุญาตให้เข้าถึง Properties ใดๆ ก็ได้โดยไม่มีการตรวจสอบ ส่งผลให้เกิดข้อผิดพลาดตอนรันได้ ส่วน `unknown` ถือเป็น Type-safe Any โดย TypeScript จะไม่อนุญาตให้เรียกใช้งานเมธอดใดๆ บนตัวแปรนั้น จนกว่าเราจะทำการตรวจสอบ Type ให้แน่ชัดก่อน (Type Narrowing)
+นี่คือหัวใจของไวยากรณ์ตระกูล C / JavaScript / TypeScript:
 
-### Q2: Type `never` มีประโยชน์อย่างไรในการใช้งานจริง?
-**แนวทางคำตอบ**: ใช้ใน 2 สถานการณ์หลัก:
-1. บอกว่าฟังก์ชันจะไม่มีวันส่งคืนค่ากลับมา (เช่น ฟังก์ชันที่โยน Error หรือรันลูปไม่รู้จบ)
-2. ใช้ทำ **Exhaustive Check** ในบล็อก `switch/case` เพื่อให้มั่นใจว่าเราได้ดักจับเงื่อนไขครบทุกเคสแล้ว หากมีเคสใหม่เพิ่มเข้ามา คอมไพเลอร์จะแจ้ง Error ทันที
+#### `()` วงเล็บมน (Parentheses) = "การสั่งทำงาน, การส่งพารามิเตอร์, การจัดกลุ่ม"
+1. **Function Invocation (สั่งให้โค้ดทำงานเดี๋ยวนี้):**
+   ```typescript
+   prepareSteak(); // วงเล็บว่างเปล่า = สั่งให้รันฟังก์ชัน
+   ```
+2. **Parameter List (รายชื่อตัวแปรที่เปิดรับเข้ามา):**
+   ```typescript
+   function grill(cut: string, doneness: string) { ... }
+   ```
+3. **Mathematical & Logical Precedence (จัดลำดับความสำคัญก่อน-หลัง):**
+   ```typescript
+   const total = (price + deliveryFee) * (1 - discount);
+   ```
+4. **จัดกลุ่ม Union Type เพื่อไม่ให้สับสน:**
+   ```typescript
+   // อาเรย์ที่สมาชิกเป็น string หรือ number ก็ได้
+   const mixedList: (string | number)[] = ["Wagyu", 1500, "Angus"];
+
+   // เทียบกับ: string | number[] (หมายถึง เป็น string ตัวเดียว หรือเป็นอาเรย์ของตัวเลข!)
+   ```
+5. **แก้ปัญหา Return Object ใน Arrow Function (เทคนิค `({ ... })`):**
+   > [!IMPORTANT]
+   > ใน JavaScript หากเราเขียน `() => { id: 1 }` ตัวเบราว์เซอร์จะเข้าใจว่า `{}` คือ **บล็อกฟังก์ชัน (Function Scope)** ไม่ใช่อ็อบเจกต์ ทำให้โค้ดพัง!  
+   > จึงต้องใช้วงเล็บมน `()` ครอบปีกกาไว้ `() => ({ id: 1 })` เพื่อบังคับให้คอมไพเลอร์มองเป็น **Object Expression ที่ส่งคืนทันที (Implicit Return)**
+
+   ```typescript filename="arrow-object-return.ts"
+   // ❌ พัง: JS คิดว่า { ... } คือบล็อกโค้ดคำสั่ง
+   // const createCut = (name: string) => { name: name }; // SyntaxError!
+
+   // ✅ ถูกต้อง: นำ () มาครอบเพื่อบอกว่าเป็นก้อน Object Literal
+   const createCut = (name: string) => ({ name: name });
+   ```
+
+6. **React JSX Return:**
+   ```tsx
+   return (
+     <div className="steak-card">
+       <h3>เนื้อสันใน</h3>
+     </div>
+   );
+   ```
+   *เหตุผล:* ป้องกันกลไก Automatic Semicolon Insertion (ASI) ของ JavaScript ที่อาจใส่ `;` อัตโนมัติหลังคำว่า `return` หากขึ้นบรรทัดใหม่โดยไม่มีวงเล็บมนครอบ
+
+---
+
+#### `{}` วงเล็บปีกกา (Curly Braces) = "ขอบเขตบล็อกคำสั่ง (Scope) หรือ โครงสร้างข้อมูล (Object / Type)"
+1. **Block Scope (ขอบเขตคำสั่ง):**
+   ```typescript
+   if (temperature > 55) {
+     const doneness = "Medium Rare"; // ตัวแปร doneness จะใช้งานได้แค่ภายในปีกกานี้
+   }
+   ```
+2. **Object Literal (การสร้างอ็อบเจกต์ใน JavaScript Runtime):**
+   ```typescript
+   const steak = { cut: "Ribeye", weightGrams: 350 };
+   ```
+3. **Type Literal / Interface Body (การระบุโครงสร้าง Type ใน TypeScript):**
+   ```typescript
+   type SteakType = {
+     cut: string;
+     weightGrams: number;
+   };
+   ```
+4. **Destructuring (การแกะกล่องดึงค่า):**
+   ```typescript
+   const { cut, weightGrams } = steak;
+   ```
+5. **Template Literal Interpolation (การแทรกตัวแปรลงในสตริง):**
+   ```typescript
+   const label = `ชิ้นเนื้อ: ${steak.cut} น้ำหนัก ${steak.weightGrams}g`;
+   ```
+6. **JSX Expression (ฝังโค้ด JavaScript ลงในแท็ก HTML ใน React):**
+   ```tsx
+   <h1>{steak.cut}</h1>
+   ```
+
+---
+
+### 1.4 สัญลักษณ์สำคัญอื่นๆ ที่พบบ่อย
+
+| สัญลักษณ์ | ชื่อเรียก | ความหมายใน TypeScript | ตัวอย่างโค้ดจริง |
+| :---: | :--- | :--- | :--- |
+| **`?`** | Optional | ตัวแปรหรือพร็อพเพอร์ตี้นี้ **จะมีหรือไม่มีก็ได้** | `note?: string;` (มีค่าเป็น `string \| undefined`) |
+| **`?.`** | Optional Chaining | เข้าถึงค่าแบบปลอดภัย ถ้าตัวหน้าเป็น `null`/`undefined` จะคืนค่า undefined ทันทีโดยไม่แครช | `order?.customer?.address` |
+| **`!`** | Non-null Assertion | บอกคอมไพเลอร์ว่า **"เชื่อฉันเถอะ ตรงนี้ไม่เป็น null หรือ undefined แน่นอน"** | `const btn = document.getElementById("pay-btn")!;` |
+| **`??`** | Nullish Coalescing | ใช้ค่าสำรองเมื่อตัวหน้าเป็น `null` หรือ `undefined` เท่านั้น (ต่างจาก `\|\|` ที่มอง `0` และ `""` เป็นเท็จด้วย) | `const qty = inputQty ?? 1;` |
+| **`\|`** | Union Type | **"หรือ"** สามารถเป็นชนิดข้อมูลใดชนิดหนึ่งในกลุ่ม | `type Status = "PENDING" \| "PAID" \| "CANCELLED";` |
+| **`&`** | Intersection Type | **"และ"** รวมคุณสมบัติของทุก Type เข้าด้วยกัน | `type VipCustomer = User & { vipCardNumber: string };` |
+| **`< >`** | Generics Bracket | **วงเล็บส่ง Type เป็นตัวแปร (Type Arguments)** เพื่อสร้างคอมโพเนนต์ที่ยืดหยุ่น | `Array<string>`, `useState<MeatCut \| null>(null)` |
+| **`as`** | Type Assertion | บังคับเปลี่ยนมุมมอง Type (ใช้เมื่อเรารู้จักข้อมูลดีกว่า TypeScript) | `const input = e.target as HTMLInputElement;` |
+
+---
+
+## 2. ชนิดข้อมูลพื้นฐาน (Primitive Types)
+
+ใน TypeScript มี Primitive Types พื้นฐาน 7 ชนิด:
+
+```typescript filename="primitives.ts"
+// 1. string: ข้อความ
+const butcherName: string = "Chef Somchai";
+
+// 2. number: ตัวเลข (รองรับทั้งจำนวนเต็ม, ทศนิยม, hex, binary)
+const meatWeightGrams: number = 450.5;
+
+// 3. boolean: ค่าความจริง
+const isDryAged: boolean = true;
+
+// 4. null: ค่าว่างเปล่าที่ถูกกำหนดไว้อย่างตั้งใจ
+const specialRequest: string | null = null;
+
+// 5. undefined: ตัวแปรที่ยังไม่ได้รับการกำหนดค่า
+let deliveryTracker: string | undefined = undefined;
+
+// 6. symbol: ค่าระบุเอกลักษณ์เฉพาะตัวที่ไม่ซ้ำใคร
+const uniqueMeatId: symbol = Symbol("A5-TAG");
+
+// 7. bigint: ตัวเลขขนาดใหญ่พิเศษเกินขอบเขต 2^53 - 1
+const massiveWarehouseStock: bigint = 9007199254740995n;
+```
+
+---
+
+## 3. ชนิดข้อมูลระดับระบบ: any vs unknown vs never
+
+```
+           [ top type: any / unknown ]
+                   |       |
+      (Primitives / Objects / Functions)
+                   |       |
+           [ bottom type: never ]
+```
+
+1. **`any` (อันตรายที่สุด - ปิดระบบตรวจ Type):**
+   - อนุญาตให้ทำอะไรก็ได้ เรียกเมธอดที่ไม่มีอยู่จริงก็ไม่ฟ้องเตือน ทำให้เสี่ยงต่อโปรแกรมพังตอนรัน (Runtime Crash)
+   - แนะนำให้หลีกเลี่ยงเกือบ 100% ในงาน Production
+2. **`unknown` (Type-safe Any - ปลอดภัยสูง):**
+   - รับค่าอะไรเข้ามาก็ได้เช่นเดียวกับ `any`
+   - แต่ **ห้ามนำไปใช้งานเด็ดขาดจนกว่าจะตรวจสอบ Type (Type Narrowing) ให้ชัดเจนก่อน**
+   - เหมาะสำหรับการรับ Response จากภายนอกหรือ `JSON.parse()`
+3. **`never` (ไม่มีทางเกิดขึ้นได้):**
+   - ใช้กับฟังก์ชันที่ไม่มีทางคืนค่ากลับมา (เช่น throw error ตลอดกาล หรือ Infinite Loop)
+   - ใช้ทำ **Exhaustive Type Checking** ใน `switch-case` เพื่อดักจับว่าลืมเคสไหนไปหรือไม่
+
+---
+
+## 4. ตัวอย่างโค้ดระบบ Smart Butcher Marketplace
+
+ตัวอย่างโค้ดที่รวบรวมการใช้งานสัญลักษณ์ `:` `=>` `()` `{}` `?` `|` อย่างเป็นระบบ:
+
+```typescript filename="src/models/meatOrder.ts"
+// 1. การใช้ {} และ : ในการนิยาม Type โครงสร้างชิ้นเนื้อ
+export type MeatCutDoneness = "RARE" | "MEDIUM_RARE" | "MEDIUM" | "WELL_DONE";
+
+export interface MeatItem {
+  sku: string;
+  cutName: string;
+  pricePerKg: number;
+  grade: "A5" | "A4" | "PRIME" | "CHOICE";
+  description?: string; // ? หมายถึง ฟิลด์นี้จะมีหรือไม่มีก็ได้
+}
+
+export interface OrderItem {
+  product: MeatItem;
+  weightGrams: number;
+  doneness?: MeatCutDoneness;
+}
+
+// 2. การใช้ () และ => ในการนิยาม Function Type Signature
+// ฟังก์ชันนี้รับ (items, discountCode?) แล้ว => คืนค่ากลับมาเป็น number
+export type PriceCalculatorFn = (
+  items: OrderItem[],
+  discountCode?: string
+) => number;
+
+// 3. ฟังก์ชันการทำงานจริง: สังเกตการใช้ () ครอบพารามิเตอร์ และ => นำทางไปสู่การประมวลผล
+export const calculateMeatOrderTotal: PriceCalculatorFn = (items, discountCode) => {
+  // คำนวณราคารวม
+  const subtotal = items.reduce((sum, item) => {
+    const itemCost = (item.product.pricePerKg / 1000) * item.weightGrams;
+    return sum + itemCost;
+  }, 0);
+
+  // การใช้ Ternary Operator (? และ :) ในการคิดส่วนลด
+  const discountMultiplier = discountCode === "WAGYU50" ? 0.5 : 1.0;
+  return subtotal * discountMultiplier;
+};
+
+// 4. ฟังก์ชันคืนค่า Object Literal สังเกตเทคนิคการใช้ ({ ... }) เพื่อไม่ให้ชนกับ Function Block
+export const createOrderSummary = (orderId: string, total: number) => ({
+  orderId,
+  total,
+  currency: "THB" as const, // as const ป้องกันการกลายพันธุ์ของ literal
+  timestamp: new Date().toISOString(),
+});
+```
+
+---
+
+## 5. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+### ❌ ผิดพลาดที่ 1: ลืมใส่วงเล็บมน `()` ครอบปีกกา `{}` เมื่อต้องการ Return Object ทันที
+```typescript
+// ❌ ผิด: JavaScript คิดว่า { ... } คือบล็อกโค้ดฟังก์ชัน ทำให้ตัวแปรข้างในกลายเป็น Syntax Error
+const getSteakProfile = (sku: string) => {
+  name: "Ribeye",
+  marbling: 8
+};
+
+// ✅ ถูกต้อง: นำ () มาครอบเพื่อให้กลายเป็น Object Literal Expression
+const getSteakProfile = (sku: string) => ({
+  name: "Ribeye",
+  marbling: 8
+});
+```
+
+### ❌ ผิดพลาดที่ 2: สับสนระหว่าง `string[]` กับ `(string | number)[]`
+```typescript
+// ❌ ผิด: ไม่ใส่วงเล็บจัดกลุ่ม ทำให้กลายเป็น "string ตัวเดียว หรือ อาเรย์ของ number"
+const listA: string | number[] = ["A5", 2500]; // Type Error!
+
+// ✅ ถูกต้อง: ใส่วงเล็บมน () จัดกลุ่ม Type
+const listB: (string | number)[] = ["A5", 2500]; // ผ่านฉลุย
+```
+
+### ❌ ผิดพลาดที่ 3: สับสนระหว่าง Colon `:` ในการทำ Destructure กับ Type Annotation
+```typescript
+interface Customer {
+  fullName: string;
+}
+
+function printCustomer(data: Customer) {
+  // ❌ พัง: : string ตรงนี้ไม่ใช่การบอก Type แต่คือการเปลี่ยนชื่อตัวแปร fullName ให้กลายเป็นชื่อ 'string'!
+  // const { fullName: string } = data;
+
+  // ✅ ถูกต้อง: ดึงค่าออกมาตรงๆ
+  const { fullName } = data;
+  console.log(fullName);
+}
+```
+
+---
+
+## 6. คำถามสัมภาษณ์งานระดับ Senior (Interview Q&A)
+
+### Q1: ใน TypeScript เครื่องหมาย `=>` มีความหมายและการทำงานต่างกันอย่างไรระหว่าง "ฝั่ง Type Definition" กับ "ฝั่ง Expression Implementation"?
+**แนวทางคำตอบ:**
+- **ฝั่ง Type Definition (Type-level):** `=>` ทำหน้าที่ระบุ **Return Type** ของโครงสร้างฟังก์ชัน เช่น `type Callback = (data: string) => void;` ซึ่งจะถูก TypeScript ลบทิ้งทั้งหมดเมื่อคอมไพล์เป็น JavaScript (Type Erasure) ไม่มีโค้ดส่วนนี้หลงเหลือไปทำงานใน Runtime
+- **ฝั่ง Expression Implementation (Value-level / Runtime):** `=>` คือ **Arrow Function Expression** ของมาตรฐาน ES6 ซึ่งมีพฤติกรรมเฉพาะตัวในการผูก `this` จาก Lexical Scope ภายนอก และจะถูกแปลงเป็นฟังก์ชันจริงใน JavaScript Runtime
+
+### Q2: ทำไม Arrow Function ที่ต้องการคืนค่า Object Literal ในบรรทัดเดียว จึงต้องเขียนในรูปแบบ `() => ({ key: value })`?
+**แนวทางคำตอบ:**
+เพราะในไวยากรณ์ของภาษา JavaScript เครื่องหมายวงเล็บปีกกา `{}` มีหน้าที่ซ้ำซ้อนกัน 2 อย่าง คือเป็น **Function Body Block** (บล็อกคำสั่ง) และเป็น **Object Literal** เมื่อเขียนลูกศร `=>` ตามด้วย `{}` เอนจินของเบราว์เซอร์จะตีความตามลำดับแรกว่าเป็นบล็อกคำสั่งของฟังก์ชันเสมอ ดังนั้น เพื่อบังคับให้เอนจินมองเห็นว่านี่คือ **Expression ก้อนข้อมูลอ็อบเจกต์ที่ต้องการส่งคืนทันที (Implicit Return)** เราจึงต้องนำวงเล็บมน `()` มาครอบไว้ เพื่อจัดกลุ่มให้โครงสร้างภายในถูกประเมินเป็น Expression แทนการเป็น Statement Block
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+1. การใช้ Types และ Interface เชิงสถาปัตยกรรม: [Interface vs Type](/docs/typescript/interface-vs-type)
+2. การสร้างฟังก์ชันขั้นสูง: [TypeScript Functions](/docs/typescript/functions)
+3. การสืบทอดและนำโค้ดกลับมาใช้ใหม่: [Generics](/docs/typescript/generics)
+4. การสร้าง Branded Types ป้องกันข้อผิดพลาดทางตรรกะ: [Branded Types](/docs/typescript/branded-types)
+5. การตรวจจับชนิดข้อมูลให้ครบถ้วน: [Exhaustive Check](/docs/typescript/exhaustive-union)
