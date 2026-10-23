@@ -130,7 +130,7 @@ COPY prisma ./prisma/
 RUN npm ci
 
 # ทำการ Generate Prisma Client สำหรับ Linux Musl
-RUN npx prisma generate
+RUN pnpm exec prisma generate
 
 # ==========================================
 # ชั้นที่ 2: Builder
@@ -350,7 +350,7 @@ jobs:
         run: npm ci
 
       - name: Run Prisma Generate
-        run: npx prisma generate
+        run: pnpm exec prisma generate
 
       - name: Run Linter Check
         run: npm run lint
@@ -427,7 +427,7 @@ jobs:
               --network butcher_network \
               -e DATABASE_URL="postgresql://postgres:${{ secrets.DB_PASSWORD }}@postgres:5432/smart_butcher_prod?schema=public" \
               ghcr.io/${{ github.repository }}:latest \
-              npx prisma migrate deploy
+              pnpm exec prisma migrate deploy
             
             # 3. สั่ง Rolling Update แอปพลิเคชัน API โดยไม่มี Downtime
             echo "Deploying new API container instance..."

@@ -380,7 +380,7 @@ const orders = await prisma.order.findMany({
 
 - [ ] **1. Single Instance Verification**: มั่นใจว่า `PrismaService` ถูกลงทะเบียนเป็น Singleton Provider ภายใน Global Module และไม่มีการ `new PrismaClient()` ในส่วนอื่นของโค้ด
 - [ ] **2. Graceful Disconnect**: มีการเรียกใช้ `$disconnect()` ใน `onModuleDestroy()` เพื่อปล่อย Connection กลับคืนฐานข้อมูลเมื่อเซิร์ฟเวอร์ปิดตัว
-- [ ] **3. CI/CD Migration Command**: ใช้คำสั่ง `npx prisma migrate deploy` ใน Deployment Pipeline เท่านั้น (ห้ามใช้ `prisma db push` เด็ดขาด)
+- [ ] **3. CI/CD Migration Command**: ใช้คำสั่ง `pnpm exec prisma migrate deploy` ใน Deployment Pipeline เท่านั้น (ห้ามใช้ `prisma db push` เด็ดขาด)
 - [ ] **4. Foreign Key Indexing**: เพิ่ม `@@index([foreignKey])` ในทุกความสัมพันธ์ของ Model เพราะ PostgreSQL ไม่ได้สร้าง Index ให้คีย์นอกโดยอัตโนมัติ
 - [ ] **5. Connection Pool Optimization**: ตั้งค่า `connection_limit` และ `pool_timeout` ใน `DATABASE_URL` ให้เหมาะสมกับสเปกแรมของเซิร์ฟเวอร์ฐานข้อมูล
 - [ ] **6. Transaction Timeout Setting**: กำหนด `maxWait` และ `timeout` ในทุกคำสั่ง `prisma.$transaction` เพื่อป้องกัน Thread ค้างจากการเกิด Deadlock

@@ -33,7 +33,7 @@ updatedAt: 2026-10-23
 |    - ส่งออกเอกสาร OpenAPI Spec อัตโนมัติ: https://api.smartbutcher.com/swagger-json             |
 |                                        |                                                         |
 | 2. Code Generation (Build / CI)        v                                                         |
-|    - npx openapi-typescript https://api... -o src/types/api-schema.d.ts                         |
+|    - pnpm dlx openapi-typescript https://api... -o src/types/api-schema.d.ts                         |
 |    - ได้ Pure TypeScript Types แบบ Zero Runtime Cost                                             |
 |                                        |                                                         |
 | 3. Frontend Client: openapi-fetch      v                                                         |
@@ -79,7 +79,7 @@ updatedAt: 2026-10-23
 ```typescript filename="src/types/api-schema.d.ts"
 /**
  * ไฟล์นี้ถูกสร้างโดยคำสั่ง:
- * npx openapi-typescript http://localhost:4000/api-docs-json -o src/types/api-schema.d.ts
+ * pnpm dlx openapi-typescript http://localhost:4000/api-docs-json -o src/types/api-schema.d.ts
  */
 export interface paths {
   '/api/v1/meat-products': {

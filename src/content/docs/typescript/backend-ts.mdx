@@ -35,7 +35,7 @@ NestJS ทำงานบนรากฐานของ Metadata Reflection:
 - **TypeScript 5 ECMAScript Stage 3 Decorators**: ใน TS 5 มีการรองรับ Decorator มาตรฐานใหม่ แต่สำหรับ NestJS 11 ยังคงพึ่งพา Legacy Parameter Decorators (`@Body()`, `@Param()`) เป็นหลัก จึงต้องระวังการตั้งค่า `tsconfig.json` ให้ถูกต้อง
 
 ### 2.2 Prisma Type Generation & AST
-เมื่อเรารันคำสั่ง `npx prisma generate`:
+เมื่อเรารันคำสั่ง `pnpm exec prisma generate`:
 1. Prisma Engine จะอ่านไฟล์ `schema.prisma` แล้วแปลงเป็น Abstract Syntax Tree (AST) ของ DMMF (Data Model Meta Format)
 2. เครื่องมือจะสร้างโค้ด TypeScript Definition ขนาดใหญ่ใน `node_modules/@prisma/client`
 3. เพื่อหลีกเลี่ยงปัญหา N+1 Query และ Over-fetching Prisma มี Generic Type Helper ชื่อ `Prisma.Payload<...>` ซึ่งช่วยคำนวณ Type ขาออกให้สอดคล้องกับอ็อบเจกต์ `include` หรือ `select` อย่างแม่นยำ 100%
