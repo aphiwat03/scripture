@@ -1,31 +1,404 @@
 ---
 title: Prisma ORM
 category: BACKEND
-version: Prisma 6
-updatedAt: 2026-10-17
+version: Prisma 6.x + PostgreSQL 16
+updatedAt: 2026-10-23
 ---
 
-# Prisma ORM
+# Prisma ORM: Enterprise Database Access Layer Blueprint
 
-คู่มือเชิงลึกสำหรับการจัดการชั้นข้อมูล (Data Access Layer) ด้วย **Prisma ORM 6.x** ร่วมกับฐานข้อมูล **PostgreSQL 16** และ **NestJS 11** สำหรับระบบอีคอมเมิร์ซ **Smart Butcher Marketplace** เนื้อหาครอบคลุมตั้งแต่การออกแบบ `schema.prisma` ที่มีความแม่นยำระดับระบบการเงิน, การเชื่อมความสัมพันธ์ของตาราง, การคิวรีแบบ Type-safe 100%, การทำ Interactive Transactions พร้อม Row-Level Locking ป้องกันการตัดสต็อกเนื้อวากิวติดลบ (Race Condition), การป้องกันปัญหา N+1 Query, ไปจนถึงสถาปัตยกรรม `PrismaService` และการเชื่อมต่อผ่าน Driver Adapter `pg` (`@prisma/adapter-pg`)
+ยินดีต้อนรับสู่พิมพ์เขียวสถาปัตยกรรมชั้นการเข้าถึงฐานข้อมูล (**Database Access Layer**) ระดับ Enterprise ด้วย **Prisma ORM 6.x** ร่วมกับฐานข้อมูลเชิงสัมพันธ์ **PostgreSQL 16** บนเฟรมเวิร์ก **NestJS 11** สำหรับระบบพาณิชย์อิเล็กทรอนิกส์ **Smart Butcher Marketplace** (แพลตฟอร์มการประมูลและค้าปลีกเนื้อสัตว์พรีเมียม เนื้อวากิวญี่ปุ่น A5 และเนื้อ Dry-Aged บ่มพิเศษ)
+
+คู่มือนี้ได้รับการออกแบบโดยอิงหลักการ **Zero Schema Drift**, ความปลอดภัยต่อการเกิดข้อผิดพลาดในการคิวรีแบบ **100% Type-Safety**, สถาปัตยกรรมการจัดการ Connection Pool ขั้นสูง, การป้องกัน Race Condition ในการตัดสต็อกสินค้าด้วย Interactive Transactions และ Row-Level Locking ตลอดจนแนวทางการทำ Database Migration บน Production แบบ Zero-Downtime
 
 ---
 
-## สารบัญหัวข้อการเรียนรู้เชิงลึก (Learning Directory)
+## 1. แนวคิด (Concept)
 
-| ลำดับ | หัวข้อย่อย | ขอบเขตเนื้อหา | ลิงก์เข้าสู่บทเรียน |
+**Prisma ORM** เป็น Next-Generation Node.js & TypeScript ORM ที่ปฏิวัติวิธีการทำงานกับฐานข้อมูลจาก ORM แบบดั้งเดิม (เช่น TypeORM หรือ Sequelize) โดยเปลี่ยนจากการนิยาม Entity ผ่าน Decorator ในคลาส มาเป็นการใช้ **Declarative Data Modeling Language** ผ่านไฟล์ `schema.prisma` เพียงจุดเดียว (Single Source of Truth)
+
+สถาปัตยกรรมของ Prisma ประกอบด้วย 3 เสาหลัก:
+1. **Prisma Schema (`schema.prisma`)**: ไฟล์ประกาศโครงสร้างโมเดล ความสัมพันธ์ คีย์หลัก ดัชนี (Indexes) และ Constraints ต่างๆ ที่มนุษย์อ่านเข้าใจง่ายและสะท้อน DDL ของ PostgreSQL อย่างแม่นยำ
+2. **Prisma Migrate**: เครื่องมือบริหารจัดการเวอร์ชันของฐานข้อมูล (Database Schema Migration) แบบระบุการเปลี่ยนแปลงเป็นไฟล์ Declarative SQL History เพื่อให้การ Deploy ขึ้น Production มีความสามารถในการตรวจสอบย้อนกลับ (Auditability) 100%
+3. **Prisma Client**: ไคลเอนต์คิวรีที่ถูกคอมไพล์ขึ้นมาตาม Schema ของโปรเจกต์โดยเฉพาะ (Tailored Type-Safe Client) ทำให้ทุกฟังก์ชัน ทุกพารามิเตอร์ และผลลัพธ์ที่ส่งกลับมา มีการรับประกันชนิดข้อมูล (Type Assurance) ในระดับ Compile-Time หมดปัญหาเรื่องสะกดชื่อคอลัมน์ผิดหรือเข้าถึงฟิลด์ที่ไม่มีอยู่จริง
+
+<Callout type="note" title="ทำไมระบบ Smart Butcher Marketplace จึงเลือก Prisma 6.x?">
+ในระบบค้าปลีกเนื้อสัตว์พรีเมียม ความผิดพลาดด้านข้อมูลของสินค้า เช่น ระดับไขมันแทรก (Marbling Score BMS 12), อายุการบ่ม (Dry-Aging Days), และน้ำหนักชั่งจริงเป็นกรัม เป็นเรื่องคอขาดบาดตาย Prisma ขจัดปัญหา Type Desynchronization ระหว่าง Database กับโค้ด TypeScript ได้อย่างเด็ดขาด ช่วยลดข้อผิดพลาดในระดับ Production ได้มากกว่า 90%
+</Callout>
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 กลไก Rust-based Query Engine และการคอมไพล์คำสั่ง SQL
+
+หัวใจสำคัญที่ทำให้ Prisma มีความเร็วในการประมวลผลสูงและจัดการหน่วยความจำได้อย่างแม่นยำคือ **Query Engine** ที่พัฒนาด้วยภาษา **Rust**:
+
+```mermaid
+flowchart TD
+    TSApp["NestJS 11 Application Service"] -->|"prisma.order.findUnique({...})"| TSClient["Prisma Client (TypeScript Layer)"]
+    TSClient -->|"DMMF (Data Model Meta Format) Query AST"| Engine["Prisma Query Engine (Rust Binary / Library)"]
+    
+    subgraph Rust_Engine ["Rust Query Engine Architecture"]
+        Engine --> Parser["Query AST Parser & Validator"]
+        Parser --> Optimizer["Query Batcher & Dataloader Optimizer"]
+        Optimizer --> SQLGen["PostgreSQL 16 Dialect SQL Generator"]
+    end
+    
+    SQLGen -->|"Optimized Prepared Statement SQL"| DriverAdapter["@prisma/adapter-pg (pg Pool)"]
+    DriverAdapter -->|"TCP / TLS Connection"| Postgres[(PostgreSQL 16 Database)]
+    Postgres -->|"Binary Rowset Data"| DriverAdapter
+    DriverAdapter --> Engine
+    Engine -->|"De-serialization & Type Hydration"| TSClient
+    TSClient -->|"Type-Safe Order Entity"| TSApp
+```
+
+1. **Query AST Transformation**: เมื่อโค้ด TypeScript สั่ง `prisma.order.create(...)` ข้อมูลคำขอจะถูกแปลงเป็น Query AST (Abstract Syntax Tree)
+2. **Rust Engine Processing**: ใน Prisma 6 ตัว Query Engine ทำงานเป็น Node-API C++ Bindings หรือ WebAssembly (Wasm) รันอยู่บนโพรเซสเดียวกันกับ Node.js ทำหน้าที่วางแผนการคิวรี (Query Planning), จัดการรวมคำขอย่อยเข้าด้วยกัน (Query Batching), และแปลความหมายเป็นภาษา SQL ของ PostgreSQL 16
+3. **Database Driver Adapter (`@prisma/adapter-pg`)**: Prisma 6 รองรับ Driver Adapter อย่างเป็นทางการ ทำให้สามารถแชร์ Connection Pool ของไลบรารี `pg` มาตรฐานได้โดยตรง รองรับการทำงานร่วมกับ Cloud-native Database Proxy เช่น Supavisor หรือ PgBouncer ได้อย่างราบรื่น
+
+### 2.2 Connection Pooling & Resource Sizing
+
+การจัดการ Connection Pool ของ PostgreSQL มีผลโดยตรงต่อ Throughput ของระบบ:
+- **Default Pool Size**: Prisma คำนวณขนาด Connection Pool เริ่มต้นตามสูตร:  
+  $$\text{num\_physical\_cpus} \times 2 + 1$$
+- **Production Recommended Formula**: ในระบบ High-traffic แนะนำให้ตั้งค่า Connection Limit ผ่าน Connection String:
+  ```env
+  DATABASE_URL="postgresql://butcher:secret@pg-primary:5432/butcher_db?connection_limit=25&pool_timeout=10"
+  ```
+- **Transaction Mode with PgBouncer**: หากใช้ PgBouncer คั่นกลาง ต้องกำหนด URL แยก 2 เส้น คือ Transaction Mode (พอร์ต 6543) สำหรับงานเขียนและ `$transaction` และ Direct Connection (พอร์ต 5432) สำหรับงานรัน `prisma migrate deploy`
+
+### 2.3 ตารางสารบัญเจาะลึก 6 หัวข้อย่อยในโมดูล Prisma ORM
+
+| ลำดับ | หัวข้อย่อย | ขอบเขตเนื้อหาและแกนสถาปัตยกรรม | ลิงก์เข้าสู่บทเรียน |
 | :---: | :--- | :--- | :--- |
-| 1 | **Prisma Schema** | เจาะลึกเนื้อหาและสถาปัตยกรรมของ Prisma Schema พร้อมโค้ดตัวอย่างและการประยุกต์ใช้งานจริง | [เปิดอ่าน Prisma Schema](/docs/backend/prisma-orm/prisma-schema) |
-| 2 | **Model Relations** | เจาะลึกเนื้อหาและสถาปัตยกรรมของ Model Relations พร้อมโค้ดตัวอย่างและการประยุกต์ใช้งานจริง | [เปิดอ่าน Model Relations](/docs/backend/prisma-orm/model-relations) |
-| 3 | **Prisma Client** | เจาะลึกเนื้อหาและสถาปัตยกรรมของ Prisma Client พร้อมโค้ดตัวอย่างและการประยุกต์ใช้งานจริง | [เปิดอ่าน Prisma Client](/docs/backend/prisma-orm/prisma-client) |
-| 4 | **Transactions** | เจาะลึกเนื้อหาและสถาปัตยกรรมของ Transactions พร้อมโค้ดตัวอย่างและการประยุกต์ใช้งานจริง | [เปิดอ่าน Transactions](/docs/backend/prisma-orm/transactions) |
-| 5 | **N1 Query Fix** | เจาะลึกเนื้อหาและสถาปัตยกรรมของ N1 Query Fix พร้อมโค้ดตัวอย่างและการประยุกต์ใช้งานจริง | [เปิดอ่าน N1 Query Fix](/docs/backend/prisma-orm/n1-query-fix) |
-| 6 | **PrismaService** | เจาะลึกเนื้อหาและสถาปัตยกรรมของ PrismaService พร้อมโค้ดตัวอย่างและการประยุกต์ใช้งานจริง | [เปิดอ่าน PrismaService](/docs/backend/prisma-orm/prisma-service) |
-| 7 | **Anti-patterns** | ข้อผิดพลาดที่พบบ่อย (Anti-patterns), Checklist สรุป และลำดับการเรียนรู้ที่แนะนำ | [เปิดอ่าน Anti-patterns](/docs/backend/prisma-orm/pitfalls) |
+| 1 | **Prisma Schema** | การออกแบบโมเดล `schema.prisma`, Data Types, Composite Keys, Enums และ Indexes | [เปิดอ่าน Prisma Schema](/docs/backend/prisma-orm/prisma-schema) |
+| 2 | **Model Relations** | การผูกความสัมพันธ์ 1:1, 1:N, M:N, Cascade Deletes, และ Referential Integrity | [เปิดอ่าน Model Relations](/docs/backend/prisma-orm/model-relations) |
+| 3 | **Prisma Client** | การใช้งาน API Query พื้นฐาน (`findMany`, `create`, `upsert`, Select, Include, Aggregations) | [เปิดอ่าน Prisma Client](/docs/backend/prisma-orm/prisma-client) |
+| 4 | **Transactions** | การทำ Sequential `$transaction` และ Interactive Transactions พร้อม Row-Level Locking | [เปิดอ่าน Transactions](/docs/backend/prisma-orm/transactions) |
+| 5 | **N1 Query Fix** | การแก้ปัญหา N+1 Query ด้วย Prisma Batching, Dataloader และ Fluent API Optimization | [เปิดอ่าน N1 Query Fix](/docs/backend/prisma-orm/n1-query-fix) |
+| 6 | **PrismaService** | สถาปัตยกรรม Singleton ใน NestJS, การดักจับ Lifecycle, Logging และ Graceful Shutdown | [เปิดอ่าน PrismaService](/docs/backend/prisma-orm/prisma-service) |
+| 7 | **Anti-patterns** | ข้อผิดพลาดที่พบบ่อย (Anti-patterns), เช็กลิสต์ความพร้อมก่อนส่งมอบ และลำดับการเรียนรู้ | [เปิดอ่าน Anti-patterns](/docs/backend/prisma-orm/pitfalls) |
 
 ---
 
-## แหล่งอ้างอิงทางการและดูเพิ่มเติม
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
 
-- [เอกสารทางการของ Prisma ORM](https://google.com/search?q=Prisma%20ORM) — คู่มือและเอกสารการใช้งานฉบับสมบูรณ์
-- [เนื้อหาในหมวด BACKEND](/) — กลับสู่หน้าหลักสารบัญ
+### ตัวอย่างที่ 1: สถาปัตยกรรม PrismaService แบบ Singleton พร้อม Graceful Shutdown และ Audit Logging
+
+คลาสนี้เป็นศูนย์กลางของ Database Access Layer ใน NestJS 11 โดยจัดการวงจรชีวิตของการเชื่อมต่ออย่างถูกต้อง เพื่อป้องกันการเกิด Connection Leaks เมื่อแอปพลิเคชันถูกรีสตาร์ตหรือทำ Zero-Downtime Deployment:
+
+```typescript filename="src/database/prisma.service.ts"
+import {
+  Injectable,
+  OnModuleInit,
+  OnModuleDestroy,
+  Logger,
+} from '@nestjs/common';
+import { PrismaClient, Prisma } from '@prisma/client';
+import { ConfigService } from '@nestjs/config';
+
+@Injectable()
+export class PrismaService
+  extends PrismaClient<Prisma.PrismaClientOptions, 'query' | 'info' | 'warn' | 'error'>
+  implements OnModuleInit, OnModuleDestroy
+{
+  private readonly logger = new Logger(PrismaService.name);
+
+  constructor(private readonly configService: ConfigService) {
+    const isProduction = configService.get<string>('NODE_ENV') === 'production';
+
+    super({
+      log: isProduction
+        ? [
+            { emit: 'event', level: 'warn' },
+            { emit: 'event', level: 'error' },
+          ]
+        : [
+            { emit: 'event', level: 'query' },
+            { emit: 'event', level: 'info' },
+            { emit: 'event', level: 'warn' },
+            { emit: 'event', level: 'error' },
+          ],
+      errorFormat: isProduction ? 'minimal' : 'pretty',
+    });
+  }
+
+  async onModuleInit(): Promise<void> {
+    this.logger.log('กำลังเชื่อมต่อฐานข้อมูล PostgreSQL ผ่าน Prisma Engine...');
+    
+    // ลงทะเบียน Event Listener สำหรับ Query Logging
+    this.$on('query', (event: Prisma.QueryEvent) => {
+      this.logger.debug(
+        `[SQL Query] ${event.query} | Params: ${event.params} | Duration: ${event.duration}ms`,
+      );
+    });
+
+    this.$on('error', (event: Prisma.LogEvent) => {
+      this.logger.error(`[Database Error] ${event.message}`);
+    });
+
+    await this.$connect();
+    this.logger.log('เชื่อมต่อ PostgreSQL 16 สำเร็จ พร้อมให้บริการคิวรี');
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    this.logger.log('กำลังปิดการเชื่อมต่อฐานข้อมูลแบบ Graceful Shutdown...');
+    await this.$disconnect();
+    this.logger.log('ตัดการเชื่อมต่อ PostgreSQL และคืน Connection Pool เรียบร้อย');
+  }
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: การทำ Interactive Transaction ตัดสต็อกเนื้อพรีเมียมแบบ Atomic ป้องกัน Race Condition
+
+ในกรณีที่ลูกค้าแย่งกันสั่งซื้อเนื้อวากิวสันนอก A5 (Sirloin) ที่มีสต็อกจำกัด 1 ชิ้น โค้ดนี้ใช้ **Interactive Transaction (`$transaction`)** ร่วมกับคำสั่งล็อกแถว (`SELECT ... FOR UPDATE`) ในระดับ PostgreSQL เพื่อรับประกันว่าสต็อกจะไม่ติดลบเด็ดขาด:
+
+```typescript filename="src/modules/orders/orders.repository.ts"
+import {
+  Injectable,
+  ConflictException,
+  NotFoundException,
+  InternalServerErrorException,
+} from '@nestjs/common';
+import { PrismaService } from '../../database/prisma.service';
+import { Order, OrderStatus, PaymentStatus } from '@prisma/client';
+
+export interface CheckoutItemInput {
+  productId: string;
+  quantity: number;
+}
+
+@Injectable()
+export class OrdersRepository {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async createOrderWithAtomicStockDeduction(
+    userId: string,
+    items: CheckoutItemInput[],
+    paymentReference: string,
+  ): Promise<Order> {
+    // ใช้งาน Interactive Transaction พร้อมกำหนด Timeout ชัดเจน (สูงสุด 10 วินาที)
+    return this.prisma.$transaction(
+      async (tx) => {
+        let totalAmount = 0;
+        const orderItemsToCreate: {
+          productId: string;
+          quantity: number;
+          unitPrice: number;
+          subtotal: number;
+        }[] = [];
+
+        for (const item of items) {
+          // 1. ใช้ Raw Query เพื่อทำ Row-Level Locking (Pessimistic Write Lock)
+          // ป้องกันคำขออื่นเข้ามาอ่านหรือแก้ไขข้อมูลสินค้าชิ้นนี้จนกว่า Transaction จะเสร็จสิ้น
+          const products = await tx.$queryRaw<
+            Array<{ id: string; name: string; price: number; stockQuantity: number }>
+          >`
+            SELECT id, name, price, "stockQuantity"
+            FROM "Product"
+            WHERE id = ${item.productId}::uuid
+            FOR UPDATE
+          `;
+
+          const product = products[0];
+
+          if (!product) {
+            throw new NotFoundException(`ไม่พบสินค้ารหัส ${item.productId} ในระบบ`);
+          }
+
+          // 2. ตรวจสอบเงื่อนไขสต็อกแบบเข้มงวด
+          if (product.stockQuantity < item.quantity) {
+            throw new ConflictException(
+              `สินค้าเนื้อพรีเมียม "${product.name}" มีสต็อกเหลือเพียง ${product.stockQuantity} ชิ้น ไม่พอสำหรับคำสั่งซื้อ ${item.quantity} ชิ้น`,
+            );
+          }
+
+          // 3. หักสต็อกสินค้าทันทีภายใน Transaction เดียวกัน
+          await tx.product.update({
+            where: { id: item.productId },
+            data: {
+              stockQuantity: {
+                decrement: item.quantity,
+              },
+            },
+          });
+
+          const subtotal = Number(product.price) * item.quantity;
+          totalAmount += subtotal;
+
+          orderItemsToCreate.push({
+            productId: item.productId,
+            quantity: item.quantity,
+            unitPrice: Number(product.price),
+            subtotal,
+          });
+        }
+
+        // 4. บันทึกคำสั่งซื้อ (Order) และรายการสินค้า (OrderItem)
+        const createdOrder = await tx.order.create({
+          data: {
+            userId,
+            totalAmount,
+            status: OrderStatus.PENDING,
+            items: {
+              createMany: {
+                data: orderItemsToCreate,
+              },
+            },
+            payment: {
+              create: {
+                amount: totalAmount,
+                status: PaymentStatus.AWAITING_PAYMENT,
+                provider: 'PROMPTPAY_QR',
+                transactionRef: paymentReference,
+              },
+            },
+          },
+          include: {
+            items: {
+              include: {
+                product: true,
+              },
+            },
+            payment: true,
+          },
+        });
+
+        return createdOrder;
+      },
+      {
+        maxWait: 5000, // รอนานสุด 5 วินาทีเพื่อรอได้ Connection จาก Pool
+        timeout: 10000, // รันคำสั่งทั้งหมดต้องเสร็จภายใน 10 วินาที
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+      },
+    );
+  }
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+### 4.1 Anti-pattern: การสร้าง `new PrismaClient()` ในหลายเซอร์วิส
+
+```typescript
+// ❌ ผิดมหันต์: แต่ละ Service สร้าง Instance ใหม่ของตนเอง
+@Injectable()
+export class ProductsService {
+  private prisma = new PrismaClient(); // แต่ละตัวสร้าง Connection Pool ของตัวเอง
+}
+```
+
+**ผลกระทบเชิงลบ**:
+หากคุณมี 20 เซอร์วิส และแต่ละเซอร์วิสสร้าง `new PrismaClient()` เซิร์ฟเวอร์จะเปิด Connection สู่ PostgreSQL นับร้อยชุดในทันที เมื่อมีทราฟฟิกเข้ามา ฐานข้อมูลจะเกิดข้อผิดพลาด `FATAL: remaining connection slots are reserved for non-replication superuser connections` และเซิร์ฟเวอร์ล่มทันที
+
+**แนวทางที่ถูกต้อง (Best Practice)**:
+สร้าง `PrismaService` เป็น **Singleton Provider** อยู่ในโมดูล `PrismaModule` และแชร์ใช้งานผ่าน Dependency Injection ของ NestJS เพียงจุดเดียวทั้งแอปพลิเคชัน
+
+### 4.2 Anti-pattern: การใช้ `prisma db push` บนสภาพแวดล้อม Production
+
+-  `prisma db push`: เหมาะสำหรับขั้นตอน Local Prototyping เท่านั้น เพราะคำสั่งนี้จะไม่สร้างประวัติไฟล์ SQL Migration และอาจทำ Data Loss ลบตารางทิ้งโดยไม่เจตนา
+-  `prisma migrate deploy`: เป็นคำสั่งเดียวที่อนุญาตให้ใช้ใน Production CI/CD Pipeline โดยคำสั่งนี้จะรันเฉพาะไฟล์ SQL Migration ที่ยังค้างอยู่แบบ Sequential และไม่มีการดัดแปลงหรือสุ่มเสี่ยงทำให้ข้อมูลสูญหาย
+
+### 4.3 Anti-pattern: การวนลูปคิวรีในหน่วยความจำ (The Hidden N+1 Query)
+
+```typescript
+// ❌ ผิดมหันต์: คิวรีซ้ำในลูป เกิด 1 + N คำสั่ง SQL ยิงเข้าฐานข้อมูล
+const orders = await prisma.order.findMany();
+for (const order of orders) {
+  const user = await prisma.user.findUnique({ where: { id: order.userId } });
+}
+```
+
+**แนวทางที่ถูกต้อง (Best Practice)**:
+ใช้ `include` หรือ `relationLoadStrategy: 'join'` ของ Prisma 6 เพื่อให้คอมไพล์เป็น SQL `JOIN` ในคำสั่งเดียว:
+
+```typescript
+//  ถูกต้อง: ดึงข้อมูลความสัมพันธ์ทั้งหมดใน Single Roundtrip
+const orders = await prisma.order.findMany({
+  include: {
+    user: {
+      select: { id: true, email: true, fullName: true },
+    },
+    items: {
+      include: { product: true },
+    },
+  },
+});
+```
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Prisma ORM เมื่อ:
+1. **ระบบต้องการความแม่นยำด้าน Type-Safety 100%**: ทุกการแก้ไข Schema จะสะท้อนเข้าโค้ด TypeScript ทันทีเมื่อรัน `prisma generate` ลดข้อผิดพลาดระหว่าง Compile-time
+2. **ระบบ OLTP (Online Transaction Processing)**: งาน CRUD ทั่วไป การจัดการตะกร้าสินค้า การสร้างบิล การสั่งซื้อ ที่ต้องการ ACID Transactions
+3. **ทีมงานใช้ TypeScript เป็นหลัก**: มอบ Developer Experience (DX) สูงสุดด้วย Autocomplete ของฟิลด์และตัวกรองที่ฉลาดมาก
+4. **ต้องการการบริหาร Migration ที่น่าเชื่อถือ**: ไฟล์ SQL Migration ที่สร้างขึ้นสามารถตรวจสอบและรีวิวโดย Database Administrator (DBA) ก่อนขึ้น Production ได้
+
+### ไม่ควรใช้ Prisma ORM เมื่อ:
+1. **ระบบ Big Data Analytics & OLAP**: งานวิเคราะห์ยอดขายย้อนหลัง 10 ปีที่ต้องทำ Group By หลายล้านแถว ควรใช้ Raw SQL หรือหันไปใช้ Data Warehouse เฉพาะทาง เช่น ClickHouse หรือ BigQuery
+2. **ระบบที่ต้องใช้ Recursive Common Table Expressions (CTE) ซับซ้อน**: ฟีเจอร์ขั้นสูงบางอย่างของ PostgreSQL เช่น Hierarchical Tree Traversals ลึกๆ การใช้ `prisma.$queryRaw` จะมีประสิทธิภาพและคล่องตัวกว่า Prisma Query API มาตรฐาน
+3. **Serverless Function ที่ไม่มี Connection Pooler**: หากรันบน AWS Lambda โดยไม่มี PgBouncer หรือ Prisma Accelerate ปัญหา Connection Exhaustion จะเกิดขึ้นอย่างรวดเร็ว
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### Q1: อธิบายกลไกการทำงานของ Prisma Query Engine ที่เขียนด้วยภาษา Rust และผลกระทบต่อ Memory Overhead และ Cold Start ใน Serverless เทียบกับ Long-running NestJS Server?
+> **แนวคำตอบระดับ Principal Architect:**
+> Prisma แตกต่างจาก ORM ภาษา JavaScript แท้ตรงที่มีการแยก Query Engine ไปเขียนด้วยภาษา Rust เพื่อประสิทธิภาพสูงสุดในการ Optimize AST และแปลงเป็น Prepared Statements SQL
+> - **ใน Long-running Server (เช่น NestJS บน Kubernetes/Docker)**: สถาปัตยกรรมนี้มีประสิทธิภาพสูงมาก เพราะ Query Engine จะถูกโหลดขึ้นสู่ Memory เพียงครั้งเดียวในรูปของ Node-API Library (`libquery_engine.node`) ใช้ Connection Pool เดิมอย่างคุ้มค่า และลดภาระ Garbage Collection (GC) ของ V8 Engine ส่งผลให้ Throughput ของ API สม่ำเสมอและมี Latency ต่ำ
+> - **ใน Serverless Environment (เช่น AWS Lambda / Vercel)**: Rust Binary หรือ Library มีขนาดไฟล์ประมาณ 15–30MB ส่งผลให้เกิด Cold Start ที่ยาวนานขึ้น (เพิ่มขึ้นประมาณ 200–500ms ในคำขอแรก) และแต่ละ Container ของ Lambda จะพยายามเปิด Connection Pool ของตัวเอง ซึ่งอาจทำให้ PostgreSQL ล่มจากจำนวน Connection ล้น เพื่อแก้ปัญหานี้ ใน Prisma 6 จึงแนะนำให้เปิดใช้ WebAssembly (Wasm) Engine หรือเชื่อมต่อผ่าน Connection Pooler เช่น PgBouncer / Supavisor หรือ Prisma Accelerate เพื่อให้ขยายขีดความสามารถได้อย่างไร้ขีดจำกัด
+
+### Q2: ในการทำระบบชำระเงินและตัดสต็อกเนื้อวากิวที่มีคนแย่งกันกดซื้อพร้อมกัน 1,000 คน จะใช้ Prisma `$transaction` ร่วมกับ Row-Level Locking หรือ Optimistic Concurrency Control อย่างไรเพื่อป้องกันสต็อกติดลบ (Phantom Read / Race Condition)?
+> **แนวคำตอบระดับ Principal Architect:**
+> ในการจัดการทราฟฟิกแย่งซื้อสินค้า Flash Sale มี 2 กลยุทธ์หลัก:
+> 1. **Pessimistic Row-Level Locking (แนะนำสำหรับสินค้าที่มีชิ้นเดียวหรือราคาสูง เช่น เนื้อดรายเอจบ่ม 60 วัน)**:
+>    - ใช้งานผ่าน `tx.$queryRaw` ร่วมกับ `SELECT ... FOR UPDATE` ภายใน `prisma.$transaction`
+>    - กลไกนี้จะสั่งให้ PostgreSQL ล็อค Row ของสินค้านั้นไว้ที่ระดับฐานข้อมูล คำขอถัดไปที่ต้องการอ่านแถวเดียวกันจะต้องรอจนกว่า Transaction แรกจะ `COMMIT` หรือ `ROLLBACK` ทำให้สต็อกไม่มีวันติดลบแน่นอน
+> 2. **Optimistic Concurrency Control (OCC) (แนะนำสำหรับสินค้าที่ปริมาณปานกลาง)**:
+>    - เพิ่มคอลัมน์ `version Int @default(0)` ใน Model `Product`
+>    - เมื่อต้องการตัดสต็อก ให้ใช้คำสั่งแบบ Atomic Update:
+>      ```typescript
+>      const updated = await prisma.product.updateMany({
+>        where: { id: productId, stockQuantity: { gte: quantity }, version: currentVersion },
+>        data: { stockQuantity: { decrement: quantity }, version: { increment: 1 } },
+>      });
+>      if (updated.count === 0) throw new ConflictException('สินค้าหมดหรือข้อมูลเปลี่ยน');
+>      ```
+>    - วิธีนี้ไม่ต้องล็อกแถวค้างไว้ ทำให้ Throughput สูงกว่า แต่ไคลเอนต์ที่ชนกันต้องรับมือกับความผิดพลาดและทำ Retry เอาเอง
+
+---
+
+## Production Checklist ด้าน Query & Migration
+
+- [ ] **1. Single Instance Verification**: มั่นใจว่า `PrismaService` ถูกลงทะเบียนเป็น Singleton Provider ภายใน Global Module และไม่มีการ `new PrismaClient()` ในส่วนอื่นของโค้ด
+- [ ] **2. Graceful Disconnect**: มีการเรียกใช้ `$disconnect()` ใน `onModuleDestroy()` เพื่อปล่อย Connection กลับคืนฐานข้อมูลเมื่อเซิร์ฟเวอร์ปิดตัว
+- [ ] **3. CI/CD Migration Command**: ใช้คำสั่ง `npx prisma migrate deploy` ใน Deployment Pipeline เท่านั้น (ห้ามใช้ `prisma db push` เด็ดขาด)
+- [ ] **4. Foreign Key Indexing**: เพิ่ม `@@index([foreignKey])` ในทุกความสัมพันธ์ของ Model เพราะ PostgreSQL ไม่ได้สร้าง Index ให้คีย์นอกโดยอัตโนมัติ
+- [ ] **5. Connection Pool Optimization**: ตั้งค่า `connection_limit` และ `pool_timeout` ใน `DATABASE_URL` ให้เหมาะสมกับสเปกแรมของเซิร์ฟเวอร์ฐานข้อมูล
+- [ ] **6. Transaction Timeout Setting**: กำหนด `maxWait` และ `timeout` ในทุกคำสั่ง `prisma.$transaction` เพื่อป้องกัน Thread ค้างจากการเกิด Deadlock
+- [ ] **7. BigInt & Decimal Serialization**: ติดตั้ง Custom JSON Serializer เพื่อจัดการชนิดข้อมูล `Decimal` และ `BigInt` ไม่ให้พังขณะแปลงเป็น HTTP JSON Response
+- [ ] **8. Slow Query Alerting**: ตั้ง Event Listener ตรวจจับคิวรีที่มีระยะเวลาประมวลผลนานกว่า 500ms (`event.duration > 500`) เพื่อแจ้งเตือนเข้าช่อง Discord/Slack
+- [ ] **9. Field Selection Masking**: ใช้คำสั่ง `select` หรือ `omit` เพื่อซ่อนฟิลด์ความลับ เช่น `passwordHash`, `refreshToken` ไม่ให้หลุดออกไปทาง API
+- [ ] **10. Migration Safety Review**: ตรวจสอบไฟล์ `.sql` ในโฟลเดอร์ `prisma/migrations` ก่อนผสานโค้ดเข้า Branch หลักทุกครั้ง เพื่อป้องกันคำสั่ง `DROP TABLE` หรือ `DROP COLUMN` โดยไม่เจตนา
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เพื่อความเป็นเลิศในการออกแบบ Database Layer ด้วย Prisma ORM ขอแนะนำให้ศึกษาเนื้อหาตามลำดับดังนี้:
+
+1. เริ่มต้นจากการประกาศ Schema และกำหนดชนิดข้อมูล: [Prisma Schema](/docs/backend/prisma-orm/prisma-schema)
+2. การผูกโยงความสัมพันธ์และ Referential Actions: [Model Relations](/docs/backend/prisma-orm/model-relations)
+3. การใช้งานคำสั่งคิวรีข้อมูลแบบ Type-safe: [Prisma Client](/docs/backend/prisma-orm/prisma-client)
+4. การสร้าง Service และบริหารจัดการ Connection: [Prisma Service](/docs/backend/prisma-orm/prisma-service)
+5. การจัดการธุรกรรมขั้นสูงและแก้ปัญหา Race Condition: [Transactions](/docs/backend/prisma-orm/transactions)
+6. การปรับปรุงประสิทธิภาพและสกัดปัญหา N+1: [N+1 Query Fix](/docs/backend/prisma-orm/n1-query-fix)
+7. หลุมพรางและข้อผิดพลาดที่พบบ่อยในการใช้งานจริง: [Prisma Anti-patterns](/docs/backend/prisma-orm/pitfalls)

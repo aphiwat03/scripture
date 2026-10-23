@@ -123,7 +123,7 @@ export function ApiKeyForm() {
   async function onSubmit(values: ApiKeyFormValues) {
     // จำลองการเรียก Server Action
     await new Promise((resolve) => setTimeout(resolve, 1500));
-    setCreatedKey(`sk_live_${Math.random().toString(36).substring(2, 15)}`);
+    setCreatedKey(`key_live_${Math.random().toString(36).substring(2, 15)}`);
   }
 
   return (
@@ -269,9 +269,7 @@ export function ApiKeyForm() {
 | รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
 | :--- | :--- |
 | **เขียน `useState` ควบคุมฟอร์ม 15 ฟิลด์**<br/>คอมโพเนนต์ Re-render ทุกครั้งที่กดปุ่มแป้นพิมพ์ ทำให้พิมพ์เร็วๆ แล้วข้อความกระตุก | **ใช้ `useForm` (React Hook Form)**<br/>จัดการ State ภายในแบบ Uncontrolled รวดเร็ว และ Re-render เฉพาะจุดที่ Error |
-| **แสดงข้อความ Error ด้วย `<div>` เอง**<br/>```tsx
-{errors.email && <div className="text-red-500">{errors.email}</div>}
-```<br/>ผลลัพธ์: Screen Reader ไม่รู้ว่าข้อความนี้สัมพันธ์กับช่องกรอกข้อมูลช่องไหน | **ใช้ `<FormMessage />` ภายใน `<FormItem>`**<br/>ระบบจะผูก `aria-describedby` และ `aria-invalid` ให้อัตโนมัติ |
+| **แสดงข้อความ Error ด้วย `<div>` เอง**<br/>`{errors.email && <div className="text-red-500">{errors.email}</div>}`<br/>ผลลัพธ์: Screen Reader ไม่รู้ว่าข้อความนี้สัมพันธ์กับช่องกรอกข้อมูลช่องไหน | **ใช้ `<FormMessage />` ภายใน `<FormItem>`**<br/>ระบบจะผูก `aria-describedby` และ `aria-invalid` ให้อัตโนมัติ |
 | **ตรวจสอบ Validation ด้วย `if-else` หลายสิบบรรทัดในฟังก์ชัน submit**<br/>ขาด Type safety และไม่สามารถนำโค้ดไปตรวจฝั่ง Server ได้ | **ใช้ Zod Schema พร้อม `zodResolver`**<br/>สร้างกฎชุดเดียว ใช้ตรวจเช็กได้ทั้ง Frontend และ Backend Server Action |
 
 ---

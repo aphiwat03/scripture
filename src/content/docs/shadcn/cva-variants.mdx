@@ -168,23 +168,8 @@ export function PaymentAlert({ invoiceId }: { invoiceId: string }) {
 | รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
 | :--- | :--- |
 | **ซ้อนแท็ก `<button><Link href="...">...</Link></button>`**<br/>สร้างโครงสร้าง HTML ผิดหลัก ทำให้ Screen Reader สับสน และเกิดปัญหากดคลิกซ้ำซ้อน | **ใช้ `<Button asChild><Link href="...">...</Link></Button>`**<br/>เรนเดอร์แท็ก `<a>` ตัวเดียวที่มีสไตล์และพฤติกรรมทั้งหมดของ Button |
-| **เขียน Switch-case หรือ if-else ยาวเหยียดเพื่อเปลี่ยนคลาส**<br/>```tsx
-let cls = "btn ";
-if (variant === "primary") cls += "bg-blue...";
-else if (variant === "danger") cls += "bg-red...";
-``` | **ใช้ `cva()` เพื่อนิยาม Variants อย่างเป็นระบบ**<br/>ได้ประโยชน์ทั้ง Type Safety จาก TypeScript, รองรับ Compound Variants, และแก้ไขง่าย |
-| **ใส่ Children หลายตัวเข้าไปใน `<Slot>`**<br/>```tsx
-<Button asChild>
-  <span>ไอคอน</span>
-  <Link href="/">หน้าแรก</Link>
-</Button>
-```<br/>ผลลัพธ์: Radix Slot จะ Error เพราะมันรับ Child ได้เพียง Element เดียว | **ใส่ Single Root Element ใน Child เสมอ**<br/>```tsx
-<Button asChild>
-  <Link href="/">
-    <HomeIcon /> หน้าแรก
-  </Link>
-</Button>
-``` |
+| **เขียน Switch-case หรือ if-else ยาวเหยียดเพื่อต่อสตริงคลาส**<br/>`let cls = "btn "; if (variant === "primary") ...`<br/>ดูแลยากและไม่มี Type Safety | **ใช้ `cva()` เพื่อนิยาม Variants อย่างเป็นระบบ**<br/>ได้ประโยชน์ทั้ง Type Safety จาก TypeScript, รองรับ Compound Variants, และแก้ไขง่าย |
+| **ใส่ Children หลายตัวเข้าไปใน `<Slot>`**<br/>`<Button asChild><span>ไอคอน</span><Link href="/">หน้าแรก</Link></Button>`<br/>ผลลัพธ์: Radix Slot จะ Error เพราะมันรับ Child ได้เพียง Element เดียว | **ใส่ Single Root Element ใน Child เสมอ**<br/>`<Button asChild><Link href="/"><HomeIcon /> หน้าแรก</Link></Button>` |
 
 ---
 

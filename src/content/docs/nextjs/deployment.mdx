@@ -3,71 +3,411 @@ title: Deployment
 category: Frontend
 parentTitle: Next.js 16
 version: v16.4
-updatedAt: 2026-10-17
+updatedAt: 2026-10-23
 ---
 
-## 1. คืออะไร / ใช้ทำไม
+# Next.js 16 Production Deployment Strategy
 
-**Deployment** คือกระบวนการเตรียมและนำแอปพลิเคชัน Next.js ไปรันบนระบบ Production อย่างมีประสิทธิภาพ ผ่านการบิลด์โค้ด (`next build`), การทำ Standalone Output เพื่อลดขนาด Docker Image, หรือการ Deploy ผ่านแพลตฟอร์มอย่าง Vercel
+คู่มือเชิงลึกระดับ Senior สำหรับการเตรียม สถาปัตยกรรม และส่งมอบแอปพลิเคชัน Next.js 16 สู่ระบบ Production อย่างมีเสถียรภาพ ปลอดภัย และรองรับทราฟฟิกมหาศาล พร้อมเปรียบเทียบระหว่าง Serverless Platform, Docker Standalone และ VPS แบบละเอียด
 
-ช่วยให้เว็บสามารถรองรับทราฟฟิกจริงได้เสถียร ประหยัดค่าใช้จ่ายเซิร์ฟเวอร์ และมีขั้นตอน CI/CD ที่เป็นอัตโนมัติ
+---
 
-## 2. ตัวอย่างโค้ด (TypeScript / Docker)
+## 1. แนวคิด (Concept)
 
-### การตั้งค่า Standalone Output ใน `next.config.ts`
+การนำแอปพลิเคชัน Next.js 16 ที่ขับเคลื่อนด้วย App Router, React Server Components (RSC) และ Server Actions ขึ้นสู่สภาพแวดล้อม Production จำเป็นต้องมีความเข้าใจอย่างถ่องแท้ในรูปแบบการโฮสต์ (Hosting Models) ซึ่งแต่ละแนวทางมีข้อได้เปรียบ จุดคุ้มทุน และสถาปัตยกรรมระบบที่แตกต่างกันอย่างสิ้นเชิง
+
+```text
++-----------------------------------------------------------------------------------+
+|                        Next.js 16 Deployment Matrix                               |
++------------------------+--------------------------+-------------------------------+
+|     Vercel Platform    |     Docker Standalone    |        VPS / Bare-Metal       |
+|  (Serverless & Edge)   | (Kubernetes, ECS, Nomad) |       (Ubuntu + PM2/Nginx)    |
++------------------------+--------------------------+-------------------------------+
+| + Zero Configuration   | + Portable ทุก Cloud     | + ควบคุม Hardware สูงสุด      |
+| + Global Edge Cache    | + ไม่มี Vendor Lock-in   | + ต้นทุนคงที่ คุ้มค่าที่สุด   |
+| + Instant Rollback     | + ควบคุม Resource เองได้ | - ต้อง Maintenance OS เอง     |
+| - Data Egress แพงมาก   | - ต้องมี DevOps/SRE      | - ขยายสเกลแบบ Manual          |
++------------------------+--------------------------+-------------------------------+
+```
+
+### การเปรียบเทียบสถาปัตยกรรม (Comparison Table)
+
+| มิติการเปรียบเทียบ | Vercel (PaaS / Serverless) | Docker Standalone (CaaS / K8s) | VPS (IaaS / PM2 + Nginx) |
+| :--- | :--- | :--- | :--- |
+| **โครงสร้างพื้นฐาน** | Serverless Lambdas + Edge Middleware | OCI-compliant Linux Container | Virtual Machine (Linux Ubuntu/Debian) |
+| **ปัญหา Cold Start** | มีโอกาสเกิดในหน้า Dynamic ที่ไม่ได้เรียกใช้นาน | **ไม่มี (Zero Cold Start)** เพราะโปรเซสรันตลอดเวลา | **ไม่มี (Zero Cold Start)** |
+| **การรองรับ WebSockets / Long-Polling** | ต้องใช้บริการภายนอกแยกต่างหาก (เช่น Pusher/Ably) | **รองรับสมบูรณ์แบบ** ในตัว Container เดียวกัน | **รองรับสมบูรณ์แบบ** ผ่าน Node.js HTTP Server |
+| **ต้นทุนแบนด์วิดท์ (Data Egress)** | \$0.15 - \$0.40 ต่อ GB (สูงมากสำหรับเว็บรูปภาพเยอะ) | \$0.01 - \$0.05 ต่อ GB (ขึ้นกับ Cloud Provider) | ฟรีตามโควตาเซิร์ฟเวอร์ (เช่น Hetzner ให้ 20TB ฟรี) |
+| **ระบบ Cache (Data Cache / ISR)** | ทำงานแบบ Distributed ทั่วโลก Out-of-the-box | ต้องผูกกับ Shared Filesystem, S3 หรือ Redis | บันทึกลง Local NVMe SSD ในเครื่อง |
+| **ความเหมาะสมของ Use Case** | MVP, ทีมขนาดเล็ก, หน้า Landing Page เน้น Global SEO | E-Commerce ขนาดกลาง-ใหญ่, องค์กรที่มี Kubernetes | ระบบภายในองค์กร, แอปประหยัดงบ, ทราฟฟิกคาดเดาได้ |
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 กลไก `output: 'standalone'` และ Node File Trace
+
+เมื่อรันคำสั่ง `next build` โดยเปิดใช้งาน `output: 'standalone'` ใน `next.config.ts`:
+1. Next.js จะเรียกใช้เอนจิน **Node File Trace (`@vercel/nft`)** สแกนไฟล์ TypeScript/JavaScript ทั้งหมดในโปรเจกต์
+2. ทำการวิเคราะห์ Dependency Graph เพื่อคัดเลือกเฉพาะไฟล์ใน `node_modules` และโค้ดต้นฉบับที่ถูกเรียกใช้จริงใน Production เท่านั้น
+3. รวบรวมไฟล์เหล่านั้นไปบรรจุไว้ที่ `.next/standalone`
+4. สร้างไฟล์ entrypoint พิเศษชื่อ `server.js` ซึ่งเป็น Minimal Node.js HTTP Server สำหรับรันโปรเจกต์
+
+ผลลัพธ์คือ: จากโฟลเดอร์ `node_modules` ปกติที่มีขนาด 800MB - 1.5GB จะถูกบีบอัดและคัดเลือกเหลือเพียง **40MB - 80MB** ภายใน `.next/standalone` ส่งผลให้การสร้าง Docker Image มีขนาดเล็กจิ๋วและ Deploy ได้อย่างรวดเร็ว
+
+<Callout type="warning" title="ไฟล์สถิตไม่รวมอยู่ใน Standalone Bundle">
+ตัวเอนจิน standalone จะไม่คัดลอกโฟลเดอร์ `public/` และ `.next/static/` ลงใน `.next/standalone` เพราะ Next.js ออกแบบมาให้เรานำสองโฟลเดอร์นี้ไปเสิร์ฟผ่าน CDN หรือคัดลอกแยกต่างหากใน Dockerfile มิฉะนั้นหน้าเว็บจะโหลด CSS, JS chunks และรูปภาพไม่ขึ้น (404 Not Found)
+</Callout>
+
+### 2.2 วงจรชีวิต Build-time vs Runtime Environment Variables
+
+ความผิดพลาดอันดับ 1 ของการ Deploy Next.js ด้วย Docker คือการสับสนระหว่าง **Build-time** และ **Runtime**:
+
+```text
+[ Docker Build Phase: RUN npm run build ]
+  -> เข้าถึงได้เฉพาะค่าที่มี prefix: NEXT_PUBLIC_* (ที่ประกาศใน Dockerfile หรือ ARG)
+  -> ตัวแปรฝั่ง Client จะถูก Hardcode (Inlined) เข้าไปในไฟล์ JavaScript ทันที
+  -> ห้ามส่ง Secret สำคัญ (เช่น DATABASE_URL) ในขั้นตอนนี้เด็ดขาด!
+
+[ Docker Run Phase: CMD ["node", "server.js"] ]
+  -> Node.js Container บูตขึ้นทำงานบนเซิร์ฟเวอร์
+  -> อ่าน process.env ณ ขณะรันจริง เช่น DATABASE_URL, STRIPE_SECRET_KEY, REDIS_URL
+  -> สามารถสลับ environment ได้โดยไม่ต้องบิลด์ Docker Image ใหม่ (12-Factor App)
+```
+
+### 2.3 กลยุทธ์ Zero-Downtime Deployment & Graceful Shutdown
+
+เมื่อทำการอัปเดตเวอร์ชันใหม่ของระบบ หากสั่งดับ Container ทันที คำสั่งซื้อเนื้อที่ลูกค้ากำลังจ่ายเงินค้างอยู่จะถูกตัดขาด (Connection Reset) นำไปสู่การสูญเสียยอดขาย
+
+Next.js 16 Standalone Server รองรับ **Graceful Shutdown** ผ่านสัญญาณ `SIGTERM` และ `SIGINT`:
+- เมื่อได้รับสัญญาณ `SIGTERM` จาก Docker หรือ Kubernetes:
+  1. ตัวเซิร์ฟเวอร์จะปฏิเสธการรับ HTTP Request ใหม่
+  2. รอให้ Request ที่กำลังประมวลผลอยู่ (Active Requests) ทำงานจนเสร็จสมบูรณ์ภายใน Timeout Window (ปกติ 30 วินาที)
+  3. ปิดการเชื่อมต่อฐานข้อมูล Database Connection Pools อย่างปลอดภัย
+  4. ยุติการทำงานของโปรเซส Node.js อย่างสมบูรณ์
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การตั้งค่า Next Config และ Health Check Probe
+
+ในระบบ **Smart Butcher Marketplace** เพื่อให้ Kubernetes หรือ Load Balancer ตรวจสอบสถานะของเซิร์ฟเวอร์ก่อนปล่อยทราฟฟิกเข้ามา เราต้องเปิดโหมด Standalone และสร้าง Health Check Endpoint สำหรับตรวจเช็กทั้งสภาพแอป และสถานะการเชื่อมต่อฐานข้อมูล
 
 ```typescript filename="next.config.ts"
 import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
-  // บิลด์เฉพาะไฟล์ที่จำเป็นลงในโฟลเดอร์ .next/standalone
+  // บังคับสร้าง Minimal Standalone Build สำหรับ Docker Image ขนาดเล็ก
   output: 'standalone',
+  
+  // เพิ่มประสิทธิภาพการบิลด์และเสิร์ฟไฟล์
+  reactStrictMode: true,
+  poweredByHeader: false, // ปิด Header X-Powered-By เพื่อความปลอดภัย
+
+  // กำหนดโดเมนของรูปภาพเนื้อพรีเมียมจาก CDN
+  images: {
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: 'images.smartbutcher.com',
+        pathname: '/**',
+      },
+    ],
+  },
 };
 
 export default nextConfig;
 ```
 
-### Dockerfile แบบ Multi-stage build สำหรับ Next.js 16
+สร้าง Endpoint ตรวจสอบสุขภาพของระบบที่รองรับ Kubernetes Liveness และ Readiness Probes:
+
+```typescript filename="src/app/api/health/route.ts"
+import { NextResponse } from 'next/server';
+
+interface HealthStatus {
+  status: 'healthy' | 'degraded' | 'unhealthy';
+  timestamp: string;
+  uptime: number;
+  checks: {
+    database: 'connected' | 'disconnected';
+    memoryUsageMB: number;
+  };
+}
+
+export async function GET() {
+  const startTime = Date.now();
+  let dbStatus: 'connected' | 'disconnected' = 'disconnected';
+
+  try {
+    // ทดสอบยิง Query สั้นๆ ไปยังฐานข้อมูลเนื้อพรีเมียม (Smart Butcher DB)
+    // ตัวอย่าง: await prisma.$queryRaw`SELECT 1`;
+    dbStatus = 'connected';
+  } catch (error) {
+    dbStatus = 'disconnected';
+  }
+
+  const memory = process.memoryUsage();
+  const memoryUsageMB = Math.round(memory.heapUsed / 1024 / 1024);
+
+  const isHealthy = dbStatus === 'connected';
+
+  const payload: HealthStatus = {
+    status: isHealthy ? 'healthy' : 'degraded',
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor(process.uptime()),
+    checks: {
+      database: dbStatus,
+      memoryUsageMB,
+    },
+  };
+
+  return NextResponse.json(payload, {
+    status: isHealthy ? 200 : 503,
+    headers: {
+      'Cache-Control': 'no-store, max-age=0',
+      'X-Response-Time-Ms': (Date.now() - startTime).toString(),
+    },
+  });
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: Multi-stage Dockerfile มาตรฐานสากลสำหรับ Next.js 16
+
+Dockerfile ระดับ Production นี้ใช้สถาปัตยกรรม 4 สเตจเพื่อลด Attack Surface, แยก Cache Layer อย่างถูกต้อง, และทำงานภายใต้สิทธิ์ผู้ใช้จำกัด (`non-root user`)
 
 ```dockerfile filename="Dockerfile"
-FROM node:20-alpine AS builder
+# syntax=docker/dockerfile:1.4
+# -------------------------------------------------------------
+# Stage 1: Base Image (Alpine Linux + Node.js 20 LTS)
+# -------------------------------------------------------------
+FROM node:20-alpine AS base
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci
+# ติดตั้ง libc6-compat สำหรับความเข้ากันได้ของ native module บน alpine
+RUN apk add --no-cache libc6-compat
+
+# -------------------------------------------------------------
+# Stage 2: Dependencies Cache Layer
+# -------------------------------------------------------------
+FROM base AS deps
+WORKDIR /app
+
+# คัดลอกเฉพาะ package files เพื่อใช้ประโยชน์จาก Docker Layer Caching
+COPY package.json package-lock.json ./
+RUN npm ci --prefer-offline --no-audit
+
+# -------------------------------------------------------------
+# Stage 3: Builder Layer
+# -------------------------------------------------------------
+FROM base AS builder
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+
+# กำหนดให้ Next.js ไม่ส่งข้อมูล Telemetry ไปยัง Vercel ระหว่าง Build
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_ENV=production
+
+# ตัวแปร NEXT_PUBLIC_* ที่จำเป็นต้องมีตอนบิลด์หน้า UI
+ARG NEXT_PUBLIC_API_URL
+ARG NEXT_PUBLIC_APP_ENV=production
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_APP_ENV=$NEXT_PUBLIC_APP_ENV
+
+# บิลด์ Next.js แอปพลิเคชัน (ได้ผลลัพธ์ใน .next/standalone)
 RUN npm run build
 
-FROM node:20-alpine AS runner
+# -------------------------------------------------------------
+# Stage 4: Production Runner (Security Hardened)
+# -------------------------------------------------------------
+FROM base AS runner
 WORKDIR /app
+
 ENV NODE_ENV=production
-# คัดลอกไฟล์ที่จำเป็นจากขั้นตอนการบิลด์
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+
+# สร้าง Non-root Group และ User เพื่อความปลอดภัย (Security Best Practice)
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 nextjs
+
+# คัดลอกโฟลเดอร์ public (รูปภาพแบนเนอร์เนื้อ, โลโก้, favicon)
 COPY --from=builder /app/public ./public
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
+
+# กำหนดสิทธิ์ให้โฟลเดอร์ .next ก่อนคัดลอกไฟล์ standalone
+RUN mkdir .next && chown nextjs:nodejs .next
+
+# คัดลอกผลลัพธ์ standalone server และ static assets
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+# สลับการทำงานไปเป็น non-root user 'nextjs'
+USER nextjs
 
 EXPOSE 3000
+
+# กำหนด Health Check สำหรับ Docker daemon
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/api/health || exit 1
+
+# รัน Minimal Standalone Server
 CMD ["node", "server.js"]
 ```
 
-## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+---
 
-- **Vercel**:
-  - *ควรใช้*: สำหรับทีมที่ต้องการความเร็วในการส่งมอบงาน มีระบบ Preview Deployment และ Edge Network ทั่วโลก
-- **Docker Standalone**:
-  - *ควรใช้*: สำหรับการติดตั้งบนเซิร์ฟเวอร์ส่วนตัว (On-Premises, AWS ECS, GCP Cloud Run) เพื่อควบคุมค่าใช้จ่ายแบนด์วิดท์
-- *ไม่ควรใช้*: การรัน `npm run dev` ใน Production เด็ดขาด
+### ตัวอย่างที่ 3: Docker Compose สำหรับ Production Stack (พร้อม Nginx และ SSL)
 
-## 4. ข้อควรระวัง
+สถาปัตยกรรมสำหรับรันบน VPS หรือ Dedicated Server ที่มี Reverse Proxy จัดการ SSL Termination, บีบอัด Brotli/Gzip, และแคช Static Assets:
 
-<Callout type="warning" title="อย่าลืมคัดลอก public และ .next/static">
-เมื่อใช้ `output: 'standalone'` จะต้องคัดลอกโฟลเดอร์ `public` และ `.next/static` ตามตัวอย่าง Dockerfile เสมอ เพราะตัว `server.js` ไม่ได้รวมไฟล์สถิตเหล่านี้เข้าไปด้วย
-</Callout>
+```yaml filename="docker-compose.prod.yml"
+version: '3.8'
 
-<Callout type="tip" title="ทดสอบ Production Build ในเครื่องก่อนเสมอ">
-ก่อน Deploy ขึ้นเซิร์ฟเวอร์จริง ให้รันคำสั่ง `npm run build` และ `npm run start` บนเครื่องตนเองเพื่อตรวจจับ Type Error และ Build Issue ล่วงหน้า
-</Callout>
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: https://smartbutcher.com/api
+        NEXT_PUBLIC_APP_ENV: production
+    image: smartbutcher-web:latest
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://butcher_admin:SecretPassword789@db:5432/butcher_db?schema=public
+      REDIS_URL: redis://cache:6379
+      PAYMENT_GATEWAY_KEY: sec_prod_sample_token_placeholder
+    expose:
+      - "3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_started
+    networks:
+      - internal-net
 
-## 5. แหล่งอ้างอิงทางการ
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - app
+    networks:
+      - internal-net
 
-- [Next.js Deploying Documentation](https://nextjs.org/docs/app/building-your-application/deploying)
-- [Docker Deployment with Next.js](https://github.com/vercel/next.js/tree/canary/examples/with-docker)
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: butcher_db
+      POSTGRES_USER: butcher_admin
+      POSTGRES_PASSWORD: SecretPassword789
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U butcher_admin -d butcher_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal-net
+
+  cache:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - internal-net
+
+networks:
+  internal-net:
+    driver: bridge
+
+volumes:
+  pgdata:
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ปัญหาที่พบ | วิธีการที่ผิด (Anti-pattern) | วิธีการที่ถูกต้องระดับ Senior (Best Practice) |
+| :--- | :--- | :--- |
+| **ลืม Static Assets ใน Docker** | ไม่ได้เขียนคำสั่ง `COPY --from=builder /app/.next/static ./.next/static` ทำให้หน้าเว็บไม่มี CSS และหน้าตาแตก | คัดลอกทั้ง `.next/static` และ `public/` เข้าไปใน Runner Stage เสมอ หรืออัปโหลดไฟล์ Static เหล่านี้ขึ้น Cloudflare R2 / AWS S3 |
+| **ความลับรั่วไหลใน Docker Layers** | ส่งค่า `ARG DATABASE_URL="postgres://..."` เข้าไปในขั้นตอน Build Image ทำให้รหัสผ่านฝังอยู่ในประวัติ Docker Image | ส่งเฉพาะตัวแปร `NEXT_PUBLIC_*` ในขั้นตอน Build ส่วน Credentials ส่งผ่าน Environment ตอนรัน Container (`docker run -e` หรือ Kubernetes Secrets) |
+| **รัน Container ด้วยสิทธิ์ Root** | ใช้ค่าเริ่มต้นของ Docker รันด้วย Root User หากมีช่องโหว่ใน Node.js Library ผู้โจมตีจะยึดสิทธิ์ Host OS ได้ | สร้าง `nextjs` system user พร้อม UID 1001 และสั่ง `USER nextjs` ก่อนรัน `node server.js` เพื่อจำกัดสิทธิ์ (Least Privilege) |
+| **ไม่มี Health Check Endpoint** | ตั้งค่า Load Balancer ให้เช็กสถานะ Root Path `/` ซึ่งกิน Resource สูงเพราะต้องเรนเดอร์ React Components | สร้าง `/api/health` ที่เบาและคืนค่า JSON ทันที พร้อมเช็กการเชื่อมต่อไปยัง Database และ Memory Usage |
+| **ไร้ระบบ Graceful Shutdown** | ใช้คำสั่ง `kill -9` บังคับหยุดเซิร์ฟเวอร์ทันทีเมื่อมีเวอร์ชันใหม่ ทำให้คำสั่งซื้อและธุรกรรมการจ่ายเงินตัดขาด | ดักจับสัญญาณ `SIGTERM` ปล่อยให้คำขอที่ค้างอยู่ประมวลผลเสร็จ และใช้ Rolling Update สลับทีละ Container |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Vercel เมื่อ:
+- เว็บไซต์เปิดตัวใหม่ หรือต้องการ Time-to-Market ที่เร็วที่สุดโดยไม่ต้องมีทีม DevOps มาดูแล Infrastructure
+- แอปต้องการฟีเจอร์ Preview Deployment ทุก Pull Request สำหรับทีม Marketing และ QA ตรวจสอบ
+- ระบบเป็นเว็บบล็อก ข่าวสาร หรือ Documentation ที่เน้น Global Edge Caching ระดับมิลลิวินาทีทั่วโลก
+
+### ไม่ควรใช้ Vercel เมื่อ:
+- เว็บไซต์มีปริมาณ Data Egress มหาศาล (เช่น ร้านขายเนื้อพรีเมียมที่มีภาพสินค้า 4K นับหมื่นรูป และวิดีโอแนะนำการปรุง) เพราะค่า Bandwidth บน Vercel จะสูงกว่า Cloud ทั่วไปหลายเท่า
+- องค์กรมีข้อกำหนดเรื่อง Data Sovereignty บังคับให้เซิร์ฟเวอร์และฐานข้อมูลต้องตั้งอยู่ในประเทศไทยเท่านั้น
+- ระบบต้องการ Persistent WebSockets เชื่อมต่อค้างไว้นานๆ ตลอด 24 ชม.
+
+### ควรใช้ Docker Standalone (บน AWS ECS / GCP Cloud Run / VPS) เมื่อ:
+- ต้องการความยืดหยุ่นสูงสุด สามารถย้ายระบบข้าม Cloud Provider ได้โดยไม่มี Vendor Lock-in
+- ต้องการควบคุมค่าใช้จ่ายแบนด์วิดท์และเซิร์ฟเวอร์ให้อยู่ในงบประมาณคงที่ (Predictable Cost)
+- ต้องการเชื่อมต่อฐานข้อมูลภายใน Private VPC เดียวกันเพื่อความปลอดภัยและ Latency ต่ำกว่า 1ms
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: การทำงานของ `output: 'standalone'` ใน Next.js 16 มีหลักการอย่างไร และทำไมเราต้องคัดลอกโฟลเดอร์ `public` และ `.next/static` แยกต่างหากใน Dockerfile?
+
+**แนวคำตอบเชิงลึก:**
+`output: 'standalone'` เป็นฟังก์ชันที่ Next.js ใช้เทคโนโลยี Node File Trace (`@vercel/nft`) วิเคราะห์โค้ดทั้งหมดเพื่อดึงเฉพาะไฟล์และโมดูลภายนอกใน `node_modules` ที่จำเป็นต่อการทำงานจริงใน Production ออกมาสร้างเป็น Minimal Node.js Server บรรจุในโฟลเดอร์ `.next/standalone` ส่งผลให้ขนาดไฟล์ลดลงจากหลักกิกะไบต์เหลือเพียงไม่กี่สิบเมกะไบต์
+
+เหตุผลที่เราต้องคัดลอก `public` และ `.next/static` แยกต่างหาก เกิดจากหลักการ **Separation of Concerns ระหว่าง Dynamic Compute และ Static Assets**:
+- ตัว `server.js` ใน standalone ทำหน้าที่ประมวลผลเฉพาะ Server-Side Rendering (SSR), Server Actions, และ Route Handlers
+- ส่วนไฟล์ใน `.next/static` (JavaScript chunks, CSS bundles) และ `public` (รูปภาพ, ฟอนต์) เป็น Static Assets ที่ไม่ได้ถูก Compile รวมเข้าไปใน `server.js` เพราะในสถาปัตยกรรม Production ขนาดใหญ่ ไฟล์เหล่านี้ควรถูก Offload ให้ CDN (เช่น Cloudflare, CloudFront) หรือ Nginx รับหน้าที่ส่งไฟล์ตรงให้ผู้ใช้เพื่อลดภาระ CPU ของ Node.js Server หากเราไม่คัดลอกไฟล์เหล่านี้ลงใน Container และไม่ได้ใช้ CDN แยก หน้าเว็บจะไม่สามารถดาวน์โหลด CSS หรือ JavaScript ได้ ส่งผลให้หน้าเว็บพังทันที
+
+---
+
+### คำถามที่ 2: ในระบบ E-Commerce อย่าง Smart Butcher Marketplace ที่มีแคมเปญ Flash Sale ลดราคาเนื้อวากิว A5 คุณจะออกแบบกระบวนการ Zero-Downtime Deployment และ Automated Rollback อย่างไร?
+
+**แนวคำตอบเชิงลึก:**
+การออกแบบระบบสำหรับภารกิจวิกฤต (Mission-Critical) ต้องผสานทั้งระดับ Container, Orchestration และ Database Migration:
+
+1. **Blue-Green หรือ Rolling Update ผ่าน Container Orchestrator (Kubernetes / AWS ECS):**
+   - รัน Container เวอร์ชันเดิม (Blue) ไว้ตามปกติ
+   - สั่ง Spin up Container เวอร์ชันใหม่ (Green) ขึ้นมา
+   - ตัว Orchestrator จะยิงตรวจสอบไปยัง `/api/health` (Readiness Probe) หากเซิร์ฟเวอร์ใหม่บูตเสร็จและเชื่อมต่อฐานข้อมูลได้สมบูรณ์ (HTTP 200) จึงค่อยสลับทราฟฟิกจาก Load Balancer ไปยัง Green
+   - ส่งสัญญาณ `SIGTERM` ให้เวอร์ชัน Blue รอ Graceful Shutdown 30 วินาที เพื่อให้คำสั่งซื้อที่ค้างอยู่ประมวลผลเสร็จ
+
+2. **Backward-Compatible Database Migrations (Expand/Contract Phase):**
+   - ห้ามลบหรือเปลี่ยนชื่อคอลัมน์ในฐานข้อมูลทันที
+   - ขั้นตอนที่ 1 (Expand): เพิ่มคอลัมน์ใหม่ที่อนุญาตค่า Nullable ก่อน Deploy โค้ด
+   - ขั้นตอนที่ 2: Deploy โค้ดใหม่ที่เขียนข้อมูลลงทั้งคอลัมน์เก่าและใหม่
+   - ขั้นตอนที่ 3 (Contract): เมื่อระบบเสถียรแล้ว จึงค่อยรัน Migration ลบคอลัมน์เก่าทิ้ง เพื่อให้เวอร์ชันเก่ายังทำงานได้หากต้อง Rollback
+
+3. **Automated Rollback Trigger:**
+   - ติดตั้ง APM (เช่น Datadog, Sentry, Prometheus) ตรวจจับอัตราข้อผิดพลาด (HTTP 5xx Error Rate) และ Latency
+   - หากหลัง Deploy พบว่า Error Rate เกิน 1% หรือ Liveness Probe ล้มเหลวติดต่อกัน 3 ครั้ง ระบบ CI/CD (GitHub Actions / ArgoCD) จะสั่ง Rollback ชี้ Traffic กลับไปยังเวอร์ชัน Blue ทันทีภายในเวลาไม่เกิน 10 วินาทีโดยไม่มีผลกระทบต่อผู้ใช้งาน
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [Next.js Environment Variables](/docs/nextjs/env) — การบริหารจัดการตัวแปรสภาพแวดล้อมและความปลอดภัย
+- [Next.js Error & Loading](/docs/nextjs/error-handling) — การจัดการ Error Boundary และ Fallback UI
+- [Next.js Optimization](/docs/nextjs/optimization) — การรีดประสิทธิภาพ Core Web Vitals, รูปภาพ และฟอนต์
+- [Next.js Routing Architecture](/docs/nextjs/routing) — สถาปัตยกรรมระบบเราต์และการจัดการ Request Lifecycle

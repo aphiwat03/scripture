@@ -223,22 +223,8 @@ export function ProjectDeleteDialog({ projectName, onConfirmDelete }: ProjectDel
 
 | รูปแบบที่ผิด (Anti-Pattern) | รูปแบบที่ถูกต้อง (Best Practice) |
 | :--- | :--- |
-| **เขียน Modal เองด้วย `<div>` และ `useState` ดักคลิก**<br/>```tsx
-{isOpen && (
-  <div className="modal-overlay">
-    <div className="modal-box">{children}</div>
-  </div>
-)}
-```<br/>ผลลัพธ์: ลืม Focus Trap, กด Tab ทะลุไปหน้าหลัง, กด ESC ไม่ปิด, Screen Reader ไม่ส่งเสียง | **ใช้ Radix UI Primitive ผ่าน shadcn**<br/>ให้ Radix จัดการ Event Listeners, Focus Trap, WAI-ARIA role และ State อัตโนมัติ<br/>```tsx
-<AlertDialog open={isOpen} onOpenChange={setIsOpen}>
-  <AlertDialogContent>...</AlertDialogContent>
-</AlertDialog>
-``` |
-| **ลบ `AlertDialogTitle` หรือ `Description` ออก**<br/>เพราะไม่อยากให้มีตัวหนังสือหัวข้อในดีไซน์ ส่งผลให้บราวเซอร์ฟ้อง Error ใน Console เรื่องขาด Accessible Label | **คงแท็กไว้แล้วซ่อนด้วย Tailwind `sr-only`**<br/>```tsx
-<AlertDialogTitle className="sr-only">
-  ยืนยันการทำรายการ
-</AlertDialogTitle>
-```<br/>หน้าตาไม่แสดงข้อความ แต่ยังรักษามาตรฐานการเข้าถึง 100% |
+| **เขียน Modal เองด้วย `<div>` และ `useState` ดักคลิก**<br/>`{isOpen && <div className="modal-overlay">...</div>}`<br/>ผลลัพธ์: ลืม Focus Trap, กด Tab ทะลุไปหน้าหลัง, กด ESC ไม่ปิด, Screen Reader ไม่ส่งเสียง | **ใช้ Radix UI Primitive ผ่าน shadcn**<br/>`<AlertDialog open={isOpen} onOpenChange={setIsOpen}>...` ให้ Radix จัดการ Event Listeners, Focus Trap, WAI-ARIA role และ State อัตโนมัติ |
+| **ลบ `AlertDialogTitle` หรือ `Description` ออก**<br/>เพราะไม่อยากให้มีตัวหนังสือหัวข้อในดีไซน์ ส่งผลให้บราวเซอร์ฟ้อง Error ใน Console เรื่องขาด Accessible Label | **คงแท็กไว้แล้วซ่อนด้วย Tailwind `sr-only`**<br/>`<AlertDialogTitle className="sr-only">ยืนยันการทำรายการ</AlertDialogTitle>`<br/>หน้าตาไม่แสดงข้อความ แต่ยังรักษามาตรฐานการเข้าถึง 100% |
 
 ---
 

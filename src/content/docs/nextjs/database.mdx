@@ -3,81 +3,341 @@ title: Database & API
 category: Frontend
 parentTitle: Next.js 16
 version: v16.4
-updatedAt: 2026-10-17
+updatedAt: 2026-10-23
 ---
 
-## 1. คืออะไร / ใช้ทำไม
+# Next.js 16 Database Architecture: Prisma ORM, Route Handlers & Data Access Layer
 
-**Database & Backend Integration** คือการจัดวางสถาปัตยกรรมให้ Next.js เชื่อมโยงกับฐานข้อมูล PostgreSQL โดยตรงผ่าน **Prisma ORM** หรือทำหน้าที่เป็น Frontend ที่สื่อสารกับบริการหลังบ้านระดับองค์กร (เช่น **NestJS API**)
+คู่มือระดับ Senior Fullstack ในการออกแบบสถาปัตยกรรมเชื่อมต่อฐานข้อมูล PostgreSQL ผ่าน Prisma ORM ใน Next.js 16 App Router, การบริหารจัดการ Connection Pool, การกำจัดปัญหา Hot-reload รั่วไหล, และการสร้าง Data Access Layer (DAL) กรองข้อมูลอ่อนไหวก่อนส่งมอบสู่ UI
 
-ช่วยให้ทีมพัฒนามีความยืดหยุ่นในการเลือกใช้ทั้งแบบ Full-Stack ในโปรเจกต์เดียว หรือแบบแยก Frontend/Backend เมื่อระบบมีขนาดใหญ่ขึ้น
+---
 
-## 2. ตัวอย่างโค้ด (TypeScript)
+## 1. แนวคิด (Concept)
 
-### การสร้าง Prisma Singleton ป้องกัน Connection รั่วไหล
+ในยุคของ React Server Components (RSC) การทำงานร่วมกับฐานข้อมูลใน Next.js 16 ได้รับการยกระดับอย่างก้าวกระโดด จากเดิมที่ต้องสร้าง REST API Endpoint หรือ Route Handler (`/api/products`) แล้วให้หน้าบ้านใช้ `fetch` ยิงกลับเข้ามา กลายเป็นการอนุญาตให้ **Server Components และ Server Actions สามารถเรียกใช้ Prisma ORM เพื่อติดต่อกับ PostgreSQL ได้โดยตรงบนเครื่องเซิร์ฟเวอร์**
+
+```text
+[ แนวทางแบบเดิม (Anti-pattern: Internal Loopback) ]
+Server Component ---> HTTP Fetch (localhost:3000/api/orders) ---> Route Handler ---> Prisma ---> Database
+* สิ้นเปลือง Network Overhead, JSON Serialization 2 รอบ, เสี่ยงต่อ Connection Deadlock
+
+[ สถาปัตยกรรม Next.js 16 (Senior Best Practice: Direct DAL) ]
+Server Component / Action ---> Data Access Layer (DAL) ---> Prisma ORM ---> PostgreSQL Database
+* ทำงานที่ระดับ Memory ในโปรเซสเดียว Latency < 1ms, Type-safe 100%, ไม่มี Loopback HTTP
+```
+
+### การเลือกใช้งานระหว่าง Server Component, Server Action และ Route Handler
+
+| รูปแบบ | บริบทการทำงาน | เทคโนโลยีที่เหมาะสม | ข้อดีหลัก |
+| :--- | :--- | :--- | :--- |
+| **Server Component** | การอ่านข้อมูลมาแสดงผล (Read Operations) | เรียกผ่าน DAL -> Prisma Direct Query | เร็วที่สุด ไร้ Network Overhead แคชได้ง่าย |
+| **Server Action** | การเขียน/แก้ไขข้อมูลจากฟอร์ม (Mutations) | เรียกผ่าน DAL -> Prisma Transaction | ผูกกับ React Transition, Revalidate แคชทันที |
+| **Route Handler (`route.ts`)** | การสื่อสารกับภายนอก (External Webhooks / APIs) | NextRequest / NextResponse + Prisma | รับ Stripe Webhook, ให้บริการแอป iOS/Android |
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 ปัญหา Database Connection Exhaustion ในโหมด Development
+
+เมื่อเราพัฒนาโปรเจกต์ Next.js ด้วยคำสั่ง `next dev`:
+1. ตัวเอนจิน Turbopack หรือ Webpack จะทำการ Hot-Module Replacement (HMR) ทุกครั้งที่มีการบันทึกไฟล์โค้ด
+2. Node.js จะล้าง Module Cache เก่าทิ้ง และทำการคอมไพล์โค้ดไฟล์นั้นใหม่
+3. หากเราเขียนคำสั่ง `const prisma = new PrismaClient()` ไว้ธรรมดา ทุกครั้งที่ HMR ทำงาน ตัว `PrismaClient` ตัวใหม่จะถูกสร้างขึ้นมาเรื่อยๆ พร้อมเปิด Connection Pool เชื่อมต่อไปยัง PostgreSQL
+4. ภายในเวลาไม่กี่นาที จำนวน Connection จะเกินขีดจำกัดของฐานข้อมูล (เช่น ทะลุ `max_connections = 100`) ส่งผลให้เกิดข้อผิดพลาด:
+   `Error: Can't reach database server at localhost:5432 - Connection pool limit exceeded`
+
+**ทางออกระดับ Senior:** การผูกอินสแตนซ์ของ Prisma ไว้กับ **`globalThis`** (Global Object ของ Node.js ที่ไม่ถูกทำลายระหว่าง HMR) เพื่อคง Connection Singleton เดิมไว้ตลอดช่วง Development
+
+### 2.2 ภัยเงียบของการส่ง Raw Database Entity สู่ Client
+
+Prisma ORM มีความสามารถในการดึงข้อมูลมาเป็น Object ที่สมบูรณ์แบบ แต่ในโมเดลความจริงของร้านขายเนื้อ **Smart Butcher Marketplace**:
+- ตาราง `User` จะมีคอลัมน์ `passwordHash`, `twoFactorSecret`, `creditCardToken`
+- ตาราง `Product` จะมีคอลัมน์ `wholesaleCost` (ราคาส่งจากฟาร์ม), `supplierContact`
+- หากเราดึงข้อมูลผ่าน Prisma แล้วส่ง Object ทั้งก้อนข้าม React Server/Client Boundary ไปยัง Client Component (`'use client'`) ตัว Next.js จะแปลง Object นั้นเป็น JSON สตริงลงใน HTML Script Tag
+- ผลลัพธ์คือ **ข้อมูลความลับขององค์กรและรหัสผ่านจะถูกเปิดเผยแก่ใครก็ตามที่กด View Page Source บนเบราว์เซอร์ทันที!**
+
+### 2.3 การสร้าง Data Access Layer (DAL) ด้วย Prisma Projection
+
+การแก้ปัญหาข้อมูลรั่วไหลอย่างยั่งยืน ต้องใช้รูปแบบ **Data Access Layer (DAL)** โดยใช้ฟังก์ชัน `select` หรือ DTO (Data Transfer Object) ในการเลือกเฉพาะคอลัมน์ที่จำเป็น และประทับตรา `import 'server-only'` บนหัวไฟล์ เพื่อให้มั่นใจว่าจะไม่มีโค้ด Database หลุดไปยัง Client เด็ดขาด
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสร้าง Prisma Singleton มาตรฐานสากล
+
+สร้างไฟล์คอนฟิก `src/lib/prisma.ts` เพื่อป้องกันปัญหา Connection รั่วไหลใน Dev และควบคุม Connection Pool ใน Production:
 
 ```typescript filename="src/lib/prisma.ts"
 import { PrismaClient } from '@prisma/client';
 
-const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
+// กำหนด Type ให้ globalThis รู้จัก property prisma
+const globalForPrisma = globalThis as unknown as {
+  prisma?: PrismaClient;
+};
 
-export const prisma = globalForPrisma.prisma ?? new PrismaClient();
-
-// ป้องกันการสร้าง Connection ใหม่ทุกครั้งที่มี Hot Reload ในโหมด Development
-if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
-```
-
-### การดึงข้อมูลใน Server Component
-
-```tsx filename="src/app/orders/page.tsx"
-import { prisma } from '@/lib/prisma';
-
-export default async function OrdersPage() {
-  // ทางเลือก A: ดึงข้อมูลจาก PostgreSQL โดยตรงผ่าน Prisma
-  const recentOrders = await prisma.order.findMany({
-    take: 5,
-    orderBy: { createdAt: 'desc' },
+// 1. ตรวจสอบว่ามีอินสแตนซ์เดิมใน globalThis หรือไม่ หากไม่มีจึงสร้างใหม่
+export const prisma =
+  globalForPrisma.prisma ??
+  new PrismaClient({
+    log:
+      process.env.NODE_ENV === 'development'
+        ? ['query', 'error', 'warn']
+        : ['error'],
   });
 
-  // ทางเลือก B: ยิงต่อไปยัง NestJS Backend API ภายนอก
-  // const res = await fetch(`${process.env.BACKEND_API_URL}/orders`, { cache: 'no-store' });
-  // const recentOrders = await res.json();
-
-  return (
-    <div className="max-w-xl mx-auto py-8">
-      <h1 className="text-xl font-bold mb-4">รายการคำสั่งซื้อล่าสุด</h1>
-      <ul className="space-y-2">
-        {recentOrders.map((order) => (
-          <li key={order.id} className="p-3 border rounded-xl flex justify-between">
-            <span>คำสั่งซื้อ #{order.id}</span>
-            <span className="font-semibold">฿{Number(order.totalAmount).toLocaleString()}</span>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
+// 2. ในโหมด Development: บันทึกอินสแตนซ์ลงใน globalThis เพื่อใช้ซ้ำตอน Hot Reload
+if (process.env.NODE_ENV !== 'production') {
+  globalForPrisma.prisma = prisma;
 }
 ```
 
-## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+---
 
-- **Prisma Direct**:
-  - *ควรใช้*: เหมาะสำหรับโปรเจกต์ขนาดเล็กถึงกลางที่ต้องการความเร็วในการพัฒนาแบบ Full-Stack
-  - *ไม่ควรใช้*: ใน Client Component เด็ดขาด เพราะ Prisma รันได้เฉพาะบน Node.js Runtime
-- **External Backend (NestJS)**:
-  - *ควรใช้*: เหมาะกับระบบขนาดใหญ่ที่มี Business Logic ซับซ้อน มีบริการหลายตัว (Microservices) หรือใช้งานร่วมกับ Mobile App
+### ตัวอย่างที่ 2: สถาปัตยกรรม Data Access Layer (DAL) พร้อม Transactions
 
-## 4. ข้อควรระวัง
+สร้างชั้นบริการจัดการคำสั่งซื้อและสต็อกเนื้อใน `src/lib/dal/orders.ts` ซึ่งมีการตรวจสอบสต็อกเนื้อวากิวและใช้ Database Transaction ป้องกันปัญหา Race Condition:
 
-<Callout type="warning" title="ระวังปัญหา Connection Pool เต็ม">
-ในสภาพแวดล้อม Serverless หรือ Next.js Dev Mode การไม่ใช้ Singleton Pattern จะสร้าง Instance ของ PrismaClient ขึ้นมาใหม่เรื่อยๆ จน PostgreSQL ปฏิเสธการเชื่อมต่อ ควรใช้ Prisma Accelerate หรือ PgBouncer เมื่อขึ้น Production
-</Callout>
+```typescript filename="src/lib/dal/orders.ts"
+import 'server-only';
+import { prisma } from '@/lib/prisma';
+import { cache } from 'react';
 
-<Callout type="tip" title="แยกชั้น Service Logic">
-หากเขียน Prisma ใน Next.js ให้แยกฟังก์ชันฐานข้อมูลไว้ในโฟลเดอร์ `services/` หรือ `lib/db/` ไม่ควรเขียนคำสั่ง Query กระจัดกระจายในคอมโพเนนต์
-</Callout>
+// กำหนด DTO ปลอดภัยสำหรับส่งให้ UI
+export interface OrderSummaryDTO {
+  id: string;
+  orderNumber: string;
+  totalAmount: number;
+  status: 'PENDING' | 'CONFIRMED' | 'DELIVERING' | 'COMPLETED' | 'CANCELLED';
+  createdAt: string;
+  customerName: string;
+  items: {
+    productName: string;
+    cutType: string;
+    weightKg: number;
+    subtotal: number;
+  }[];
+}
 
-## 5. แหล่งอ้างอิงทางการ
+// 1. ดึงประวัติคำสั่งซื้อของลูกค้า โดยคัดกรองฟิลด์อ่อนไหวทิ้งทั้งหมด (DTO Projection)
+export const getCustomerOrders = cache(
+  async (userId: string): Promise<OrderSummaryDTO[]> => {
+    const orders = await prisma.order.findMany({
+      where: { customerId: userId },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        orderNumber: true,
+        totalAmount: true,
+        status: true,
+        createdAt: true,
+        customer: {
+          select: {
+            name: true,
+            // ไม่ select passwordHash หรือข้อมูลส่วนตัวอื่น
+          },
+        },
+        items: {
+          select: {
+            cutType: true,
+            weightKg: true,
+            subtotal: true,
+            product: {
+              select: {
+                name: true,
+                // ไม่ select wholesaleCost หรือ supplierDetails
+              },
+            },
+          },
+        },
+      },
+    });
 
-- [Prisma with Next.js Guide](https://www.prisma.io/docs/guides/other/troubleshooting-orm/help-articles/nextjs-prisma-client-dev-practices)
-- [Next.js Fetching Data from a Database](https://nextjs.org/docs/app/building-your-application/data-fetching/fetching)
+    return orders.map((order) => ({
+      id: order.id,
+      orderNumber: order.orderNumber,
+      totalAmount: order.totalAmount,
+      status: order.status as OrderSummaryDTO['status'],
+      createdAt: order.createdAt.toISOString(),
+      customerName: order.customer.name,
+      items: order.items.map((item) => ({
+        productName: item.product.name,
+        cutType: item.cutType,
+        weightKg: item.weightKg,
+        subtotal: item.subtotal,
+      })),
+    }));
+  }
+);
+
+// 2. ฟังก์ชัน Transaction สำหรับบันทึกคำสั่งซื้อเนื้อพรีเมียม (Atomic Operation)
+export async function placeMeatOrderTransaction(params: {
+  customerId: string;
+  productId: string;
+  cutType: string;
+  weightKg: number;
+  pricePerKg: number;
+}) {
+  return await prisma.$transaction(async (tx) => {
+    // ก) ตรวจสอบและตัดสต็อกเนื้อแบบ Row-Level Locking หรือ Atomic Decrement
+    const product = await tx.product.findUnique({
+      where: { id: params.productId },
+      select: { id: true, name: true, stockKg: true },
+    });
+
+    if (!product || product.stockKg < params.weightKg) {
+      throw new Error(`เนื้อ ${product?.name || ''} มีสต็อกไม่เพียงพอสำหรับการสั่งซื้อ`);
+    }
+
+    // ตัดสต็อกเนื้อ
+    await tx.product.update({
+      where: { id: params.productId },
+      data: { stockKg: { decrement: params.weightKg } },
+    });
+
+    const subtotal = params.pricePerKg * params.weightKg;
+
+    // ข) สร้าง Order และ OrderItem
+    const createdOrder = await tx.order.create({
+      data: {
+        orderNumber: `ORD-${Date.now().toString().slice(-6)}`,
+        customerId: params.customerId,
+        totalAmount: subtotal,
+        status: 'CONFIRMED',
+        items: {
+          create: {
+            productId: params.productId,
+            cutType: params.cutType,
+            weightKg: params.weightKg,
+            subtotal: subtotal,
+          },
+        },
+      },
+      select: {
+        id: true,
+        orderNumber: true,
+        totalAmount: true,
+      },
+    });
+
+    return createdOrder;
+  });
+}
+```
+
+---
+
+### ตัวอย่างที่ 3: Route Handler (`route.ts`) สำหรับระบบภายนอก (POS หน้าร้าน / Webhook)
+
+เมื่อมีระบบภายนอก เช่น เครื่องชั่งน้ำหนักเนื้อหน้าร้าน (Smart Butcher POS Terminal) หรือ Payment Webhook ส่งข้อมูลเข้ามา เราจะใช้ Route Handler จัดการ:
+
+```typescript filename="src/app/api/v1/pos/sync-stock/route.ts"
+import { NextResponse, type NextRequest } from 'next/server';
+import { prisma } from '@/lib/prisma';
+import { z } from 'zod';
+
+const stockSyncSchema = z.object({
+  secretKey: z.string(),
+  productId: z.string(),
+  currentWeightKg: z.number().min(0),
+});
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const parsed = stockSyncSchema.safeParse(body);
+
+    if (!parsed.success) {
+      return NextResponse.json({ error: 'Payload ไม่ถูกต้อง' }, { status: 400 });
+    }
+
+    // ตรวจสอบ POS Secret Key
+    if (parsed.data.secretKey !== process.env.POS_TERMINAL_SECRET) {
+      return NextResponse.json({ error: 'ไม่ได้รับอนุญาต (Unauthorized)' }, { status: 401 });
+    }
+
+    // อัปเดตสต็อกจริงจากเครื่องชั่งดิจิทัลหน้าร้าน
+    const updatedProduct = await prisma.product.update({
+      where: { id: parsed.data.productId },
+      data: { stockKg: parsed.data.currentWeightKg },
+      select: { id: true, name: true, stockKg: true },
+    });
+
+    return NextResponse.json({
+      success: true,
+      data: updatedProduct,
+      syncedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('POS Sync Failed:', error);
+    return NextResponse.json({ error: 'เกิดข้อผิดพลาดภายในระบบ' }, { status: 500 });
+  }
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ปัญหาที่พบบ่อย | รูปแบบที่ผิด (Anti-pattern) | วิธีการที่ถูกต้องระดับ Senior (Best Practice) |
+| :--- | :--- | :--- |
+| **สร้าง `new PrismaClient()` ทุกไฟล์** | ประกาศอินสแตนซ์ใหม่ในทุก Server Component ส่งผลให้ PostgreSQL Connection เต็มในพริบตา | ใช้ Singleton Pattern ผูกกับ `globalThis` ในโหมด Dev เพื่อให้ Connection ถูกนำมาใช้ซ้ำ |
+| **ยิง HTTP หาตัวเอง (Internal Loopback)** | เขียน `await fetch('http://localhost:3000/api/products')` ภายใน Server Component | ดึงตรงผ่านฟังก์ชันใน Data Access Layer (DAL) รันแบบ Direct In-process Query ประหยัดเวลาได้ 80% |
+| **ส่ง Raw Database Entity สู่ UI** | เรียก `prisma.user.findFirst()` แล้วส่งอ็อบเจกต์ทั้งก้อนให้ Client Component ทำให้รหัสผ่านและคีย์ลับรั่ว | ใช้ `select` หรือ DTO คัดเฉพาะฟิลด์ที่หน้าบ้านต้องการใช้งานจริง พร้อมประทับตรา `server-only` |
+| **ไม่ใช้ Database Transaction ในการตัดสต็อก** | อัปเดตสต็อกและสร้าง Order คนละคำสั่ง เมื่อมีคำขอพร้อมกันจะเกิดปัญหาเนื้อวากิวขายเกินจำนวนสต็อก (Overselling) | ห่อหุ้มคำสั่งที่เกี่ยวข้องกันด้วย `prisma.$transaction([ ... ])` เพื่อความสมบูรณ์แบบของข้อมูล (ACID) |
+| **ลืม Index คอลัมน์ที่ถูกค้นหาบ่อย** | ค้นหาเนื้อตาม `slug` หรือ `cutType` โดยไม่ได้ใส่ `@unique` หรือ `@@index` ใน Prisma Schema | กำหนด Index ให้กับ Foreign Keys, Slugs, และ Status เสมอ เพื่อไม่ให้ฐานข้อมูลทำ Full Table Scan |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรเรียก Prisma โดยตรงใน Server Components & DAL เมื่อ:
+- **การเรนเดอร์เนื้อหาหน้าเว็บฝั่ง Server (SSR/SSG):** หน้ารายการเนื้อสเต๊ก, หน้าหมวดหมู่, หน้ารายละเอียดสินค้า
+- **ต้องการความเร็วสูงสุด (Lowest Latency):** ตัดวงรอบ TCP/HTTP Loopback และไม่ต้องเสียเวลาแปลง Object เป็น JSON ไปกลับ
+- **ต้องการ Type-safety สูงสุด:** TypeScript สามารถส่งผ่านประเภทข้อมูลจาก Prisma Schema สู่ JSX Props ได้แบบ 100%
+
+### ควรใช้ Route Handlers (`src/app/api/...`) เมื่อ:
+- **Webhooks จากบริการบุคคลที่สาม:** เช่น ระบบรับแจ้งเตือนการตัดบัตรจาก Stripe หรือ Omise
+- **Public REST API ให้บริการภายนอก:** การเชื่อมต่อกับ Mobile Application (Flutter/React Native), หรือเครื่อง POS ชั่งน้ำหนักเนื้อหน้าร้าน
+- **งาน Streaming Data ขนาดใหญ่:** การส่งออกรายงานยอดขายเป็นไฟล์ CSV/Excel ขนาดหลายร้อยเมกะไบต์
+
+### ควรแยก Backend ออกไปเป็น Standalone Service (เช่น NestJS / Go) เมื่อ:
+- ระบบมีขนาดระดับ Enterprise ที่มีทีม Frontend และ Backend แยกจากกันอย่างเด็ดขาด
+- มีงาน Background Jobs หรือ Distributed Message Queues (Kafka/RabbitMQ) ทำงานหนักตลอดเวลา
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: ทำไมการสร้าง `new PrismaClient()` โดยตรงใน Next.js โดยไม่ใช้ `globalThis` ถึงนำไปสู่ปัญหา "Connection Pool Exhaustion" ในระหว่างการรัน `next dev` และเหตุใดปัญหานี้จึงมักไม่แสดงอาการใน Production?
+
+**แนวคำตอบเชิงลึก:**
+สาเหตุหลักเกิดจากความแตกต่างของ **Lifecycle ในกระบวนการ Bundling และ Hot Module Replacement (HMR)**:
+- **ในสภาพแวดล้อม Development (`next dev`):** ตัวเอนจินของ Next.js จะคอยตรวจจับการเปลี่ยนแปลงของไฟล์โค้ด เมื่อนักพัฒนาแก้ไขโค้ดและกดบันทึก Next.js จะเคลียร์ Node.js Module Cache เพื่อคอมไพล์และโหลดไฟล์ใหม่ การทำเช่นนี้ทำให้โค้ดส่วนนอกของโมดูลถูกรันใหม่ทั้งหมด หากเราเขียน `const prisma = new PrismaClient()` ไว้ตรงๆ ตัวอินสแตนซ์ใหม่จะถูกสร้างขึ้นมาเรื่อยๆ ทุกครั้งที่มีการบันทึกไฟล์ โดยที่อินสแตนซ์เก่ายังคงถือครอง Connection Socket ไปยัง PostgreSQL ค้างไว้ จนกระทั่ง Connection Pool เต็ม
+- **ทำไมไม่เกิดใน Production:** เพราะในโหมด Production โค้ดจะถูกคอมไพล์เสร็จสิ้นล่วงหน้าครั้งเดียว (`next build`) และรันโปรเซส Node.js เพียงโปรเซสเดียวอย่างคงที่ (`node server.js`) จึงไม่มีกระบวนการ HMR มารันโค้ดซ้ำซ้อน
+- **การแก้ปัญหา:** การนำ Prisma ไปเก็บไว้ใน `globalThis` จะทำให้อ็อบเจกต์ Prisma ยังคงอยู่ในระดับ Global Runtime ของ Node.js ซึ่งจะไม่ถูกรีเซ็ตไปตาม Module Cache เมื่อ HMR โหลดไฟล์ใหม่ ระบบจะตรวจสอบเจออินสแตนซ์เดิมและนำกลับมาใช้ซ้ำเสมอ
+
+---
+
+### คำถามที่ 2: ทำไมการเขียน Server Component แล้วสั่ง `fetch('http://localhost:3000/api/products')` เพื่อดึงข้อมูลผ่าน Route Handler ของตัวเอง ถึงถือเป็น Anti-pattern ร้ายแรงในสถาปัตยกรรม Next.js 16?
+
+**แนวคำตอบเชิงลึก:**
+การกระทำดังกล่าวเรียกว่า **Internal Loopback Fetching** ซึ่งก่อให้เกิดปัญหาตามมาถึง 4 ประการ:
+
+1. **Unnecessary Network & Serialization Overhead:**
+   การเรียกผ่าน HTTP ทำให้คำขอต้องเดินทางผ่าน Network Stack ของระบบปฏิบัติการ (TCP Handshake, HTTP Headers Parsing) และต้องทำการ Serialize ข้อมูลจาก Database Entity ไปเป็น JSON String แล้วฝั่ง Server Component ต้องมา Deserialize กลับเป็น JavaScript Object อีกรอบ ซึ่งสูญเสียเวลาและ CPU โดยเปล่าประโยชน์ เมื่อเทียบกับการเรียกฟังก์ชันตรงๆ ในหน่วยความจำ (Direct In-Memory Call)
+2. **Serverless Deadlock / Connection Starvation:**
+   หากแอปพลิเคชันถูก Deploy บน Serverless Platform (เช่น Vercel) หรือมีจำนวน Worker จำกัด การที่ Serverless Function หนึ่งยิง HTTP กลับมาหาเซิร์ฟเวอร์ตัวเอง อาจทำให้ Worker ถูกจองจนเต็มและเกิดอาการ Deadlock ค้างรอคำตอบจน Time-out
+3. **Loss of TypeScript Type Inference:**
+   การดึงผ่าน `fetch` ทำให้สูญเสียความสามารถในการตรวจสอบ Type ที่แม่นยำจาก Prisma เว้นแต่จะต้องเขียน Interface ซ้ำซ้อน
+4. **Senior Solution:**
+   สร้าง **Data Access Layer (DAL)** เป็นโมดูลฟังก์ชันกลาง เช่น `getProducts()` แล้วให้ Server Component เรียกใช้โดยตรง ส่วน Route Handler ก็สามารถนำฟังก์ชัน `getProducts()` เดียวกันนี้ไปใช้ตอบสนองคำขอของ Mobile App ได้ โดยไม่ต้องยิงข้ามกันเอง
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [Next.js Data Fetching & Caching](/docs/nextjs/data-fetching) — การทำงานร่วมกับ React Suspense และ Data Cache
+- [Next.js Server Actions](/docs/nextjs/server-actions) — การนำ Prisma Transactions ไปผสานกับ Form Mutations
+- [Next.js Environment Variables](/docs/nextjs/env) — การบริหารจัดการ `DATABASE_URL` และรหัสผ่านความปลอดภัย
+- [Next.js Production Deployment](/docs/nextjs/deployment) — การตั้งค่า PostgreSQL Database ใน Docker Compose

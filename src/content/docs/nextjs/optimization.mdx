@@ -3,82 +3,354 @@ title: Optimization
 category: Frontend
 parentTitle: Next.js 16
 version: v16.4
-updatedAt: 2026-10-17
+updatedAt: 2026-10-23
 ---
 
-## 1. คืออะไร / ใช้ทำไม
+# Next.js 16 Performance Optimization & Core Web Vitals
 
-**Optimization** ใน Next.js 16 คือชุดเครื่องมือเพิ่มประสิทธิภาพเว็บไซต์ให้ได้คะแนน Core Web Vitals สูงสุด ทั้งการแปลงรูปภาพเป็น WebP/AVIF อัตโนมัติ (`next/image`), การโหลดฟอนต์โดยปราศจากอาการกระตุก (`next/font`), และการทำ OpenGraph สำหรับ Search Engine
+คู่มือเชิงลึกระดับ Senior Fullstack ในการรีดเค้นประสิทธิภาพแอปพลิเคชัน Next.js 16 สู่คะแนน Core Web Vitals 100 เต็ม, การใช้งาน `next/image` ขั้นสูง, การขจัด Layout Shift ด้วย `next/font`, การวิเคราะห์ Bundle ด้วย Analyzer, และการทำ Code Splitting ด้วย `next/dynamic`
 
-ช่วยเพิ่มอัตราการเข้าถึงจาก Google (SEO Ranking), ลดอัตราการตีกลับของผู้ใช้ (Bounce Rate) และประหยัดแบนด์วิดท์เซิร์ฟเวอร์
+---
 
-## 2. ตัวอย่างโค้ด (TypeScript)
+## 1. แนวคิด (Concept)
 
-### การใช้งาน `next/font` และ Metadata API
+สำหรับแพลตฟอร์มอีคอมเมิร์ซเนื้อเกรดพรีเมียมอย่าง **Smart Butcher Marketplace** ความเร็วไม่ใช่แค่เรื่องของความพึงพอใจ แต่ส่งผลโดยตรงต่อ **ยอดขาย (Conversion Rate)** และ **อันดับบน Google Search (SEO Ranking)**:
+- ลูกค้าที่เปิดดูภาพลายหินอ่อนของเนื้อวากิว A5 ต้องเห็นภาพคมชัดทันทีโดยไม่ต้องรอโหลด
+- หน้าเว็บต้องไม่กระตุกหรือเลื่อนตำแหน่งเองขณะกำลังกดปุ่มสั่งซื้อ
+
+### ตัวชี้วัดหลัก Core Web Vitals ยุคใหม่ (ปี 2026)
+Google กำหนดเกณฑ์วัดประสิทธิภาพเว็บไซต์ออกเป็น 3 แกนหลัก:
+
+1. **LCP (Largest Contentful Paint) < 2.5 วินาที:** ความเร็วในการเรนเดอร์ชิ้นส่วนเนื้อหาที่ใหญ่ที่สุดบนหน้าจอ (เช่น ภาพแบนเนอร์เนื้อสเต๊ก Hero หรือหัวข้อหลัก)
+2. **INP (Interaction to Next Paint) < 200 มิลลิวินาที:** ตัวชี้วัดความตอบสนองต่อการคลิกหรือสัมผัสของผู้ใช้ (มาแทนที่ FID เดิม) วัดความหน่วงตั้งแต่ลูกค้าคลิกเลือกขนาดชิ้นเนื้อจนถึงหน้าจอแสดงผลการเปลี่ยนแปลง
+3. **CLS (Cumulative Layout Shift) < 0.1:** ความเสถียรของเลย์เอาต์ ป้องกันไม่ให้ปุ่มหรือข้อความกระโดดเลื่อนตำแหน่งขณะโหลดรูปภาพหรือฟอนต์
+
+```text
++-----------------------------------------------------------------------------------+
+|                        Next.js 16 Optimization Triad                              |
++--------------------------+---------------------------+----------------------------+
+|        next/image        |         next/font         |        next/dynamic        |
++--------------------------+---------------------------+----------------------------+
+| - แปลง AVIF/WebP อัตโนมัติ| - Self-hosting ฟอนต์ตอนบิลด์| - Code Splitting ลดขนาด JS |
+| - Responsive sizes ตามจอ | - ป้องกัน CLS ด้วย Fallback| - ปิด SSR สำหรับไลบรารีเบราว์เซอร์|
+| - Preload ด้วย priority  | - ไร้ Network Roundtrip ไป | - โหลดแผนที่/กราฟเฉพาะตอน   |
+| - Blur Placeholder       |   Google CDN              |   ที่ผู้ใช้เลื่อนมาถึง     |
++--------------------------+---------------------------+----------------------------+
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 กลไก On-Demand Image Optimization ของ `next/image`
+
+คอมโพเนนต์ `next/image` ไม่ใช่เพียงแค่แท็ก `<img>` ที่ใส่ CSS แต่เป็น Pipeline ปรับแต่งรูปภาพอัตโนมัติบนเซิร์ฟเวอร์:
+1. **Format Negotiation:** เมื่อเบราว์เซอร์ส่ง Request เข้ามาพร้อม Header `Accept: image/avif,image/webp` ตัวเอนจินของ Next.js จะแปลงไฟล์ภาพต้นฉบับ (เช่น JPEG ขนาด 5MB) ให้กลายเป็น **AVIF** หรือ **WebP** ทันที ซึ่งลดขนาดไฟล์ลงได้ถึง 70-85% โดยไม่สูญเสียความคมชัด
+2. **Device-Specific Resizing ผ่านคุณสมบัติ `sizes`:**
+   หากไม่ระบุ `sizes` เมื่อใช้ `fill` เบราว์เซอร์จะไม่รู้ว่าภาพจะแสดงผลกว้างกี่พิกเซลบนหน้าจอ และจะเลือกโหลดภาพขนาดใหญ่สุดสำหรับ Desktop เสมอ การระบุ `sizes="(max-width: 768px) 100vw, 50vw"` จะช่วยให้มือถือดาวน์โหลดเฉพาะภาพความกว้าง 400px ประหยัดแบนด์วิดท์มหาศาล
+3. **การกำจัด CLS ด้วย Aspect Ratio Reservation:** `next/image` บังคับให้ระบุ `width` และ `height` หรือใช้ `fill` เพื่อให้เบราว์เซอร์สามารถจองพื้นที่ว่างใน DOM ล่วงหน้าตั้งแต่ก่อนภาพจะดาวน์โหลดเสร็จ
+
+### 2.2 ทำไม `next/font` ถึงได้คะแนน CLS: 0 เสมอ?
+
+การโหลดฟอนต์ผ่าน Google Fonts แบบเดิม (`<link href="https://fonts.googleapis.com/..." />`):
+- ทำให้เกิดปัญหา **FOIT (Flash of Invisible Text)**: ข้อความหายไประหว่างรอฟอนต์
+- หรือ **FOUT (Flash of Unstyled Text)**: ข้อความแสดงเป็นฟอนต์ระบบก่อน แล้วกระตุกเปลี่ยนรูปทรงเมื่อฟอนต์ Google โหลดเสร็จ ทำให้เลย์เอาต์กระโดด (CLS พุ่งสูง)
+
+**`next/font` ใน Next.js 16 แก้ปัญหานี้อย่างไร:**
+1. ดาวน์โหลดไฟล์ฟอนต์มาเก็บไว้ในเครื่องตั้งแต่ตอน `next build` (Zero External Requests)
+2. ทำการคำนวณสัดส่วนรูปทรงของ Glyph ล่วงหน้า แล้วสร้าง CSS `@font-face` พร้อมคุณสมบัติ `size-adjust`, `ascent-override`, และ `descent-override`
+3. บังคับให้ Fallback System Font (เช่น Arial/Helvetica) มีความกว้างและสูงเท่ากับฟอนต์จริงทุกประการ ทำให้เมื่อสลับฟอนต์ ตัวอักษรจะไม่ขยับแม้แต่มิลลิเมตรเดียว (**Zero Layout Shift**)
+
+### 2.3 การวิเคราะห์ Bundle ด้วย `@next/bundle-analyzer` และ Dynamic Import
+
+ไฟล์ JavaScript ฝั่ง Client ยิ่งมีขนาดใหญ่ ยิ่งทำให้ค่า INP และ TBT (Total Blocking Time) ย่ำแย่ลง:
+- ไลบรารีบางตัว เช่น แผนที่ Leaflet/Mapbox สำหรับติดตามรถส่งเนื้อ หรือกราฟ Recharts/Chart.js มักมีขนาดใหญ่ถึง 200KB - 500KB
+- การใช้ `next/dynamic` พร้อมออปชัน `{ ssr: false }` จะช่วยแยกโค้ดเหล่านั้นออกเป็น Chunk ต่างหาก และจะดาวน์โหลดมายังเบราว์เซอร์เฉพาะเมื่อคอมโพเนนต์นั้นถูกเรนเดอร์จริงเท่านั้น
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การตั้งค่า Next Config สำหรับ Bundle Analyzer และ Image CDN
+
+กำหนดค่าใน `next.config.ts` ให้รองรับการแปลงรูปภาพขั้นสูง และเปิดใช้งาน Analyzer ผ่าน Environment Variable:
+
+```typescript filename="next.config.ts"
+import type { NextConfig } from 'next';
+
+const nextConfig: NextConfig = {
+  // บังคับ Standalone สำหรับ Container Production
+  output: 'standalone',
+
+  // เปิดใช้งานการบีบอัดภาพแบบขั้นสูง
+  images: {
+    formats: ['image/avif', 'image/webp'],
+    deviceSizes: [640, 750, 828, 1080, 1200, 1920, 2048],
+    imageSizes: [16, 32, 48, 64, 96, 128, 256, 384],
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: 'cdn.smartbutcher.com',
+        pathname: '/meats/**',
+      },
+      {
+        protocol: 'https',
+        hostname: 'images.unsplash.com',
+      },
+    ],
+  },
+};
+
+// ตรวจสอบว่าเปิดโหมดวิเคราะห์ Bundle หรือไม่ (ANALYZE=true)
+const withBundleAnalyzer = process.env.ANALYZE === 'true'
+  ? require('@next/bundle-analyzer')({ enabled: true })
+  : (config: NextConfig) => config;
+
+export default withBundleAnalyzer(nextConfig);
+```
+
+ติดตั้งฟอนต์ภาษาไทยและอังกฤษแบบ Zero CLS ใน Root Layout:
 
 ```tsx filename="src/app/layout.tsx"
-import { Inter } from 'next/font/google';
+import { Inter, Prompt } from 'next/font/google';
 import type { Metadata } from 'next';
+import './globals.css';
 
-// next/font: ดาวน์โหลดฟอนต์ล่วงหน้าตั้งแต่ตอน Build ป้องกัน Cumulative Layout Shift (CLS: 0)
+// 1. ฟอนต์ภาษาอังกฤษสำหรับตัวเลขและรหัสชิ้นเนื้อ
 const inter = Inter({
   subsets: ['latin'],
   display: 'swap',
   variable: '--font-inter',
 });
 
+// 2. ฟอนต์ภาษาไทยสำหรับเนื้อหาและการบรรยายรสชาติเนื้อ
+const prompt = Prompt({
+  subsets: ['thai', 'latin'],
+  weight: ['400', '500', '600', '700'],
+  display: 'swap',
+  variable: '--font-prompt',
+});
+
 export const metadata: Metadata = {
-  title: {
-    default: 'Scripture Documentation',
-    template: '%s | Scripture',
-  },
-  description: 'เอกสารรวมการใช้งาน Full-Stack Tech Stack ครบวงจร',
-  openGraph: {
-    title: 'Scripture Documentation',
-    description: 'เรียนรู้ Next.js 16, NestJS, Prisma, PostgreSQL',
-    images: [{ url: '/og-image.png', width: 1200, height: 630 }],
-  },
+  title: 'Smart Butcher | ตลาดเนื้อวากิวและเนื้อดรายเอจระดับพรีเมียม',
+  description: 'คัดสรรเนื้อคุณภาพสูงจากฟาร์มชั้นนำทั่วโลก พร้อมบริการตัดแต่งพิเศษตามสั่ง',
 };
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="th" className={`${inter.variable} ${prompt.variable}`}>
+      <body className="font-sans bg-neutral-50 dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100 antialiased">
+        {children}
+      </body>
+    </html>
+  );
+}
 ```
 
-### การใช้งาน `next/image`
+---
 
-```tsx filename="src/components/BannerImage.tsx"
+### ตัวอย่างที่ 2: คอมโพเนนต์แสดงภาพเนื้อพรีเมียมด้วย `next/image` แบบ Production
+
+สร้างคอมโพเนนต์การ์ดเนื้อวากิว `src/components/MeatProductCard.tsx` ที่รองรับ Responsive Sizes, Blur Placeholder, และจองพื้นที่ป้องกัน CLS:
+
+```tsx filename="src/components/MeatProductCard.tsx"
 import Image from 'next/image';
 
-export default function BannerImage() {
+interface MeatProductProps {
+  name: string;
+  cutType: string;
+  imageUrl: string;
+  pricePerKg: number;
+  isHeroItem?: boolean; // สินค้าชิ้นแรกสุดบนหน้าจอที่ส่งผลต่อ LCP
+}
+
+export function MeatProductCard({
+  name,
+  cutType,
+  imageUrl,
+  pricePerKg,
+  isHeroItem = false,
+}: MeatProductProps) {
+  // สร้าง Base64 Blur Placeholder ขนาดเล็กพิเศษ (10x10 px)
+  const shimmerBlurUrl =
+    'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAiIGhlaWdodD0iMTAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjEwIiBoZWlnaHQ9IjEwIiBmaWxsPSIjMmEyYMmEiIC8+PC9zdmc+';
+
   return (
-    <div className="relative w-full h-72 overflow-hidden rounded-2xl">
-      <Image
-        src="/banner.jpg"
-        alt="ภาพหน้าปกเอกสาร"
-        fill
-        priority // ดาวน์โหลดภาพนี้ก่อนเพื่อนเพื่อลดค่า LCP สำหรับรูปด้านบนสุดของจอ
-        sizes="(max-width: 768px) 100vw, 1200px"
-        className="object-cover"
-      />
+    <div className="group border border-neutral-200 dark:border-neutral-800 rounded-2xl overflow-hidden bg-white dark:bg-neutral-900 hover:shadow-lg transition-all duration-300">
+      {/* Container รูปภาพที่ล็อก Aspect Ratio ป้องกัน Layout Shift (CLS = 0) */}
+      <div className="relative aspect-[4/3] w-full overflow-hidden bg-neutral-100 dark:bg-neutral-800">
+        <Image
+          src={imageUrl}
+          alt={`เนื้อวากิวพรีเมียมส่วน ${name} ตัดแต่งแบบ ${cutType}`}
+          fill
+          // สำคัญมาก: กำหนด responsive sizes เพื่อให้เบราว์เซอร์โหลดขนาดที่เหมาะสมกับหน้าจอ
+          sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+          // หากเป็นภาพ Hero ด้านบนสุดของหน้า ให้ Preload ทันทีเพื่อคะแนน LCP สูงสุด
+          priority={isHeroItem}
+          loading={isHeroItem ? undefined : 'lazy'}
+          placeholder="blur"
+          blurDataURL={shimmerBlurUrl}
+          className="object-cover group-hover:scale-105 transition-transform duration-500"
+        />
+        <div className="absolute top-3 left-3 bg-red-600/90 text-white text-xs font-bold px-2.5 py-1 rounded-full uppercase tracking-wider">
+          {cutType}
+        </div>
+      </div>
+
+      <div className="p-5 space-y-2">
+        <h3 className="font-bold text-lg text-neutral-800 dark:text-neutral-100 group-hover:text-red-600 transition-colors">
+          {name}
+        </h3>
+        <p className="text-2xl font-extrabold text-red-600">
+          ฿{pricePerKg.toLocaleString()}
+          <span className="text-xs font-normal text-neutral-500 ml-1">/ กก.</span>
+        </p>
+        <button className="w-full mt-2 bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 py-2.5 rounded-xl font-medium text-sm hover:opacity-90 transition">
+          ดูรายละเอียดการบ่ม
+        </button>
+      </div>
     </div>
   );
 }
 ```
 
-## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+---
 
-- **`next/image`**: ควรใช้แทนแท็ก `<img>` เสมอในทุกกรณี / *ไม่ควรใส่* `priority` กับรูปทุกรูปในหน้า ให้ใส่เฉพาะรูปที่เป็นจุดโฟกัสหลักด้านบนสุดของจอ (Above the Fold) เท่านั้น
-- **`next/font`**: ใช้แทนการดึง Google Fonts ผ่าน `<link>` ใน HTML เพราะ `next/font` จะดาวน์โหลดและโฮสต์ฟอนต์ให้อัตโนมัติโดยไม่มีการยิงไปภายนอกขณะรัน
+### ตัวอย่างที่ 3: Dynamic Import แผนที่และกราฟติดตามคำสั่งซื้อ (`ssr: false`)
 
-## 4. ข้อควรระวัง
+ในหน้าติดตามสถานะการส่งเนื้อสด `src/app/orders/[id]/track/page.tsx` มีคอมโพเนนต์แผนที่ GPS (Leaflet) และกราฟอุณหภูมิความเย็น ซึ่งเป็นโค้ดขนาดใหญ่และเรียกใช้ `window` ของเบราว์เซอร์:
 
-<Callout type="warning" title="ลงทะเบียน Remote Domain ใน next.config.ts">
-หากรูปภาพมาจาก Domain ภายนอก (เช่น AWS S3, Cloudinary, Supabase Storage) ต้องลงทะเบียนโดเมนใน `images.remotePatterns` ภายในไฟล์ `next.config.ts` เสมอ มิเช่นนั้น Next.js จะปฏิเสธการโหลดรูปภาพ
-</Callout>
+```tsx filename="src/app/orders/[id]/track/page.tsx"
+'use client';
 
-<Callout type="tip" title="ระบุ sizes ให้ตรงกับ Layout จริงเสมอ">
-เมื่อใช้รูปภาพแบบ `fill` ต้องระบุค่า `sizes="..."` ให้ตรงกับขนาดที่แสดงผลบนหน้าจอจริง เพื่อให้ Next.js เลือกส่งไฟล์รูปภาพที่มีความละเอียดเหมาะสมที่สุดไปให้ผู้ใช้
-</Callout>
+import dynamic from 'next/dynamic';
 
-## 5. แหล่งอ้างอิงทางการ
+// 1. นำเข้าคอมโพเนนต์แผนที่แบบ Dynamic พร้อมปิด SSR เพราะต้องพึ่งพา Leaflet DOM
+const LiveDeliveryMap = dynamic(
+  () => import('@/components/tracking/LiveDeliveryMap').then((mod) => mod.LiveDeliveryMap),
+  {
+    ssr: false, // ห้ามรันบน Server เพราะ Leaflet เข้าถึง window object
+    loading: () => (
+      <div className="w-full h-80 bg-neutral-200 dark:bg-neutral-800 rounded-2xl animate-pulse flex items-center justify-center text-sm text-neutral-500">
+        📍 กำลังโหลดแผนที่ติดตามรถขนส่งควบคุมอุณหภูมิ...
+      </div>
+    ),
+  }
+);
 
-- [Next.js Image Optimization](https://nextjs.org/docs/app/building-your-application/optimizing/images)
-- [Next.js Font Optimization](https://nextjs.org/docs/app/building-your-application/optimizing/fonts)
-- [Next.js Metadata and SEO](https://nextjs.org/docs/app/building-your-application/optimizing/metadata)
+// 2. นำเข้ากราฟวัดอุณหภูมิกล่องเนื้อ (Cold-Chain Analytics)
+const ColdChainChart = dynamic(
+  () => import('@/components/tracking/ColdChainChart').then((mod) => mod.ColdChainChart),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="w-full h-48 bg-neutral-100 dark:bg-neutral-900 rounded-xl animate-pulse" />
+    ),
+  }
+);
+
+export default function OrderTrackingPage() {
+  return (
+    <div className="max-w-4xl mx-auto p-6 space-y-8">
+      <div>
+        <h1 className="text-2xl font-bold">ระบบติดตามการจัดส่งเนื้อสด (Cold-Chain Tracking)</h1>
+        <p className="text-neutral-500 text-sm mt-1">
+          ควบคุมอุณหภูมิที่ -2°C ถึง 2°C ตลอดเส้นทางจัดส่ง
+        </p>
+      </div>
+
+      {/* แผนที่จะถูกแยกเป็น JavaScript Chunk ต่างหาก ไม่กระทบ Initial Page Load */}
+      <div className="border rounded-2xl overflow-hidden p-2 bg-white dark:bg-neutral-900">
+        <LiveDeliveryMap deliveryRiderId="rider_wagyu_express_01" />
+      </div>
+
+      <div className="border rounded-2xl p-6 bg-white dark:bg-neutral-900 space-y-4">
+        <h2 className="text-lg font-bold">บันทึกอุณหภูมิกล่องบรรจุภัณฑ์แบบเรียลไทม์</h2>
+        <ColdChainChart />
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ปัญหาที่พบบ่อย | รูปแบบที่ผิด (Anti-pattern) | วิธีการที่ถูกต้องระดับ Senior (Best Practice) |
+| :--- | :--- | :--- |
+| **ใช้แท็ก `<img>` แบบดั้งเดิม** | ใช้ `<img src="/meat.jpg" />` ขาดการบีบอัด ไม่แปลงเป็น WebP/AVIF และทำให้หน้าจอกระตุก | ใช้ `next/image` เสมอ เพื่อรับประโยชน์จากการบีบอัดภาพอัตโนมัติ การทำ Lazy load และ CLS = 0 |
+| **ลืมระบุ `sizes` เมื่อใช้ `fill`** | ใส่เฉพาะ `fill` ปล่อยให้เบราว์เซอร์ดาวน์โหลดภาพขนาด Desktop ความละเอียด 1920px บนมือถือ | ระบุ `sizes="(max-width: 768px) 100vw, 33vw"` เพื่อช่วยให้เบราว์เซอร์เลือกขนาดภาพที่เล็กที่สุดที่เหมาะสม |
+| **ใส่ `priority` ให้รูปภาพทุกใบ** | ใส่ `priority` ให้กับสินค้าเนื้อทั้ง 24 รายการในหน้า Catalog ทำให้เครือข่ายแย่ง Bandwidth กันจน LCP พัง | ใส่ `priority` เฉพาะภาพ Hero หรือภาพสินค้า 1-2 ชิ้นแรกสุดที่ผู้ใช้มองเห็นทันทีเมื่อเปิดเว็บ (Above the Fold) |
+| **Static Import โมดูลยักษ์ในหน้าแรก** | นำเข้า Rich Text Editor หรือ Charting Library เข้ามาตรงๆ ส่งผลให้ Initial JS Bundle ทะลุ 1MB | ใช้ `next/dynamic` โหลดแบบ Lazy Load เมื่อผู้ใช้ต้องการใช้งาน หรือปิด SSR ด้วย `{ ssr: false }` |
+| **โหลดฟอนต์ผ่าน Google CDN Link** | แปะ `<link rel="stylesheet">` ของ Google Fonts ใน `<head>` ทำให้ติด Network Handshake และเกิด FOIT | ใช้ `next/font/google` เพื่อให้เซิร์ฟเวอร์ดาวน์โหลดฟอนต์ล่วงหน้าตั้งแต่ตอน Build และปรับแต่ง Fallback อัตโนมัติ |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ `priority` ใน `next/image`:
+- **ภาพ Hero Banner ด้านบนสุดของหน้าแรก:** รูปเนื้อวากิวสเต๊กชิ้นเอกที่กินพื้นที่ 50% ของหน้าจอ
+- **ภาพเดี่ยวหลักในหน้ารายละเอียดสินค้า (`/products/[slug]`):** ภาพที่ถูกคำนวณว่าเป็นชิ้นส่วน LCP ของหน้าเว็บ
+
+### ไม่ควรใช้ `priority` ใน `next/image`:
+- **ภาพสินค้าที่อยู่ครึ่งล่างของจอ (Below the Fold):** ภาพรีวิวของลูกค้า, ภาพเมนูแนะนำท้ายหน้า (ควรปล่อยให้เป็น Lazy Load ตามปกติ)
+- **ไอคอนขนาดเล็ก:** เช่น ไอคอนรถเข็น, ธงชาติ (ควรใช้ SVG ในตัว หรือไอคอน Font)
+
+### ควรใช้ `next/dynamic` พร้อม `{ ssr: false }`:
+- **คอมโพเนนต์ที่อ้างอิง Browser API:** เช่น `window`, `navigator.geolocation`, แผนที่ Leaflet หรือโมเดล 3 มิติ Three.js
+- **โมดัลและป๊อปอัปที่ยังไม่ได้ถูกเปิด:** เช่น หน้าต่างแชตช่วยเหลือลูกค้า, โมดัลแสดงตารางโภชนาการเนื้อ
+
+### ไม่ควรใช้ `{ ssr: false }`:
+- **เนื้อหาหลักที่ต้องการผลทาง SEO:** คำบรรยายเนื้อ, ข้อมูลโภชนาการ, รายการราคา (เพราะ Search Engine Bot จะมองไม่เห็นเนื้อหาหากไม่มี SSR)
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: ทำไมการระบุแอตทริบิวต์ `sizes` ถึงมีความสำคัญอย่างยิ่งยวดเมื่อเราใช้งาน `<Image fill ... />` ใน Next.js และจะเกิดผลกระทบอะไรขึ้นกับประสิทธิภาพหากเราละเลยไม่ใส่ค่านี้?
+
+**แนวคำตอบเชิงลึก:**
+การทำงานของเบราว์เซอร์ในการเลือกดาวน์โหลดรูปภาพจากชุด `srcset` ที่ Next.js สร้างขึ้น จะเกิดขึ้น **ก่อนที่เบราว์เซอร์จะดาวน์โหลดและประมวลผลไฟล์ CSS เสร็จสิ้น**:
+1. เมื่อเบราว์เซอร์อ่านเจอบรรทัด `<Image fill ... />` หากไม่มีการระบุ `sizes` ตัวเบราว์เซอร์จะไม่สามารถรู้ได้เลยว่าภาพนั้นจะถูกแสดงผลกว้างกี่พิกเซลบนหน้าจอจริง
+2. ตามมาตรฐานของ HTML เบราว์เซอร์จะตั้งสมมติฐานกรณีที่แย่ที่สุด (Worst-case Assumption) นั่นคือ **`sizes="100vw"`** (ภาพจะกินพื้นที่เต็มความกว้างหน้าจอเสมอ)
+3. **ผลกระทบ:** แม้ว่าเราจะเปิดเว็บบนหน้าจอมือถือที่มีความกว้าง 390px แต่เนื่องจากเบราว์เซอร์เจอ `sizes="100vw"` และหน้าจอมือถือส่วนใหญ่มี Device Pixel Ratio (DPR) 2x หรือ 3x เบราว์เซอร์จะตัดสินใจดาวน์โหลดภาพที่มีความละเอียดสูงถึง 1080px หรือ 1200px ซึ่งมีขนาดไฟล์ใหญ่กว่าที่ต้องการจริงถึง 4-6 เท่าตัว
+4. **การแก้ไข:** เมื่อเราระบุ `sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"` เบราว์เซอร์จะคำนวณได้อย่างแม่นยำว่าบนมือถือภาพจะกว้างเพียงใด และบนจอคอมพิวเตอร์ 3 คอลัมน์ ภาพจะกว้างเพียง 33% ของจอ ทำให้เบราว์เซอร์เลือกดาวน์โหลดภาพขนาดเล็กที่มีขนาดเพียง 40-60KB ช่วยประหยัด Data Egress และเร่งความเร็ว LCP ได้อย่างมหาศาล
+
+---
+
+### คำถามที่ 2: กลไกของ `next/font` แตกต่างจากการโหลดฟอนต์ผ่าน Google Fonts CDN แบบเดิมอย่างไร และเทคนิคเบื้องหลังใดที่ทำให้มันสามารถกำจัด Cumulative Layout Shift (CLS) ได้อย่างสมบูรณ์แบบ?
+
+**แนวคำตอบเชิงลึก:**
+ความแตกต่างสำคัญระหว่าง `next/font` กับการโหลดผ่าน CDN ประกอบด้วย 2 เสาหลัก:
+
+1. **Zero External Network Latency (Self-Hosting at Build Time):**
+   การโหลดแบบเดิมผ่าน `<link href="https://fonts.googleapis.com">` ต้องผ่านกระบวนการ DNS Lookup, TCP Handshake, และ TLS Negotiation ไปยัง Google CDN ซึ่งเพิ่ม Latency 100-300ms ก่อนที่ฟอนต์จะเริ่มดาวน์โหลด แต่ `next/font` จะดาวน์โหลดไฟล์ฟอนต์ฟอร์แมต WOFF2 มาเก็บไว้ในเครื่องตั้งแต่ขั้นตอน `next build` และเสิร์ฟไฟล์ฟอนต์จากโดเมนเดียวกัน (Same-origin) ส่งผลให้โหลดได้เร็วกว่าและไม่ถูกบล็อกด้วยข้อจำกัดความเป็นส่วนตัว (Privacy Regulations)
+
+2. **Font Metrics Overrides & Synthetic Fallbacks (กำจัด CLS เป็น 0):**
+   สิ่งที่ทำให้เกิด CLS ในการโหลดฟอนต์แบบเดิม คือขนาดของตัวอักษรแต่ละตัว (Glyph Metrics) ของฟอนต์ที่โหลดมาใหม่ ไม่เท่ากับฟอนต์ระบบ (Fallback Font) เช่น เมื่อฟอนต์ดาวน์โหลดเสร็จ ตัวอักษรคำว่า "Wagyu" มีความกว้างมากขึ้น ทำให้ข้อความตัดขึ้นบรรทัดใหม่ และดันปุ่มสั่งซื้อเลื่อนตกลงไปด้านล่าง (Layout Shift)
+   
+   `next/font` จัดการปัญหานี้โดยอัตโนมัติด้วยการคำนวณสถิติของฟอนต์ แล้วสร้างกฎ CSS พิเศษ:
+   ```css filename="src/app/font-overrides.css"
+   @font-face {
+     font-family: 'Prompt Fallback';
+     src: local('Arial');
+     ascent-override: 95.2%;
+     descent-override: 24.1%;
+     line-gap-override: 0%;
+     size-adjust: 102.5%;
+   }
+   ```
+   คุณสมบัติ `size-adjust` และ `*-override` จะบีบหรือขยายฟอนต์ Arial ในเครื่องผู้ใช้ ให้มีสัดส่วนความกว้าง ความสูง และระยะห่างบรรทัด **เท่ากับฟอนต์ Prompt 100% ในระดับพิกเซล** ดังนั้นเมื่อเบราว์เซอร์ทำการสลับจาก Fallback Font ไปเป็น Custom Font โครงสร้างของหน้าจอจะไม่กระตุกหรือเลื่อนตำแหน่งแม้แต่พิกเซลเดียว ส่งผลให้ค่าคะแนน CLS เท่ากับ 0 อย่างสมบูรณ์แบบ
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [Next.js Data Fetching & Caching](/docs/nextjs/data-fetching) — การสตรีมมิ่งด้วย Suspense เพื่อปรับปรุง TTFB และ LCP
+- [Next.js Production Deployment](/docs/nextjs/deployment) — การตั้งค่า Docker และ CDN Caching สำหรับรูปภาพ
+- [Next.js Routing Architecture](/docs/nextjs/routing) — การวางโครงสร้าง Layout และ Page ให้โหลดเร็ว
+- [Next.js Server Actions](/docs/nextjs/server-actions) — การทำ Optimistic UI เพื่อปรับปรุงคะแนน INP

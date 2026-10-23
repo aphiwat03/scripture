@@ -3,70 +3,401 @@ title: Data Fetching
 category: Frontend
 parentTitle: Next.js 16
 version: v16.4
-updatedAt: 2026-10-17
+updatedAt: 2026-10-23
 ---
 
-## 1. คืออะไร / ใช้ทำไม
+# Next.js 16 Data Fetching, Caching & Parallel Architecture
 
-**Data Fetching & Caching** ใน Next.js 16 คือกลไกการดึงข้อมูลบนเซิร์ฟเวอร์ด้วย `fetch()` โดยสามารถควบคุมได้อย่างละเอียดว่าจะให้ผลลัพธ์ถูกแคชไว้ล่วงหน้าเพื่อความเร็วสูงสุด (Static SSG / ISR) หรือดึงสดใหม่ทุกครั้ง (Dynamic SSR) เพื่อความถูกต้องของข้อมูลล่าสุด
+คู่มือเชิงลึกระดับ Senior Fullstack ในการออกแบบระบบดึงข้อมูล (Data Fetching), กลไก Caching 4 ลำดับชั้นใน Next.js 16, การสตรีมมิ่งด้วย React Suspense, การกำจัด Waterfall ด้วย Parallel Fetching, และสถาปัตยกรรม Data Access Layer (DAL)
 
-ช่วยแก้ปัญหาการจัดการแคชที่ซับซ้อน และเพิ่มความเร็วในการตอบสนองให้แก่ผู้ใช้งาน
+---
 
-## 2. ตัวอย่างโค้ด (TypeScript)
+## 1. แนวคิด (Concept)
 
-### การเลือกโหมด Caching ด้วย fetch()
+การดึงข้อมูลใน Next.js 16 ภายใต้สถาปัตยกรรม React Server Components (RSC) ได้เปลี่ยนกระบวนทัศน์จากการทำ Client-side Fetching (เช่น `useEffect` หรือ Axios) มาเป็นการดึงข้อมูลโดยตรงบนเซิร์ฟเวอร์แบบ Asynchronous:
+- คอมโพเนนต์สามารถประกาศเป็น `async/await` ได้โดยตรง
+- ไม่มีการส่งโค้ดการดึงข้อมูล หรือ Library ขนาดใหญ่ข้ามเครือข่ายไปยังเบราว์เซอร์
+- สามารถเข้าถึงฐานข้อมูล PostgreSQL หรือ Microservices ภายใน Private Network ได้โดยตรง
 
-```tsx filename="src/app/market/page.tsx"
-export default async function MarketPage() {
-  // 1. Dynamic: ดึงข้อมูลสดใหม่ทุก Request (ค่าเริ่มต้นใน Next.js 15+)
-  const liveRes = await fetch('https://api.example.com/rates', {
-    cache: 'no-store',
+### การเปลี่ยนแปลงพฤติกรรม Caching ใน Next.js 15 & 16
+ในเวอร์ชันก่อนหน้า (Next.js 13-14) คำสั่ง `fetch()` จะถูกแคชไว้แบบถาวรโดยค่าเริ่มต้น (`force-cache`) ซึ่งมักสร้างความสับสนและทำให้เกิดปัญหาข้อมูลไม่อัปเดต
+
+**ใน Next.js 16:** พฤติกรรมเริ่มต้นของคำสั่ง `fetch()` เปลี่ยนเป็น **Uncached (`cache: 'no-store'`)** หรือ Dynamic ตามความต้องการจริงของเว็บแอปพลิเคชันยุคใหม่ หากต้องการให้ข้อมูลถูกแคช นักพัฒนาจะต้องระบุออปชัน `cache: 'force-cache'` หรือกำหนดช่วงเวลา `next: { revalidate: 60 }` อย่างชัดเจน (Explicit Caching Opt-in)
+
+```text
++-----------------------------------------------------------------------------------+
+|                        Next.js 16 Caching Layer Architecture                      |
++-----------------------------------------------------------------------------------+
+| 1. Request Memoization (React Level)                                              |
+|    - มีอายุเฉพาะรอบการเรนเดอร์ 1 Request เท่านั้น                                 |
+|    - รวมคำสั่ง fetch / cache() เดียวกันใน Layout, Page และ Component ให้รันครั้งเดียว|
++-----------------------------------------------------------------------------------+
+| 2. Data Cache (Next.js Server Level)                                              |
+|    - แคชข้อมูลข้ามคำขอ (Cross-request) และข้ามผู้ใช้ (Cross-user)                 |
+|    - ควบคุมด้วย cache: 'force-cache' หรือ next: { revalidate: 3600, tags: [...] } |
++-----------------------------------------------------------------------------------+
+| 3. Full Route Cache (Build / Server Level)                                        |
+|    - บันทึกผลลัพธ์ HTML และ RSC Payload ของ Static Page ตอนบิลด์                  |
++-----------------------------------------------------------------------------------+
+| 4. Router Cache (Client Browser Memory)                                           |
+|    - แคชในหน่วยความจำเบราว์เซอร์ขณะผู้ใช้นำทางไปมาระหว่างหน้า (Session Lifespan)   |
++-----------------------------------------------------------------------------------+
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 Request Memoization vs Data Cache
+
+ความสับสนที่พบบ่อยที่สุดในหมู่นักพัฒนาคือความแตกต่างระหว่างสองระดับแคชนี้:
+- **Request Memoization:** เป็นฟังก์ชันของ React เมื่อมีคอมโพเนนต์หลายตัวในหน้าเดียวกันสั่ง `fetch('https://api.smartbutcher.com/categories')` ตัว React จะตรวจจับ URL และ Parameters เดียวกัน แล้วรันคำขอจริงเพียงรอบเดียว ผลลัพธ์จะถูกส่งให้ทุกคอมโพเนนต์ จากนั้น **แคชนี้จะถูกทำลายทิ้งทันทีเมื่อส่ง HTML/RSC Payload กลับไปยังเบราว์เซอร์เสร็จสิ้น**
+- **Data Cache:** เป็นฟังก์ชันของ Next.js เซิร์ฟเวอร์ที่อยู่ถาวรในหน่วยความจำดิสก์หรือ Shared Cache (เช่น Redis / S3) ข้อมูลที่ถูกบันทึกไว้ใน Data Cache จะถูกนำมาใช้ซ้ำกับผู้ใช้คนอื่นๆ ที่เข้ามาเปิดเว็บในอีกหลายชั่วโมงต่อมา จนกว่าจะหมดอายุ (TTL) หรือถูกสั่ง Invalidate ด้วย `revalidateTag`
+
+### 2.2 การป้องกัน Request Waterfall ด้วย Parallel Fetching และ Streaming
+
+**Waterfall Request** คือมหันตภัยด้านความเร็ว: เมื่อคอมโพเนนต์สั่งรอข้อมูลก้อนที่ 1 เสร็จก่อน ถึงจะเริ่มสั่งขอก้อนที่ 2 และ 3:
+
+```text
+[ Sequential Waterfall (ช้ามาก: รวม 750ms) ]
+fetchProduct (200ms) ======>
+                            fetchProductReviews (250ms) ======>
+                                                                fetchRelatedCuts (300ms) ======>
+
+[ Parallel Fetching + Streaming Suspense (เร็วสุดยอด: ปลดล็อกหน้าจอทันทีที่ 200ms) ]
+fetchProduct (200ms) =========> เรนเดอร์ Header + รายละเอียดเนื้อทันที!
+fetchProductReviews (250ms) ====> สตรีมมิ่งผ่าน Suspense Fallback
+fetchRelatedCuts (300ms) =======> สตรีมมิ่งผ่าน Suspense Fallback
+```
+
+### 2.3 สถาปัตยกรรม Data Access Layer (DAL)
+
+ในระบบเกรด Enterprise การเขียนคำสั่ง Database Query หรือ `fetch` กระจัดกระจายอยู่ตามคอมโพเนนต์ต่างๆ ถือเป็นช่องโหว่ด้านความปลอดภัยและยากต่อการดูแล
+
+**Data Access Layer (DAL)** คือรูปแบบการแยกโค้ดที่ทำหน้าที่เป็นชั้นเข้าถึงข้อมูลโดยเฉพาะ:
+1. เก็บไว้ในโฟลเดอร์เฉพาะ เช่น `src/data-access/` หรือ `src/lib/dal/`
+2. ใส่ `import 'server-only'` บนหัวไฟล์ทุกครั้ง เพื่อรับประกันว่าจะไม่มีทางหลุดไปฝั่ง Client
+3. ห่อหุ้มฟังก์ชันด้วย React `cache()` เพื่อให้เกิด Request Memoization แม้ไม่ได้ใช้ `fetch` (เช่น การเรียกผ่าน Prisma ORM)
+4. ทำการกรอง (Data Sanitization) ตัดข้อมูลอ่อนไหว (เช่น รหัสผ่าน, ต้นทุนราคาส่งของฟาร์ม) ออกก่อนคืนค่าให้ UI
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสร้าง Data Access Layer (DAL) ที่ปลอดภัยและมี Request Memoization
+
+สร้างชั้นบริการดึงข้อมูลเนื้อพรีเมียมใน `src/lib/dal/products.ts` ที่มีการป้องกันการเข้าถึงจาก Client และทำแคชอย่างแม่นยำ:
+
+```typescript filename="src/lib/dal/products.ts"
+import 'server-only';
+import { cache } from 'react';
+
+// ประกาศประเภทข้อมูลเนื้อพรีเมียมเฉพาะฟิลด์ที่ปลอดภัยสำหรับ UI (DTO)
+export interface ButcherProductDTO {
+  id: string;
+  slug: string;
+  name: string;
+  origin: string;
+  marblingScore: number;
+  agingDays: number;
+  pricePerKg: number;
+  inStock: boolean;
+  category: {
+    id: string;
+    name: string;
+  };
+}
+
+// 1. ฟังก์ชันดึงรายละเอียดเนื้อแบบเดี่ยว พร้อม React cache() ป้องกันการเรียกซ้ำในรอบเดียวกัน
+export const getProductBySlug = cache(
+  async (slug: string): Promise<ButcherProductDTO | null> => {
+    try {
+      // เรียกใช้ Next.js Data Cache พร้อมกำหนด Tag ประจำตัวสินค้า
+      const res = await fetch(`https://api.smartbutcher.com/products/${slug}`, {
+        next: {
+          revalidate: 3600, // แคชไว้ 1 ชั่วโมง (ISR)
+          tags: ['products', `product-${slug}`], // Tag สำหรับ On-demand Invalidation
+        },
+      });
+
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error(`ไม่สามารถดึงข้อมูลเนื้อ slug: ${slug} ได้`);
+
+      const rawProduct = await res.json();
+
+      // Data Sanitization: คัดเลือกเฉพาะฟิลด์ที่จำเป็น ตัด wholesaleCost หรือ supplierInfo ทิ้ง
+      const sanitized: ButcherProductDTO = {
+        id: rawProduct.id,
+        slug: rawProduct.slug,
+        name: rawProduct.name,
+        origin: rawProduct.origin,
+        marblingScore: rawProduct.marblingScore,
+        agingDays: rawProduct.agingDays,
+        pricePerKg: rawProduct.pricePerKg,
+        inStock: rawProduct.stockQuantity > 0,
+        category: {
+          id: rawProduct.category.id,
+          name: rawProduct.category.name,
+        },
+      };
+
+      return sanitized;
+    } catch (error) {
+      console.error('DAL getProductBySlug Error:', error);
+      return null;
+    }
+  }
+);
+
+// 2. ฟังก์ชันดึงรีวิวของเนื้อชิ้นนั้นๆ
+export async function getProductReviews(productId: string) {
+  // จำลอง Network Delay 200ms
+  const res = await fetch(`https://api.smartbutcher.com/products/${productId}/reviews`, {
+    next: { revalidate: 300, tags: [`reviews-${productId}`] },
   });
-  const liveRates = await liveRes.json();
 
-  // 2. Incremental Static Regeneration (ISR): แคชไว้และอัปเดตใหม่ทุก 60 วินาที
-  const productRes = await fetch('https://api.example.com/products', {
-    next: { revalidate: 60 },
-  });
-  const products = await productRes.json();
+  if (!res.ok) return [];
+  return res.json();
+}
 
-  // 3. Static: ดึงครั้งเดียวตอน Build และบันทึกแคชถาวร
-  const configRes = await fetch('https://api.example.com/config', {
-    cache: 'force-cache',
-  });
-  const siteConfig = await configRes.json();
+// 3. ฟังก์ชันดึงเนื้อส่วนแนะนำที่ใกล้เคียงกัน (Related Cuts)
+export async function getRelatedMeatCuts(categoryId: string, excludeId: string) {
+  const res = await fetch(
+    `https://api.smartbutcher.com/categories/${categoryId}/products?exclude=${excludeId}&limit=3`,
+    { next: { revalidate: 1800 } }
+  );
+
+  if (!res.ok) return [];
+  return res.json();
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: หน้ารายละเอียดสินค้าแบบขจัด Waterfall ด้วย Parallel Suspense Streaming
+
+สร้างหน้ารายละเอียดเนื้อวากิว `src/app/products/[slug]/page.tsx` ที่โหลดข้อมูลหลักทันที และสตรีมมิ่งส่วนรีวิวกับสินค้าแนะนำคู่ขนานกันโดยไม่บล็อกกันเอง:
+
+```tsx filename="src/app/products/[slug]/page.tsx"
+import { Suspense } from 'react';
+import { notFound } from 'next/navigation';
+import type { Metadata } from 'next';
+import {
+  getProductBySlug,
+  getProductReviews,
+  getRelatedMeatCuts,
+} from '@/lib/dal/products';
+
+interface PageProps {
+  params: Promise<{ slug: string }>;
+}
+
+// 1. generateMetadata เรียก getProductBySlug โดยไม่ต้องกลัวเปลือง Network
+// เพราะ React cache() จะ Memoize ผลลัพธ์และแชร์ให้ Page ด้านล่างทันที
+export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
+  const { slug } = await params;
+  const product = await getProductBySlug(slug);
+
+  if (!product) {
+    return { title: 'ไม่พบรายการเนื้อ | Smart Butcher' };
+  }
+
+  return {
+    title: `${product.name} (เกรดลายหินอ่อน A${product.marblingScore}) | Smart Butcher`,
+    description: `เนื้อวากิวพรีเมียมนำเข้าจาก ${product.origin} บ่มพิเศษ ${product.agingDays} วัน ราคา ฿${product.pricePerKg.toLocaleString()}/กก.`,
+  };
+}
+
+export default async function ProductDetailPage({ params }: PageProps) {
+  const { slug } = await params;
+  
+  // ดึงข้อมูลหลักชิ้นเนื้อ (Critical Path)
+  const product = await getProductBySlug(slug);
+
+  if (!product) {
+    notFound();
+  }
 
   return (
-    <div className="space-y-6 max-w-2xl mx-auto py-8">
-      <h1 className="text-2xl font-bold">ข้อมูลการเงินและตลาด</h1>
-      <p>อัตราแลกเปลี่ยนปัจจุบัน: {liveRates.USD_THB} บาท</p>
-      <p>จำนวนสินค้าในแคช: {products.length} รายการ</p>
+    <div className="max-w-6xl mx-auto p-6 space-y-12">
+      {/* ส่วนที่ 1: รายละเอียดเนื้อหลัก เรนเดอร์ทันทีตั้งแต่วินาทีแรก */}
+      <section className="grid grid-cols-1 md:grid-cols-2 gap-8 items-start">
+        <div className="aspect-video bg-neutral-100 dark:bg-neutral-800 rounded-2xl flex items-center justify-center text-6xl">
+          🥩
+        </div>
+
+        <div className="space-y-4">
+          <div className="text-xs uppercase tracking-wider text-red-600 font-bold">
+            หมวดหมู่: {product.category.name}
+          </div>
+          <h1 className="text-3xl font-extrabold">{product.name}</h1>
+          <p className="text-neutral-600 dark:text-neutral-400">
+            แหล่งกำเนิด: {product.origin} | ระยะเวลาบ่ม: {product.agingDays} วัน
+          </p>
+
+          <div className="p-4 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 rounded-xl inline-block">
+            <span className="font-semibold text-amber-900 dark:text-amber-200">
+              Beef Marble Score: A{product.marblingScore}
+            </span>
+          </div>
+
+          <div className="text-3xl font-black text-red-600">
+            ฿{product.pricePerKg.toLocaleString()} <span className="text-sm font-normal text-neutral-500">/ กิโลกรัม</span>
+          </div>
+
+          <div>
+            <button className="bg-red-700 hover:bg-red-800 text-white px-6 py-3 rounded-xl font-medium transition shadow-sm">
+              สั่งตัดเนื้อพิเศษชิ้นนี้
+            </button>
+          </div>
+        </div>
+      </section>
+
+      {/* ส่วนที่ 2: สตรีมมิ่งส่วนรีวิวของลูกค้าด้วย React Suspense แบบไม่บล็อกส่วนอื่น */}
+      <section className="border-t pt-8">
+        <h2 className="text-xl font-bold mb-4">รีวิวจากผู้เชี่ยวชาญด้านเนื้อ</h2>
+        <Suspense fallback={<ReviewsSkeleton />}>
+          <ReviewsSection productId={product.id} />
+        </Suspense>
+      </section>
+
+      {/* ส่วนที่ 3: สตรีมมิ่งรายการเนื้อแนะนำคู่ขนานกัน */}
+      <section className="border-t pt-8">
+        <h2 className="text-xl font-bold mb-4">เนื้อส่วนอื่นๆ ในหมวดเดียวกัน</h2>
+        <Suspense fallback={<RelatedCutsSkeleton />}>
+          <RelatedCutsSection categoryId={product.category.id} currentId={product.id} />
+        </Suspense>
+      </section>
+    </div>
+  );
+}
+
+// Sub-component สำหรับสตรีมมิ่งรีวิว
+async function ReviewsSection({ productId }: { productId: string }) {
+  const reviews = await getProductReviews(productId);
+
+  if (reviews.length === 0) {
+    return <p className="text-sm text-neutral-500">ยังไม่มีรีวิวสำหรับเนื้อส่วนนี้ เป็นคนแรกที่ได้ลิ้มลอง!</p>;
+  }
+
+  return (
+    <div className="space-y-3">
+      {reviews.map((r: any) => (
+        <div key={r.id} className="p-4 border rounded-xl bg-neutral-50 dark:bg-neutral-900">
+          <div className="font-semibold text-sm">{r.author} (คะแนน: ⭐ {r.rating}/5)</div>
+          <p className="text-sm text-neutral-600 dark:text-neutral-400 mt-1">{r.comment}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Sub-component สำหรับสตรีมมิ่งเนื้อแนะนำ
+async function RelatedCutsSection({ categoryId, currentId }: { categoryId: string; currentId: string }) {
+  const related = await getRelatedMeatCuts(categoryId, currentId);
+
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      {related.map((item: any) => (
+        <a key={item.id} href={`/products/${item.slug}`} className="block border p-4 rounded-xl hover:shadow-md transition">
+          <h3 className="font-semibold text-base">{item.name}</h3>
+          <p className="text-xs text-neutral-500 mt-1">Marbling A{item.marblingScore}</p>
+          <div className="font-bold text-red-600 mt-2">฿{item.pricePerKg.toLocaleString()}</div>
+        </a>
+      ))}
+    </div>
+  );
+}
+
+function ReviewsSkeleton() {
+  return (
+    <div className="space-y-3 animate-pulse">
+      <div className="h-16 bg-neutral-100 dark:bg-neutral-800 rounded-xl" />
+      <div className="h-16 bg-neutral-100 dark:bg-neutral-800 rounded-xl" />
+    </div>
+  );
+}
+
+function RelatedCutsSkeleton() {
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 animate-pulse">
+      <div className="h-32 bg-neutral-100 dark:bg-neutral-800 rounded-xl" />
+      <div className="h-32 bg-neutral-100 dark:bg-neutral-800 rounded-xl" />
+      <div className="h-32 bg-neutral-100 dark:bg-neutral-800 rounded-xl" />
     </div>
   );
 }
 ```
 
-## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+---
 
-- **`cache: 'no-store'` (Dynamic)**:
-  - *ควรใช้*: กับข้อมูลเฉพาะบุคคล เช่น ยอดเงินคงเหลือ, ตะกร้าสินค้า, แดชบอร์ดผู้ดูแลระบบ
-  - *ไม่ควรใช้*: กับหน้าบทความทั่วไปเพราะจะทำให้เซิร์ฟเวอร์ต้องรับภาระประมวลผลสูง
-- **`next: { revalidate: 60 }` (ISR)**:
-  - *ควรใช้*: กับหน้ารายการสินค้า ข่าวสาร หรือบล็อกที่มีการแก้ไขเป็นระยะแต่ต้องการความเร็วในการเปิดอ่านระดับมิลลิวินาที
-- **`cache: 'force-cache'` (Static)**:
-  - *ควรใช้*: กับหน้าข้อมูลคงที่ นโยบายความเป็นส่วนตัว ข้อมูลติดต่อ
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
 
-## 4. ข้อควรระวัง
+| ปัญหาที่พบบ่อย | รูปแบบที่ผิด (Anti-pattern) | วิธีการที่ถูกต้องระดับ Senior (Best Practice) |
+| :--- | :--- | :--- |
+| **Waterfall Sequential Await** | สั่ง `await fetchA()`, `await fetchB()`, `await fetchC()` เรียงกัน ทำให้เวลาในการรอโหลดบวกสะสม | ใช้ `Promise.all([fetchA(), fetchB()])` หรือแยกเป็น Sub-component แล้วครอบด้วย `<Suspense>` เพื่อสตรีมคู่ขนาน |
+| **Prop Drilling ข้อมูลจาก Root** | ดึงข้อมูลชิ้นเนื้อไว้ที่ Root Layout แล้วส่ง Props ทะลุคอมโพเนนต์ย่อยลงไป 5 ชั้นเพื่อประหยัด Request | ใช้ประโยชน์จาก React `cache()` ดึงข้อมูลเฉพาะจุดที่ต้องการ โดยฟังก์ชันเดียวกันจะถูก Memoize ให้อัตโนมัติ |
+| **แคชข้อมูลส่วนตัวลงใน Data Cache** | ตั้งค่า `force-cache` กับ API ที่ดึงรายการตะกร้าสินค้าหรือยอดเงินคงเหลือของลูกค้า | ข้อมูลส่วนบุคคล (User-specific) ต้องใช้ `cache: 'no-store'` เสมอเพื่อไม่ให้ผู้ใช้คนอื่นเห็นแคชของคนก่อนหน้า |
+| **ไร้สถาปัตยกรรม Data Access Layer** | เขียน Prisma Query และ Database Credentials ตรงๆ ใน Client Component หรือกระจายทั่วไฟล์ Page | รวมศูนย์การดึงข้อมูลไว้ที่ Data Access Layer (DAL) พร้อมใส่ `import 'server-only'` และทำ Sanitization |
+| **สับสนพฤติกรรม Cache ใน Next.js 16** | คิดว่า `fetch()` ใน Next.js 16 จะแคชผลลัพธ์ให้ตลอดไปเหมือน Next.js 14 จึงลืมระบุ `revalidate` | Next.js 16 มีค่าเริ่มต้นเป็น `no-store` (Dynamic) ต้องระบุ `revalidate` หรือ `force-cache` เมื่อต้องการทำ Static/ISR |
 
-<Callout type="warning" title="ค่าเริ่มต้น fetch() ไม่แคชอีกต่อไป">
-ตั้งแต่ Next.js 15 และ 16 เป็นต้นมา คำสั่ง `fetch()` จะมีค่าเริ่มต้นเป็น `cache: 'no-store'` (ไม่แคช) หากต้องการให้ทำแคชเพื่อความเร็วต้องระบุ `force-cache` หรือ `revalidate` ให้ชัดเจนเสมอ
-</Callout>
+---
 
-<Callout type="note" title="Dynamic APIs ทำให้หน้ากลายเป็น Dynamic">
-หากมีการใช้ `cookies()`, `headers()`, หรืออ่าน `searchParams` ตัว Next.js จะถือว่าหน้านั้นเป็น Dynamic SSR โดยอัตโนมัติ
-</Callout>
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
 
-## 5. แหล่งอ้างอิงทางการ
+### ควรใช้ Server-side Fetching & RSC:
+- **ข้อมูลสาธารณะและแคตตาล็อกสินค้า:** หน้ารายการเนื้อวากิว, หน้ารายละเอียดการบ่มเนื้อ (ได้ความเร็วสูงสุดจาก Data Cache และคะแนน SEO เต็มร้อย)
+- **การประมวลผลที่ต้องการความปลอดภัยสูง:** งานที่ต้องอ่าน Secret API Key, ข้อมูลที่เชื่อมต่อกับฐานข้อมูลภายใน Private Subnet
+- **หน้าเว็บที่ต้องการลด JavaScript Bundle ของ Client:** ให้เซิร์ฟเวอร์รัน Library แปลงข้อมูล (Markdown parser, date-fns) แล้วส่งเฉพาะ Pure HTML/JSON กลับไป
 
-- [Next.js Data Fetching and Caching](https://nextjs.org/docs/app/building-your-application/data-fetching)
-- [Incremental Static Regeneration (ISR)](https://nextjs.org/docs/app/building-your-application/data-fetching/incremental-static-regeneration)
+### ไม่ควรใช้ Server-side Fetching (ควรใช้ SWR / React Query บน Client):
+- **ข้อมูลแบบ Real-time ความถี่สูงระดับเสี้ยววินาที:** กราฟความร้อนของเตาอบเนื้อ, แชตสนทนาสดกับคนขายเนื้อ (ควรใช้ WebSockets / SSE บน Client)
+- **การ Polling ข้อมูลสถานะการจัดส่งไรเดอร์บนแผนที่:** เมื่อลูกค้าเปิดหน้าจอค้างไว้และต้องการให้อัปเดตพิกัด GPS ทุก 3 วินาที
+- **ข้อมูลที่ขึ้นกับ Browser State โดยตรง:** เช่น พิกัดตำแหน่ง Geolocation ของผู้ใช้ หรือขนาดหน้าจอ Window resize
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: อธิบายความแตกต่างของช่วงชีวิต (Lifespan) และขอบเขตการทำงาน (Scope) ระหว่าง "Request Memoization" ของ React กับ "Data Cache" ของ Next.js 16 ให้เห็นภาพชัดเจน?
+
+**แนวคำตอบเชิงลึก:**
+สองกลไกนี้ทำงานคนละระดับชั้นและแก้ปัญหาคนละโจทย์:
+
+1. **Request Memoization (React Feature):**
+   - **Scope:** ครอบคลุมเฉพาะ **หนึ่งคำขอ (Single Server Request Lifecycle)** เท่านั้น
+   - **Lifespan:** เกิดขึ้นเมื่อเซิร์ฟเวอร์เริ่มประมวลผลเรนเดอร์คอมโพเนนต์ต้นไม้ (Component Tree) และ **จะสลายตัวทิ้งทันที** เมื่อการเรนเดอร์เสร็จสิ้นและส่งข้อมูลกลับไปยังเบราว์เซอร์
+   - **Purpose:** ออกแบบมาเพื่อแก้ปัญหา **Deduplication** ทำให้นักพัฒนาสามารถเรียก `getUserProfile()` ใน `layout.tsx`, `page.tsx`, และ `header.tsx` ได้อย่างอิสระโดยไม่ต้องส่ง Props ข้ามกัน และระบบจะยิง API จริงเพียง 1 ครั้งถ้วน
+
+2. **Data Cache (Next.js Platform Feature):**
+   - **Scope:** ครอบคลุมระดับ **ข้ามคำขอ (Cross-request)** และ **ข้ามผู้ใช้งานทุกคน (Cross-user)**
+   - **Lifespan:** อยู่ถาวร (Persistent) บันทึกลงในดิสก์หรือระบบ Cache ภายนอก ข้อมูลจะคงอยู่แม้ว่าเซิร์ฟเวอร์จะประมวลผลคำขอนั้นเสร็จไปแล้ว หรือแม้กระทั่งรีสตาร์ตเซิร์ฟเวอร์ (ขึ้นอยู่กับ storage)
+   - **Purpose:** ออกแบบมาเพื่อลดภาระงานของฐานข้อมูล (Database Load) และเพิ่มความเร็วในการตอบสนอง (TTFB) โดยจะคงอยู่จนกว่าจะหมดเวลา TTL (`revalidate: 3600`) หรือถูกสั่งล้างแคชด้วย Server Actions (`revalidateTag`)
+
+---
+
+### คำถามที่ 2: ในหน้ารายละเอียดสินค้าที่มีการดึงข้อมูล 3 ส่วนที่มีความเร็วต่างกันอย่างมาก: ข้อมูลเนื้อ (เร็ว: 40ms), ข้อมูลสต็อกคงเหลือ (ปานกลาง: 180ms), และระบบ AI แนะนำสเต๊กคู่ไวน์ (ช้ามาก: 1,500ms) คุณจะออกแบบสถาปัตยกรรม Data Fetching อย่างไรเพื่อให้ได้ค่า LCP และ TTFB ที่ดีที่สุด?
+
+**แนวคำตอบเชิงลึก:**
+หากนำทั้งสามส่วนมารอด้วยคำสั่ง `await` ใน Page Component หน้าเว็บจะต้องรอถึง 1,500ms ก่อนที่เบราว์เซอร์จะได้รับ Byte แรก (TTFB สูงมาก) และ LCP จะพังทลายลงทันที
+
+**แนวทางระดับ Senior คือใช้สถาปัตยกรรม "Streaming Architecture with Tiered Suspense":**
+1. **Critical Path (ข้อมูลเนื้อ 40ms):**
+   - ทำการ Fetch ที่ระดับบนสุดของ `Page` โดยเปิดใช้งาน Data Cache (`revalidate: 3600`)
+   - เซิร์ฟเวอร์จะสร้าง HTML Shell พร้อมรายละเอียดเนื้อ, ชื่อ, รูปภาพ, และราคา ส่งกลับไปยังเบราว์เซอร์ทันทีภายในเวลาประมาณ 40-50ms ทำให้ได้ค่า **TTFB ต่ำสุดขีด** และส่วนเนื้อหาหลักจะแสดงบนหน้าจอทันที ส่งผลให้ค่า **LCP ผ่านเกณฑ์สีเขียว (Good Core Web Vitals)**
+
+2. **Secondary Path (ข้อมูลสต็อก 180ms):**
+   - แยกออกมาเป็น Sub-component แล้วหุ้มด้วย `<Suspense fallback={<StockSkeleton />}>`
+   - เมื่อข้อมูลมาถึงใน 180ms เซิร์ฟเวอร์จะส่ง HTML Chunk ก้อนที่สองผ่าน HTTP Stream ไปสลับแทน Skeleton โดยอัตโนมัติ
+
+3. **Heavy AI Path (ระบบแนะนำไวน์ 1,500ms):**
+   - แยกเป็น Sub-component อีกตัวหนึ่ง และหุ้มด้วย `<Suspense fallback={<WineSkeleton />}>` แยกอิสระจากสต็อก
+   - ผู้ใช้สามารถอ่านรายละเอียดเนื้อและกดสั่งซื้อได้ทันทีโดยไม่ต้องรอให้โมเดล AI ประมวลผลเสร็จ เมื่อผ่านไป 1.5 วินาที กล่องแนะนำไวน์จะค่อยๆ ปรากฏขึ้นมาอย่างนุ่มนวล โดยไม่ขัดจังหวะการทำธุรกรรมของลูกค้า
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [Next.js RSC vs Client](/docs/nextjs/rsc-client) — สถาปัตยกรรมพื้นฐานของ React Server Components
+- [Next.js Database & API Integration](/docs/nextjs/database) — การต่อยอด DAL ไปสู่ Prisma ORM
+- [Next.js Optimization](/docs/nextjs/optimization) — การปรับแต่งคะแนน Core Web Vitals และรูปภาพ
+- [Next.js Error & Loading](/docs/nextjs/error-handling) — การผสาน Suspense เข้ากับ Error Boundaries

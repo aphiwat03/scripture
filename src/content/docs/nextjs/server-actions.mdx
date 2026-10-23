@@ -3,74 +3,380 @@ title: Server Actions
 category: Frontend
 parentTitle: Next.js 16
 version: v16.4
-updatedAt: 2026-10-17
+updatedAt: 2026-10-23
 ---
 
-## 1. คืออะไร / ใช้ทำไม
+# Next.js 16 Server Actions & React 19 Mutations
 
-**Server Actions** (`'use server'`) คือฟังก์ชันอะซิงโครนัสที่รันบนเซิร์ฟเวอร์สำหรับรับข้อมูลจากฟอร์มและบันทึกข้อมูล (Mutation) โดยไม่ต้องเขียน API แยก ส่วน **Route Handlers** (`route.ts`) คือการสร้าง RESTful API Endpoint มาตรฐาน
+คู่มือเชิงลึกระดับ Senior Fullstack ในการออกแบบ Server Actions (`'use server'`), การบังคับใช้สิทธิ์ (RBAC), สัญญาส่งกลับข้อมูลแบบ Discriminated Union, การทำ Cache Revalidation, และการผสานกับ React 19 `useActionState` และ Optimistic UI
 
-ช่วยลดความซ้ำซ้อนของการเขียน API Controller และทำให้การส่งฟอร์มเป็นแบบ Type-safe ตั้งแต่หน้าบ้านจนถึงหลังบ้าน
+---
 
-## 2. ตัวอย่างโค้ด (TypeScript)
+## 1. แนวคิด (Concept)
 
-### การเขียน Server Action สำหรับจัดการข้อมูล
+**Server Actions** เป็นฟังก์ชัน Asynchronous ที่ถูกประกาศด้วย Directive `'use server'` ซึ่งทำหน้าที่เป็นสะพานเชื่อมระหว่าง Client และ Server โดยนักพัฒนาสามารถสั่ง Mutation ข้อมูลบนฐานข้อมูลได้โดยตรงจากคอมโพเนนต์ โดยไม่ต้องเสียเวลาเขียน REST Controller, Route Handlers หรือกำหนด Endpoint URL ด้วยตนเอง
 
-```typescript filename="src/app/actions/items.ts"
+ใน Next.js 16 ร่วมกับ **React 19**:
+- Server Actions ถูกยกระดับให้ทำงานร่วมกับ Form Actions และ Hooks ยุคใหม่อย่าง `useActionState` และ `useOptimistic`
+- เมื่อรัน Server Action สำเร็จ Next.js จะส่งข้อมูลการเปลี่ยนแปลงและทำ **Server Component Re-rendering** ให้ทันทีในรอบ Request เดียวกัน (Single Network Roundtrip)
+- รองรับ **Progressive Enhancement**: ฟอร์มสามารถส่งข้อมูลได้แม้ในขณะที่ JavaScript บนเบราว์เซอร์ยังดาวน์โหลดไม่เสร็จสิ้น
+
+```text
++-----------------------------------------------------------------------------------+
+|                        Server Actions Execution Lifecycle                         |
++-----------------------------------------------------------------------------------+
+| 1. Client Browser (React 19)                                                      |
+|    - User กดปุ่ม "สั่งซื้อเนื้อสเต๊กวากิว A5"                                     |
+|    - useOptimistic ปรับลดสต็อกหน้าจอทันที (0ms Latency)                           |
+|    - ส่งคำขอ HTTP POST (Action ID Header) ----------------------------+          |
+|                                                                        |          |
+| 2. Next.js 16 Server Engine                                            v          |
+|    - ถอดรหัส Action ID -> รันฟังก์ชัน 'use server'                                |
+|    - ด่านที่ 1: ตรวจสอบ Session Cookie (Authentication)                           |
+|    - ด่านที่ 2: ตรวจสอบสิทธิ์บทบาทผู้ใช้ (RBAC: Customer/Admin)                  |
+|    - ด่านที่ 3: ตรวจสอบความถูกต้องของ Input ด้วย Zod                              |
+|    - ด่านที่ 4: บันทึกข้อมูลลงฐานข้อมูล (Prisma Database Transaction)              |
+|    - ด่านที่ 5: สั่งล้างแคช revalidateTag('inventory') & revalidatePath          |
+|                                                                        |          |
+| 3. Response & Hydration                                                v          |
+|    - ส่งผลลัพธ์ Discriminated Union ({ success: true, data }) <--------+          |
+|    - ส่ง RSC Payload ก้อนใหม่เพื่ออัปเดต Server Component บนหน้าจออัตโนมัติ       |
++-----------------------------------------------------------------------------------+
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 ความปลอดภัย: Server Action คือ Public HTTP Endpoint
+สิ่งสำคัญที่สุดที่ Senior Developer ต้องตระหนัก: **Server Action ไม่ใช่ฟังก์ชันลับภายในเซิร์ฟเวอร์**
+
+เมื่อเราเขียน `'use server'` บนฟังก์ชันใดก็ตาม คอมไพเลอร์ของ Next.js จะสร้าง **HTTP POST Endpoint แบบสถิต** ที่มี Action ID เป็นรหัสแฮชขึ้นมาเบื้องหลัง:
+- ใครก็ตามที่มีความรู้เรื่อง Network สามารถเปิด Postman หรือเขียนสคริปต์ curl ยิงตรงเข้ามาที่ Endpoint นี้ได้ โดยไม่จำเป็นต้องกดผ่านปุ่มบนหน้าเว็บ
+- **กฎเหล็กด้านความปลอดภัย:** ห้ามเชื่อถือ Input จาก Client โดยเด็ดขาด และต้องทำการตรวจสอบสิทธิ์ (Authentication & Authorization) ภายใน Action ทุกครั้งประหนึ่งว่ามันคือ Public REST API
+
+<Callout type="warning" title="อย่าพึ่งพา Hidden Fields สำหรับข้อมูลสำคัญ">
+การส่งค่าสำคัญ เช่น ราคาสินค้า (`price`), สิทธิ์ผู้ใช้ (`role`) ผ่าน `<input type="hidden" />` เป็นช่องโหว่ร้ายแรง เพราะผู้โจมตีสามารถแก้ไขค่าใน HTML Inspector ได้เสมอ ข้อมูลราคาต้องถูกดึงจากฐานข้อมูลหลังบ้านเท่านั้น
+</Callout>
+
+### 2.2 สัญญาส่งกลับแบบ Discriminated Union (Return Type Contract)
+
+การใช้คำสั่ง `throw new Error()` ภายใน Server Action เพื่อแจ้งข้อผิดพลาดจากการกรอกฟอร์มของผู้ใช้ (Validation Error) เป็น **Anti-pattern**:
+- เพราะจะทำให้ React คิดว่าเป็น Uncaught System Exception และพยายามส่งต่อไปยัง `error.tsx` ทำให้หน้าเว็บพัง
+- ในโหมด Production ข้อความ Error จะถูก Mask เป็นรหัส Digest ทำให้ฝั่ง UI ไม่สามารถนำข้อความไปแสดงใต้ช่องกรอกข้อมูลได้
+
+แนวทางที่ถูกต้องระดับ Senior คือการส่งกลับผลลัพธ์ในรูปแบบ **Discriminated Union**:
+
+```typescript filename="src/types/actions.ts"
+export type ActionResponse<TData = unknown> =
+  | { success: true; data: TData; message?: string }
+  | { success: false; error: string; fieldErrors?: Record<string, string[]> };
+```
+
+### 2.3 กลไก Cache Revalidation (`revalidatePath` vs `revalidateTag`)
+
+เมื่อข้อมูลในฐานข้อมูลเปลี่ยนแปลง เซิร์ฟเวอร์ต้องสั่งล้างแคชเพื่อให้ผู้ใช้เห็นข้อมูลใหม่:
+- **`revalidatePath(path, type?: 'page' | 'layout')`:** สั่งล้างแคชของ URL Path ที่ระบุ เหมาะสำหรับการเปลี่ยนแปลงที่กระทบหน้าใดหน้าหนึ่งโดยเฉพาะ
+- **`revalidateTag(tag)`:** สั่งล้างแคชตาม Semantic Tag ที่ถูกผูกไว้กับคำสั่ง `fetch(url, { next: { tags: ['tag-name'] } })` หรือ Data Cache เป็นวิธีที่มีประสิทธิภาพสูงสุดในระบบขนาดใหญ่ เพราะสามารถอัปเดตข้อมูลสินค้าเดียวกันที่กระจายอยู่ทั้งในหน้า Catalog, หน้ารายละเอียด, และหน้าแรกได้พร้อมกันในคำสั่งเดียว
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: Server Action สำหรับสร้างคำสั่งซื้อเนื้อพรีเมียม (พร้อม Auth, Zod, และ Revalidation)
+
+สร้าง Action ในไฟล์ `src/actions/orders.ts` ที่มีการป้องกันสิทธิ์ ตรวจสอบความถูกต้อง และส่งคืนแบบ Discriminated Union:
+
+```typescript filename="src/actions/orders.ts"
 'use server';
 
-import { revalidatePath } from 'next/cache';
+import { z } from 'zod';
+import { revalidatePath, revalidateTag } from 'next/cache';
 
-export async function createItemAction(formData: FormData) {
-  const title = formData.get('title') as string;
+// 1. กำหนดโครงสร้างสัญญาผลลัพธ์ (Discriminated Union)
+export type ActionResponse<T = unknown> =
+  | { success: true; data: T; message?: string }
+  | { success: false; error: string; fieldErrors?: Record<string, string[]> };
 
-  if (!title || title.trim().length === 0) {
-    throw new Error('กรุณาระบุชื่อรายการ');
-  }
+// 2. กำหนด Zod Schema สำหรับตรวจสอบข้อมูลสั่งซื้อเนื้อ
+const createOrderSchema = z.object({
+  productId: z.string().min(1, 'กรุณาระบุรหัสสินค้าเนื้อ'),
+  cutType: z.string().min(1, 'กรุณาระบุประเภทการตัดแต่ง'),
+  weightKg: z
+    .number({ invalid_type_error: 'น้ำหนักต้องเป็นตัวเลข' })
+    .min(0.2, 'น้ำหนักสั่งซื้อขั้นต่ำ 0.2 กิโลกรัม')
+    .max(10.0, 'น้ำหนักสั่งซื้อสูงสุด 10.0 กิโลกรัมต่อคำสั่ง'),
+  deliveryAddress: z
+    .string()
+    .min(10, 'ที่อยู่จัดส่งต้องมีความยาวอย่างน้อย 10 ตัวอักษร'),
+});
 
-  // ตัวอย่าง: บันทึกข้อมูลลงฐานข้อมูลโดยตรง
-  // await db.item.create({ data: { title } });
-
-  // ล้างแคชหน้านั้นเพื่อให้แสดงข้อมูลใหม่ทันที
-  revalidatePath('/items');
+// จำลองฟังก์ชันดึง Session ผู้ใช้ที่ปลอดภัย
+async function getAuthenticatedUser() {
+  // ในระบบจริง: ดึงจาก cookies(), auth() session
+  return {
+    id: 'usr_butcher_999',
+    role: 'CUSTOMER',
+    name: 'Somchai WagyuLover',
+  };
 }
-```
 
-### การเขียน Route Handler สำหรับ Endpoint ภายนอก
-
-```typescript filename="src/app/api/webhooks/route.ts"
-import { NextResponse } from 'next/server';
-
-export async function POST(request: Request) {
+export async function createMeatOrderAction(
+  prevState: ActionResponse<{ orderId: string; totalAmount: number }> | null,
+  formData: FormData
+): Promise<ActionResponse<{ orderId: string; totalAmount: number }>> {
   try {
-    const payload = await request.json();
-    // ประมวลผล Webhook เช่น Stripe Payment Notification
-    return NextResponse.json({ received: true }, { status: 200 });
-  } catch {
-    return NextResponse.json({ error: 'Invalid Payload' }, { status: 400 });
+    // ด่านที่ 1: ตรวจสอบการล็อกอินและสิทธิ์ (Authentication & RBAC)
+    const user = await getAuthenticatedUser();
+    if (!user) {
+      return { success: false, error: 'กรุณาเข้าสู่ระบบก่อนทำรายการสั่งซื้อเนื้อ' };
+    }
+
+    // ด่านที่ 2: ดึงข้อมูลดิบจาก FormData และแปลงเป็น Type ที่ถูกต้อง
+    const rawData = {
+      productId: formData.get('productId'),
+      cutType: formData.get('cutType'),
+      weightKg: parseFloat(formData.get('weightKg') as string),
+      deliveryAddress: formData.get('deliveryAddress'),
+    };
+
+    // ด่านที่ 3: ตรวจสอบความถูกต้องด้วย Zod
+    const validationResult = createOrderSchema.safeParse(rawData);
+    if (!validationResult.success) {
+      return {
+        success: false,
+        error: 'ข้อมูลคำสั่งซื้อไม่ถูกต้อง กรุณาตรวจสอบรายละเอียด',
+        fieldErrors: validationResult.error.flatten().fieldErrors,
+      };
+    }
+
+    const { productId, cutType, weightKg, deliveryAddress } = validationResult.data;
+
+    // ด่านที่ 4: ดึงราคาจาก Database จริง (ห้ามเชื่อราคาที่ส่งมาจากหน้าบ้าน!)
+    // ตัวอย่าง: ดึงข้อมูลเนื้อ Wagyu A5 จากฐานข้อมูล
+    const pricePerKg = 4500; // สมมติราคา 4,500 บาทต่อ กก.
+    const calculatedTotal = pricePerKg * weightKg;
+
+    // จำลองการบันทึกข้อมูลคำสั่งซื้อลงฐานข้อมูล (Prisma Transaction)
+    const newOrderId = `ORD-${Date.now()}`;
+
+    // ด่านที่ 5: สั่ง Revalidate แคชที่เกี่ยวข้อง
+    revalidateTag('meat-inventory'); // รีเฟรชสต็อกเนื้อทุกหน้า
+    revalidatePath('/orders');       // รีเฟรชหน้ารายการสั่งซื้อของลูกค้า
+
+    return {
+      success: true,
+      data: {
+        orderId: newOrderId,
+        totalAmount: calculatedTotal,
+      },
+      message: `สั่งซื้อเนื้อส่วน ${cutType} ปริมาณ ${weightKg} กก. สำเร็จเรียบร้อย!`,
+    };
+  } catch (error) {
+    console.error('Create Meat Order Failure:', error);
+    return {
+      success: false,
+      error: 'เกิดข้อผิดพลาดในการประมวลผลคำสั่งซื้อ กรุณาลองใหม่อีกครั้งในภายหลัง',
+    };
   }
 }
 ```
 
-## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+---
 
-- **Server Actions**:
-  - *ควรใช้*: เป็นตัวเลือกหลักสำหรับการทำ Mutation (เพิ่ม, ลบ, แก้ไขข้อมูล) ในแอป Next.js เอง เพราะใช้งานร่วมกับ `<form>` ได้ง่ายและสั่ง `revalidatePath` ได้ทันที
-  - *ไม่ควรใช้*: ดึงข้อมูลเพื่อนำมาแสดงผล (ให้ใช้ Server Components ดึงแทน)
-- **Route Handlers**:
-  - *ควรใช้*: เมื่อต้องเปิด API ให้ภายนอกเชื่อมต่อ (Mobile Apps, Webhooks, Third-party integrations) หรือการรับส่งข้อมูลแบบสตรีมมิ่ง/ไบนารีไฟล์
+### ตัวอย่างที่ 2: ฟอร์มสั่งซื้อพร้อม React 19 `useActionState` และ Optimistic UI
 
-## 4. ข้อควรระวัง
+คอมโพเนนต์ฝั่ง Client ที่นำ Server Action ด้านบนมาผสานกับ `useActionState` เพื่อจัดการ Loading state, แสดง Error ใต้ฟิลด์ และใช้ `useOptimistic` แสดงสถานะทันที:
 
-<Callout type="warning" title="Server Actions เป็น Public Endpoints">
-แม้ฟังก์ชันจะดูเหมือนฟังก์ชันธรรมดา แต่เบื้องหลังมันคือ HTTP POST Endpoint สาธารณะ ต้องตรวจสอบ Authentication และสิทธิ์ของผู้ใช้เสมอภายใน Server Action ทุกตัว
-</Callout>
+```tsx filename="src/app/products/[id]/OrderForm.tsx"
+'use client';
 
-<Callout type="tip" title="สั่ง revalidatePath ทันทีหลัง Mutation">
-หลังจากแก้ไขข้อมูลเสร็จเรียบร้อย ให้เรียก `revalidatePath('/path')` เพื่อให้ Next.js อัปเดตแคชของหน้านั้นทันทีโดยที่ผู้ใช้ไม่ต้องกดรีเฟรชหน้าจอ
-</Callout>
+import { useActionState, useOptimistic, startTransition } from 'react';
+import { createMeatOrderAction, type ActionResponse } from '@/actions/orders';
 
-## 5. แหล่งอ้างอิงทางการ
+interface OrderFormProps {
+  productId: string;
+  meatName: string;
+  defaultPricePerKg: number;
+}
 
-- [Next.js Server Actions and Mutations](https://nextjs.org/docs/app/building-your-application/data-fetching/server-actions-and-mutations)
-- [Route Handlers](https://nextjs.org/docs/app/building-your-application/routing/route-handlers)
+export function OrderForm({ productId, meatName, defaultPricePerKg }: OrderFormProps) {
+  // 1. เรียกใช้ React 19 useActionState แทน useFormState เดิม
+  const [state, formAction, isPending] = useActionState(createMeatOrderAction, null);
+
+  // 2. ใช้งาน useOptimistic เพื่อแสดงสถานะเสมือนก่อนเซิร์ฟเวอร์ตอบกลับ
+  const [optimisticStatus, setOptimisticStatus] = useOptimistic(
+    { isSubmitting: false, tempOrderId: '' },
+    (current, update: { isSubmitting: boolean; tempOrderId: string }) => ({
+      ...current,
+      ...update,
+    })
+  );
+
+  const handleSubmit = (formData: FormData) => {
+    startTransition(() => {
+      // ตั้งค่าสถานะ Optimistic ทันทีที่ผู้ใช้คลิก
+      setOptimisticStatus({
+        isSubmitting: true,
+        tempOrderId: 'กำลังสร้างรายการ...',
+      });
+      // ส่ง Form Action ไปยังเซิร์ฟเวอร์
+      formAction(formData);
+    });
+  };
+
+  return (
+    <form action={handleSubmit} className="border rounded-2xl p-6 bg-white dark:bg-neutral-900 shadow-sm space-y-4">
+      <h3 className="text-lg font-bold text-neutral-800 dark:text-neutral-100">
+        สั่งตัดเนื้อพิเศษ: {meatName}
+      </h3>
+
+      {/* Hidden Field สำหรับ productId */}
+      <input type="hidden" name="productId" value={productId} />
+
+      {/* ประเภทการตัดแต่ง */}
+      <div>
+        <label className="block text-sm font-medium mb-1">สไตล์การตัดแต่ง (Cut Type)</label>
+        <select
+          name="cutType"
+          defaultValue="Steak Cut (2.5cm)"
+          className="w-full border rounded-lg p-2 text-sm bg-transparent"
+          disabled={isPending}
+        >
+          <option value="Steak Cut (2.5cm)">สเต๊กคัท หนา 2.5 ซม.</option>
+          <option value="Yakiniku Cut (4mm)">ยากินิกุ สไลซ์ 4 มม.</option>
+          <option value="Shabu Slice (1.5mm)">ชาบู สไลซ์บาง 1.5 มม.</option>
+          <option value="Whole Roast Block">เนื้อทั้งก้อน (Roast Block)</option>
+        </select>
+        {state?.fieldErrors?.cutType && (
+          <p className="text-red-500 text-xs mt-1">{state.fieldErrors.cutType[0]}</p>
+        )}
+      </div>
+
+      {/* น้ำหนักเป็นกิโลกรัม */}
+      <div>
+        <label className="block text-sm font-medium mb-1">น้ำหนักที่ต้องการ (กก.)</label>
+        <input
+          type="number"
+          name="weightKg"
+          step="0.1"
+          defaultValue="0.5"
+          className="w-full border rounded-lg p-2 text-sm bg-transparent"
+          disabled={isPending}
+        />
+        {state?.fieldErrors?.weightKg && (
+          <p className="text-red-500 text-xs mt-1">{state.fieldErrors.weightKg[0]}</p>
+        )}
+      </div>
+
+      {/* ที่อยู่จัดส่ง */}
+      <div>
+        <label className="block text-sm font-medium mb-1">ที่อยู่จัดส่งควบคุมความเย็น</label>
+        <textarea
+          name="deliveryAddress"
+          rows={3}
+          placeholder="บ้านเลขที่, ถนน, แขวง/ตำบล, เขต/อำเภอ, จังหวัด, รหัสไปรษณีย์"
+          className="w-full border rounded-lg p-2 text-sm bg-transparent"
+          disabled={isPending}
+        />
+        {state?.fieldErrors?.deliveryAddress && (
+          <p className="text-red-500 text-xs mt-1">{state.fieldErrors.deliveryAddress[0]}</p>
+        )}
+      </div>
+
+      {/* แสดงข้อความแจ้งเตือนผลลัพธ์ */}
+      {state && !state.success && (
+        <div className="p-3 bg-red-50 dark:bg-red-950/40 border border-red-200 text-red-600 rounded-lg text-sm">
+          {state.error}
+        </div>
+      )}
+
+      {state?.success && (
+        <div className="p-3 bg-green-50 dark:bg-green-950/40 border border-green-200 text-green-700 rounded-lg text-sm">
+          {state.message} (รหัสคำสั่งซื้อ: {state.data.orderId} ยอดรวม: ฿{state.data.totalAmount.toLocaleString()})
+        </div>
+      )}
+
+      {optimisticStatus.isSubmitting && !state?.success && (
+        <p className="text-xs text-amber-600 animate-pulse">
+          ⚡ {optimisticStatus.tempOrderId} กำลังส่งข้อมูลไปยังโรงเชือดพรีเมียม...
+        </p>
+      )}
+
+      <button
+        type="submit"
+        disabled={isPending}
+        className="w-full bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white font-medium py-2.5 rounded-xl transition"
+      >
+        {isPending ? 'กำลังประมวลผลคำสั่งซื้อ...' : 'ยืนยันสั่งตัดเนื้อ'}
+      </button>
+    </form>
+  );
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ปัญหาที่พบบ่อย | รูปแบบที่ผิด (Anti-pattern) | รูปแบบที่ถูกต้องระดับ Senior (Best Practice) |
+| :--- | :--- | :--- |
+| **ละเลยการตรวจสิทธิ์ใน Action** | คิดว่าผู้ใช้กดปุ่มมาจากหน้าที่ล็อกอินแล้ว จึงไม่เช็ก Session ซ้ำใน Server Action | ตรวจสอบ Session Cookie และ Role (RBAC) เป็นบรรทัดแรกในทุก Server Action เพราะคนภายนอกยิง HTTP POST ตรงได้ |
+| **Throw Exception เพื่อแจ้งข้อมูลผิดพลาด** | ใช้คำสั่ง `throw new Error('กรุณากรอกน้ำหนัก')` ทำให้หน้าจอเด้งเข้า Error Boundary | ส่งกลับผลลัพธ์ Discriminated Union `{ success: false, fieldErrors: {...} }` และนำไปผูกใต้ Input แต่ละช่อง |
+| **เชื่อถือราคาและ ID จาก Client Form** | ส่ง `price=4500` ผ่าน `<input type="hidden" />` เปิดช่องให้ผู้โจมตีเปลี่ยนเป็น `price=1` ใน Inspector | ส่งเฉพาะ `productId` จากนั้นให้เซิร์ฟเวอร์ดึงราคาจริงจากฐานข้อมูลเพื่อคำนวณยอดเงิน |
+| **ไม่ปิดปุ่ม Submit ขณะกำลัง Pending** | ปล่อยให้ผู้ใช้คลิกปุ่มรัวๆ ทำให้คำสั่งซื้อเนื้อซ้ำซ้อน 2-3 ครั้งในเสี้ยววินาที | ใช้ค่า `isPending` จาก `useActionState` ในการใส่ `disabled` ที่ปุ่มบันทึก หรือทำ Idempotency Key ในฐานข้อมูล |
+| **สับสนระหว่าง Revalidate Tag และ Path** | สั่ง `revalidatePath('/')` พร่ำเพรื่อทุกครั้งที่มีการกดไลก์สินค้า ทำให้แคชหน้าแรกถูกทำลายทั้งหมด | ใช้ `revalidateTag('product-123')` เพื่อล้างเฉพาะข้อมูลของสินค้านั้นๆ ที่กระจายอยู่ตามหน้าต่างๆ อย่างแม่นยำ |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Server Actions เมื่อ:
+- **ฟอร์มการส่งและบันทึกข้อมูล (Data Mutations):** เช่น สั่งซื้อเนื้อสเต๊ก, สมัครสมาชิก, สมัครรับจดหมายข่าว, แก้ไขที่อยู่จัดส่ง
+- **การดำเนินการที่เชื่อมโยงกับ UI State และ Cache:** เช่น กดปุ่ม Bookmark เนื้อส่วนโปรด, เปลี่ยนสถานะคำสั่งซื้อจาก "กำลังตัดแต่ง" เป็น "จัดส่งแล้ว"
+- **ฟอร์มที่ต้องการ Progressive Enhancement:** รองรับการกดส่งข้อมูลแม้ขณะที่เครือข่ายมือถือช้ามากจนยังโหลด JS ไม่เสร็จ
+
+### ไม่ควรใช้ Server Actions เมื่อ:
+- **Webhook Callbacks จากระบบภายนอก:** เช่น Stripe Webhook, ธนาคารส่งสัญญาณยืนยันการโอนเงิน (ต้องใช้ Route Handler `src/app/api/webhooks/route.ts` เพราะต้องการรับ Raw Request Body และตรวจสอบ Webhook Signature)
+- **การให้บริการ Public API สำหรับ Mobile App หรือ Third-Party:** ควรใช้ Route Handlers หรือ REST API Framework แยกต่างหาก
+- **การสตรีมมิ่งไฟล์ขนาดใหญ่ หรือ Export รายงาน Excel/PDF:** ควรใช้ Route Handlers ที่คืนค่า `new NextResponse(fileStream)`
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: ทำไมในมุมมองความปลอดภัยด้านไซเบอร์ เราจึงต้องปฏิบัติกับ Server Actions เสมือนว่าเป็น Public HTTP POST Endpoint แม้ว่ามันจะถูกเขียนอยู่ในไฟล์เดียวกับ UI ก็ตาม?
+
+**แนวคำตอบเชิงลึก:**
+เพราะในสถาปัตยกรรมของ Next.js ตัว Server Action ไม่ได้ถูกจำกัดการเรียกใช้ผ่าน Event Handler ในเบราว์เซอร์เท่านั้น:
+1. **Compilation Transformation:** เมื่อคอมไพล์โค้ด Next.js จะแปลงฟังก์ชัน `'use server'` แต่ละตัวให้กลายเป็น Endpoint ภายใน โดยมีการสร้าง Action ID (รหัสแฮชแบบคงที่) และผูก Endpoint นั้นเข้ากับเราต์
+2. **Accessible over HTTP:** เมื่อแอป Deploy ขึ้น Production คำสั่งซื้อนี้สามารถถูกยิงด้วยเครื่องมือใดๆ เช่น `curl -X POST https://smartbutcher.com/products -H "Next-Action: <action-id>" -d "..."` ได้ทันที โดยที่ผู้ส่งคำขอไม่ต้องเปิดเบราว์เซอร์ ไม่ต้องโหลด React และไม่ต้องผ่าน Client-side Form Validation
+3. **Defense Strategy:** ดังนั้น Senior Developer ต้องไม่พึ่งพากลยุทธ์ "Security through Obscurity" เด็ดขาด ทุก Server Action จะต้องมีกระบวนการ:
+   - ตรวจสอบ Authentication Token / Session Cookie
+   - ตรวจสอบ Authorization (RBAC / Permissions)
+   - ตรวจสอบความถูกต้องของ Schema ด้วย Zod อย่างเข้มงวด
+   - ป้องกัน CSRF Token ซึ่ง Next.js มีการตรวจสอบ Origin/Host Header ให้อัตโนมัติ
+
+---
+
+### คำถามที่ 2: อธิบายความแตกต่างของพฤติกรรมระหว่าง `revalidatePath` และ `revalidateTag` ใน Next.js 16 และอธิบายว่า React 19 `useActionState` ช่วยยกระดับ User Experience ของการทำ Mutation อย่างไร?
+
+**แนวคำตอบเชิงลึก:**
+ความแตกต่างสำคัญระหว่างสองคำสั่งในการล้างแคช:
+- **`revalidatePath(path)`:** ทำงานในระดับ **URL Structure** เป็นการระบุชัดเจนว่าต้องการทำลายแคชของ Path ไหน (เช่น `/products` หรือแบบครอบคลุมทั้ง subtree ด้วย `/products/[id]`) ข้อดีคือตรงไปตรงมา แต่ข้อเสียคือ หากเนื้อวากิวชิ้นหนึ่งถูกแสดงผลใน 5 หน้า (หน้า Home, หน้ารวมเนื้อ, หน้า Best Seller, หน้ารายละเอียดสินค้า, หน้า Flash Sale) เราจะต้องสั่ง `revalidatePath` ถึง 5 รอบ ซึ่งเสี่ยงต่อการตกหล่น
+- **`revalidateTag(tag)`:** ทำงานในระดับ **Data Semantics** เป็นการล้างแคชที่ผูกติดอยู่กับตัวข้อมูล ไม่ว่าจะไปปรากฏอยู่บน URL ใดก็ตาม เช่น เมื่อเนื้อวากิว A5 ถูกแก้ไขสต็อก เราเพียงแค่สั่ง `revalidateTag('product-wagyu-a5')` หรือ `revalidateTag('inventory')` ครั้งเดียว ทุกหน้าที่มีการดึง Tag นี้จะถูก Invalidate พร้อมกันทั้งหมดในมิลลิวินาทีถัดไป
+
+**บทบาทของ React 19 `useActionState`:**
+- มาแทนที่ `useFormState` เดิมใน React 18
+- คืนค่า State สามส่วนที่สมบูรณ์แบบ: `[state, formAction, isPending]`
+- ช่วยลด Boilerplate โค้ด: ไม่ต้องสร้าง `useState` สำหรับเก็บ error, data, หรือ loading flag อีกต่อไป
+- ตัวแปร `isPending` ทำงานร่วมกับ React Transition ทำให้ UI ไม่กระตุก และสามารถนำไปสั่ง Disable ปุ่ม หรือแสดง Spinner ได้อย่างแม่นยำ
+- เมื่อ Server Action ส่งข้อมูลกลับ Next.js จะทำ Selective Re-rendering ข้อมูล Server Components บนหน้าจอให้ตรงกับฐานข้อมูลล่าสุดทันทีใน Network Cycle เดียวกัน
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [Next.js Forms & Form State](/docs/nextjs/forms) — การผสาน Server Actions กับ React Hook Form และ Zod
+- [Next.js Data Fetching & Caching](/docs/nextjs/data-fetching) — การควบคุม Caching และ Revalidation Tags
+- [Next.js Database & API Integration](/docs/nextjs/database) — การผสาน Prisma ORM และ Transactions ภายใน Actions
+- [Next.js RSC vs Client](/docs/nextjs/rsc-client) — การแยกแยะขอบเขตการทำงานของ Server และ Client Components

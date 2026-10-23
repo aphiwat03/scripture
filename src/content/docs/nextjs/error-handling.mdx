@@ -3,77 +3,382 @@ title: Error & Loading
 category: Frontend
 parentTitle: Next.js 16
 version: v16.4
-updatedAt: 2026-10-17
+updatedAt: 2026-10-23
 ---
 
-## 1. คืออะไร / ใช้ทำไม
+# Next.js 16 Error Handling, Loading States & Observability
 
-**Error Handling & Loading UI** คือระบบจัดการหน้าแสดงผลขณะรอข้อมูล (`loading.tsx`) และการดักจับข้อผิดพลาด (`error.tsx`, `not-found.tsx`) โดยอัตโนมัติด้วย React Suspense และ Error Boundary ระดับ Route
+คู่มือสถาปัตยกรรมการจัดการข้อผิดพลาด (Error Boundaries), การแสดงผลขณะรอข้อมูล (Loading Skeletons), การควบคุมความลับด้วย Server Error Redaction (`digest`), และการส่งรายงานข้อยกเว้นไปยังระบบ Monitoring อย่าง Sentry
 
-ช่วยป้องกันไม่ให้หน้าเว็บล่มทั้งระบบเมื่อเกิดข้อผิดพลาดเฉพาะจุด (Graceful Degradation) และสร้างความรู้สึกตอบสนองที่รวดเร็วให้แก่ผู้ใช้งาน
+---
 
-## 2. ตัวอย่างโค้ด (TypeScript)
+## 1. แนวคิด (Concept)
 
-### การสร้าง Loading Skeleton
+ในเว็บแอปพลิเคชันยุคดั้งเดิม เมื่อเกิด Uncaught Exception ขึ้นในคอมโพเนนต์ใดคอมโพเนนต์หนึ่ง ตัว React DOM Tree ทั้งหน้าจะพังทลายลงและกลายเป็นหน้าจอขาวว่างเปล่า (White Screen of Death) ทำให้ผู้ใช้งานไม่สามารถทำธุรกรรมใดๆ ต่อได้
 
-```tsx filename="src/app/dashboard/loading.tsx"
-// Next.js จะนำไปหุ้ม page.tsx ด้วย <Suspense> ให้อัตโนมัติ
-export default function DashboardLoading() {
+Next.js 16 App Router แก้ปัญหานี้ด้วยหลักการ **Fault Isolation & Graceful Degradation** ผ่านโครงสร้างไฟล์พิเศษระดับโฟลเดอร์:
+- **`loading.tsx`:** ห่อหุ้ม `page.tsx` ด้วย React `<Suspense>` โดยอัตโนมัติ เพื่อแสดง Loading UI หรือ Skeleton ทันทีที่ผู้ใช้กดนำทาง
+- **`error.tsx`:** สร้าง React Error Boundary ดักจับข้อผิดพลาดที่เกิดขึ้นในหน้านั้นๆ เพื่อให้ส่วนอื่นๆ ของเว็บ (เช่น Navbar, Cart Sidebar) ยังใช้งานได้ตามปกติ
+- **`not-found.tsx`:** แสดงผลหน้า 404 เมื่อมีการเรียกฟังก์ชัน `notFound()`
+- **`global-error.tsx`:** ด่านสุดท้ายในการดักจับข้อผิดพลาดระดับราก (Root Layout Error) เพื่อป้องกันไม่ให้เว็บล่มทั้งระบบ
+
+```text
++-----------------------------------------------------------------------------------+
+|                        Next.js Route Segment Hierarchy                            |
++-----------------------------------------------------------------------------------+
+| <RootLayout>                                                                      |
+|   <Header / Navigation />                                                         |
+|   +-----------------------------------------------------------------------------+ |
+|   | <ErrorBoundary (จาก error.tsx)>                                             | |
+|   |   +-----------------------------------------------------------------------+ | |
+|   |   | <Suspense fallback={<LoadingSkeleton /> (จาก loading.tsx)}>           | | |
+|   |   |   <PageContent /> (จาก page.tsx)                                      | | |
+|   |   +-----------------------------------------------------------------------+ | |
+|   +-----------------------------------------------------------------------------+ |
+|   <Footer />                                                                      |
+| </RootLayout>                                                                     |
++-----------------------------------------------------------------------------------+
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 ทำไม `error.tsx` ถึงไม่สามารถดักจับ Error ใน `layout.tsx` โฟลเดอร์เดียวกันได้?
+
+หากดูโครงสร้างโค้ดที่ Next.js สร้างขึ้นเบื้องหลัง:
+- คอมโพเนนต์ `error.tsx` จะถูกเรนเดอร์อยู่ **ภายใน (Inside)** คอมโพเนนต์ `layout.tsx` ของโฟลเดอร์เดียวกัน
+- ดังนั้น หาก `src/app/catalog/layout.tsx` เกิดข้อผิดพลาด ตัว `src/app/catalog/error.tsx` จะมองไม่เห็น Error นั้น เพราะ Error Boundary สามารถดักจับได้เฉพาะคอมโพเนนต์ลูกของตัวเองเท่านั้น
+- **วิธีแก้:** ข้อผิดพลาดใน `layout.tsx` จะต้องถูกดักจับโดย `error.tsx` ของโฟลเดอร์แม่ที่อยู่เหนือขึ้นไป 1 ชั้น
+
+### 2.2 บทบาทของ `global-error.tsx`
+ในกรณีที่ข้อผิดพลาดเกิดขึ้นที่ `src/app/layout.tsx` (Root Layout) คอมโพเนนต์ `error.tsx` ใน `src/app/error.tsx` จะไม่สามารถดักจับได้ เพราะ Root Layout ครอบ Error Boundary อยู่ข้างนอกสุด
+
+Next.js จึงมีไฟล์พิเศษชื่อ **`global-error.tsx`** ซึ่งจะทำงานแทนที่ Root Layout ทั้งหมดเมื่อเกิด Fatal Error ขึ้น:
+- ต้องกำหนด `'use client'`
+- ต้องประกาศแท็ก `<html>` และ `<body>` ภายในตัวเอง เพราะ Root Layout เดิมถูกปลดออกไปแล้ว
+- มีผลเฉพาะใน Production Build เท่านั้น (ใน Dev Mode จะแสดงหน้าต่าง Error Overlay ของ Next.js เพื่อความสะดวกในการ Debug)
+
+### 2.3 การ Redact ข้อผิดพลาดฝั่ง Server ด้วย `error.digest`
+
+ในระบบ Production ความปลอดภัยเป็นสิ่งสำคัญสูงสุด หากฐานข้อมูล PostgreSQL ล่ม หรือฟังก์ชันชำระเงินตัดบัตรโยน Database Error ออกมา ข้อความเหล่านั้นอาจมีชื่อ Table, คอลัมน์, หรือ Connection String หลุดออกมา
+
+Next.js 16 จึงมีกลไก **Server Error Masking / Redaction**:
+1. เมื่อเกิด Exception ใน Server Component หรือ Server Action ตัว Next.js จะบันทึก Stack Trace ฉบับเต็มลงในเซิร์ฟเวอร์คอนโซล
+2. สร้างรหัสแฮช (SHA Hash) พิเศษขึ้นมาเรียกว่า **`error.digest`** เช่น `"1837482910"`
+3. ข้อความ `error.message` ที่ส่งข้ามเครือข่ายไปยังเบราว์เซอร์จะถูกแทนที่ด้วยข้อความทั่วไปว่า:
+   `"An error occurred in the Server Components render. The specific message is omitted in production builds to avoid leaking sensitive information."`
+4. นักพัฒนาสามารถนำค่า `error.digest` ไปค้นหาใน Log ของเซิร์ฟเวอร์หรือ Sentry เพื่อดู Stack Trace ที่แท้จริงได้
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: ระบบ Loading Skeleton และ Error Boundary ของคลังเนื้อพรีเมียม
+
+สร้าง UI แสดงสถานะการโหลดสินค้าเนื้อวากิวแบบนุ่มนวล (Skeleton) ทันทีที่ผู้ใช้คลิกเลือกหมวดหมู่:
+
+```tsx filename="src/app/products/loading.tsx"
+export default function ProductsLoading() {
   return (
-    <div className="animate-pulse space-y-4 max-w-xl mx-auto py-8">
-      <div className="h-8 bg-hairline/60 rounded-xl w-1/3" />
-      <div className="h-48 bg-hairline/60 rounded-2xl" />
-      <div className="h-32 bg-hairline/60 rounded-2xl" />
+    <div className="max-w-6xl mx-auto p-6 space-y-6">
+      {/* Header Skeleton */}
+      <div className="space-y-2">
+        <div className="h-8 w-64 bg-neutral-200 dark:bg-neutral-800 rounded-lg animate-pulse" />
+        <div className="h-4 w-96 bg-neutral-100 dark:bg-neutral-900 rounded-lg animate-pulse" />
+      </div>
+
+      {/* Grid Meat Cards Skeleton */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+        {Array.from({ length: 6 }).map((_, index) => (
+          <div
+            key={index}
+            className="border border-neutral-200 dark:border-neutral-800 rounded-xl p-4 space-y-4"
+          >
+            {/* Image Placeholder */}
+            <div className="h-48 w-full bg-neutral-200 dark:bg-neutral-800 rounded-lg animate-pulse" />
+            
+            {/* Title & Badge */}
+            <div className="flex justify-between items-center">
+              <div className="h-6 w-32 bg-neutral-200 dark:bg-neutral-800 rounded animate-pulse" />
+              <div className="h-5 w-16 bg-neutral-100 dark:bg-neutral-900 rounded-full animate-pulse" />
+            </div>
+
+            {/* Price & Button */}
+            <div className="h-8 w-24 bg-neutral-200 dark:bg-neutral-800 rounded animate-pulse" />
+            <div className="h-10 w-full bg-neutral-300 dark:bg-neutral-700 rounded-lg animate-pulse" />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
 ```
 
-### การดักจับ Error ด้วย Error Boundary
+สร้าง Error Boundary ในระดับโฟลเดอร์ `products` เพื่อให้ผู้ใช้สามารถกด Retry กู้คืนการดึงข้อมูลเนื้อได้โดยไม่ต้องรีเฟรชทั้งหน้า:
 
-```tsx filename="src/app/dashboard/error.tsx"
+```tsx filename="src/app/products/error.tsx"
 'use client'; // Error Component ต้องเป็น Client Component เสมอ
 
-export default function DashboardError({
+import { useEffect } from 'react';
+
+interface ErrorProps {
+  error: Error & { digest?: string };
+  reset: () => void;
+}
+
+export default function ProductsError({ error, reset }: ErrorProps) {
+  useEffect(() => {
+    // บันทึกข้อยกเว้นไปยังระบบ Monitoring ภายนอก (เช่น Sentry / Datadog)
+    console.error('Smart Butcher Error Captured:', {
+      message: error.message,
+      digest: error.digest,
+      timestamp: new Date().toISOString(),
+    });
+  }, [error]);
+
+  return (
+    <div className="max-w-xl mx-auto my-12 p-8 border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/30 rounded-2xl text-center space-y-4">
+      <div className="w-12 h-12 bg-red-100 dark:bg-red-900/50 text-red-600 rounded-full flex items-center justify-center mx-auto text-xl font-bold">
+        !
+      </div>
+      
+      <h2 className="text-xl font-bold text-red-900 dark:text-red-200">
+        ไม่สามารถโหลดรายการเนื้อพรีเมียมได้ในขณะนี้
+      </h2>
+
+      <p className="text-sm text-red-700 dark:text-red-400">
+        ระบบขัดข้องชั่วคราวในการติดต่อกับคลังสินค้า กรุณาลองใหม่อีกครั้ง
+      </p>
+
+      {/* แสดง Error Digest สำหรับให้ผู้ใช้แจ้งทีมงาน Support */}
+      {error.digest && (
+        <p className="text-xs font-mono text-neutral-500 bg-white dark:bg-neutral-900 py-1 px-3 rounded-md inline-block border border-neutral-200 dark:border-neutral-800">
+          Incident ID: {error.digest}
+        </p>
+      )}
+
+      <div className="pt-2">
+        <button
+          onClick={() => reset()}
+          className="bg-red-600 hover:bg-red-700 text-white font-medium px-5 py-2.5 rounded-xl transition-colors shadow-sm"
+        >
+          ลองใหม่อีกครั้ง (Retry)
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: หน้ารายละเอียดสินค้า พร้อม `notFound()` และ 404 UI
+
+จัดการกรณีที่ผู้ใช้ค้นหาเนื้อสเต๊กที่ไม่มีอยู่ในระบบ ด้วยฟังก์ชัน `notFound()`:
+
+```tsx filename="src/app/products/[id]/page.tsx"
+import { notFound } from 'next/navigation';
+import type { Metadata } from 'next';
+
+interface MeatProduct {
+  id: string;
+  name: string;
+  origin: string;
+  pricePerKg: number;
+  marblingScore: number;
+  inStock: boolean;
+}
+
+async function fetchMeatById(id: string): Promise<MeatProduct | null> {
+  const res = await fetch(`https://api.smartbutcher.com/products/${id}`, {
+    next: { revalidate: 60 },
+  });
+
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`ไม่สามารถติดต่อเซอร์วิสสินค้าได้ (Status: ${res.status})`);
+
+  return res.json();
+}
+
+export default async function ProductDetailPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = await params;
+  const product = await fetchMeatById(id);
+
+  // หากไม่พบสินค้า ให้ตัดการทำงานและส่งต่อไปยัง not-found.tsx ทันที
+  if (!product) {
+    notFound();
+  }
+
+  return (
+    <div className="max-w-4xl mx-auto p-6 space-y-4">
+      <h1 className="text-3xl font-extrabold">{product.name}</h1>
+      <p className="text-neutral-600">แหล่งกำเนิด: {product.origin}</p>
+      <div className="text-2xl font-bold text-red-600">
+        ฿{product.pricePerKg.toLocaleString()} / กิโลกรัม
+      </div>
+      <div className="inline-block px-3 py-1 bg-amber-100 text-amber-900 rounded-lg text-sm font-semibold">
+        Marbling Score: A{product.marblingScore}
+      </div>
+    </div>
+  );
+}
+```
+
+สร้างหน้า UI เฉพาะจุดสำหรับสินค้าที่ไม่พบในระบบ:
+
+```tsx filename="src/app/products/[id]/not-found.tsx"
+import Link from 'next/navigation';
+
+export default function MeatNotFound() {
+  return (
+    <div className="max-w-md mx-auto my-16 text-center space-y-4 p-6">
+      <span className="text-5xl">🥩</span>
+      <h2 className="text-2xl font-bold text-neutral-800 dark:text-neutral-100">
+        ไม่พบเนื้อส่วนที่คุณกำลังมองหา
+      </h2>
+      <p className="text-sm text-neutral-500">
+        เนื้อส่วนนี้อาจขายหมดแล้ว หรือ URL อาจไม่ถูกต้อง ตรวจสอบรายการเนื้ออื่นๆ ในแคตตาล็อกของเราได้
+      </p>
+      <div className="pt-2">
+        <a
+          href="/products"
+          className="inline-block bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-90 transition"
+        >
+          กลับสู่คลังเนื้อพรีเมียม
+        </a>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 3: `global-error.tsx` ผสาน Sentry สำหรับ Root Layout Crash
+
+ไฟล์ฉุกเฉินระดับรากสำหรับกรณีที่ระบบพังทั้งแอป:
+
+```tsx filename="src/app/global-error.tsx"
+'use client';
+
+import { useEffect } from 'react';
+
+export default function GlobalError({
   error,
   reset,
 }: {
   error: Error & { digest?: string };
   reset: () => void;
 }) {
+  useEffect(() => {
+    // ส่งรายงาน Critical Exception ไปยัง Sentry หรือ Monitoring Service
+    // if (typeof window !== 'undefined' && (window as any).Sentry) {
+    //   (window as any).Sentry.captureException(error);
+    // }
+    console.error('Fatal Application Error (Global Error):', error);
+  }, [error]);
+
   return (
-    <div className="p-8 text-center border border-red-500/20 rounded-2xl bg-red-500/[0.04] max-w-md mx-auto my-8">
-      <h2 className="text-xl font-bold text-red-500">เกิดข้อผิดพลาดในการโหลดข้อมูล</h2>
-      <p className="text-sm text-muted mt-2">{error.message}</p>
-      <button
-        type="button"
-        onClick={() => reset()}
-        className="mt-4 px-4 py-2 bg-red-600 text-white rounded-xl text-xs font-semibold hover:bg-red-700 transition"
-      >
-        ลองใหม่อีกครั้ง
-      </button>
-    </div>
+    <html lang="th">
+      <body className="min-h-screen flex items-center justify-center bg-neutral-100 dark:bg-neutral-950 font-sans p-4">
+        <div className="max-w-lg w-full bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-800 rounded-2xl p-8 shadow-xl text-center space-y-5">
+          <div className="text-4xl">⚠️</div>
+          <h1 className="text-2xl font-bold text-neutral-900 dark:text-neutral-100">
+            เกิดข้อผิดพลาดร้ายแรงของระบบ
+          </h1>
+          <p className="text-sm text-neutral-600 dark:text-neutral-400">
+            ระบบโครงสร้างหลักขัดข้อง ทีมวิศวกรของเราได้รับรายงานเรียบร้อยแล้วและกำลังแก้ไขอย่างเร่งด่วน
+          </p>
+          {error.digest && (
+            <div className="bg-neutral-100 dark:bg-neutral-800 py-2 px-3 rounded text-xs font-mono text-neutral-600 dark:text-neutral-300">
+              Reference Code: {error.digest}
+            </div>
+          )}
+          <div>
+            <button
+              onClick={() => reset()}
+              className="bg-red-700 hover:bg-red-800 text-white font-medium px-6 py-2.5 rounded-xl transition"
+            >
+              เริ่มต้นใหม่อีกครั้ง
+            </button>
+          </div>
+        </div>
+      </body>
+    </html>
   );
 }
 ```
 
-## 3. ควรใช้เมื่อไหร่ / ไม่ควรใช้เมื่อไหร่
+---
 
-- **`loading.tsx`**: วางไว้ในโฟลเดอร์ Route เพื่อแสดง Skeleton ทันทีที่ผู้ใช้คลิกเปลี่ยนหน้า โดยไม่ต้องเขียน state `isLoading` เองในคอมโพเนนต์
-- **`error.tsx`**: ใช้ดักจับข้อผิดพลาดเฉพาะส่วนของหน้านั้น ช่วยให้ส่วนอื่นๆ ของเว็บ (เช่น Navbar/Sidebar) ยังใช้งานได้ตามปกติ
-- **`not-found.tsx`**: ใช้ร่วมกับฟังก์ชัน `notFound()` จาก `next/navigation` เมื่อไม่พบข้อมูลในฐานข้อมูล
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
 
-## 4. ข้อควรระวัง
+| ปัญหาที่พบบ่อย | วิธีการที่ผิด (Anti-pattern) | วิธีการที่ถูกต้องระดับ Senior (Best Practice) |
+| :--- | :--- | :--- |
+| **ลืมใส่ `'use client'` ใน `error.tsx`** | ประกาศ `error.tsx` เป็น Server Component ทำให้ Next.js คอมไพล์ล้มเหลวทันที | ใส่ `'use client'` บรรทัดแรกเสมอ เพราะ React Error Boundary ต้องมี Life-cycle State ของเบราว์เซอร์ |
+| **คาดหวังให้ `error.tsx` ดัก Error ใน `layout.tsx` เดียวกัน** | วาง `error.tsx` คู่กับ `layout.tsx` แล้วหวังให้จับ Layout Crash ได้ | ขยับ `error.tsx` ไปไว้ที่ Segment แม่ด้านบน 1 ระดับ หรือใช้ `global-error.tsx` สำหรับ Root Layout |
+| **ลืมแท็ก `<html>` ใน `global-error.tsx`** | เรนเดอร์เฉพาะ `<div>` ใน `global-error.tsx` เหมือน `error.tsx` ทั่วไป ทำให้ DOM พัง | ต้องครอบด้วย `<html>` และ `<body>` เสมอเมื่อเขียน `global-error.tsx` เพราะ Root Layout ทั้งหมดถูกปลด |
+| **พึ่งพา `error.message` ใน Production** | พยายามแยกแยะเคสข้อผิดพลาดด้วย `error.message` หน้าบ้าน ซึ่งใน Production ข้อความจะถูก Mask เป็นข้อความกลาง | ใช้ `error.digest` จับคู่กับ Server Log หรือใช้ Custom Error Code ที่ส่งผ่าน State แทนการ throw ข้อความดิบ |
+| **ใช้ Full Page Error กับคอมโพเนนต์เล็กๆ** | ปล่อยให้ Error ในวิดเจ็ตแนะนำเนื้อพรีเมียมท้ายหน้า ส่งผลให้ทั้งเพจดับลงเป็นหน้าจอ Error | ใช้ `<Suspense>` และ Local Error Boundary ห่อหุ้มคอมโพเนนต์ย่อยเฉพาะจุด เพื่อให้ส่วนอื่นยังใช้งานได้ |
 
-<Callout type="warning" title="error.tsx ต้องเป็น Client Component เสมอ">
-ไฟล์ `error.tsx` ต้องระบุ `'use client'` บรรทัดแรกสุดเสมอ เพราะ Error Boundary ใน React สามารถทำงานได้เฉพาะบนฝั่ง Client เท่านั้น
-</Callout>
+---
 
-<Callout type="tip" title="การใช้ global-error.tsx">
-`error.tsx` ภายในโฟลเดอร์ `app/` จะไม่สามารถดักจับ Error ที่เกิดขึ้นใน Root `layout.tsx` ได้ หากต้องการดักจับ Error ของ Root Layout ให้สร้างไฟล์ `app/global-error.tsx`
-</Callout>
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
 
-## 5. แหล่งอ้างอิงทางการ
+### ควรใช้ `error.tsx` และ `loading.tsx`:
+- **Route Segments ที่มีการดึงข้อมูล Asynchronous:** เช่น หน้ารายการเนื้อวากิว, หน้าประวัติคำสั่งซื้อ, หน้าแดชบอร์ดแอดมิน
+- **หน้าเว็บที่ต้องการให้ผู้ใช้กู้คืนสถานะได้:** ใช้ฟังก์ชัน `reset()` เพื่อให้ลอง Fetch ข้อมูลใหม่โดยไม่ต้องสูญเสีย Form State หรือ Scroll Position
+- **การนำทางที่ต้องการความรู้สึกลื่นไหล:** `loading.tsx` ช่วยแสดงผลทันทีแบบ Instant Navigation ตอบโจทย์ Core Web Vitals (INP)
 
-- [Next.js Loading UI and Streaming](https://nextjs.org/docs/app/building-your-application/routing/loading-ui-and-streaming)
-- [Next.js Error Handling](https://nextjs.org/docs/app/building-your-application/routing/error-handling)
+### ควรใช้ `notFound()`:
+- **ข้อมูลที่ระบุ ID หรือ Slug ไม่มีอยู่ในฐานข้อมูลจริง:** เพื่อให้เซิร์ฟเวอร์ส่ง HTTP Status Code 404 ที่ถูกต้องแก่ Search Engine Crawlers ป้องกันปัญหาหน้าเพจว่างที่ติดดัชนีหลอก (Soft 404)
+
+### ไม่ควรใช้ Error Boundary / `throw Error`:
+- **การตรวจสอบข้อมูลในฟอร์ม (Form Validation):** เช่น ลูกค้ากรอกรหัสไปรษณีย์ผิด หรือไม่ได้ระบุน้ำหนักเนื้อที่ต้องการ (ควรใช้ Discriminated Union คืนค่า `{ success: false, errors: {...} }` กลับไปแสดงใต้ช่องกรอกแทน)
+- **การควบคุม Flow การทำงานปกติของโปรแกรม:** เช่น การเช็กสิทธิ์ล็อกอิน (ควรใช้ `redirect('/login')` แทนการ throw Error 401)
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: ใน Next.js 16 App Router ทำไมไฟล์ `error.tsx` ถึงไม่สามารถดักจับ Exception ที่เกิดขึ้นใน `layout.tsx` ในโฟลเดอร์เดียวกันได้ และคุณจะจัดวางสถาปัตยกรรมโฟลเดอร์อย่างไรเพื่อจัดการกับปัญหานี้?
+
+**แนวคำตอบเชิงลึก:**
+เหตุผลเกิดจากการซ้อนกันของ React Component Tree ภายใน Next.js:
+- โครงสร้างที่ Next.js สร้างขึ้นใน Route Segment หนึ่งๆ จะเป็นลำดับดังนี้:
+  `<Layout> -> <ErrorBoundary (จาก error.tsx)> -> <Suspense (จาก loading.tsx)> -> <Page />`
+- จะเห็นได้ชัดเจนว่า `error.tsx` ทำหน้าที่เป็นลูก (Child) ที่ถูกห่อหุ้มอยู่ภายใน `<Layout>` อีกทีหนึ่ง
+- ตามกฎของ React Error Boundary: Error Boundary จะสามารถดักจับข้อผิดพลาดได้เฉพาะของ Component ลูก (Children) ที่อยู่ใต้ลำดับชั้นของมันเท่านั้น แต่ **ไม่สามารถดักจับข้อผิดพลาดของ Component พ่อแม่ หรือตัวมันเองได้**
+
+**แนวทางการจัดวางสถาปัตยกรรมที่ถูกต้อง:**
+1. หาก `src/app/dashboard/layout.tsx` มีโอกาสเกิดข้อผิดพลาด การดักจับจะต้องทำโดย `src/app/error.tsx` ซึ่งเป็น Error Boundary ของระดับโฟลเดอร์แม่ที่อยู่เหนือขึ้นไป
+2. หากข้อผิดพลาดเกิดขึ้นที่ Root Layout สูงสุด (`src/app/layout.tsx`) จะต้องสร้างไฟล์ `src/app/global-error.tsx` ซึ่งเป็น Fallback พิเศษที่ครอบทับ Root Layout ทั้งหมด
+
+---
+
+### คำถามที่ 2: ฟังก์ชัน `error.digest` ใน Next.js มีวัตถุประสงค์เพื่ออะไร ทำไม Next.js ถึงทำการ Redact ข้อความในโหมด Production และเราจะเชื่อมโยงระบบ Observability (เช่น Sentry) กับ Digest นี้ได้อย่างไร?
+
+**แนวคำตอบเชิงลึก:**
+`error.digest` คือรหัสแฮชแบบไม่สุ่ม (Deterministic Hash) ที่ Next.js สร้างขึ้นเพื่อเป็นสะพานเชื่อมระหว่าง Client และ Server โดยมีวัตถุประสงค์หลัก 2 ประการ:
+
+1. **Security & Information Disclosure Prevention:**
+   ในขั้นตอนการเรนเดอร์ Server Components หากเกิดข้อผิดพลาด เช่น คำสั่ง SQL ใน Prisma พัง ข้อความดิบของ Error อาจมีชื่อตารางในฐานข้อมูล, ไอพีภายใน, หรือพารามิเตอร์ที่เป็นความลับ หากปล่อยให้ข้อความนี้แสดงบนหน้าจอของผู้ใช้ ผู้ไม่ประสงค์ดีจะสามารถนำไปใช้โจมตีต่อได้ Next.js จึงทำการ Mask ข้อความทั้งหมดในโหมด Production ให้กลายเป็นข้อความทั่วไป แล้วส่งเฉพาะ `error.digest` กลับมา
+
+2. **End-to-End Incident Correlation (การเชื่อมโยงระบบ Log):**
+   บนเซิร์ฟเวอร์ Next.js จะพิมพ์ Log ข้อผิดพลาดฉบับเต็มคู่กับ `error.digest` รหัสนั้นเสมอ
+   - เมื่อผู้ใช้หน้าบ้านพบปัญหา Client Component ใน `error.tsx` จะได้รับค่า `error.digest` มา
+   - เราสามารถส่งค่า `digest` นี้เข้าไปเป็น Tag ในระบบ APM หรือ Error Monitoring (เช่น Sentry via `Sentry.captureException(error, { tags: { digest: error.digest } })`)
+   - เมื่อทีม On-call Engineer ได้รับแจ้งรหัส Digest จากผู้ใช้ หรือแจ้งเตือนจาก Sentry วิศวกรสามารถนำรหัส Digest นั้นไปค้นหาใน ElasticSearch, Datadog หรือ CloudWatch เพื่อดู Full Stack Trace ที่เกิดขึ้นบนเซิร์ฟเวอร์ได้ทันทีโดยไม่มีการเปิดเผยความลับสู่สาธารณะ
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [Next.js Routing Architecture](/docs/nextjs/routing) — การทำงานของ Route Segments และ Nested Layouts
+- [Next.js Data Fetching](/docs/nextjs/data-fetching) — การทำงานร่วมกับ React Suspense และ Cache
+- [Next.js Server Actions](/docs/nextjs/server-actions) — การจัดการข้อผิดพลาดในการ Mutation ข้อมูล
+- [Next.js Production Deployment](/docs/nextjs/deployment) — การตั้งค่า Logging และ Health Check ใน Production
