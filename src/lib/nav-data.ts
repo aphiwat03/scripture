@@ -190,6 +190,10 @@ export const NAV_GROUPS: NavGroup[] = [
             href: "/docs/typescript/basics",
           },
           {
+            title: "Built-in Methods",
+            href: "/docs/typescript/builtin-functions",
+          },
+          {
             title: "Inference",
             href: "/docs/typescript/inference",
           },

@@ -1,0 +1,763 @@
+---
+title: Built-in Methods
+category: Frontend
+parentTitle: TypeScript
+version: ES2024 / TypeScript 5.x
+updatedAt: 2026-10-23
+---
+
+# Built-in Functions & Methods: รวมฟังก์ชันมาตรฐานที่ใช้บ่อยที่สุดในงานจริง
+
+ในการพัฒนาเว็บแอปพลิเคชันระดับ Production ด้วย **TypeScript & JavaScript** มากกว่า 80% ของ Logic การแปลงข้อมูล (Data Transformation) ล้วนพึ่งพา **Built-in Methods & Functions** ที่ติดมากับภาษา การเข้าใจพฤติกรรมเชิงลึกว่าฟังก์ชันใดแก้ไขข้อมูลเดิม (Mutating) หรือสร้างข้อมูลใหม่ (Non-mutating), ฟังก์ชันใดมีความซับซ้อนเชิงเวลา $O(1)$ หรือ $O(n)$, และการเลือกใช้งานอย่างถูกต้อง จึงเป็นทักษะชี้ขาดความสะอาดและประสิทธิภาพของโค้ด
+
+เอกสารนี้รวบรวมฟังก์ชันและเมธอดที่ใช้บ่อยที่สุดในงานจริง แบ่งตามหมวดหมู่โครงสร้างข้อมูล พร้อมตัวอย่างการประยุกต์ใช้จริงในระบบ **Smart Butcher Marketplace**
+
+---
+
+## สารบัญเนื้อหาในหน้านี้
+
+- [1. หมวด Array Methods (ตระกูลจัดการอาเรย์)](#1-หมวด-array-methods-ตระกูลจัดการอาเรย์)
+  - [1.1 map(): แปลงร่างข้อมูลทุกตัวในอาเรย์](#11-map-แปลงร่างข้อมูลทุกตัวในอาเรย์)
+  - [1.2 filter(): กรองข้อมูลที่ต้องการ](#12-filter-กรองข้อมูลที่ต้องการ)
+  - [1.3 reduce(): รวมทั้งก้อนเป็นผลลัพธ์เดียว](#13-reduce-รวมทั้งก้อนเป็นผลลัพธ์เดียว)
+  - [1.4 find() และ findIndex(): ค้นหาตัวแรกที่ตรงเงื่อนไข](#14-find-และ-findindex-ค้นหาตัวแรกที่ตรงเงื่อนไข)
+  - [1.5 some() และ every(): ตรวจสอบเงื่อนไขแบบ Boolean](#15-some-และ-every-ตรวจสอบเงื่อนไขแบบ-boolean)
+  - [1.6 flatMap(): แมปพร้อมคลี่อาเรย์ซ้อน (Unnesting)](#16-flatmap-แมปพร้อมคลี่อาเรย์ซ้อน-unnesting)
+  - [1.7 sort() vs toSorted(): การเรียงลำดับข้อมูล](#17-sort-vs-tosorted-การเรียงลำดับข้อมูล)
+  - [1.8 slice() vs splice(): ตัดแบบปลอดภัย vs ตัดแก้ของเดิม](#18-slice-vs-splice-ตัดแบบปลอดภัย-vs-ตัดแก้ของเดิม)
+  - [1.9 includes() และ indexOf(): เช็คการมีอยู่ของค่า](#19-includes-และ-indexof-เช็คการมีอยู่ของค่า)
+- [2. หมวด String Methods (ตระกูลจัดการข้อความ & ข้อความฟอร์แมต)](#2-หมวด-string-methods-ตระกูลจัดการข้อความ--ข้อความฟอร์แมต)
+  - [2.1 split(): หั่นข้อความออกเป็นอาเรย์](#21-split-หั่นข้อความออกเป็นอาเรย์)
+  - [2.2 join(): ประกอบอาเรย์ข้อความกลับเป็นสตริง](#22-join-ประกอบอาเรย์ข้อความกลับเป็นสตริง)
+  - [2.3 replace() และ replaceAll(): แทนที่ข้อความและ Regex](#23-replace-และ-replaceall-แทนที่ข้อความและ-regex)
+  - [2.4 trim(), trimStart(), trimEnd(): ล้างช่องว่าง](#24-trim-trimstart-trimend-ล้างช่องว่าง)
+  - [2.5 toLowerCase() และ toUpperCase(): จัดการตัวพิมพ์](#25-tolowercase-และ-touppercase-จัดการตัวพิมพ์)
+  - [2.6 startsWith() และ endsWith(): ตรวจสอบหัวท้าย](#26-startswith-และ-endswith-ตรวจสอบหัวท้าย)
+  - [2.7 padStart() และ padEnd(): เติมตัวเลขนำหน้า](#27-padstart-และ-padend-เติมตัวเลขนำหน้า)
+- [3. หมวด Object Methods (ตระกูลจัดการพจนานุกรมและคีย์-ค่า)](#3-หมวด-object-methods-ตระกูลจัดการพจนานุกรมและคีย์-ค่า)
+  - [3.1 Object.keys(), Object.values(), Object.entries()](#31-objectkeys-objectvalues-objectentries)
+  - [3.2 Object.fromEntries(): แปลงคู่คีย์-ค่ากลับเป็น Object](#32-objectfromentries-แปลงคู่คีย์-ค่ากลับเป็น-object)
+  - [3.3 Object.assign() vs Spread Operator](#33-objectassign-vs-spread-operator)
+  - [3.4 structuredClone(): การทำ Deep Clone ระดับ Native](#34-structuredclone-การทำ-deep-clone-ระดับ-native)
+- [4. หมวด Collections: Set & Map (โครงสร้างข้อมูล O(1))](#4-หมวด-collections-set--map-โครงสร้างข้อมูล-o1)
+  - [4.1 Set: การลบค่าซ้ำซ้อนในบรรทัดเดียว](#41-set-การลบค่าซ้ำซ้อนในบรรทัดเดียว)
+  - [4.2 Map: พจนานุกรมความเร็วสูงสำหรับ Key ทุกชนิด](#42-map-พจนานุกรมความเร็วสูงสำหรับ-key-ทุกชนิด)
+- [5. หมวด Number & Internationalization (ตัวเลข วันเวลา และค่าเงิน)](#5-หมวด-number--internationalization-ตัวเลข-วันเวลา-และค่าเงิน)
+  - [5.1 Intl.NumberFormat: ฟอร์แมตเงินบาทไทย](#51-intlnumberformat-ฟอร์แมตเงินบาทไทย)
+  - [5.2 Intl.DateTimeFormat & toISOString(): จัดการวันเวลา](#52-intldatetimeformat--toisostring-จัดการวันเวลา)
+  - [5.3 Math.round(), floor(), ceil(), max(), min()](#53-mathround-floor-ceil-max-min)
+- [6. หมวด Asynchronous: Promise Methods](#6-หมวด-asynchronous-promise-methods)
+  - [6.1 Promise.all() vs Promise.allSettled()](#61-promiseall-vs-promiseallsettled)
+- [7. หมวด URL & Query String Handling](#7-หมวด-url--query-string-handling)
+  - [7.1 URL และ URLSearchParams](#71-url-และ-urlsearchparams)
+- [8. ตัวอย่างโค้ด Pipeline จริง (Smart Butcher Data Pipeline)](#8-ตัวอย่างโค้ด-pipeline-จริง-smart-butcher-data-pipeline)
+- [9. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)](#9-ข้อผิดพลาดที่พบบ่อย-anti-patterns)
+- [10. คำถามสัมภาษณ์งานระดับ Senior (Interview Q&A)](#10-คำถามสัมภาษณ์งานระดับ-senior-interview-qa)
+
+---
+
+## 1. หมวด Array Methods (ตระกูลจัดการอาเรย์)
+
+อาเรย์คือโครงสร้างข้อมูลที่ใช้งานบ่อยที่สุดใน Frontend และ Backend สำหรับการเขียนโค้ดสไตล์ Functional และ React ควรยึดหลัก **Immutability (ไม่แก้ไขข้อมูลต้นฉบับ)** เสมอ
+
+### 1.1 `map()`: แปลงร่างข้อมูลทุกตัวในอาเรย์
+- **คุณสมบัติ:** **Non-mutating** (คืนอาเรย์ใหม่ที่มีจำนวนสมาชิกเท่าเดิมเป๊ะ)
+- **การใช้งานหลัก:** ดึงเฉพาะฟิลด์ที่ต้องการ, แปลงหน่วย, ห่อหุ้ม JSX Component ใน React
+
+```typescript filename="array-map.ts"
+interface MeatItem {
+  sku: string;
+  name: string;
+  pricePerKg: number;
+}
+
+const meatInventory: MeatItem[] = [
+  { sku: "WAG-01", name: "Miyazaki Wagyu A5", pricePerKg: 3800 },
+  { sku: "ANG-02", name: "Black Angus Ribeye", pricePerKg: 1450 },
+];
+
+// แปลงให้เป็นป้ายราคาติดหน้าร้าน
+const displayLabels: string[] = meatInventory.map(
+  (item) => `${item.name} - ฿${item.pricePerKg.toLocaleString()}/kg`
+);
+// ผลลัพธ์: ["Miyazaki Wagyu A5 - ฿3,800/kg", "Black Angus Ribeye - ฿1,450/kg"]
+```
+
+---
+
+### 1.2 `filter()`: กรองข้อมูลที่ต้องการ
+- **คุณสมบัติ:** **Non-mutating** (คืนอาเรย์ใหม่ที่มีจำนวนสมาชิก $\le$ เดิม เฉพาะตัวที่ Callback ส่งค่า `true`)
+- **การใช้งานหลัก:** ค้นหา, กรองสถานะ, คัดแยกไอเทมที่ถูกลบ
+
+```typescript filename="array-filter.ts"
+interface Order {
+  id: string;
+  total: number;
+  status: "PENDING" | "PAID" | "CANCELLED";
+}
+
+const orders: Order[] = [
+  { id: "ORD-1", total: 4500, status: "PAID" },
+  { id: "ORD-2", total: 1200, status: "PENDING" },
+  { id: "ORD-3", total: 890, status: "CANCELLED" },
+];
+
+// กรองเฉพาะออเดอร์ที่จ่ายเงินแล้ว
+const paidOrders = orders.filter((order) => order.status === "PAID");
+```
+
+---
+
+### 1.3 `reduce()`: รวมทั้งก้อนเป็นผลลัพธ์เดียว
+- **คุณสมบัติ:** **Non-mutating** (ทรงพลังที่สุดในอาเรย์ สามารถแปลงอาเรย์เป็นตัวเลข, สตริง, อ็อบเจกต์ หรือแม้กระทั่งอาเรย์ใหม่)
+- **ไวยากรณ์:** `array.reduce((accumulator, currentItem, index) => { ... }, initialValue)`
+- **การใช้งานหลัก:** คำนวณยอดเงินรวม, Group By หมวดหมู่, นับความถี่ข้อมูล
+
+```typescript filename="array-reduce.ts"
+// 1. คำนวณยอดเงินรวมของตะกร้า
+const cartItems = [
+  { cut: "Striploin", price: 1500, quantity: 2 },
+  { cut: "Tenderloin", price: 1800, quantity: 1 },
+];
+
+const grandTotal = cartItems.reduce(
+  (acc, item) => acc + item.price * item.quantity,
+  0 // <--- ห้ามลืมกำหนด Initial Value เสมอ!
+);
+// grandTotal = 4800
+
+// 2. จัดกลุ่มข้อมูล (Group By Category)
+interface Product {
+  name: string;
+  category: "BEEF" | "PORK" | "SAUCE";
+}
+
+const products: Product[] = [
+  { name: "Wagyu A5", category: "BEEF" },
+  { name: "Kurobuta Pork", category: "PORK" },
+  { name: "Truffle Butter", category: "SAUCE" },
+  { name: "Angus Ribeye", category: "BEEF" },
+];
+
+const grouped = products.reduce((acc, product) => {
+  const cat = product.category;
+  if (!acc[cat]) {
+    acc[cat] = [];
+  }
+  acc[cat].push(product.name);
+  return acc;
+}, {} as Record<string, string[]>);
+
+/* ผลลัพธ์:
+{
+  BEEF: ["Wagyu A5", "Angus Ribeye"],
+  PORK: ["Kurobuta Pork"],
+  SAUCE: ["Truffle Butter"]
+}
+*/
+```
+
+---
+
+### 1.4 `find()` และ `findIndex()`: ค้นหาตัวแรกที่ตรงเงื่อนไข
+- `find()`: คืนค่า **Object สมาชิกตัวแรกที่ตรงเงื่อนไข** หากไม่พบจะคืนค่า `undefined`
+- `findIndex()`: คืนค่า **ดัชนี (Index) ตำแหน่งแรกที่พบ** หากไม่พบจะคืนค่า `-1`
+
+```typescript filename="array-find.ts"
+const meatCuts = [
+  { id: "c1", name: "Pork Chop", stock: 12 },
+  { id: "c2", name: "Wagyu Ribeye", stock: 0 },
+  { id: "c3", name: "Angus Sirloin", stock: 5 },
+];
+
+// หาเนื้อที่ของหมด
+const outOfStockCut = meatCuts.find((c) => c.stock === 0);
+// outOfStockCut = { id: "c2", name: "Wagyu Ribeye", stock: 0 }
+
+const outOfStockIndex = meatCuts.findIndex((c) => c.stock === 0);
+// outOfStockIndex = 1
+```
+
+---
+
+### 1.5 `some()` และ `every()`: ตรวจสอบเงื่อนไขแบบ Boolean
+- `some()`: คืนค่า `true` หากมีสมาชิก **อย่างน้อย 1 ตัว** ตรงตามเงื่อนไข (หยุดตรวจทันทีเมื่อพบตัวแรก - Short-circuit)
+- `every()`: คืนค่า `true` ก็ต่อเมื่อ **ทุกตัวในอาเรย์** ต้องตรงตามเงื่อนไข
+
+```typescript filename="array-some-every.ts"
+const orderItems = [
+  { name: "Wagyu", isFrozen: true, weightKg: 1.2 },
+  { name: "Dry-Aged Tomahawk", isFrozen: false, weightKg: 2.5 },
+];
+
+// ตรวจว่ามีสินค้าที่ต้องใช้รถห้องเย็นจัดส่งหรือไม่
+const needsColdChain = orderItems.some((item) => item.isFrozen); // true
+
+// ตรวจสอบว่าสินค้าทุกชิ้นมีน้ำหนักเกินเกณฑ์ขั้นต่ำ 1kg หรือไม่
+const allOverWeight = orderItems.every((item) => item.weightKg >= 1.0); // true
+```
+
+---
+
+### 1.6 `flatMap()`: แมปพร้อมคลี่อาเรย์ซ้อน (Unnesting)
+- **คุณสมบัติ:** รวมการทำ `.map()` และ `.flat(1)` ไว้ในรอบเดียว ประสิทธิภาพดีกว่าการเรียกแยก
+- **การใช้งานหลัก:** แตกข้อมูลแบบ One-to-Many เช่น ดึงรายการสินค้าทั้งหมดออกมาจากทุกคำสั่งซื้อ
+
+```typescript filename="array-flatmap.ts"
+interface CustomerOrder {
+  orderId: string;
+  items: string[];
+}
+
+const customerOrders: CustomerOrder[] = [
+  { orderId: "ORD-1", items: ["Ribeye", "Tenderloin"] },
+  { orderId: "ORD-2", items: ["Brisket"] },
+  { orderId: "ORD-3", items: ["Wagyu A5", "Butter"] },
+];
+
+// ดึงรายการเนื้อทั้งหมดออกมาเป็นอาเรย์ชั้นเดียว
+const allBoughtItems = customerOrders.flatMap((order) => order.items);
+// ผลลัพธ์: ["Ribeye", "Tenderloin", "Brisket", "Wagyu A5", "Butter"]
+```
+
+---
+
+### 1.7 `sort()` vs `toSorted()`: การเรียงลำดับข้อมูล
+> [!CAUTION]
+> `sort()` ของ JavaScript แบบดั้งเดิมจะ **แก้ไขข้อมูลในอาเรย์ต้นฉบับ (Mutate in-place)** และเรียงตามรหัสตัวอักษร Unicode ทำให้ตัวเลข `[10, 2, 5]` กลายเป็น `[10, 2, 5]` เพราะ `'10'` มาก่อน `'2'`!  
+> ต้องใส่ Comparison Function `(a, b) => a - b` เสมอ  
+> ในโมเดิร์น JavaScript/TypeScript (ES2023+) แนะนำให้ใช้ **`toSorted()`** เพราะ **Non-mutating**
+
+```typescript filename="array-sort.ts"
+const prices = [1200, 450, 3800, 890];
+
+// ❌ แบบดั้งเดิม (Mutate ต้นฉบับ)
+// prices.sort((a, b) => a - b);
+
+// ✅ ปลอดภัยแบบ Immutable (ES2023)
+const sortedPricesAscending = prices.toSorted((a, b) => a - b);
+// [450, 890, 1200, 3800]
+
+const sortedPricesDescending = prices.toSorted((a, b) => b - a);
+// [3800, 1200, 890, 450]
+```
+
+---
+
+### 1.8 `slice()` vs `splice()`: ตัดแบบปลอดภัย vs ตัดแก้ของเดิม
+- **`slice(start, end)`**: **Non-mutating** คัดลอกส่วนหนึ่งของอาเรย์ออกมาเป็นอาเรย์ใหม่ ไม่กระทบของเดิม (ใช้ทำ Pagination)
+- **`splice(start, deleteCount, ...items)`**: **Mutating** ควัก/ลบ/แทรกสมาชิกในอาเรย์เดิมโดยตรง
+
+```typescript filename="array-slice-splice.ts"
+const meatList = ["Ribeye", "Sirloin", "T-Bone", "Tenderloin", "Chuck"];
+
+// การทำ Pagination ดึงหน้าที่ 1 ขนาด 2 ชิ้น (ไม่กระทบ meatList เดิม)
+const pageOne = meatList.slice(0, 2); // ["Ribeye", "Sirloin"]
+const pageTwo = meatList.slice(2, 4); // ["T-Bone", "Tenderloin"]
+```
+
+---
+
+### 1.9 `includes()` และ `indexOf()`: เช็คการมีอยู่ของค่า
+- `includes(value)`: คืนค่า `true` / `false` เหมาะกับการตรวจ Primitive values
+- `indexOf(value)`: คืนค่าตำแหน่ง index หรือ `-1` เมื่อไม่พบ
+
+```typescript filename="array-includes.ts"
+const allowedGrades = ["A5", "A4", "PRIME"];
+const customerGrade = "A5";
+
+if (allowedGrades.includes(customerGrade)) {
+  console.log("เกรดเนื้อพรีเมียมตรงตามเงื่อนไขส่งออก");
+}
+```
+
+---
+
+## 2. หมวด String Methods (ตระกูลจัดการข้อความ & ข้อความฟอร์แมต)
+
+---
+
+### 2.1 `split()`: หั่นข้อความออกเป็นอาเรย์
+- **การใช้งานหลัก:** แปลง CSV เป็นอาเรย์, แยก Path, หั่นคำด้วย Space
+
+```typescript filename="string-split.ts"
+// 1. แยก Tags สินค้าจากสตริงที่คั่นด้วยลูกน้ำ
+const tagString = "wagyu,dry-aged,halal,a5";
+const tagList = tagString.split(","); 
+// ["wagyu", "dry-aged", "halal", "a5"]
+
+// 2. ดึง Username ออกจาก Email
+const email = "somchai.butcher@smartbutcher.com";
+const [username, domain] = email.split("@");
+// username = "somchai.butcher", domain = "smartbutcher.com"
+```
+
+---
+
+### 2.2 `join()`: ประกอบอาเรย์ข้อความกลับเป็นสตริง
+- **การใช้งานหลัก:** สร้าง Breadcrumbs, สร้างสตริงสำหรับใส่ใน SQL Query, รวม ClassNames
+
+```typescript filename="string-join.ts"
+const categories = ["Home", "Meat", "Beef", "Wagyu A5"];
+const breadcrumb = categories.join(" > ");
+// "Home > Meat > Beef > Wagyu A5"
+
+const selectedSkus = ["SKU-1", "SKU-2", "SKU-3"];
+const urlQuery = selectedSkus.join("&sku=");
+```
+
+---
+
+### 2.3 `replace()` และ `replaceAll()`: แทนที่ข้อความและ Regex
+- `replace(target, replacement)`: แทนที่ **จุดแรกที่พบ** จุดเดียว
+- `replaceAll(target, replacement)`: แทนที่ **ทุกจุดทั่วทั้งสตริง** (หรือใช้ `replace(/pattern/g, ...)` ด้วย Regex flag `g`)
+
+```typescript filename="string-replace.ts"
+// 1. ล้างขีดและเว้นวรรคออกจากเบอร์โทรศัพท์
+const rawPhone = "081-234 5678";
+const cleanPhone = rawPhone.replaceAll(/[- ]/g, ""); // "0812345678"
+
+// 2. ปิดบังข้อมูลอ่อนไหว (Masking Credit Card)
+const card = "1234-5678-9012-3456";
+const masked = card.replace(/^(\d{4})-(\d{4})-(\d{4})/, "****-****-****");
+// "****-****-****-3456"
+```
+
+---
+
+### 2.4 `trim()`, `trimStart()`, `trimEnd()`: ล้างช่องว่าง
+- หัวใจสำคัญของการ Sanitization ข้อมูล Input จากฟอร์มลูกค้าเพื่อป้องกันบั๊กช่องว่างแฝง
+
+```typescript filename="string-trim.ts"
+const customerInput = "   wagyu a5 striploin   \n";
+const sanitized = customerInput.trim(); 
+// "wagyu a5 striploin"
+```
+
+---
+
+### 2.5 `toLowerCase()` และ `toUpperCase()`: จัดการตัวพิมพ์
+- ใช้ทำ Case-Insensitive Comparison เพื่อความแม่นยำในการค้นหา
+
+```typescript filename="string-case.ts"
+const searchKeyword = "WAGYU";
+const productName = "Miyazaki Wagyu A5";
+
+const isMatch = productName.toLowerCase().includes(searchKeyword.toLowerCase());
+// true
+```
+
+---
+
+### 2.6 `startsWith()` และ `endsWith()`: ตรวจสอบหัวท้าย
+```typescript filename="string-start-end.ts"
+const orderNumber = "ORD-2026-10928";
+const isOrder = orderNumber.startsWith("ORD-"); // true
+
+const receiptImage = "slip-upload-89.png";
+const isImage = receiptImage.endsWith(".png") || receiptImage.endsWith(".jpg"); // true
+```
+
+---
+
+### 2.7 `padStart()` และ `padEnd()`: เติมตัวเลขนำหน้า
+- กำหนดความยาวคงที่โดยเติมอักขระที่กำหนด นิยมใช้สร้างเลขที่ใบแจ้งหนี้ รหัสสินค้า หรือรันนัมเบอร์
+
+```typescript filename="string-pad.ts"
+const orderSeqNumber = 42;
+// เติม 0 ด้านหน้าให้ครบ 6 หลัก
+const formattedInvoice = `INV-${orderSeqNumber.toString().padStart(6, "0")}`;
+// "INV-000042"
+```
+
+---
+
+## 3. หมวด Object Methods (ตระกูลจัดการพจนานุกรมและคีย์-ค่า)
+
+---
+
+### 3.1 `Object.keys()`, `Object.values()`, `Object.entries()`
+- `Object.keys(obj)`: ดึงรายชื่อ Key ทั้งหมดออกมาเป็น `string[]`
+- `Object.values(obj)`: ดึงค่า Value ทั้งหมดออกมาเป็นอาเรย์
+- `Object.entries(obj)`: ดึงออกมาเป็นคู่ `[key, value][]` สำหรับการวนลูป
+
+```typescript filename="object-methods.ts"
+const meatPrices = {
+  ribeye: 1200,
+  striploin: 1100,
+  tenderloin: 1600,
+};
+
+const cutNames = Object.keys(meatPrices); 
+// ["ribeye", "striploin", "tenderloin"]
+
+const priceList = Object.values(meatPrices); 
+// [1200, 1100, 1600]
+
+// วนลูปแสดงผล Key และ Value
+for (const [cut, price] of Object.entries(meatPrices)) {
+  console.log(`เนื้อส่วน ${cut} ราคากิโลกรัมละ ฿${price}`);
+}
+```
+
+---
+
+### 3.2 `Object.fromEntries()`: แปลงคู่คีย์-ค่ากลับเป็น Object
+- มักใช้งานร่วมกับ `Object.entries()` และ `map()` เพื่อแปลงค่าของอ็อบเจกต์ทั้งก้อน
+
+```typescript filename="object-fromentries.ts"
+const pricesTHB = { wagyu: 3000, angus: 1500, kurobuta: 800 };
+
+// ต้องการปรับขึ้นราคาทุกชิ้น 10%
+const increasedPrices = Object.fromEntries(
+  Object.entries(pricesTHB).map(([meat, price]) => [meat, Math.round(price * 1.1)])
+);
+// { wagyu: 3300, angus: 1650, kurobuta: 880 }
+```
+
+---
+
+### 3.3 `Object.assign()` vs Spread Operator
+- ทั้งคู่เป็นการคัดลอกแบบ **Shallow Copy (ตื้น)** หากมีอ็อบเจกต์ซ้อนข้างใน Reference จะยังผูกกันอยู่
+- ในโค้ดสมัยใหม่ นิยมใช้ **Object Spread `{ ...obj }`** มากกว่าเพราะสั้นกระชับกว่า
+
+```typescript filename="object-spread.ts"
+const baseCut = { name: "Tomahawk", price: 2800 };
+const dryAgedCut = { ...baseCut, isAged: true, agingDays: 45 };
+// { name: "Tomahawk", price: 2800, isAged: true, agingDays: 45 }
+```
+
+---
+
+### 3.4 `structuredClone()`: การทำ Deep Clone ระดับ Native
+> [!TIP]
+> ในอดีต นักพัฒนามักใช้ `JSON.parse(JSON.stringify(obj))` เพื่อทำ Deep Clone ซึ่งมีจุดบกพร่องร้ายแรงคือ ข้อมูลประเภท `Date`, `Set`, `Map`, `undefined`, และ Circular Reference จะพังทลาย  
+> ในเบราว์เซอร์และ Node.js ยุคใหม่ มีฟังก์ชันมาตรฐานชื่อ **`structuredClone(obj)`** มาแทนที่อย่างสมบูรณ์แบบ 100%
+
+```typescript filename="deep-clone.ts"
+const originalOrder = {
+  id: "ORD-99",
+  createdAt: new Date(),
+  items: [{ cut: "Wagyu A5", specs: { thicknessCm: 2.5 } }],
+};
+
+// Deep Clone แบบไม่ผูก Reference ข้ามกัน
+const clonedOrder = structuredClone(originalOrder);
+clonedOrder.items[0].specs.thicknessCm = 3.0;
+
+// originalOrder.items[0].specs.thicknessCm ยังคงเป็น 2.5 ไม่เปลี่ยนตาม!
+```
+
+---
+
+## 4. หมวด Collections: Set & Map (โครงสร้างข้อมูล O(1))
+
+---
+
+### 4.1 `Set`: การลบค่าซ้ำซ้อนในบรรทัดเดียว
+- `Set` เก็บเฉพาะ **ค่าที่ไม่ซ้ำกัน (Unique Values)**
+- การค้นหา `set.has(val)` ทำงานด้วยความเร็ว $O(1)$ เร็วกว่า `array.includes()` ที่เป็น $O(n)$ มหาศาลเมื่อข้อมูลมีจำนวนมาก
+
+```typescript filename="set-dedup.ts"
+const duplicateCategories = ["Beef", "Pork", "Beef", "Sauce", "Pork", "Wagyu"];
+
+// เทคนิคลบค่าซ้ำใน 1 บรรทัดด้วย Set + Spread
+const uniqueCategories = [...new Set(duplicateCategories)];
+// ["Beef", "Pork", "Sauce", "Wagyu"]
+```
+
+---
+
+### 4.2 `Map`: พจนานุกรมความเร็วสูงสำหรับ Key ทุกชนิด
+- ต่างจาก Plain Object ตรงที่ `Map` อนุญาตให้ใช้ **Object เป็น Key ได้** และคงลำดับการใส่ข้อมูลไว้อย่างแม่นยำ
+
+```typescript filename="map-usage.ts"
+interface ButcherShop {
+  id: string;
+  name: string;
+}
+
+const shopA: ButcherShop = { id: "s1", name: "Thonglor Wagyu House" };
+const shopB: ButcherShop = { id: "s2", name: "Asoke Dry-Aged Lab" };
+
+// Map สามารถใช้ Object เป็น Key ได้โดยตรง
+const shopRevenueMap = new Map<ButcherShop, number>();
+shopRevenueMap.set(shopA, 1250000);
+shopRevenueMap.set(shopB, 840000);
+
+console.log(shopRevenueMap.get(shopA)); // 1250000
+```
+
+---
+
+## 5. หมวด Number & Internationalization (ตัวเลข วันเวลา และค่าเงิน)
+
+---
+
+### 5.1 `Intl.NumberFormat`: ฟอร์แมตเงินบาทไทย
+- **มาตรฐานสากล:** ห้ามเขียนฟังก์ชันใส่จุลภาคเอง ให้ใช้ Web API มาตรฐาน `Intl.NumberFormat`
+
+```typescript filename="intl-currency.ts"
+const thaiBahtFormatter = new Intl.NumberFormat("th-TH", {
+  style: "currency",
+  currency: "THB",
+  minimumFractionDigits: 2,
+});
+
+console.log(thaiBahtFormatter.format(3500.5));
+// "฿3,500.50"
+```
+
+---
+
+### 5.2 `Intl.DateTimeFormat` & `toISOString()`: จัดการวันเวลา
+- `toISOString()`: รูปแบบ `YYYY-MM-DDTHH:mm:ss.sssZ` (ใช้ส่งข้าม API และเซฟลงฐานข้อมูล PostgreSQL)
+- `Intl.DateTimeFormat`: แสดงผลภาษาไทยแบบทางการ
+
+```typescript filename="intl-date.ts"
+const now = new Date();
+
+// 1. ส่งให้ Database / API
+const dbTimestamp = now.toISOString(); // "2026-10-23T12:15:30.123Z"
+
+// 2. แสดงผลภาษาไทยบนหน้าเว็บ
+const thaiDateFormatter = new Intl.DateTimeFormat("th-TH", {
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
+console.log(thaiDateFormatter.format(now));
+// "23 ตุลาคม 2026, 19:15"
+```
+
+---
+
+### 5.3 `Math.round()`, `floor()`, `ceil()`, `max()`, `min()`
+- `Math.round()`: ปัดเศษตามหลักสากล ($\ge 0.5$ ปัดขึ้น)
+- `Math.floor()`: ปัดเศษลงเสมอ
+- `Math.ceil()`: ปัดเศษขึ้นเสมอ (นิยมใช้คำนวณจำนวนหน้า Pagination: `Math.ceil(totalCount / pageSize)`)
+- `Math.max(...nums)` & `Math.min(...nums)`: หาค่ามากสุด/น้อยสุด
+
+```typescript filename="math-methods.ts"
+// คำนวณจำนวนหน้าทั้งหมดในระบบร้านค้า
+const totalItems = 53;
+const pageSize = 10;
+const totalPages = Math.ceil(totalItems / pageSize); // 6 หน้า
+
+// หาช่วงราคาต่ำสุดและสูงสุดของเนื้อสเต๊ก
+const prices = [1200, 3800, 890, 4500, 1650];
+const minPrice = Math.min(...prices); // 890
+const maxPrice = Math.max(...prices); // 4500
+```
+
+---
+
+## 6. หมวด Asynchronous: Promise Methods
+
+เมื่อต้องเรียก API หลายตัวพร้อมกันใน Next.js หรือ NestJS การใช้ Promise Methods อย่างถูกวิธีจะช่วยลดเวลา Response Time ของระบบได้อย่างมหาศาล:
+
+```
+[ Sequential Fetching ] (ช้า)
+Fetch A (1s) ──> Fetch B (1s) ──> Fetch C (1s)  Total = 3s
+
+[ Promise.all Concurrent ] (เร็ว)
+Fetch A (1s) ──┐
+Fetch B (1s) ──┼──> Total = 1s!
+Fetch C (1s) ──┘
+```
+
+---
+
+### 6.1 `Promise.all()` vs `Promise.allSettled()`
+
+| เมธอด | พฤติกรรมเมื่อมีตัวใดตัวหนึ่ง Error | เหมาะสำหรับ |
+| :--- | :--- | :--- |
+| **`Promise.all([p1, p2, p3])`** | **Fail-fast (Reject ทันที)** หากตัวใดตัวหนึ่งล้มเหลว จะทิ้งผลลัพธ์ของตัวอื่นทั้งหมด | ข้อมูลที่มีความเกี่ยวเนื่องกันสูง เช่น ดึงข้อมูล User + Order ที่ต้องใช้คู่กัน |
+| **`Promise.allSettled([p1, p2, p3])`** | **รอจนจบครบทุกตัวเสมอ** ไม่ว่าจะ Success หรือ Error โดยส่งสถานะ `{ status: 'fulfilled', value }` หรือ `{ status: 'rejected', reason }` | การยิงงานที่ไม่ผูกมัดกัน เช่น ส่งแจ้งเตือน SMS + Email + Line Notify |
+
+```typescript filename="promise-methods.ts"
+// ยิงแจ้งเตือน 3 ช่องทางพร้อมกัน แม้ SMS จะล้มเหลว Email และ LINE ยังทำงานสำเร็จ
+const results = await Promise.allSettled([
+  sendEmailNotification(orderId),
+  sendSmsNotification(orderId),
+  sendLineNotify(orderId),
+]);
+
+results.forEach((res, index) => {
+  if (res.status === "fulfilled") {
+    console.log(`ช่องทางที่ ${index + 1} ส่งสำเร็จ`);
+  } else {
+    console.error(`ช่องทางที่ ${index + 1} ล้มเหลว:`, res.reason);
+  }
+});
+```
+
+---
+
+## 7. หมวด URL & Query String Handling
+
+ในการทำงานกับ Next.js Route Handlers หรือการเรียก External API หลีกเลี่ยงการต่อสตริง URL ด้วยเครื่องหมาย `+` เพราะมักลืม Escape อักขระพิเศษ ให้ใช้ **Web URL APIs** แทน:
+
+```typescript filename="url-search-params.ts"
+// การสร้าง URL สำหรับค้นหาเนื้อวากิวพร้อม Query Parameters
+const url = new URL("https://api.smartbutcher.com/v1/products");
+
+url.searchParams.set("category", "beef");
+url.searchParams.set("grade", "A5");
+url.searchParams.set("maxPrice", "4000");
+url.searchParams.append("tags", "dry-aged");
+url.searchParams.append("tags", "halal");
+
+console.log(url.toString());
+// "https://api.smartbutcher.com/v1/products?category=beef&grade=A5&maxPrice=4000&tags=dry-aged&tags=halal"
+
+// การอ่านค่า Query String
+const params = new URLSearchParams("?page=2&limit=20&sort=desc");
+const page = Number(params.get("page") ?? 1); // 2
+const hasSort = params.has("sort"); // true
+```
+
+---
+
+## 8. ตัวอย่างโค้ด Pipeline จริง (Smart Butcher Data Pipeline)
+
+ตัวอย่างการประกอบร่างของ `split`, `filter`, `map`, `reduce`, `new Set`, และ `Intl` เข้าด้วยกันเพื่อประมวลผลสรุปยอดขายเนื้อประจำวัน:
+
+```typescript filename="src/services/reportPipeline.ts"
+interface RawSaleRecord {
+  recordId: string;
+  rawPayload: string; // ข้อมูลดิบรูปแบบ: "SKU|MeatName|Category|Qty|PricePerUnit"
+  soldAt: string;     // ISO timestamp
+}
+
+interface DailyCategorySummary {
+  category: string;
+  totalRevenue: number;
+  totalQuantity: number;
+  formattedRevenue: string;
+}
+
+export function processDailySalesData(records: RawSaleRecord[]): DailyCategorySummary[] {
+  // 1. ตัวแปลงค่าเงินภาษาไทย
+  const currencyFormatter = new Intl.NumberFormat("th-TH", {
+    style: "currency",
+    currency: "THB",
+    maximumFractionDigits: 0,
+  });
+
+  // 2. ประมวลผลคลี่ข้อมูลดิบด้วย split และ map
+  const parsedItems = records.map((record) => {
+    const [sku, meatName, category, qtyStr, priceStr] = record.rawPayload.split("|");
+    return {
+      sku: sku.trim(),
+      meatName: meatName.trim(),
+      category: category.trim().toUpperCase(),
+      quantity: Number.parseInt(qtyStr, 10),
+      price: Number.parseFloat(priceStr),
+    };
+  });
+
+  // 3. กรองเฉพาะรายการที่ถูกต้อง (quantity > 0)
+  const validItems = parsedItems.filter((item) => item.quantity > 0 && !Number.isNaN(item.price));
+
+  // 4. รวบรวมหมวดหมู่ทั้งหมดแบบไม่ซ้ำซ้อนด้วย Set
+  const categories = [...new Set(validItems.map((item) => item.category))];
+
+  // 5. จัดกลุ่มและคำนวณยอดรวมรายหมวดหมู่ด้วย reduce
+  return categories.map((category) => {
+    const categoryItems = validItems.filter((item) => item.category === category);
+    
+    const summary = categoryItems.reduce(
+      (acc, item) => {
+        acc.totalRevenue += item.price * item.quantity;
+        acc.totalQuantity += item.quantity;
+        return acc;
+      },
+      { totalRevenue: 0, totalQuantity: 0 }
+    );
+
+    return {
+      category,
+      totalRevenue: summary.totalRevenue,
+      totalQuantity: summary.totalQuantity,
+      formattedRevenue: currencyFormatter.format(summary.totalRevenue),
+    };
+  });
+}
+```
+
+---
+
+## 9. ข้อผิดพลาดที่พบบ่อย (Anti-patterns)
+
+### ❌ ผิดพลาดที่ 1: เผลอใช้ `sort()` แก้ไขข้อมูลใน Props หรือ State ใน React
+```typescript
+// ❌ ผิด: sort() จะ mutate items เดิมโดยตรง ทำให้ React Re-render ผิดพลาด
+function MeatList({ items }: { items: Product[] }) {
+  const sorted = items.sort((a, b) => a.price - b.price); // อันตรายมาก!
+  return <div>...</div>;
+}
+
+// ✅ ถูกต้อง: ใช้ toSorted() หรือทำ Shallow Copy ก่อนจัดเรียง
+const sortedSafe = items.toSorted((a, b) => a.price - b.price);
+// หรือ [...items].sort((a, b) => a.price - b.price);
+```
+
+### ❌ ผิดพลาดที่ 2: ใช้ `map()` โดยไม่มีการ Return ค่า (ทำงานแบบ Side-effect)
+```typescript
+// ❌ ผิด: map() ถูกสร้างมาเพื่อแปลงอาเรย์ หากต้องการรัน Side-effect ให้ใช้ forEach
+orders.map((order) => {
+  sendReceiptEmail(order.id); // สร้างอาเรย์ที่เต็มไปด้วย undefined โดยเปล่าประโยชน์
+});
+
+// ✅ ถูกต้อง: ใช้ forEach หรือ for...of
+orders.forEach((order) => {
+  sendReceiptEmail(order.id);
+});
+```
+
+### ❌ ผิดพลาดที่ 3: ลืมระบุ Initial Value ใน `reduce()`
+```typescript
+interface CartItem {
+  id: string;
+  price: number;
+}
+const cart: CartItem[] = [];
+
+// ❌ ผิด: เมื่อ cart เป็นอาเรย์ว่างเปล่า และไม่มี initial value เบราว์เซอร์จะโยน TypeError ทันที!
+// const total = cart.reduce((sum, item) => sum + item.price); // TypeError: Reduce of empty array with no initial value
+
+// ✅ ถูกต้อง: กำหนด initial value เสมอ
+const totalSafe = cart.reduce((sum, item) => sum + item.price, 0); // 0
+```
+
+---
+
+## 10. คำถามสัมภาษณ์งานระดับ Senior (Interview Q&A)
+
+### Q1: ทำไมการใช้ `new Set()` ในการค้นหาข้อมูลขนาดใหญ่ จึงมีประสิทธิภาพสูงกว่า `Array.prototype.includes()` อย่างมีนัยสำคัญ?
+**แนวทางคำตอบ:**
+- `Array.prototype.includes()` ทำงานด้วยกลไก **Linear Search** โดยต้องวนตรวจสอบทีละตัวตั้งแต่ช่องแรกจนถึงช่องสุดท้าย มีความซับซ้อนเชิงเวลาเป็น **$O(n)$** หากอาเรย์มี 100,000 ชิ้นและค้นหา 1,000 ครั้ง จะเกิดการเปรียบเทียบข้อมูลสูงสุดถึง 100 ล้านครั้ง
+- ขณะที่ `Set` ใน JavaScript Engine (เช่น V8) ถูกสร้างขึ้นบนโครงสร้างข้อมูล **Hash Table** ซึ่งจะนำค่า Key ไปผ่าน Hash Function เพื่อคำนวณตำแหน่ง Bucket ของหน่วยความจำโดยตรง ทำให้การตรวจสอบ `set.has(val)` มีความซับซ้อนเชิงเวลาเฉลี่ยคงที่เพียง **$O(1)$** ไม่ว่าข้อมูลใน Set จะมีขนาด 10 หรือ 100,000 รายการ เวลาในการค้นหาก็จะเร็วเท่าเดิม
+
+### Q2: ในการคัดลอกอ็อบเจกต์ที่มีความซับซ้อน (Nested Objects) ทำไมคำสั่ง `structuredClone()` จึงถูกสร้างขึ้นมาแทนที่ `JSON.parse(JSON.stringify(obj))`?
+**แนวทางคำตอบ:**
+เพราะเทคนิค `JSON.parse(JSON.stringify(obj))` มีข้อจำกัดร้ายแรงหลายประการ:
+1. แปลงอ็อบเจกต์ชนิด `Date` ให้กลายเป็น `string` ISO และสูญเสีย Prototype Methods ไปทั้งหมด
+2. ไม่รองรับ `Set` และ `Map` (จะถูกแปลงเป็น `{}` ว่างเปล่า)
+3. ค่าฟิลด์ที่เป็น `undefined`, `Symbol`, หรือ Function จะถูกลบทิ้งไปโดยอัตโนมัติ
+4. โยนข้อยกเว้นทันทีหากมี **Circular Reference** (การอ้างอิงวนลูปหากัน)
+5. `structuredClone()` รองรับการโคลน Typed Arrays, RegExp, ArrayBuffer, Date, Set, Map, และ Circular Reference ได้อย่างสมบูรณ์แบบที่ระดับ Native C++ ของเอนจิน
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+1. พื้นฐานและสัญลักษณ์ไวยากรณ์: [Primitives & Symbols](/docs/typescript/basics)
+2. การสร้างฟังก์ชันขั้นสูงใน TypeScript: [TypeScript Functions](/docs/typescript/functions)
+3. การสืบทอดและนำโค้ดกลับมาใช้ใหม่: [Generics](/docs/typescript/generics)
+4. การจัดการความผิดพลาดแบบ Asynchronous: [Async & Result](/docs/typescript/async-error)
+5. การตรวจสอบความถูกต้องของข้อมูลตอน Runtime: [Zod Validation](/docs/typescript/zod-runtime)
