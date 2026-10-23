@@ -1,0 +1,327 @@
+---
+title: Advanced Routing
+category: Frontend
+parentTitle: Next.js 16
+version: Parallel & Intercepting Routes
+updatedAt: 2026-10-23
+---
+
+# Next.js 16 Advanced Routing: Parallel & Intercepting Routes
+
+เจาะลึกรูปแบบ Routing ขั้นสูงใน Next.js 16: การจัดระเบียบโครงสร้างด้วย Route Groups, การแสดงผลหลายมุมมองพร้อมกันด้วย Parallel Routes (`@slot`) ร่วมกับ `default.tsx`, และการสร้าง Steak Quick-view Modal ผ่าน Intercepting Routes (`(.)`) ที่รองรับทั้งการเปิดเป็นหน้าต่างป๊อปอัปและการแชร์ลิงก์ตรงระดับโปรดักชัน
+
+---
+
+## 1. แนวคิด (Concept)
+
+Next.js App Router ปฏิวัติระบบ Routing ของเว็บแอปพลิเคชันด้วยการนำแนวคิดจากสถาปัตยกรรม UI ยุคใหม่เข้ามาแก้ปัญหาความซับซ้อนของ URL:
+
+1. **Route Groups `(groupName)`:** การจัดกลุ่มโฟลเดอร์เพื่อจัดระเบียบโค้ดหรือแชร์ Layout ร่วมกัน โดย **ไม่เพิ่มชื่อกลุ่มเข้าไปใน URL Path** (เช่น `src/app/(shop)/products` จะกลายเป็น `/products`)
+2. **Parallel Routes (`@slotName`):** การเรนเดอร์หลายเพจพร้อมกันใน Layout เดียวกันอย่างเป็นอิสระ โดยแต่ละหน้าต่างสามารถโหลดข้อมูล (Suspense) และจัดการ Error Boundary ของตัวเองได้
+3. **Intercepting Routes (`(.)`, `(..)`, `(...)`):** การ "ดักจับ" การเปลี่ยนเส้นทาง (Client-side Navigation) เพื่อแสดงผล Route ปลายทางในรูปแบบ Modal หรือ Overlay โดยที่เบราว์เซอร์ยังคงแสดงหน้าเดิมเป็นพื้นหลัง และ URL บน Address Bar จะอัปเดตตรงตามหน้าจริง
+
+```text
++--------------------------------------------------------------------------------------------------+
+|               Intercepting Route: Steak Quick-view Modal vs Direct Access Link                   |
++--------------------------------------------------------------------------------------------------+
+| Case A: Soft Navigation (ลูกค้าคลิกการ์ดเนื้อวากิวจากหน้า /cuts)                                    |
+|         - Client-side Next.js Navigation ดักจับด้วย (.)quick-view/[id]                           |
+|         - URL บน Address Bar เปลี่ยนเป็น /quick-view/wagyu-a5                                    |
+|         - หน้าจอ: แสดงหน้า /cuts เป็นพื้นหลัง + เปิด Quick-view Modal ลอยทับขึ้นมา                 |
+|                                                                                                  |
+| Case B: Hard Refresh / คัดลอกลิงก์ส่งให้เพื่อนในแชต (Direct URL Access)                            |
+|         - ผู้รับกดลิงก์ https://smartbutcher.com/quick-view/wagyu-a5                              |
+|         - Next.js เรนเดอร์ไฟล์ปกติที่: src/app/quick-view/[id]/page.tsx                           |
+|         - หน้าจอ: แสดงผลเป็น Full-screen Product Page เต็มหน้าจอ ไม่ใช่หน้าต่าง Modal              |
++--------------------------------------------------------------------------------------------------+
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 Parallel Routes และบทบาทสำคัญของ `default.tsx`
+เมื่อเราสร้าง Slots เช่น `@modal` หรือ `@sidebar` ใน Layout:
+```tsx filename="src/app/layout.tsx"
+export default function Layout({ children, modal, sidebar }: LayoutProps)
+```
+- ในการเข้าชมครั้งแรก (Hard Refresh หรือ Initial Load) Next.js จะต้องรู้ว่าถ้า Slot ใดไม่มีหน้าเพจตรงกับ URL ปัจจุบัน มันควรเรนเดอร์อะไร
+- **หากไม่มี `default.tsx`:** Next.js จะโยนข้อผิดพลาด **404 Not Found** ทันที
+- **Senior Rule:** ทุกครั้งที่สร้าง Parallel Slot (`@modal`) ต้องสร้างไฟล์ `default.tsx` ควบคู่กันเสมอ โดยคืนค่า `null` เมื่อไม่มีโมดัลเปิดอยู่
+
+### 2.2 Intercepting Conventions สัญลักษณ์ดักจับเส้นทาง
+Next.js ใช้สัญลักษณ์เลียนแบบ Relative Path ในระบบไฟล์:
+- `(.)`: ดักจับ Route ที่อยู่ใน **ระดับโฟลเดอร์เดียวกัน (Same Level)**
+- `(..)`: ดักจับ Route ที่อยู่ใน **โฟลเดอร์ระดับบนขึ้นไป 1 ขั้น (One Level Above)**
+- `(..)(..)`: ดักจับ Route ที่อยู่ **สูงขึ้นไป 2 ขั้น (Two Levels Above)**
+- `(...)`: ดักจับ Route จาก **รูทหลักสุดของโฟลเดอร์ `app` (Root Directory)**
+
+<Callout type="note" title="ความเข้ากันได้ของการกดปุ่ม Back บนเบราว์เซอร์">
+เมื่อปิด Modal ด้วยคำสั่ง `router.back()` เบราว์เซอร์จะย้อน History State กลับไป 1 จังหวะ ส่งผลให้ URL กลับเป็นหน้าเดิม และ Slot `@modal` จะถูกล้างออกโดยอัตโนมัติ มอบประสบการณ์เทียบเท่า Native Mobile App
+</Callout>
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: โครงสร้าง Route Groups และ Parallel Routes (`@modal`, `@sidebar`)
+
+การออกแบบโครงสร้างโฟลเดอร์ร้านค้าเนื้อพรีเมียม เพื่อแยก Layout ของกลุ่มร้านค้า `(shop)` ออกจากระบบหลังบ้านของเขียงเนื้อ
+
+```text
+src/app/
+├── (shop)/
+│   ├── layout.tsx              <-- รับ children, modal, and sidebar
+│   ├── default.tsx
+│   ├── @modal/
+│   │   ├── default.tsx         <-- คืนค่า null เมื่อไม่มี modal
+│   │   └── (.)quick-view/
+│   │       └── [id]/
+│   │           └── page.tsx    <-- Intercepted Modal
+│   ├── @sidebar/
+│   │   ├── default.tsx
+│   │   └── page.tsx            <-- แสดงตะกร้าเนื้อสเต๊กด้านข้าง
+│   └── cuts/
+│       └── page.tsx            <-- รายการเนื้อสเต๊กทั้งหมด
+└── quick-view/
+    └── [id]/
+        └── page.tsx            <-- Standalone Full-page เมื่อกด Refresh
+```
+
+ไฟล์ Layout หลักของ `(shop)`:
+
+```tsx filename="src/app/(shop)/layout.tsx"
+import type { ReactNode } from 'react';
+
+interface ShopLayoutProps {
+  children: ReactNode;
+  modal: ReactNode;
+  sidebar: ReactNode;
+}
+
+export default function ShopLayout({ children, modal, sidebar }: ShopLayoutProps) {
+  return (
+    <div className="min-h-screen bg-stone-950 text-stone-100 flex flex-col">
+      {/* ส่วนหัวร้านค้า */}
+      <header className="border-b border-stone-800 bg-stone-900/80 backdrop-blur px-6 py-4 sticky top-0 z-40">
+        <div className="max-w-7xl mx-auto flex items-center justify-between">
+          <span className="text-xl font-black text-red-500 tracking-wider">🥩 SMART BUTCHER</span>
+          <nav className="flex gap-6 text-sm text-stone-300">
+            <a href="/cuts" className="hover:text-white transition">คลังเนื้อสเต๊ก</a>
+            <a href="/orders" className="hover:text-white transition">ประวัติคำสั่งซื้อ</a>
+          </nav>
+        </div>
+      </header>
+
+      {/* พื้นที่แสดงผลหลัก พร้อมช่อง Sidebar สำหรับตะกร้าสินค้าแบบคู่ขนาน */}
+      <div className="max-w-7xl mx-auto w-full flex-1 flex gap-8 p-6">
+        <main className="flex-1 min-w-0">{children}</main>
+        <aside className="w-80 hidden lg:block shrink-0">{sidebar}</aside>
+      </div>
+
+      {/* ช่องสำหรับ Render โมดัลแบบขนาน */}
+      {modal}
+    </div>
+  );
+}
+```
+
+ไฟล์ Fallback เริ่มต้นสำหรับ Slot `@modal`:
+
+```tsx filename="src/app/(shop)/@modal/default.tsx"
+// เมื่อไม่มีการคลิกเปิด Quick-view Modal ช่องนี้จะไม่เรนเดอร์อะไรเลย
+export default function DefaultModalSlot() {
+  return null;
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: Steak Quick-view Intercepting Route พร้อม Standalone Fallback
+
+เมื่อลูกค้าคลิกการ์ดเนื้อในหน้า `/cuts` จะเปิดโมดัลลอยทับหน้าจอทันที แต่ถ้าเพื่อนเปิดลิงก์ตรงจะเห็นหน้าเต็ม
+
+ไฟล์ Modal สำหรับการดักจับเส้นทาง (Intercepted):
+
+```tsx filename="src/app/(shop)/@modal/(.)quick-view/[id]/page.tsx"
+'use client';
+
+import { useRouter } from 'next/navigation';
+import { useEffect, use } from 'react';
+
+interface Props {
+  params: Promise<{ id: string }>;
+}
+
+export default function SteakQuickViewModal({ params }: Props) {
+  const router = useRouter();
+  const { id } = use(params);
+
+  // ดักจับปุ่ม Escape บนคีย์บอร์ดเพื่อปิด Modal
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        router.back();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [router]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200"
+      onClick={() => router.back()} // คลิกฉากหลังเพื่อปิด
+    >
+      <div
+        className="w-full max-w-2xl bg-stone-900 border border-stone-800 rounded-3xl p-6 shadow-2xl relative"
+        onClick={(e) => e.stopPropagation()} // ป้องกันคลิกทะลุ
+      >
+        <button
+          onClick={() => router.back()}
+          className="absolute top-5 right-5 text-stone-400 hover:text-white p-2 rounded-full hover:bg-stone-800 transition"
+          aria-label="ปิดหน้าต่างพรีวิว"
+        >
+          ✕
+        </button>
+
+        <span className="text-xs uppercase tracking-wider text-red-500 font-bold">Quick View Preview</span>
+        <h2 className="text-2xl font-black text-white mt-2 capitalize">{id.replace(/-/g, ' ')}</h2>
+        
+        <div className="mt-4 p-4 rounded-2xl bg-stone-950 border border-stone-800/80">
+          <p className="text-sm text-stone-300">
+            🥩 สเต๊กเนื้อวากิวพรีเมียมบ่มดรายเอจ ควบคุมอุณหภูมิและความชื้นอย่างแม่นยำ
+          </p>
+          <div className="mt-3 flex gap-4 text-xs text-stone-400">
+            <span>Marbling Score: <strong>BMS 9-11</strong></span>
+            <span>ความหนามาตรฐาน: <strong>1.5 นิ้ว</strong></span>
+          </div>
+        </div>
+
+        <div className="mt-6 flex justify-end gap-3">
+          <button
+            onClick={() => router.back()}
+            className="px-5 py-2.5 rounded-xl border border-stone-700 text-stone-300 hover:bg-stone-800 text-sm font-medium transition"
+          >
+            เลือกดูเนื้อชิ้นอื่นต่อ
+          </button>
+          <button
+            onClick={() => alert(`เพิ่มเนื้อ ${id} ลงตะกร้าเรียบร้อย`)}
+            className="px-6 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-sm font-semibold transition"
+          >
+            สั่งตัดชิ้นนี้ทันที
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+ไฟล์ Standalone Page เมื่อผู้ใช้เปิดลิงก์ตรงหรือกดรีเฟรชหน้าเบราว์เซอร์:
+
+```tsx filename="src/app/quick-view/[id]/page.tsx"
+import Link from 'next/link';
+
+interface Props {
+  params: Promise<{ id: string }>;
+}
+
+export default async function StandaloneSteakDetailPage({ params }: Props) {
+  const { id } = await params;
+
+  return (
+    <div className="min-h-screen bg-stone-950 text-stone-100 flex items-center justify-center p-6">
+      <div className="max-w-3xl w-full bg-stone-900 border border-stone-800 rounded-3xl p-10 shadow-2xl">
+        <span className="px-3.5 py-1.5 rounded-full bg-red-950 border border-red-800 text-red-400 text-xs font-bold uppercase">
+          Direct Link View
+        </span>
+
+        <h1 className="text-4xl font-extrabold text-white mt-4 capitalize">{id.replace(/-/g, ' ')}</h1>
+        <p className="text-stone-400 mt-2">หน้ารายละเอียดเต็มรูปแบบสำหรับเปิดผ่านการแชร์ URL หรือรีเฟรชหน้าเว็บ</p>
+
+        <div className="mt-8 p-6 rounded-2xl bg-stone-950 border border-stone-800">
+          <h3 className="text-lg font-bold text-white mb-2">ข้อมูลการบ่มเนื้อพิเศษ</h3>
+          <p className="text-stone-300 text-sm leading-relaxed">
+            เนื้อชิ้นนี้ผ่านกระบวนการคัดกรองพิเศษโดยมาสเตอร์บุชเชอร์ บ่มในห้องควบคุมความชื้นสัมพัทธ์ 75%
+            และอุณหภูมิคงที่ 1.5°C นาน 45 วัน
+          </p>
+        </div>
+
+        <div className="mt-8 flex items-center justify-between pt-6 border-t border-stone-800">
+          <Link href="/cuts" className="text-sm text-stone-400 hover:text-white transition">
+            ← กลับสู่หน้ารวมเนื้อสเต๊กทั้งหมด
+          </Link>
+          <button className="px-6 py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-semibold transition">
+            สั่งซื้อเนื้อพร้อมจัดส่งด่วน
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ปัญหาที่พบบ่อย | รูปแบบที่ผิด (Anti-pattern) | รูปแบบที่ถูกต้องระดับ Senior (Best Practice) |
+| :--- | :--- | :--- |
+| **ลืมสร้าง `default.tsx` ใน Parallel Slots** | สร้างเฉพาะ `@modal/(.)quick-view/[id]/page.tsx` เมื่อผู้ใช้รีเฟรชหน้าเว็บจะขึ้น Error 404 | สร้าง `default.tsx` ในทุกโฟลเดอร์ของ Slot เพื่อให้ Next.js ทราบว่าจะเรนเดอร์อะไรเมื่อ URL ไม่ตรง |
+| **ใช้ `(..)` สับสนลำดับชั้นโฟลเดอร์** | คำนวณจำนวนจุด `(..)` ตามโครงสร้าง URL แทนที่จะนับตาม **โครงสร้างโฟลเดอร์จริงใน Filesystem** | นับย้อนกลับตามโฟลเดอร์ของ Filesystem จริง หรือใช้ `(...)` หากต้องการดักจากโฟลเดอร์ `app` หลัก |
+| **ปิด Modal ด้วย `setState(false)` ธรรมดา** | ปิด Modal แต่ไม่ได้เปลี่ยน URL ทำให้กดปุ่ม Back บนเบราว์เซอร์แล้วหน้าเว็บเด้งไปหน้าก่อนหน้า | ใช้ `router.back()` เพื่อให้ History Stack ตรงกับความเป็นจริงและ URL กลับสู่สถานะเดิม |
+| **ไม่ดักจับ `e.stopPropagation()` บนกล่อง Modal** | วาง Event Click บนฉากหลัง แต่ไม่ดักที่ตัวการ์ด ทำให้คลิกตรงไหนใน Modal ก็ปิดหน้าต่างทั้งหมด | ใส่ `onClick={(e) => e.stopPropagation()}` บน Container ของตัวการ์ดเนื้อเสมอ |
+| **ไม่สร้าง Standalone Page รองรับ** | สร้างเฉพาะ Intercepted Modal เมื่อมีคนคัดลอกลิงก์ไปเปิดในแท็บใหม่จะพบหน้าว่างเปล่าหรือ 404 | สร้างเพจปกติที่ URL เดียวกันเสมอ เพื่อให้ทั้งการ Soft Nav และ Hard Nav ทำงานได้ 100% |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Parallel & Intercepting Routes เมื่อ:
+- **Steak Quick-view / Product Photo Galleries:** การเปิดดูภาพสินค้าหรือพรีวิวเนื้อชิ้นใหญ่โดยไม่ต้องสลับหน้าเพจหลัก
+- **Login / Register Modal:** เปิดป๊อปอัปเข้าสู่ระบบทับหน้าชำระเงิน แต่ถ้าเปิดตรงๆ จะเป็นหน้า Login เต็มจอ
+- **Split-screen / Dashboard Panels:** หน้าแดชบอร์ดที่ต้องการให้มี `@orders` และ `@inventory` โหลดข้อมูลแยกอิสระในหน้าจอเดียวกัน
+
+### ไม่ควรใช้เมื่อ:
+- **ฟอร์มการกรอกข้อมูลยาวหลายสเต็ป (Multi-step Wizards):** หากฟอร์มมีความซับซ้อนมาก การเก็บ State ข้าม URL อาจทำให้สูญเสียข้อมูลหากผู้ใช้เผลอกด Back
+- **หน้าที่ไม่มีความจำเป็นต้องแชร์ URL สู่ภายนอก:** หากเป็นเพียง Dropdown เมนูหรือ Dialog แจ้งเตือนทั่วไป (Alert Modal) ให้ใช้ Local State หรือ Shadcn Dialog ธรรมดา
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: อธิบายความสัมพันธ์และบทบาทของไฟล์ `default.tsx` เมื่อทำงานร่วมกับ Parallel Routes ในสภาวะ Soft Navigation เทียบกับ Hard Refresh?
+
+**แนวคำตอบเชิงลึก:**
+Parallel Routes ทำงานแตกต่างกันอย่างสิ้นเชิงระหว่างสองสถานการณ์:
+1. **ในสภาวะ Soft Navigation (Client-side Navigation ด้วย Next Link หรือ useRouter):**
+   - Next.js จะรักษา State ของ Slot อื่นๆ ที่ไม่ได้ถูกเปลี่ยนไว้ในหน่วยความจำ (Partial Rendering)
+   - หากผู้ใช้เปลี่ยนหน้าไปยัง Route ที่ไม่ได้กำหนด Slot นั้นไว้ Next.js จะยังคงแสดงผลหน้าเดิมของ Slot นั้นต่อไป
+2. **ในสภาวะ Hard Refresh หรือ Initial Page Load (Direct URL Access):**
+   - เบราว์เซอร์ขอโหลดหน้าเว็บใหม่ทั้งหมด ทำให้ไม่มี State ในหน่วยความจำเดิมหลงเหลืออยู่
+   - Next.js จะตรวจสอบโครงสร้างไฟล์ของแต่ละ Slot ตาม URL ปัจจุบัน หาก Slot นั้น (เช่น `@modal`) ไม่มี `page.tsx` ที่ตรงกับ URL และ**ไม่มีไฟล์ `default.tsx`** Next.js จะตัดการทำงานและส่ง HTTP 404 Not Found ทันที
+   - ดังนั้น `default.tsx` จึงเป็น **Fallback Component ที่จำเป็นอย่างยิ่งยวด** เพื่อคืนค่า `null` หรือ UI ค่าเริ่มต้นให้กับ Slot ที่ไม่มีเนื้อหาตรงกับ URL ในจังหวะ Initial Load
+
+---
+
+### คำถามที่ 2: ในการทำ Photo Gallery หรือ Product Quick-view Modal สถาปัตยกรรม Intercepting Routes แก้ไขข้อจำกัดของ Client-side State Dialog แบบดั้งเดิมอย่างไร?
+
+**แนวคำตอบเชิงลึก:**
+การเปิด Dialog ด้วย `useState(isOpen)` แบบดั้งเดิมมีข้อจำกัดร้ายแรงในระบบ E-commerce:
+1. **URL ไม่เปลี่ยน (No Shareable State):** ผู้ใช้ไม่สามารถคัดลอก URL ของเนื้อชิ้นที่กำลังดูอยู่ไปให้เพื่อนดูได้
+2. **เบราว์เซอร์ Back Button พัง:** เมื่อผู้ใช้กดปุ่มย้อนกลับ (Back Button) บนมือถือ แทนที่จะปิด Dialog เบราว์เซอร์จะพาถอยหลังออกจากเว็บไซต์ไปเลย
+3. **SEO และ Social Scraping ไม่ทำงาน:** Search Engine Crawler ไม่สามารถเข้าถึงหรือ Index หน้ารายละเอียดนั้นได้เพราะไม่มี URL สถิตรองรับ
+
+**การแก้ปัญหาด้วย Intercepting Routes:**
+- มอบประสบการณ์ที่ดีที่สุดทั้งสองด้าน: เมื่อกดเปิดผ่านหน้าเว็บจะเร็วทันใจแบบ Client Modal (Soft Navigation ดักจับด้วย `(.)`)
+- URL บน Address Bar จะอัปเดตเป็น `/quick-view/wagyu-a5` ทันที ทำให้กด Back เพื่อปิด Modal ได้อย่างเป็นธรรมชาติ
+- เมื่อนำ URL ไปแชร์หรือเปิดในแท็บใหม่ จะมี Standalone Page รองรับ ทำให้ Googlebot สามารถ Index และผู้รับสามารถเข้าชมสินค้าได้ทันทีอย่างไร้รอยต่อ
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [Next.js Middleware & Proxy](/docs/nextjs/middleware) — การจัดเส้นทางคำขอด่านหน้า Edge
+- [Next.js Route Handlers](/docs/nextjs/route-handlers) — การรับส่งข้อมูล API ฝั่งเซิร์ฟเวอร์
+- [Next.js Metadata & SEO](/docs/nextjs/metadata-seo) — การสร้าง OpenGraph Dynamic ตาม Route
+- [Next.js Optimization](/docs/nextjs/optimization) — การทำ Prefetching และจัดการ Link Performance

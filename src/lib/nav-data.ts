@@ -78,6 +78,42 @@ export const NAV_GROUPS: NavGroup[] = [
             href: "/docs/nextjs/deployment",
           },
           {
+            title: "Middleware & Proxy",
+            href: "/docs/nextjs/middleware",
+          },
+          {
+            title: "Multi-layer Caching",
+            href: "/docs/nextjs/caching",
+          },
+          {
+            title: "Metadata & SEO",
+            href: "/docs/nextjs/metadata-seo",
+          },
+          {
+            title: "Route Handlers",
+            href: "/docs/nextjs/route-handlers",
+          },
+          {
+            title: "Advanced Routing",
+            href: "/docs/nextjs/advanced-routing",
+          },
+          {
+            title: "Error Monitoring (Sentry)",
+            href: "/docs/nextjs/error-monitoring",
+          },
+          {
+            title: "Web Analytics",
+            href: "/docs/nextjs/analytics",
+          },
+          {
+            title: "Web Vitals & Audits",
+            href: "/docs/nextjs/web-vitals",
+          },
+          {
+            title: "Progressive Web App (PWA)",
+            href: "/docs/nextjs/pwa",
+          },
+          {
             title: "Pitfalls & Q&A",
             href: "/docs/nextjs/pitfalls",
           },
@@ -130,6 +166,14 @@ export const NAV_GROUPS: NavGroup[] = [
           {
             title: "Architecture",
             href: "/docs/react/architecture",
+          },
+          {
+            title: "Accessibility (A11y)",
+            href: "/docs/react/accessibility-components",
+          },
+          {
+            title: "Compound Components",
+            href: "/docs/react/compound-components",
           },
           {
             title: "Pitfalls & Q&A",
@@ -200,6 +244,18 @@ export const NAV_GROUPS: NavGroup[] = [
           {
             title: "tsconfig.json",
             href: "/docs/typescript/tsconfig",
+          },
+          {
+            title: "Branded Types",
+            href: "/docs/typescript/branded-types",
+          },
+          {
+            title: "Exhaustive Check",
+            href: "/docs/typescript/exhaustive-union",
+          },
+          {
+            title: "Type-safe API Client",
+            href: "/docs/typescript/typed-api-client",
           },
           {
             title: "Pitfalls & Q&A",
@@ -909,6 +965,14 @@ export const NAV_GROUPS: NavGroup[] = [
             href: "/docs/backend/nodejs/process-errors",
           },
           {
+            title: "Streams & Buffer",
+            href: "/docs/backend/nodejs/streams-buffer",
+          },
+          {
+            title: "Workers & Memory",
+            href: "/docs/backend/nodejs/workers-memory",
+          },
+          {
             title: "Anti-patterns",
             href: "/docs/backend/nodejs/pitfalls",
           },
@@ -973,6 +1037,30 @@ export const NAV_GROUPS: NavGroup[] = [
           {
             title: "Enterprise Logging",
             href: "/docs/backend/nestjs/enterprise-logging",
+          },
+          {
+            title: "Health Check",
+            href: "/docs/backend/nestjs/health-check",
+          },
+          {
+            title: "Redis Caching",
+            href: "/docs/backend/nestjs/redis-cache",
+          },
+          {
+            title: "Queue (BullMQ)",
+            href: "/docs/backend/nestjs/bullmq-queue",
+          },
+          {
+            title: "Cron Schedule",
+            href: "/docs/backend/nestjs/cron-schedule",
+          },
+          {
+            title: "Real-time (WS & SSE)",
+            href: "/docs/backend/nestjs/websocket-sse",
+          },
+          {
+            title: "Graceful Shutdown",
+            href: "/docs/backend/nestjs/graceful-shutdown",
           },
           {
             title: "Anti-patterns",
@@ -1079,6 +1167,22 @@ export const NAV_GROUPS: NavGroup[] = [
           {
             title: "Token Rotation",
             href: "/docs/backend/authentication/token-rotation",
+          },
+          {
+            title: "OAuth & Social",
+            href: "/docs/backend/authentication/oauth-social",
+          },
+          {
+            title: "Email Verification",
+            href: "/docs/backend/authentication/email-verify",
+          },
+          {
+            title: "Reset Password",
+            href: "/docs/backend/authentication/reset-password",
+          },
+          {
+            title: "2FA / MFA",
+            href: "/docs/backend/authentication/two-factor",
           },
           {
             title: "Anti-patterns",
@@ -1273,6 +1377,26 @@ export const NAV_GROUPS: NavGroup[] = [
             href: "/docs/backend/ai-integration/pitfalls",
           },
         ],
+      },
+      {
+        title: "Email Service",
+        href: "/docs/backend/email",
+      },
+      {
+        title: "Payment Gateway",
+        href: "/docs/backend/payment",
+      },
+      {
+        title: "Observability",
+        href: "/docs/backend/observability",
+      },
+      {
+        title: "CI/CD & Deploy",
+        href: "/docs/backend/deployment-cicd",
+      },
+      {
+        title: "Monorepo",
+        href: "/docs/backend/monorepo",
       },
     ],
   },

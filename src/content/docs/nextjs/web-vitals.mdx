@@ -1,0 +1,448 @@
+---
+title: Web Vitals & Audits
+category: Frontend
+parentTitle: Next.js 16
+version: Core Web Vitals 2026 (INP, LCP, CLS)
+updatedAt: 2026-10-23
+---
+
+# Web Vitals & Audits
+
+คู่มือเชิงลึกระดับ Enterprise ในการตรวจวัด, วิเคราะห์ และปรับแต่ง Core Web Vitals ยุคใหม่ปี 2026 (INP, LCP, CLS) ใน Next.js 16 ด้วย `useReportWebVitals`, สถาปัตยกรรม Real User Monitoring (RUM) และระบบตรวจสอบคุณภาพอัตโนมัติด้วย Lighthouse CI บน GitHub Actions
+
+---
+
+## 1. แนวคิด (Concept)
+
+ตั้งแต่ปี 2024 เป็นต้นมา Google ได้ปลดระวาง First Input Delay (FID) อย่างเป็นทางการ และผลักดัน **Interaction to Next Paint (INP)** ขึ้นมาเป็นเมตริกหลักในการวัดความรู้สึกลื่นไหลของหน้าเว็บ ควบคู่กับ **Largest Contentful Paint (LCP)** และ **Cumulative Layout Shift (CLS)**
+
+ในสถาปัตยกรรม **Next.js 16 App Router** การเข้าใจ Core Web Vitals ทั้งสามตัวถือเป็นหัวใจสำคัญในการทำ SEO อันดับต้นๆ และการสร้างอัตรา Conversion ในธุรกิจอีคอมเมิร์ซ:
+
+```text
++----------------------------------------------------------------------------------------------------+
+|                         Core Web Vitals Standard 2026 Thresholds                                   |
++----------------------------------------------------------------------------------------------------+
+|                                                                                                    |
+|  1. Largest Contentful Paint (LCP)  [ความเร็วในการเรนเดอร์ชิ้นส่วนเนื้อหาหลัก เช่น ภาพเนื้อวากิว]       |
+|     [  Good: <= 2.5s  ] ---- [  Needs Improvement: 2.5s - 4.0s  ] ---- [  Poor: > 4.0s  ]          |
+|                                                                                                    |
+|  2. Interaction to Next Paint (INP) [ความหน่วงในการตอบสนองต่อการคลิก/แตะ/พิมพ์ของผู้ใช้ตลอดทั้งเซสชัน]  |
+|     [  Good: <= 200ms ] ---- [  Needs Improvement: 200ms - 500ms ] ---- [  Poor: > 500ms ]         |
+|                                                                                                    |
+|  3. Cumulative Layout Shift (CLS)   [ความนิ่งของหน้าจอ ไม่มี Element กระตุกขยับกะทันหัน]             |
+|     [  Good: <= 0.1   ] ---- [  Needs Improvement: 0.1 - 0.25   ] ---- [  Poor: > 0.25  ]          |
+|                                                                                                    |
++----------------------------------------------------------------------------------------------------+
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 โครงสร้าง 3 ช่วงเวลาของ Interaction to Next Paint (INP)
+
+ต่างจาก FID ที่วัดเฉพาะการคลิกแรกสุด INP จะติดตาม **ทุกการโต้ตอบของผู้ใช้** (Clicks, Taps, Keypresses) ตลอดการเปิดหน้าเว็บ และเลือกการโต้ตอบที่แย่ที่สุด (Worst Latency ที่เปอร์เซ็นไทล์ 98) มาเป็นตัวแทนคะแนนของหน้านั้น
+
+INP ประกอบด้วย 3 องค์ประกอบย่อย:
+
+$$\text{INP} = \text{Input Delay} + \text{Processing Duration} + \text{Presentation Delay}$$
+
+1. **Input Delay (ความล่าช้าของอินพุต):** เวลาตั้งแต่ผู้ใช้แตะปุ่มจนถึงตอนที่ Event Handler เริ่มทำงาน หากมี Long Tasks รันอยู่บน Main Thread คิวของอินพุตจะถูกดองไว้
+2. **Processing Duration (ระยะเวลาประมวลผล):** เวลาที่โค้ด JavaScript ใน Event Listener (เช่น การคำนวณราคาน้ำหนักเนื้อสเต๊ก หรือการอัปเดต State) ทำงานจนเสร็จ
+3. **Presentation Delay (ความล่าช้าในการวาดเฟรม):** เวลาที่เบราว์เซอร์ใช้ในการคำนวณ Style, ทำ Recalculate Layout, Paint และ Composit เพื่อแสดงผลพิกเซลใหม่บนหน้าจอ
+
+```text
+User Action
+    |
+    v
+[ Input Delay ] ---------> [ Processing Time ] ------------> [ Presentation Delay ] -> Next Frame Painted
+(Main Thread Busy)         (Event Handlers Execution)        (Browser Layout & Paint)
+```
+
+### 2.2 โครงสร้าง 4 ช่วงย่อยของ Largest Contentful Paint (LCP)
+
+LCP ไม่ใช่เพียงแค่ขนาดไฟล์ภาพ แต่ขึ้นอยู่กับ 4 ปัจจัยย่อย:
+1. **Time to First Byte (TTFB):** เวลาที่เซิร์ฟเวอร์ใช้ประมวลผล RSC และส่ง HTML ไบต์แรกกลับมา
+2. **Resource Load Delay:** เวลาตั้งแต่เริ่มโหลด HTML จนเบราว์เซอร์ค้นพบ URL ของภาพ LCP (แก้ได้ด้วย Priority Preloading)
+3. **Resource Load Duration:** เวลาที่ใช้ดาวน์โหลดไฟล์ภาพจริงข้ามเครือข่าย CDN (แก้ได้ด้วย WebP/AVIF และ Responsive Sizes)
+4. **Element Render Delay:** เวลาที่เบราว์เซอร์ใช้แกะรูป (Image Decoding) และวาดลงบน Canvas
+
+### 2.3 การป้องกัน Cumulative Layout Shift (CLS) ใน Next.js
+
+สาเหตุหลักที่ทำให้ CLS พังในร้านค้าออนไลน์:
+- รูปภาพสินค้าที่ไม่มีการระบุ `width` และ `height` หรือ `aspect-ratio` ส่งผลให้กล่องสินค้ากระตุกขยายเมื่อรูปโหลดเสร็จ
+- แบนเนอร์ Flash Sale หรือแจ้งเตือนคุกกี้ที่แทรกตัวลงมาดันเนื้อหาด้านล่างกะทันหัน
+- การโหลด Custom Fonts แล้วเกิด Flash of Unstyled Text (FOUT) ที่ทำให้ข้อความขยายความสูงเปลี่ยนบรรทัด
+
+Next.js แก้ไขปัญหานี้โดย:
+- คอมโพเนนต์ `next/image` บังคับระบุอัตราส่วนขนาดหรือใช้ `fill` คู่กับ `aspect-ratio` กล่องแม่
+- โมดูล `next/font` ทำการดาวน์โหลดและคำนวณ Font Fallback Metrics อัตโนมัติในขั้นตอนบิลด์ ทำให้ไม่มี Font Shift เกิดขึ้นแม้แต่มิลลิเมตรเดียว
+
+<Callout type="tip" title="การทดสอบ RUM สำคัญกว่า Synthetic Test เสมอ">
+Lighthouse ในเครื่องคอมพิวเตอร์ของคุณเป็นเพียงการทดสอบสังเคราะห์ (Synthetic Lab Test) บนฮาร์ดแวร์แรงๆ แต่ Core Web Vitals ของ Google ใช้ข้อมูลผู้ใช้จริง (CrUX Report) บนมือถือสเปกต่ำและเครือข่าย 4G ดังนั้นการวัดด้วย RUM (Real User Monitoring) จึงสะท้อนความจริงได้แม่นยำที่สุด
+</Callout>
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ในส่วนนี้เราจะนำเสนอการสร้างระบบ Observability วัด Web Vitals แบบ Real User Monitoring, การสร้างคอมโพเนนต์แสดงผลภาพสเต๊กพรีเมียมที่ LCP เร็วทะลุเกณฑ์และไม่มี Layout Shift, และการตั้งค่าระบบทดสอบอัตโนมัติบน CI/CD
+
+### ตัวอย่างที่ 1: Real User Monitoring (RUM) ด้วย `useReportWebVitals`
+
+เราสร้าง Client Component พิเศษสำหรับรวบรวม Web Vitals ส่งกลับไปยัง Route Handler หลังบ้านผ่าน `navigator.sendBeacon` เพื่อไม่ให้บล็อกการเปลี่ยนหน้าเว็บ
+
+```tsx filename="src/app/web-vitals.tsx"
+"use client";
+
+import { useReportWebVitals } from "next/web-vitals";
+
+interface WebVitalPayload {
+  id: string;
+  name: string;
+  value: number;
+  rating: "good" | "needs-improvement" | "poor";
+  delta: number;
+  navigationType: string;
+  pathname: string;
+  deviceMemory?: number;
+  effectiveConnectionType?: string;
+}
+
+export function WebVitalsReporter() {
+  useReportWebVitals((metric) => {
+    // ดึงค่า Network Information API เพื่อวิเคราะห์บริบทเครือข่ายของผู้ใช้
+    const nav = typeof navigator !== "undefined" ? (navigator as unknown as {
+      connection?: { effectiveType?: string };
+      deviceMemory?: number;
+    }) : undefined;
+
+    const payload: WebVitalPayload = {
+      id: metric.id,
+      name: metric.name,
+      value: Math.round(metric.name === "CLS" ? metric.value * 1000 : metric.value),
+      rating: metric.rating,
+      delta: Math.round(metric.name === "CLS" ? metric.delta * 1000 : metric.delta),
+      navigationType: metric.navigationType,
+      pathname: typeof window !== "undefined" ? window.location.pathname : "",
+      deviceMemory: nav?.deviceMemory,
+      effectiveConnectionType: nav?.connection?.effectiveType,
+    };
+
+    const endpoint = "/api/telemetry/vitals";
+
+    // ใช้ navigator.sendBeacon เพื่อส่งข้อมูลออกไปโดยไม่ขัดขวาง Main Thread หรือการปิดหน้าเว็บ
+    if (typeof navigator !== "undefined" && navigator.sendBeacon) {
+      const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+      navigator.sendBeacon(endpoint, blob);
+    } else {
+      // Fallback สำหรับเบราว์เซอร์เก่า
+      fetch(endpoint, {
+        body: JSON.stringify(payload),
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        keepalive: true,
+      }).catch(() => {
+        // เงียบไว้เพื่อไม่ให้กระทบประสบการณ์ผู้ใช้
+      });
+    }
+  });
+
+  return null;
+}
+```
+
+```typescript filename="src/app/api/telemetry/vitals/route.ts"
+import { NextRequest, NextResponse } from "next/server";
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json();
+
+    const { name, value, rating, pathname, effectiveConnectionType } = body;
+
+    // บันทึก Log ลงระบบ Monitoring หรือส่งต่อไปยัง Datadog / OpenTelemetry
+    if (process.env.NODE_ENV === "production") {
+      // ตรวจจับกรณีที่ INP หรือ LCP ตกเกณฑ์ขั้นวิกฤต (Poor)
+      if (rating === "poor") {
+        console.warn(
+          `[WEB_VITALS_ALERT] Critical degradation on ${pathname}: ${name}=${value} (${rating}) on ${effectiveConnectionType} connection`
+        );
+      }
+    }
+
+    return NextResponse.json({ status: "acknowledged" }, { status: 200 });
+  } catch (err) {
+    return NextResponse.json({ error: "Invalid vitals payload" }, { status: 400 });
+  }
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: คอมโพเนนต์แสดงเนื้อวากิวพรีเมียม (Zero CLS + Sub-1.5s LCP + Low INP)
+
+คอมโพเนนต์นี้แสดงภาพเนื้อสเต๊กพรีเมียม โดยใช้ `next/image` ร่วมกับเทคนิค:
+- `priority`: เพื่อให้ Next.js สร้าง `<link rel="preload">` ใน `<head>` ล่วงหน้า
+- `sizes`: ช่วยให้บราวเซอร์เลือกรูปขนาดพอดีกับ Viewport ไม่ดาวน์โหลดภาพ 4K บนจอมือถือ
+- Dynamic Cut Selector: ใช้ `useTransition` แยกการอัปเดตราคาน้ำหนักออกเป็น Non-urgent Update เพื่อไม่ให้บล็อกการแสดงผล และคงค่า INP ให้ต่ำกว่า 50ms
+
+```tsx filename="src/components/products/MeatHeroShowcase.tsx"
+"use client";
+
+import React, { useState, useTransition } from "react";
+import Image from "next/image";
+
+export interface PremiumMeatCut {
+  id: string;
+  sku: string;
+  title: string;
+  japaneseGrade: "A5-BMS12" | "A5-BMS9" | "A4-BMS7";
+  imageUrl: string;
+  blurDataUrl: string;
+  baseWeightGrams: number;
+  pricePerKilogram: number;
+  originPrefecture: string;
+}
+
+export function MeatHeroShowcase({ meat }: { meat: PremiumMeatCut }) {
+  const [selectedWeight, setSelectedWeight] = useState<number>(meat.baseWeightGrams);
+  const [displayedPrice, setDisplayedPrice] = useState<number>(
+    (meat.baseWeightGrams / 1000) * meat.pricePerKilogram
+  );
+  const [isPending, startTransition] = useTransition();
+
+  const handleWeightSelection = (grams: number) => {
+    // 1. อัปเดต UI ที่สำคัญต่อสายตาทันที (Immediate Feedback)
+    setSelectedWeight(grams);
+
+    // 2. ใช้ useTransition กับการคำนวณราคาย่อย เพื่อลดความหน่วงใน Main Thread (รักษา INP < 50ms)
+    startTransition(() => {
+      const calculated = (grams / 1000) * meat.pricePerKilogram;
+      setDisplayedPrice(calculated);
+    });
+  };
+
+  return (
+    <section className="max-w-6xl mx-auto px-4 py-8 grid grid-cols-1 lg:grid-cols-2 gap-10 items-center">
+      {/* ส่วนรูปภาพหลัก (LCP Hero Element) ป้องกัน CLS ด้วย Aspect Ratio คงที่ */}
+      <div className="relative w-full aspect-[4/3] rounded-3xl overflow-hidden shadow-2xl bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700">
+        <Image
+          src={meat.imageUrl}
+          alt={`${meat.title} เกรด ${meat.japaneseGrade} ส่งตรงจาก ${meat.originPrefecture}`}
+          fill
+          priority // สั่ง Preload รูปภาพทันทีเพื่อทำลายสถิติ LCP
+          fetchPriority="high"
+          sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 600px"
+          quality={85}
+          placeholder="blur"
+          blurDataURL={meat.blurDataUrl}
+          className="object-cover object-center transition-transform duration-500 hover:scale-105"
+        />
+
+        {/* ตราการันตีเกรดเนื้อพรีเมียม */}
+        <div className="absolute top-4 left-4 bg-neutral-900/80 backdrop-blur-md text-amber-400 px-3.5 py-1.5 rounded-full text-xs font-black tracking-widest uppercase border border-amber-500/30">
+          🇯🇵 {meat.japaneseGrade}
+        </div>
+      </div>
+
+      {/* รายละเอียดสินค้าและปุ่มปรับน้ำหนัก */}
+      <div className="space-y-6">
+        <div>
+          <span className="text-red-700 dark:text-red-500 text-sm font-bold tracking-wider uppercase">
+            จังหวัด {meat.originPrefecture} — Single Farm Origin
+          </span>
+          <h1 className="text-3xl sm:text-4xl font-extrabold text-neutral-900 dark:text-neutral-50 mt-1">
+            {meat.title}
+          </h1>
+          <p className="text-sm text-neutral-500 mt-2 leading-relaxed">
+            สัมผัสประสบการณ์เนื้อลายหินอ่อนระดับท็อปคลาส ไขมันไม่อิ่มตัวจุดหลอมเหลวต่ำ ละลายในปากพร้อมกลิ่นหอมเฉพาะตัว
+          </p>
+        </div>
+
+        {/* เลือกล็อตน้ำหนักตัดพิเศษ */}
+        <div className="space-y-2">
+          <label className="text-xs font-bold text-neutral-500 uppercase tracking-wider">
+            เลือกขนาดน้ำหนักตัดสเต๊ก (Custom Cut):
+          </label>
+          <div className="flex gap-3">
+            {[300, 450, 600].map((grams) => (
+              <button
+                key={grams}
+                type="button"
+                onClick={() => handleWeightSelection(grams)}
+                className={`py-2.5 px-5 rounded-2xl text-sm font-semibold border transition ${
+                  selectedWeight === grams
+                    ? "bg-red-700 text-white border-red-700 shadow-md"
+                    : "bg-white dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 border-neutral-300 dark:border-neutral-700 hover:border-neutral-400"
+                }`}
+              >
+                {grams} กรัม
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* พื้นที่แสดงราคาแบบสงวนความสูงคงที่ (Reserved Space ป้องกัน CLS 100%) */}
+        <div className="min-h-[80px] p-4 rounded-2xl bg-neutral-100 dark:bg-neutral-800/60 border border-neutral-200 dark:border-neutral-800 flex justify-between items-center">
+          <div>
+            <span className="text-xs text-neutral-500">ราคาสุทธิโดยประมาณ:</span>
+            <div className="text-3xl font-black text-red-600 dark:text-red-500">
+              ฿{displayedPrice.toLocaleString()}
+            </div>
+          </div>
+          {isPending && (
+            <span className="text-xs text-neutral-400 animate-pulse">กำลังคำนวณ...</span>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 3: ระบบทดสอบประสิทธิภาพอัตโนมัติด้วย Lighthouse CI บน GitHub Actions
+
+สร้างไฟล์คอนฟิก `.lighthouserc.json` กำหนดงบประมาณประสิทธิภาพ (Performance Budgets) และเวิร์กโฟลว์ GitHub Actions เพื่อตรวจจับ Performance Regression ก่อน Merge โค้ดเข้าสู่ Production
+
+```json filename=".lighthouserc.json"
+{
+  "ci": {
+    "collect": {
+      "numberOfRuns": 3,
+      "startServerCommand": "npm run start",
+      "startServerReadyPattern": "Ready in",
+      "url": [
+        "http://localhost:3000/",
+        "http://localhost:3000/products/wagyu-a5-ribeye"
+      ],
+      "settings": {
+        "preset": "desktop",
+        "throttlingMethod": "simulate",
+        "formFactor": "desktop"
+      }
+    },
+    "assert": {
+      "assertions": {
+        "categories:performance": ["error", { "minScore": 0.90 }],
+        "first-contentful-paint": ["error", { "maxNumericValue": 1800 }],
+        "largest-contentful-paint": ["error", { "maxNumericValue": 2500 }],
+        "cumulative-layout-shift": ["error", { "maxNumericValue": 0.05 }],
+        "total-blocking-time": ["error", { "maxNumericValue": 200 }],
+        "categories:accessibility": ["warn", { "minScore": 0.95 }],
+        "categories:best-practices": ["warn", { "minScore": 0.95 }],
+        "categories:seo": ["error", { "minScore": 0.95 }]
+      }
+    },
+    "upload": {
+      "target": "temporary-public-storage"
+    }
+  }
+}
+```
+
+```yaml filename=".github/workflows/lighthouse-ci.yml"
+name: Lighthouse CI Performance Gatekeeper
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  performance-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build Next.js Production Bundle
+        run: npm run build
+        env:
+          NEXT_PUBLIC_APP_ENV: "ci"
+
+      - name: Run Lighthouse CI Audit
+        run: |
+          npm install -g @lhci/cli@0.14.x
+          lhci autorun
+        env:
+          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ประเด็นข้อผิดพลาด | รูปแบบที่ผิดพลาด (Anti-pattern) | แนวปฏิบัติระดับ Senior Architect (Best Practice) |
+| :--- | :--- | :--- |
+| **ลืมใส่ `priority` บนภาพ LCP** | ใช้ `loading="lazy"` บนภาพฮีโร่หน้าแรก ทำให้เบราว์เซอร์รอ Scroll จึงเริ่มโหลด ฉุด LCP ไปถึง 4-6 วินาที | ใส่ `priority` และ `fetchPriority="high"` บนรูปภาพ LCP ประจำหน้าเสมอ เพื่อให้ Next.js สร้าง Preload Link ตั้งแต่หัวเอกสาร HTML |
+| **แทรกลิงก์ฟอนต์ภายนอกบล็อกเรนเดอร์** | เรียก `<link href="https://fonts.googleapis.com..." rel="stylesheet">` ส่งผลให้เบราว์เซอร์หยุดรอ CSS ฟอนต์ | ใช้ `next/font/google` หรือ `next/font/local` เพื่อให้ Next.js ดาวน์โหลดไฟล์ฟอนต์มาไว้ภายใน และคำนวณ Fallback Metrics ป้องกัน Font Shift |
+| **คำนวณข้อมูลหนักๆ ภายใน Click Handler (INP พัง)** | วนลูปคำนวณราคาเนื้อและอัปเดต React State ขนาดใหญ่ใน `onClick` เดียวกัน ทำให้ Main Thread ค้างเกิน 300ms | ใช้ React 19 `useTransition` หรือแบ่ง Task ด้วย `setTimeout(..., 0)` หรือ `requestAnimationFrame` เพื่อปล่อยให้เบราว์เซอร์วาดเฟรมตอบสนองทันที |
+| **พื้นที่ป้ายแบนเนอร์หรือราคากระตุกขยับ (CLS พัง)** | เรนเดอร์คอมโพเนนต์โปรโมชันหรือราคาจาก API โดยไม่มีกล่องคลุมขนาดคงที่ ทำให้เนื้อหาข้างเคียงกระตุกหล่น | กำหนด `min-height` หรือใช้ Skeleton ครอบพื้นที่ไว้ล่วงหน้า (Reserved Dimensions) เพื่อรักษาระดับ Layout ให้คงที่ 100% |
+| **ไม่กำหนด `sizes` ใน `next/image`** | ใส่ภาพแบบ `fill` โดยไม่ระบุ `sizes` ทำให้เบราว์เซอร์ดาวน์โหลดรูปภาพความกว้างขนาด 100vw แม้กล่องแสดงผลจะกว้างแค่ 300px | ระบุ `sizes="(max-width: 768px) 100vw, 50vw"` เสมอ เพื่อให้ Next.js เสิร์ฟขนาดภาพที่บีบอัดพอดีกับอุปกรณ์จริง |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรทำ Performance Optimization & Audit:
+- **Core Conversion Pages:** เช่น หน้าแรก (Landing Page), หน้าแสดงชิ้นเนื้อ (Product Detail Page), และหน้าตระกร้าชำระเงิน (Checkout)
+- **ระบบ CI/CD Pull Request Checks:** ติดตั้ง Lighthouse CI เพื่อสกัดกั้นการเพิ่มแพ็กเกจขนาดยักษ์ที่ไม่จำเป็นก่อนถูก Merge เข้าสู่ Main Branch
+- **การเก็บค่า RUM ด้วย `useReportWebVitals`:** เพื่อทำความเข้าใจพฤติกรรมและความเร็วในการโหลดของผู้ใช้บนเครือข่ายมือถือจริงในประเทศไทย
+
+### สิ่งที่ไม่จำเป็นต้องทำ (Over-optimization):
+- **หน้าจัดการแอดมินภายในองค์กร (Internal Backoffice):** หน้า Dashboard หลังร้านที่มีผู้ใช้งานเฉพาะพนักงาน ไม่จำเป็นต้องเคี่ยวเข็ญคะแนน Lighthouse ให้ได้ 100 เต็ม เพราะแลกกับเวลาพัฒนาที่สูงเกินความคุ้มค่า
+- **การแยกชิ้นส่วนโค้ดจนเล็กเกินไป (Micro-splitting):** การใช้ `dynamic()` แยกคอมโพเนนต์ย่อยขนาด 1KB ออกเป็นหลายร้อยไฟล์ อาจทำให้เกิด Network Waterfall และทำให้เวลาโหลดกลับช้าลงกว่าเดิม
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: เหตุใด Google จึงเปลี่ยนมาใช้ Interaction to Next Paint (INP) แทน First Input Delay (FID) และในเชิงสถาปัตยกรรม React 19 / Next.js 16 คุณมีเทคนิคอย่างไรในการปรับแต่งโค้ดให้ค่า INP อยู่ในเกณฑ์ Good (< 200ms)?
+
+**แนวคำตอบเชิงลึก:**
+1. **ข้อจำกัดของ FID vs ความครอบคลุมของ INP:**
+   - FID วัดเฉพาะความล่าช้าของอินพุตแรกสุด (First Input Delay) เท่านั้น หากการคลิกครั้งแรกตอบสนองเร็ว แต่เมื่อผู้ใช้คลิกเลือกชิ้นเนื้อหรือกดเปิดตะกร้าในขั้นตอนถัดไปแล้วระบบค้าง 1 วินาที FID จะไม่สามารถตรวจจับปัญหานี้ได้
+   - INP วัดตลอดทั้งวงจรชีวิตของการเข้าชมหน้าเว็บ โดยตรวจจับการโต้ตอบที่แย่ที่สุด (Worst 98th percentile) และวัดรวมถึง **Processing Duration** และ **Presentation Delay**
+2. **กลยุทธ์การปรับปรุง INP ใน Next.js 16:**
+   - **การใช้ React 19 `useTransition`:** แยกการอัปเดต State ที่เร่งด่วน (Urgent เช่น การเปลี่ยนสีปุ่มเมื่อถูกกด) ออกจากการอัปเดตข้อมูลหนัก (Non-urgent เช่น การกรองรายการสินค้าหรือคำนวณราคาสเต๊ก) เพื่อให้ React ปล่อย Main Thread กลับไปให้เบราว์เซอร์วาดเฟรมถัดไปทันที
+   - **การลด Long Tasks (Tasks > 50ms):** ใช้ API `scheduler.yield()` หรือแบ่งฟังก์ชันใหญ่ๆ ให้ทำงานเป็นชิ้นย่อย เพื่อเปิดโอกาสให้ Event Queue ระบายอินพุตของผู้ใช้ออกไปก่อน
+   - **การลด Hydration Overhead:** ย้ายคอมโพเนนต์ที่ไม่ต้องการโต้ตอบไปเป็น React Server Components (RSC) เพื่อลดปริมาณ JavaScript ที่ต้องดาวน์โหลดและประมวลผลบนเบราว์เซอร์
+
+---
+
+### คำถามที่ 2: อธิบาย 4 เฟสย่อยของ Largest Contentful Paint (LCP) และหากหน้าสินค้าเนื้อวากิวพรีเมียมมีปัญหา LCP ช้ากว่า 4.5 วินาที คุณจะมีลำดับขั้นตอนในการวิเคราะห์และแก้ไขปัญหาแต่ละจุดอย่างไร?
+
+**แนวคำตอบเชิงลึก:**
+LCP ประกอบด้วย 4 เฟสย่อย:
+1. **Time to First Byte (TTFB):**
+   - *ปัญหา:* เซิร์ฟเวอร์ใช้เวลา Query ข้อมูลเนื้อจากฐานข้อมูลนานเกินไป
+   - *วิธีแก้:* ใช้ Dynamic IO / ISR แคชข้อมูลหน้ารายละเอียดสินค้า หรือใช้ React Cache / Unstable Cache เพื่อให้ TTFB ต่ำกว่า 600ms
+2. **Resource Load Delay (ความล่าช้าในการเริ่มโหลดภาพ):**
+   - *ปัญหา:* เบราว์เซอร์ต้องรอให้ JavaScript โหลดและ Hydrate เสร็จก่อน จึงจะรู้ว่าต้องโหลดรูปอะไร
+   - *วิธีแก้:* กำหนดแอตทริบิวต์ `priority` และ `fetchPriority="high"` บนคอมโพเนนต์ `<Image />` ซึ่ง Next.js จะแทรกแท็ก `<link rel="preload" as="image" href="..." fetchpriority="high">` ลงในส่วน `<head>` ของ HTML ทำให้เบราว์เซอร์เริ่มดาวน์โหลดภาพทันทีตั้งแต่เริ่มอ่านสตรีม HTML ไบต์แรก
+3. **Resource Load Duration (เวลาในการถ่ายโอนข้อมูลภาพ):**
+   - *ปัญหา:* รูปภาพมีขนาดไฟล์ใหญ่เกินไป หรือใช้ฟอร์แมตโบราณอย่าง PNG/JPEG
+   - *วิธีแก้:* ใช้ Image Optimization API ของ Next.js ซึ่งแปลงเป็น AVIF/WebP อัตโนมัติ พร้อมทั้งกำหนด `sizes` ให้ตรงกับ Viewport เพื่อไม่ให้โหลดรูปขนาด 1200px มาแสดงในพื้นที่ 400px
+4. **Element Render Delay (เวลาตั้งแต่โหลดรูปเสร็จจนถึงวาดลงจอ):**
+   - *ปัญหา:* เบราว์เซอร์ดาวน์โหลดรูปเสร็จแล้ว แต่ Main Thread ถูกบล็อกด้วยสคริปต์บุคคลที่สาม (เช่น GTM, Facebook Pixel) หรือคอมไพล์ JS ขนาดใหญ่ ทำให้ถอดรหัสภาพไม่ได้
+   - *วิธีแก้:* กำหนด `decoding="async"` บนรูปภาพ และย้ายสคริปต์บุคคลที่สามไปโหลดแบบ `afterInteractive`
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [Next.js Optimization Architecture](/docs/nextjs/optimization) — การปรับแต่ง Image, Font, Script และ Bundle Size
+- [Next.js Web Analytics](/docs/nextjs/analytics) — การวัดผลข้อมูลการใช้งานเว็บไซต์และความสอดคล้องกับ PDPA
+- [Next.js Production Deployment](/docs/nextjs/deployment) — การตั้งค่า Dockerfile, แคชระดับ CDN และการวัดสุขภาพระบบ
+- [React Performance Optimization](/docs/react/performance) — การใช้ useTransition, useDeferredValue และการลด Re-render

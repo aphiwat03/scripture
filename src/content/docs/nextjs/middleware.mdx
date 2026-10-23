@@ -1,0 +1,379 @@
+---
+title: Middleware & Proxy
+category: Frontend
+parentTitle: Next.js 16
+version: Edge Runtime (Next.js 16)
+updatedAt: 2026-10-23
+---
+
+# Next.js 16 Edge Middleware & Proxy Architecture
+
+สถาปัตยกรรมระดับ Senior ในการใช้ Next.js 16 Edge Middleware สำหรับตรวจสอบสิทธิ์ผู้ใช้ (Session Cookie & Role-based Access Control), การจัดเส้นทางขั้นสูงด้วย URL Rewrite เทียบกับ Redirect, การฉีด Security Headers, และการป้องกันบอทพร้อมจำกัดอัตราคำขอ (Rate Limiting) ที่ Edge Network ก่อนเข้าสู่ Server Component Lifecycle
+
+---
+
+## 1. แนวคิด (Concept)
+
+**Next.js Middleware** คือฟังก์ชันที่ทำงานอยู่บน **Edge Runtime** (V8 Isolate Engine ขนาดเบาพิเศษ) ทำหน้าที่เป็นด่านหน้าสุดของทุกคำขอ HTTP ที่ส่งเข้ามายังเว็บแอปพลิเคชัน ก่อนที่คำขอนั้นจะถูกส่งต่อไปยัง Layout, Page หรือ Route Handlers
+
+ในสถาปัตยกรรมยุคใหม่ของ **Next.js 16**:
+- Middleware รันอยู่บนโหนด CDN ใกล้ผู้ใช้งานมากที่สุด (Edge Locations) ทำให้เกิด Latency ต่ำมากระดับ Single-digit Milliseconds
+- เหมาะอย่างยิ่งสำหรับการทำหน้าที่ Gatekeeper เช่น การตรวจสอบสิทธิ์ (Auth Guard), การทำ A/B Testing, การตรวจจับบอท (Bot Detection), และการเขียนทับเส้นทางคำขอ (Path Rewriting)
+- Next.js 16 รองรับการปรับแต่ง Request Headers และ Response Cookies แบบ Immutable ผ่าน Web Standards API (`Request`, `Response`, `Headers`)
+
+```text
++------------------------------------------------------------------------------------------------+
+|                         Next.js 16 Edge Middleware Request Pipeline                            |
++------------------------------------------------------------------------------------------------+
+| 1. Incoming Client Request (Browser / Bot / Mobile App)                                        |
+|    - Path: /admin/inventory/a5-wagyu                                                           |
+|    - Headers: Cookie: session_token=..., User-Agent: ...                                       |
+|                                       |                                                        |
+| 2. Edge Middleware (V8 Isolate)       v                                                        |
+|    +--------------------------------------------------------------------------------------+    |
+|    | Matcher Check: ตรงกับ config.matcher หรือไม่?                                        |    |
+|    | [Step A] Bot Detection: ตรวจจับ Malicious Scraper / Headless Browser                 |    |
+|    | [Step B] Edge Rate Limiting: เช็ก Sliding Window / Token Bucket                      |    |
+|    | [Step C] Auth & RBAC Guard: ตรวจสอบ JWT Session และ Role จาก Cookie                  |    |
+|    |          - ไม่ล็อกอิน      -> NextResponse.redirect('/login')                        |    |
+|    |          - ไม่มีสิทธิ์ Admin -> NextResponse.redirect('/unauthorized')                 |    |
+|    | [Step D] Header Enrichment: สร้าง x-request-id และ x-user-id ส่งต่อลงข้างล่าง        |    |
+|    | [Step E] Path Rewriting: Rewrite โดเมนร้านคู่ค้า butcher.com/shop -> /shops/butcher  |    |
+|    +--------------------------------------------------------------------------------------+    |
+|                                       |                                                        |
+| 3. Downstream Execution               v                                                        |
+|    - Server Components / Route Handlers (Node.js or Edge) ได้รับ Headers สะอาด                 |
+|    - ส่งผลลัพธ์กลับสู่ Client ผ่าน Response Cookies และ Security Headers                       |
++------------------------------------------------------------------------------------------------+
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 Edge Runtime vs Node.js Runtime
+ความเข้าใจผิดอันดับหนึ่งของนักพัฒนาคือการคิดว่า Middleware เป็น Node.js ปกติ:
+- **Edge Runtime ไม่ใช่ Node.js เต็มรูปแบบ:** ไม่สามารถใช้งาน Native Node.js APIs เช่น `fs`, `child_process`, `net`, หรือไลบรารีอย่าง `bcrypt` (C++ Addons) ได้
+- **ไลบรารีเข้ารหัส:** ต้องใช้ Web Crypto API มาตรฐาน หรือไลบรารี Pure JS/Web Crypto เช่น `jose` แทน `jsonwebtoken`
+- **ข้อจำกัดเรื่องขนาด Memory & Execution Time:** Middleware ต้องทำงานเสร็จภายในเวลาสั้นมาก (ปกติไม่เกิน 25-50ms) ห้ามรัน Database Query ตรงๆ ผ่าน ORM หนักๆ (เช่น Prisma) ใน Middleware เพราะจะเกิด Connection Overhead มหาศาล
+
+<Callout type="warning" title="อย่าเชื่อมต่อฐานข้อมูลโดยตรงใน Middleware">
+การเปิด Direct Connection สู่ PostgreSQL/MySQL ใน Edge Middleware จะทำให้เซิร์ฟเวอร์ฐานข้อมูลล่มจาก Connection Exhaustion หากจำเป็นต้องอ่านข้อมูล ให้ใช้ HTTP-based Database (เช่น Upstash Redis, Supabase REST) หรือตรวจสอบผ่าน Signed Cryptographic JWT Cookie แทน
+</Callout>
+
+### 2.2 URL Rewrite vs URL Redirect
+Next.js มีสองวิธีหลักในการจัดการเส้นทาง:
+
+1. **`NextResponse.redirect(url, statusCode)` (HTTP 307 / 308 / 302 / 301):**
+   - สั่งให้เบราว์เซอร์เปลี่ยน URL บน Address Bar และส่ง HTTP Request ใหม่เข้ามา
+   - เหมาะสำหรับการบังคับ Login, การย้ายหน้าถาวร (SEO 301), หรือการปฏิเสธสิทธิ์
+2. **`NextResponse.rewrite(destinationUrl)` (Server-side Proxying):**
+   - URL บน Address Bar ของผู้ใช้ยังคงเดิม แต่ Next.js จะดึงเนื้อหาจาก `destinationUrl` มาแสดงผลแทน
+   - เหมาะสำหรับ Multi-tenant Subdomains (เช่น `butcher-korat.smartbutcher.com` -> `/tenants/korat`), A/B Testing โดยไม่เปลี่ยน URL, หรือการซ่อน URL ภายในระบบ
+
+### 2.3 Mutating Headers ใน Next.js 16
+เมื่อต้องการส่งค่าจาก Middleware ไปยัง Server Components หรือ Route Handlers (เช่น `userId`, `requestId`):
+- เราต้องโคลน Headers จากคำขอเดิมผ่าน `new Headers(request.headers)`
+- ใส่ Header ใหม่ลงไป
+- ส่งต่อไปด้วย `NextResponse.next({ request: { headers: requestHeaders } })`
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: Basic Edge Guard (การตรวจสอบ Session Cookie และ Path Matcher)
+
+ตัวอย่างเริ่มต้นสำหรับการตรวจสอบผู้ใช้ทั่วไป ป้องกันเส้นทาง `/account/*` และ `/checkout/*` ของร้านค้าเนื้อ
+
+```typescript filename="src/middleware.ts"
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
+
+// รายการเส้นทางที่ต้องเข้าสู่ระบบก่อนสั่งซื้อเนื้อ
+const PROTECTED_PREFIXES = ['/account', '/checkout', '/orders'];
+
+export function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+  
+  // 1. อ่าน Session Token จาก HttpOnly Cookie
+  const sessionToken = request.cookies.get('sb_session')?.value;
+  
+  // 2. ตรวจสอบว่าเส้นทางปัจจุบันเป็น Protected Route หรือไม่
+  const isProtected = PROTECTED_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+
+  if (isProtected && !sessionToken) {
+    // ผู้ใช้ยังไม่ล็อกอิน ให้ Redirect ไปหน้า Login พร้อมแนบ returnUrl
+    const loginUrl = new URL('/auth/login', request.url);
+    loginUrl.searchParams.set('returnUrl', pathname);
+    return NextResponse.redirect(loginUrl);
+  }
+
+  // 3. แนบ Request ID เพื่อใช้แกะรอย Log ในระบบ
+  const requestId = crypto.randomUUID();
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set('x-request-id', requestId);
+
+  const response = NextResponse.next({
+    request: {
+      headers: requestHeaders,
+    },
+  });
+
+  // แนบ Header กลับไปใน Response เพื่อให้ Client เห็น ID การแกะรอย
+  response.headers.set('x-request-id', requestId);
+  return response;
+}
+
+// กำหนด Matcher เพื่อไม่ให้ Middleware ทำงานกับ Static Files และรูปภาพ
+export const config = {
+  matcher: [
+    /*
+     * กรองไม่ให้รันใน:
+     * - api/webhooks (Stripe / Omise webhook ต้องการ raw request)
+     * - _next/static (ไฟล์ JS/CSS)
+     * - _next/image (ภาพสเต๊กที่ optimize แล้ว)
+     * - favicon.ico, sitemap.xml, robots.txt
+     */
+    '/((?!api/webhooks|_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt).*)',
+  ],
+};
+```
+
+---
+
+### ตัวอย่างที่ 2: Advanced Production Middleware (RBAC, Multi-Tenant Rewrite, และ Edge Rate Limiting)
+
+ในระบบจริงของ Smart Butcher Marketplace เราต้องการ:
+1. การตรวจสอบ JWT Signature ด้วย Web Crypto (`jose`) เพื่อถอดรหัส Role (`ADMIN` | `BUTCHER` | `CUSTOMER`)
+2. การคัดกรอง Role สำหรับหน้า `/admin/*` และ `/butcher-portal/*`
+3. การทำ URL Rewrite สำหรับ Subdomain ของฟาร์มเนื้อพรีเมียม
+4. การทำ In-memory Token Bucket Rate Limiter อย่างง่ายที่ Edge
+
+```typescript filename="src/types/auth.ts"
+export type UserRole = 'ADMIN' | 'BUTCHER' | 'CUSTOMER';
+
+export interface TokenPayload {
+  sub: string; // User ID
+  email: string;
+  role: UserRole;
+  shopId?: string; // รหัสร้านค้าพาร์ตเนอร์
+  exp: number;
+}
+```
+
+```typescript filename="src/middleware.ts"
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
+import { jwtVerify } from 'jose';
+import type { TokenPayload, UserRole } from '@/types/auth';
+
+// Key เข้ารหัส JWT (ต้องเป็น Uint8Array สำหรับ Edge Runtime Web Crypto)
+const JWT_SECRET = new TextEncoder().encode(
+  process.env.JWT_SECRET || 'smart-butcher-super-secret-key-32chars-min'
+);
+
+// Memory Cache สำหรับจำกัดอัตราคำขอแบบ Sliding Window พื้นฐานที่ Edge Node
+const ipRequestCounts = new Map<string, { count: number; resetTime: number }>();
+const RATE_LIMIT_MAX = 100; // 100 คำขอ
+const RATE_LIMIT_WINDOW_MS = 60 * 1000; // ต่อ 1 นาที
+
+// ฟังก์ชันตรวจสอบและจำกัดอัตราคำขอ
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const clientData = ipRequestCounts.get(ip);
+
+  if (!clientData || now > clientData.resetTime) {
+    ipRequestCounts.set(ip, { count: 1, resetTime: now + RATE_LIMIT_WINDOW_MS });
+    return true;
+  }
+
+  if (clientData.count >= RATE_LIMIT_MAX) {
+    return false;
+  }
+
+  clientData.count += 1;
+  return true;
+}
+
+export async function middleware(request: NextRequest) {
+  const { pathname, hostname } = request.nextUrl;
+  const clientIp = request.headers.get('x-forwarded-for')?.split(',')[0].trim() || '127.0.0.1';
+
+  // ----------------------------------------------------
+  // 1. Bot Protection & Edge Rate Limiting
+  // ----------------------------------------------------
+  const userAgent = request.headers.get('user-agent') || '';
+  const isMaliciousBot = /curl|python-requests|scrapy|wget/i.test(userAgent) && !pathname.startsWith('/api/health');
+
+  if (isMaliciousBot) {
+    return new NextResponse(JSON.stringify({ error: 'Access Denied: Automated scraping prohibited' }), {
+      status: 403,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  if (!checkRateLimit(clientIp)) {
+    return new NextResponse(JSON.stringify({ error: 'Too Many Requests: Rate limit exceeded' }), {
+      status: 429,
+      headers: {
+        'Content-Type': 'application/json',
+        'Retry-After': '60',
+      },
+    });
+  }
+
+  // ----------------------------------------------------
+  // 2. Token Decoding & RBAC Authentication
+  // ----------------------------------------------------
+  const tokenCookie = request.cookies.get('sb_session')?.value;
+  let userPayload: TokenPayload | null = null;
+
+  if (tokenCookie) {
+    try {
+      const { payload } = await jwtVerify(tokenCookie, JWT_SECRET);
+      userPayload = payload as unknown as TokenPayload;
+    } catch {
+      // Token หมดอายุ หรือ Signature ไม่ถูกต้อง ให้ลบ Cookie ออก
+      const redirectResponse = NextResponse.redirect(new URL('/auth/login', request.url));
+      redirectResponse.cookies.delete('sb_session');
+      return redirectResponse;
+    }
+  }
+
+  // ตรวจสอบเส้นทางแอดมิน: ต้องมี Role ADMIN เท่านั้น
+  if (pathname.startsWith('/admin')) {
+    if (!userPayload) {
+      const loginUrl = new URL('/auth/login', request.url);
+      loginUrl.searchParams.set('returnUrl', pathname);
+      return NextResponse.redirect(loginUrl);
+    }
+    if (userPayload.role !== 'ADMIN') {
+      return NextResponse.redirect(new URL('/403-forbidden', request.url));
+    }
+  }
+
+  // ตรวจสอบเส้นทางโรงเชือด/เขียงเนื้อ: ต้องเป็น BUTCHER หรือ ADMIN
+  if (pathname.startsWith('/butcher-portal')) {
+    if (!userPayload || (userPayload.role !== 'BUTCHER' && userPayload.role !== 'ADMIN')) {
+      return NextResponse.redirect(new URL('/auth/login', request.url));
+    }
+  }
+
+  // ----------------------------------------------------
+  // 3. Multi-tenant Subdomain Rewrite
+  // ----------------------------------------------------
+  // รองรับฟาร์มเนื้อพาร์ตเนอร์ เช่น: `hokkaido-wagyu.smartbutcher.com`
+  const baseDomain = process.env.NEXT_PUBLIC_BASE_DOMAIN || 'smartbutcher.com';
+  const isCustomSubdomain = hostname !== baseDomain && hostname.endsWith(`.${baseDomain}`);
+
+  const requestHeaders = new Headers(request.headers);
+  const requestId = crypto.randomUUID();
+  requestHeaders.set('x-request-id', requestId);
+
+  if (userPayload) {
+    // แนบ Identity ลงใน Headers เพื่อให้ Server Components ดึงไปใช้ได้ทันที
+    requestHeaders.set('x-user-id', userPayload.sub);
+    requestHeaders.set('x-user-role', userPayload.role);
+    if (userPayload.shopId) {
+      requestHeaders.set('x-user-shop-id', userPayload.shopId);
+    }
+  }
+
+  // หากเป็น Subdomain ของฟาร์ม ให้ Rewrite ไปที่ internal dynamic route
+  if (isCustomSubdomain) {
+    const subdomain = hostname.replace(`.${baseDomain}`, '');
+    const rewrittenUrl = new URL(`/tenants/${subdomain}${pathname}`, request.url);
+    return NextResponse.rewrite(rewrittenUrl, {
+      request: {
+        headers: requestHeaders,
+      },
+    });
+  }
+
+  // ----------------------------------------------------
+  // 4. Header Injection & Security Response Headers
+  // ----------------------------------------------------
+  const response = NextResponse.next({
+    request: {
+      headers: requestHeaders,
+    },
+  });
+
+  // ป้องกัน Clickjacking, XSS, และ MIME Sniffing
+  response.headers.set('X-Frame-Options', 'DENY');
+  response.headers.set('X-Content-Type-Options', 'nosniff');
+  response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  response.headers.set('x-request-id', requestId);
+
+  return response;
+}
+
+export const config = {
+  matcher: [
+    '/((?!api/webhooks|_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt).*)',
+  ],
+};
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ปัญหาที่พบบ่อย | รูปแบบที่ผิด (Anti-pattern) | รูปแบบที่ถูกต้องระดับ Senior (Best Practice) |
+| :--- | :--- | :--- |
+| **รัน Database Queries ใน Middleware** | เรียก `await prisma.user.findUnique(...)` ใน Edge ทำให้ติดปัญหา Node.js C++ bindings และเกิด Connection Exhaustion | ตรวจสอบข้อมูลสิทธิ์จาก Cryptographic Signed JWT (ผ่าน `jose`) หรือส่งต่อให้ Server Component จัดการ |
+| **ใช้ `jsonwebtoken` บน Edge** | นำเข้า `import jwt from 'jsonwebtoken'` ซึ่งพึ่งพา Node.js Crypto module และทำให้ Build พังบน Edge | ใช้ไลบรารี `jose` หรือ Web Crypto API มาตรฐาน (`crypto.subtle`) ที่ทำงานได้ 100% บน V8 Isolate |
+| **ลืมตั้ง Matcher กรองไฟล์ Static** | ปล่อยให้ Middleware รันทุกคำขอ รวมไปถึงรูปภาพ `.png`, `.jpg`, ฟอนต์ `.woff2`, และ chunks `.js` ทำให้ Latency พุ่งสูง | กำหนด `config.matcher` พร้อม Negative Regex เพื่อข้าม `_next/static`, `_next/image`, และ Webhook routes |
+| **สับสนระหว่าง Rewrite และ Redirect** | ใช้ `NextResponse.redirect` สำหรับ Custom Subdomain ส่งผลให้ URL เปลี่ยนและเสียภาพลักษณ์ของแบรนด์พาร์ตเนอร์ | ใช้ `NextResponse.rewrite` เพื่อดึงเนื้อหาจาก Route ภายในมาแสดง โดยที่ URL บน Address Bar ไม่เปลี่ยนแปลง |
+| **พึ่งพาเฉพาะ Middleware ในการป้องกันข้อมูล** | คิดว่ามี Middleware แล้ว Server Action และ Route Handler ไม่ต้องเช็กสิทธิ์ซ้ำ | ต้องทำ Defense-in-Depth เสมอ Middleware เป็นเพียงประตูด่านแรก Server Action ต้องตรวจสอบ Session และ Role ซ้ำ |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Next.js Edge Middleware เมื่อ:
+- **Global Authentication & Authorization Gate:** สกัดกั้นผู้ใช้ที่ไม่ได้ล็อกอินก่อนที่จะเริ่ม Render React Components ลดการใช้งาน Server Compute
+- **Multi-tenant / Subdomain Routing:** แปลง Subdomain หรือ Custom Domain ไปยัง Page ภายในแบบไร้รอยต่อด้วย `rewrite`
+- **Geolocation & Internationalization (i18n):** ตรวจสอบประเทศของผู้ใช้เพื่อส่งต่อไปยังภาษาที่ถูกต้อง (`/th`, `/en`) หรือเลือกคลังสินค้าเนื้อที่ใกล้ที่สุด
+- **Security Headers & Traceability:** ฉีด `x-request-id`, `Content-Security-Policy`, และ `Strict-Transport-Security` ในทุก Response
+
+### ไม่ควรใช้ Next.js Edge Middleware เมื่อ:
+- **งานประมวลผลข้อมูลหนักหรือใช้ I/O สูง:** เช่น การบีบอัดรูปภาพเนื้อ, การแปลงไฟล์ PDF ใบเสร็จรับเงิน
+- **การเข้าถึงฐานข้อมูลโดยตรงผ่าน Heavy ORM:** เช่น Prisma, TypeORM, หรือ Sequelize
+- **การรับชำระเงิน Webhooks:** Route เช่น `/api/webhooks/stripe` ต้องปล่อยผ่านโดยตรงเพื่อให้อ่าน Raw Binary Body ในการตรวจสอบ Cryptographic Signature
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: ทำไม Next.js Middleware ถึงทำงานบน Edge Runtime และการออกแบบนี้ส่งผลต่อการเลือกใช้งานไลบรารีภายนอกอย่างไร?
+
+**แนวคำตอบเชิงลึก:**
+Next.js ออกแบบให้ Middleware ทำงานบน Edge Runtime เพื่อให้โค้ดถูกประมวลผลบนเซิร์ฟเวอร์แบบกระจายตัวทั่วโลก (เช่น Vercel Edge Network หรือ Cloudflare Workers) ซึ่งอยู่ใกล้ตัวผู้ใช้มากที่สุด:
+1. **Cold Start ที่ต่ำมาก (Sub-millisecond):** ต่างจาก Full Node.js Container ที่อาจมี Cold Start หลายร้อยมิลลิวินาที V8 Isolate สามารถบูตและเริ่มประมวลผลคำขอได้ทันที
+2. **Impact ต่อสถาปัตยกรรมโค้ด:**
+   - โค้ดถูกจำกัดอยู่ในมาตรฐาน Web APIs (`fetch`, `Request`, `Response`, `Headers`, `crypto.subtle`)
+   - ไม่สามารถใช้ Node.js Built-in Modules เช่น `fs`, `path`, `stream` (Node.js version) หรือ C++ native addons ได้
+   - ไลบรารียอดนิยมอย่าง `jsonwebtoken` ไม่สามารถทำงานได้ ต้องเปลี่ยนไปใช้ `jose` ซึ่งเขียนบน Web Crypto API แทน
+   - การเชื่อมต่อฐานข้อมูล SQL แบบ TCP Connection Pool ทำไม่ได้ ต้องสื่อสารผ่าน HTTP APIs เช่น Upstash Serverless Redis หรือ Neon Serverless Postgres Driver
+
+---
+
+### คำถามที่ 2: อธิบายความแตกต่างระหว่าง `NextResponse.rewrite()` และ `NextResponse.redirect()` และยกตัวอย่างสถานการณ์จริงในระบบ E-commerce เนื้อพรีเมียมที่จำเป็นต้องเลือกใช้อันใดอันหนึ่งอย่างเจาะจง?
+
+**แนวคำตอบเชิงลึก:**
+- **`NextResponse.redirect(URL, status)` (Client-side URL Change):**
+  - เป็นการส่ง HTTP Status Code (เช่น 307 Temporary Redirect หรือ 308 Permanent Redirect) พร้อม `Location` Header กลับไปบอกเบราว์เซอร์
+  - เบราว์เซอร์จะล้างประวัติคำขอเดิมและยิง HTTP Request ก้อนใหม่ไปยัง URL ปลายทาง ส่งผลให้ URL บน Address Bar เปลี่ยนแปลง
+  - **ตัวอย่างการใช้งาน:** เมื่อลูกค้าพยายามเข้าหน้า `/checkout` เพื่อชำระเงินค่าเนื้อสเต๊ก แต่ไม่มีคุกกี้ Session ระบบจะ `redirect('/auth/login?returnUrl=/checkout')` เพื่อบังคับล็อกอิน
+- **`NextResponse.rewrite(URL)` (Server-side Transparent Proxy):**
+  - เกิดขึ้นบนเซิร์ฟเวอร์เท่านั้น โดย URL บน Address Bar ของเบราว์เซอร์ผู้ใช้จะคงเดิม 100% แต่ Next.js จะดึง RSC Payload หรือ HTML จาก Route ปลายทางที่ระบุมาแสดงผล
+  - **ตัวอย่างการใช้งาน:** การทำ Multi-tenant Whitelabel ให้กับฟาร์มคู่ค้า เช่น ลูกค้าเปิด `farm-kobe.smartbutcher.com/products/a5-sirloin` ตัว Middleware จะทำ `NextResponse.rewrite(new URL('/tenants/farm-kobe/products/a5-sirloin', request.url))` ทำให้ลูกค้ายังเห็น URL แบรนด์ของฟาร์มตามเดิม แต่โครงสร้างซอร์สโค้ดของระบบไม่ต้องแยกโปรเจกต์ใหม่
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [Next.js Route Handlers](/docs/nextjs/route-handlers) — การรับคำขอ HTTP และ Webhooks ฝั่งเซิร์ฟเวอร์
+- [Next.js Authentication & Security](/docs/nextjs/auth) — กลยุทธ์การจัดการ Session และ Cookie ปลอดภัย
+- [Next.js Advanced Routing](/docs/nextjs/advanced-routing) — Parallel Routes และ Intercepting Routes
+- [Next.js Error Handling](/docs/nextjs/error-handling) — การจัดการข้อผิดพลาดและ Custom Error Boundaries

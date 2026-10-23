@@ -1,0 +1,296 @@
+---
+title: Graceful Shutdown
+category: BACKEND
+parentTitle: NestJS 11
+version: "SIGTERM / SIGINT (NestJS 11)"
+updatedAt: 2026-10-23
+---
+
+## 1. แนวคิด (Concept)
+
+ในสภาพแวดล้อม Cloud-Native ยุคใหม่บน Kubernetes, AWS ECS หรือ Docker Swarm เซิร์ฟเวอร์คอนเทนเนอร์ไม่ได้เปิดทำงานตลอดไป แต่จะถูกสร้างขึ้นและทำลายลงอย่างต่อเนื่อง (Ephemeral Lifecycle) ไม่ว่าจะเป็นการทำ **Rolling Updates** (ปล่อยโค้ดเวอร์ชันใหม่), **Auto-scaling Scale-in** (ลดจำนวนเครื่องเมื่อหมดช่วงเที่ยง), หรือการย้าย Pod ข้าม Worker Node
+
+ลองจินตนาการถึงสถานการณ์ใน **Smart Butcher Marketplace**:
+> ลูกค้ากำลังกดยืนยันการชำระเงินค่าเนื้อวากิวญี่ปุ่นมูลค่า 12,500 บาท เงินในบัตรเครดิตถูกตัดเรียบร้อยแล้ว และระบบกำลังเขียนบันทึกออเดอร์ลงฐานข้อมูล PostgreSQL แต่ในเสี้ยววินาทีนั้น Kubernetes สั่งปิด Pod เพื่อ Deploy เวอร์ชันใหม่ หากแอปพลิเคชันถูกดับแบบฉับพลัน (Hard Kill):
+> 1. การเชื่อมต่อ HTTP ถูกตัดขาดกลางคัน ลูกค้าจะเห็นหน้าเว็บขึ้นข้อความ `502 Bad Gateway`
+> 2. Database Connection ถูกตัดขณะกำลัง Commit Transaction ส่งผลให้ข้อมูลค้างคา ยอดเงินถูกตัดแต่ไม่ได้ของ
+
+**Graceful Shutdown (การปิดตัวลงอย่างนุ่มนวล)** คือกระบวนการที่แอปพลิเคชันปฏิบัติตามเมื่อได้รับสัญญาณปิดระบบจาก OS:
+1. ปฏิเสธการรับ HTTP Request ใหม่ทันที (หยุดรับลูกค้ารายใหม่)
+2. รอให้ Request ที่กำลังประมวลผลอยู่เดิม (In-flight Requests เช่น การตัดบัตรและการบันทึกออเดอร์เนื้อ) ทำงานจนเสร็จสมบูรณ์ (HTTP Draining)
+3. รัน Background Workers ปัจจุบันให้จบงาน หรือคืน Job กลับเข้าคิว
+4. ปิดการเชื่อมต่อฐานข้อมูล Prisma Connection Pool และ Redis อย่างเป็นระเบียบ
+5. ยุติโปรเซส Node.js ด้วยรหัสสถานะ `0` (Clean Exit) โดยไม่มีข้อมูลสูญหาย 100%
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### ลำดับขั้นตอนการปิด Pod ใน Kubernetes และ NestJS Lifecycle Hooks
+
+```text filename="docs/backend/shutdown-sequence.txt"
+[ Kubelet สั่ง Terminate Pod ]
+       │
+       ├─► 1. ถอด Pod ออกจาก Service Endpoint (หยุดส่งทราฟฟิกใหม่เข้ามา)
+       │
+       ├─► 2. รัน preStop Hook (เช่น sleep 5s เพื่อรอให้ Ingress อัปเดต Routing Table)
+       │
+       ├─► 3. ส่งสัญญาณ OS Signal: SIGTERM ไปยัง Node.js Process
+       │
+       ▼
+[ NestJS Lifecycle Sequence ]
+       │
+       ├─► app.enableShutdownHooks() ตรวจจับสัญญาณ SIGTERM
+       │
+       ├─► onModuleDestroy(): เริ่มทำลายโมดูลภายใน
+       │
+       ├─► beforeApplicationShutdown(signal):
+       │        - หยุดรับ Connection ใหม่ (server.close())
+       │        - รอ In-flight HTTP Requests รันจนเสร็จ (Drain Connections)
+       │
+       ├─► onApplicationShutdown(signal):
+       │        - ปิด Prisma.$disconnect()
+       │        - ปิด Redis.quit()
+       │        - ปิด BullMQ Worker.close()
+       │
+       ▼
+[ Node.js Exit 0 (สำเร็จสมบูรณ์) ]
+       │
+       (หากกินเวลานานเกิน terminationGracePeriodSeconds เช่น 30s)
+       ▼
+[ Kubelet บังคับยิง SIGKILL (Hard Kill - สิ้นสุดทันที) ]
+```
+
+### สัญญาณระบบปฏิบัติการที่สำคัญ (OS Signals)
+- **`SIGTERM` (Signal 15):** สัญญาณขอให้โปรแกรมปิดตัวลงอย่างสุภาพ (Graceful Termination) เป็นสัญญาณมาตรฐานที่ Docker และ Kubernetes ส่งมาให้โปรแกรมเตรียมตัว
+- **`SIGINT` (Signal 2):** สัญญาณขัดจังหวะจากคีย์บอร์ด (เช่น การกด `Ctrl + C` ในเทอร์มินัลขณะพัฒนาใน Local)
+- **`SIGKILL` (Signal 9):** สัญญาณสั่งประหารชีวิตโปรเซสทันทีโดย Kernel ของระบบปฏิบัติการ โปรเซสไม่สามารถดักจับหรือกักขังได้ จะเกิดขึ้นหากแอปพลิเคชันยังปิดตัวไม่เสร็จภายในเวลา Grace Period (ค่าเริ่มต้น Kubernetes คือ 30 วินาที)
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การเปิดใช้งาน Shutdown Hooks และการ Drain HTTP Connections ใน `main.ts`
+
+ตามค่าเริ่มต้นของ NestJS ตัว Shutdown Hooks จะถูกปิดการใช้งานไว้เพื่อประหยัดหน่วยความจำ เราจำเป็นต้องสั่งเปิดใช้งานผ่านคำสั่ง `app.enableShutdownHooks()` ในจุดเริ่มต้นของแอปพลิเคชัน
+
+```typescript filename="src/main.ts"
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+import { Logger } from '@nestjs/common';
+import type { Server } from 'node:http';
+
+async function bootstrap() {
+  const logger = new Logger('Bootstrap');
+  const app = await NestFactory.create(AppModule);
+
+  // สำคัญที่สุด: เปิดใช้งาน Shutdown Hooks เพื่อให้ NestJS ดักจับ SIGTERM / SIGINT
+  app.enableShutdownHooks();
+
+  const server: Server = (await app.listen(3000)).getHttpServer();
+  logger.log('🥩 Smart Butcher Marketplace กำลังทำงานที่พอร์ต 3000');
+
+  // ตั้งค่า Keep-Alive Timeout ของ HTTP Server ให้สอดคล้องกับ Ingress Load Balancer
+  server.keepAliveTimeout = 65000; // 65 วินาที
+  server.headersTimeout = 66000; // ต้องมากกว่า keepAliveTimeout เล็กน้อย
+}
+bootstrap();
+```
+
+---
+
+### ตัวอย่างที่ 2: การสร้าง Lifecycle Resilience Service ปิด Prisma, Redis และ BullMQ อย่างปลอดภัย
+
+ในตัวอย่างนี้ เราจะสร้าง `PrismaService` และ `GracefulShutdownService` ที่คอยดูแลการ Drain คำสั่งซื้อเนื้อที่ค้างอยู่ และตัดการเชื่อมต่อ Storage & Cache เมื่อได้รับสัญญาณ `SIGTERM`
+
+```typescript filename="src/modules/prisma/prisma.service.ts"
+import { Injectable, OnModuleInit, OnApplicationShutdown, Logger } from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
+
+@Injectable()
+export class PrismaService
+  extends PrismaClient
+  implements OnModuleInit, OnApplicationShutdown
+{
+  private readonly logger = new Logger(PrismaService.name);
+
+  async onModuleInit() {
+    this.logger.log('กำลังเชื่อมต่อฐานข้อมูล PostgreSQL ผ่าน Prisma Connection Pool...');
+    await this.$connect();
+    this.logger.log('เชื่อมต่อฐานข้อมูลสำเร็จ พร้อมรับคำสั่งซื้อเนื้อ');
+  }
+
+  // Hook นี้จะถูกเรียกเมื่อ NestJS ได้รับสัญญาณ Shutdown
+  async onApplicationShutdown(signal?: string) {
+    this.logger.warn(`[SHUTDOWN] ได้รับสัญญาณ ${signal} กำลังตัดการเชื่อมต่อฐานข้อมูล Prisma...`);
+    try {
+      // รอคำสั่ง Transaction ล่าสุดให้เสร็จ แล้วปิด Connection Pool อย่างเรียบร้อย
+      await this.$disconnect();
+      this.logger.log('ตัดการเชื่อมต่อ Prisma Database สำเร็จ 100%');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Prisma disconnect error';
+      this.logger.error(`เกิดข้อผิดพลาดขณะปิดฐานข้อมูล: ${msg}`);
+    }
+  }
+}
+```
+
+```typescript filename="src/common/services/graceful-shutdown.service.ts"
+import {
+  Injectable,
+  BeforeApplicationShutdown,
+  OnApplicationShutdown,
+  Logger,
+} from '@nestjs/common';
+import Redis from 'ioredis';
+
+@Injectable()
+export class GracefulShutdownService
+  implements BeforeApplicationShutdown, OnApplicationShutdown
+{
+  private readonly logger = new Logger(GracefulShutdownService.name);
+  private readonly redis: Redis;
+
+  constructor() {
+    this.redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+  }
+
+  // 1. ขั้นตอนแรก: ก่อนที่แอปพลิเคชันจะปิด (HTTP ยังคงยอมให้ Request ที่ค้างอยู่ทำให้เสร็จ)
+  async beforeApplicationShutdown(signal?: string) {
+    this.logger.warn(`[BEFORE SHUTDOWN] ได้รับสัญญาณ ${signal}: กำลังเคลียร์ In-flight Meat Orders...`);
+
+    // หน่วงเวลาสั้นๆ 2-3 วินาที เพื่อรอให้ Ingress Controller ลบ Pod นี้ออกจาก Routing Table
+    // และให้เวลาคำสั่งซื้อเนื้อวากิวที่กำลังตัดเงินในเสี้ยววินาทีนี้ทำงานจนสำเร็จ
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    this.logger.log('เคลียร์ In-flight Requests เสร็จสิ้น');
+  }
+
+  // 2. ขั้นตอนสุดท้าย: ปิดการเชื่อมต่อภายนอกทั้งหมด
+  async onApplicationShutdown(signal?: string) {
+    this.logger.warn(`[APPLICATION SHUTDOWN] ปิดการเชื่อมต่อ Redis Cache...`);
+    try {
+      // ส่งคำสั่ง QUIT ไปยัง Redis (รอให้คำสั่งที่ค้างส่งเสร็จก่อนปิด)
+      await this.redis.quit();
+      this.logger.log('ปิดการเชื่อมต่อ Redis เรียบร้อย ปลอดภัยจาก Data Corruption');
+    } catch (err: unknown) {
+      this.logger.error('เกิดข้อผิดพลาดในการตัดการเชื่อมต่อ Redis:', err);
+    }
+  }
+}
+```
+
+```yaml filename="k8s/butcher-pod-spec.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smart-butcher-backend
+spec:
+  replicas: 4
+  template:
+    spec:
+      # ให้เวลา Container ปิดตัวสูงสุด 45 วินาทีก่อน Kubelet ส่ง SIGKILL
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: nestjs-api
+          image: smartbutcher/api:v1.2.0
+          lifecycle:
+            preStop:
+              exec:
+                # สำคัญมาก: รอ 5 วินาทีก่อนส่ง SIGTERM เพื่อให้ Ingress ปรับ DNS/Endpoints ทัน
+                command: ["/bin/sh", "-c", "sleep 5"]
+          ports:
+            - containerPort: 3000
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+### ❌ โค้ดที่ผิด: ไม่เปิด Shutdown Hooks และสั่ง `process.exit(1)` ทันทีใน Exception Handler
+
+```typescript filename="bad-shutdown.ts"
+async function badBootstrap() {
+  const app = await NestFactory.create(AppModule);
+  // ผิดมหันต์ 1: ลืมใส่ app.enableShutdownHooks()
+  // เมื่อ Docker/K8s ส่ง SIGTERM ตัว NestJS จะเพิกเฉย ไม่รัน Lifecycle Hooks ใดๆ ทั้งสิ้น
+  // จนกระทั่งครบ 30 วินาที Kubelet จะยิง SIGKILL สังหาร Pod ทิ้งทันที ออเดอร์ลูกค้าพังทั้งหมด!
+  await app.listen(3000);
+}
+
+// ผิดมหันต์ 2: ดักจับ Error แล้วเรียก process.exit() ทันที
+process.on('unhandledRejection', () => {
+  // บังคับปิดแอปทันทีโดยไม่คืน Connection, ตัดเงินลูกค้าค้างคา
+  process.exit(1); 
+});
+```
+
+### ✅ โค้ดที่ถูก: เปิด Shutdown Hooks และกำหนด preStop Hook ใน Kubernetes
+
+```typescript filename="good-shutdown.ts"
+// ถูกต้อง: เปิดใช้งาน Hooks และดักจับอย่างถูกขั้นตอน
+app.enableShutdownHooks(['SIGTERM', 'SIGINT']);
+
+// ใน Kubernetes Deployment กำหนด preStop: sleep 5
+// เพื่อป้องกันสภาวะ Ingress ยังคงส่ง Request ใหม่เข้ามาที่ Pod ในเสี้ยววินาทีแรกที่กำลังจะดับ
+```
+
+<Callout type="warning" title="ความสำคัญของ Kubernetes preStop Sleep">
+เมื่อ Kubelet ตัดสินใจ Terminate Pod เหตุการณ์ 2 อย่างจะเกิดขึ้นแบบ **อะซิงโครนัสคู่ขนานกัน**:
+1. การลบ Pod IP ออกจาก Endpoints ของ Service (เพื่อให้ Ingress / Load Balancer หยุดส่งทราฟฟิก)
+2. การส่งสัญญาณ `SIGTERM` ไปยัง Container
+หากไม่มี `preStop: sleep 5` ตัว Pod อาจได้รับ `SIGTERM` และปิดพอร์ตรับงานทันทีในขณะที่ Ingress ยังไม่ทันอัปเดต Routing Table ทำให้ลูกค้าที่กดสั่งซื้อเนื้อสดในเสี้ยววินาทีนั้นได้รับข้อผิดพลาด `502 Bad Gateway` ทันที!
+</Callout>
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้:
+- ระบบ Backend ทุกตัวที่รันบน Docker, Kubernetes, AWS ECS, GCP Cloud Run หรือ Bare-metal Production
+- ระบบที่มีการเชื่อมต่อ State เช่น Database Connection Pools (Prisma, TypeORM, Knex), Redis Cluster, RabbitMQ หรือ Kafka Consumer
+- ระบบที่มีธุรกรรมทางการเงิน (Financial / Payment) หรือการตัดสต็อกสินค้าที่ห้ามเกิดสภาวะ Corrupted State
+
+### ไม่ควรใช้:
+- CLI Scripts สั้นๆ ที่ทำงานขั้นตอนเดียวแล้วจบ เช่น `npm run migrate` หรือ `npm run seed`
+- Stateless AWS Lambda / Serverless Functions ที่รันบน MicroVM สั้นๆ ซึ่งตัว Cloud Provider เป็นผู้แช่แข็ง (Freeze) และทำลาย Execution Context เองตามรอบเวลา
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### Q1: จงอธิบายลำดับเหตุการณ์ทั้งหมด (Step-by-step sequence) ตั้งแต่วินาทีที่ Kubernetes เริ่มต้น Terminate Pod จนกระทั่งโปรเซส NestJS ดับสนิท?
+**แนวคำตอบเชิงลึก:**
+1. **Endpoint Removal & PreStop Execution:**
+   - Kubelet เปลี่ยนสถานะ Pod เป็น `Terminating` และแจ้งไปยัง Ingress / Kube-proxy ให้ถอด Pod IP ออกจาก Endpoints
+   - หากมีคำสั่ง `lifecycle.preStop` (เช่น `sleep 5`) Kubelet จะรันคำสั่งนี้ก่อน เพื่อรอให้ Control Plane กระจาย Routing Table ใหม่เสร็จสมบูรณ์
+2. **SIGTERM Signal:**
+   - Kubelet ส่งสัญญาณ `SIGTERM` ไปยัง Process ID 1 ของ Container
+   - เริ่มต้นนับเวลาถอยหลังตาม `terminationGracePeriodSeconds` (ค่าเริ่มต้น 30 วินาที)
+3. **NestJS Shutdown Hooks Activation:**
+   - NestJS ซึ่งเปิด `app.enableShutdownHooks()` ไว้ จะดักจับ `SIGTERM`
+   - รัน `onModuleDestroy()` สำหรับทำลาย Controller/Provider
+   - รัน `beforeApplicationShutdown(signal)`: HTTP Server สั่ง `server.close()` เพื่อหยุดรับ Connection ใหม่ และรอให้ Active Connections ส่งข้อมูลจนครบ (Draining)
+   - รัน `onApplicationShutdown(signal)`: ทำการตัด Connection ภายนอกทั้งหมด เช่น `prisma.$disconnect()`, `redis.quit()`, และปิด Worker Pool
+4. **Clean Exit or SIGKILL:**
+   - หากกระบวนการทั้งหมดเสร็จสิ้นก่อน 30 วินาที Node.js จะออกด้วย `exit code 0` คอนเทนเนอร์จะหยุดทำงานอย่างสมบูรณ์
+   - หากกระบวนการติดค้างหรือใช้เวลาเกิน 30 วินาที Kubelet จะส่งสัญญาณ `SIGKILL` เพื่อบังคับสังหาร Container ทันที
+
+---
+
+### Q2: ในกรณีที่มี Background Worker (เช่น BullMQ) กำลังประมวลผลการคำนวณเงินหรือออกใบเสร็จเนื้อสดอยู่ เราจะจัดการ Graceful Shutdown ของ Worker อย่างไรไม่ให้งานสูญหาย?
+**แนวคำตอบเชิงลึก:**
+การจัดการ Graceful Shutdown สำหรับ BullMQ Worker มี 3 ขั้นตอนสำคัญ:
+1. **Pause Worker:** เมื่อได้รับสัญญาณ Shutdown ให้เรียกคำสั่ง `worker.pause()` ทันที เพื่อไม่ให้ Worker ตัวนี้ดึง Job ใหม่จาก Redis ขึ้นมาทำเพิ่ม
+2. **Wait for Active Jobs (with Timeout):** เรียกคำสั่ง `await worker.close()` ซึ่งคำสั่งนี้ของ BullMQ จะรอให้ Job ที่กำลังประมวลผลอยู่ในสถานะ `active` รันจนเสร็จสมบูรณ์ตามธรรมชาติ
+3. **Grace Period Management:** ต้องมั่นใจว่าค่า `terminationGracePeriodSeconds` ใน Kubernetes ตั้งไว้สูงกว่าระยะเวลาที่นานที่สุดของ Job ปกติ (เช่น หาก Job นานสุดใช้เวลา 20 วินาที ควรตั้ง Grace Period ไว้ที่ 45-60 วินาที)
+4. **Stalled Job Recovery Fallback:** หากจำเป็นต้องปิดระบบฉุกเฉินและ Job ไม่สามารถเสร็จทัน กลไก Lock Renewal ของ BullMQ จะหมดอายุลง และเมื่อ Worker ตัวใหม่บูตขึ้นมา จะทำการระบุว่างานนี้เป็น Stalled Job และนำกลับไปรันต่อใน Worker ตัวอื่นโดยอัตโนมัติ
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เพื่อความเชี่ยวชาญในการบริหารจัดการวงจรชีวิตระบบระดับ Production แนะนำให้ศึกษาหัวข้อต่อไปนี้:
+1. การตรวจสอบสุขภาพและการเตรียมความพร้อมของ Pod: [Health Check](/docs/backend/nestjs/health-check)
+2. การสร้าง Multi-stage Docker Container ที่ปลอดภัย: [Docker Multi-stage Build](/docs/backend/docker/multi-stage-build)
+3. การตั้งค่า Prisma ให้ทนทานต่อการเชื่อมต่อ: [Prisma Service](/docs/backend/prisma-orm/prisma-service)
+4. การจัดการ Structured Logging ระดับองค์กร: [Enterprise Logging](/docs/backend/nestjs/enterprise-logging)

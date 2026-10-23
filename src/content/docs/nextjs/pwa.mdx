@@ -1,0 +1,594 @@
+---
+title: Progressive Web App (PWA)
+category: Frontend
+parentTitle: Next.js 16
+version: Next.js 16 + Serwist / Service Worker
+updatedAt: 2026-10-23
+---
+
+# Progressive Web App (PWA)
+
+คู่มือสถาปัตยกรรมการยกระดับ Next.js 16 App Router สู่ Progressive Web App (PWA) เกรด Enterprise รองรับการติดตั้งแบบ Standalone Native-like, ระบบ Service Worker ด้วย `@serwist/next`, กลยุทธ์แคชระดับมืออาชีพ (Stale-While-Revalidate, Cache-First, Network-Only), หน้าจอ Offline Fallback และระบบแจ้งเตือน Web Push Notifications สำหรับการจัดส่งสินค้า
+
+---
+
+## 1. แนวคิด (Concept)
+
+ในยุคของ Mobile Commerce การมอบประสบการณ์เสมือน Native Application บนเว็บเบราว์เซอร์ช่วยเพิ่ม Conversion Rate และ Engagement ของลูกค้าอย่างมีนัยสำคัญ **Progressive Web App (PWA)** ใน Next.js 16 ช่วยให้ร้านค้าออนไลน์มีคุณสมบัติเด่น 4 ประการ:
+
+1. **Installable Experience:** ผู้ใช้สามารถกด "เพิ่มลงในหน้าจอหลัก" (Add to Home Screen) ทั้งบน iOS, Android, macOS และ Windows โดยเปิดใช้งานแบบไม่มี Address Bar (Display: `standalone`)
+2. **Offline Resilience:** เข้าถึงข้อมูลสินค้าที่เคยเปิดดูได้แม้ขณะสัญญาณขาดหายในซูเปอร์มาร์เก็ตหรือห้องเย็น พร้อมหน้าจอ Offline Fallback อัตโนมัติ
+3. **Multi-tier Caching Strategy:** บริหารจัดการแคชไฟล์สถิต, รูปภาพเนื้อสเต๊ก และข้อมูล API แยกจากกันเพื่อความเร็วสูงสุด
+4. **Re-engagement via Web Push:** ส่งการแจ้งเตือนสเตตัสการบ่มเนื้อ (Dry-Aging Status) หรือการจัดส่งเนื้อสดถึงบ้านผ่าน Web Push Notifications แม้ผู้ใช้จะปิดแอปไปแล้ว
+
+```text
++----------------------------------------------------------------------------------------------------+
+|                         Next.js 16 PWA Architecture with Serwist                                   |
++----------------------------------------------------------------------------------------------------+
+|                                                                                                    |
+|  [ User Device / Browser ]                                                                         |
+|         |                                                                                          |
+|         v                                                                                          |
+|  [ Service Worker Proxy (sw.js) ]                                                                  |
+|         |                                                                                          |
+|         +---> Cache-First Strategy -----------------> [ Browser Cache: Static Images & Fonts ]     |
+|         |     (ภาพเนื้อวากิว, Next.js CSS/JS Chunks)                                                |
+|         |                                                                                          |
+|         +---> Stale-While-Revalidate Strategy ------> [ Cache & Background Fetch ]                  |
+|         |     (แคตตาล็อกเนื้อ /api/meats, รายการสินค้า)                                            |
+|         |                                                                                          |
+|         +---> Network-Only Strategy ----------------> [ Server API / Database ]                   |
+|         |     (ระบบตัดเงิน, ยืนยันคำสั่งซื้อ, Server Actions)                                         |
+|         |                                                                                          |
+|         +---> Offline Fallback Interception --------> [ Offline Page: /~offline ]                  |
+|               (เมื่อเครือข่ายล่ม ให้เรนเดอร์ Fallback UI)                                          |
+|                                                                                                    |
+|  [ Web Push Service ] ------------------------------> [ Push Event Handler ]                       |
+|  (VAPID Server Trigger)                               (แสดง System Notification สถานะเนื้อ)         |
+|                                                                                                    |
++----------------------------------------------------------------------------------------------------+
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 วิวัฒนาการจาก `next-pwa` สู่ `@serwist/next`
+
+ในอดีต ชุมชน Next.js นิยมใช้ไลบรารี `next-pwa` แต่เนื่องจาก `next-pwa` ยุติการดูแลและมีปัญหากับสถาปัตยกรรม App Router, React Server Components และ Webpack 5/Turbopack ยุคใหม่ ชุมชนจึงพัฒนา **`@serwist/next`** (ฟอร์กและเขียนใหม่จาก Workbox โดยใช้ TypeScript ทั้งระบบ) ขึ้นมาเป็นมาตรฐานใหม่
+
+ข้อได้เปรียบของ Serwist ใน Next.js 16:
+- **Type-safe Service Worker:** เขียน `sw.ts` ด้วย TypeScript เต็มรูปแบบพร้อม Autocomplete ทุก Strategy
+- **Precache Manifest Tree-shaking:** คัดแยกเฉพาะไฟล์สถิตใน `.next/static` ที่จำเป็นมาใส่ Precache ป้องกันไม่ให้แอปบวม
+- **RSC & Server Actions Friendly:** ไม่พยายามดักแคช Request ของ Server Actions หรือสตรีมของ RSC แบบสุ่มสี่สุ่มห้า
+
+### 2.2 กลยุทธ์การบริหารแคช (Caching Strategies Matrix)
+
+การเลือกกลยุทธ์การแคชที่ผิดพลาดในระบบ E-Commerce อาจทำให้ลูกค้าเห็นราคาสินค้าผิด หรือเกิดการตัดเงินซ้ำซ้อน:
+
+1. **Cache-First (ช้าครั้งแรก เร็วถาวร):**
+   - เหมาะกับ: รูปภาพเนื้อสเต๊ก (`/_next/image`), ฟอนต์, ไอคอน
+   - หลักการ: ค้นหาใน Cache Storage ก่อนเสมอ หากพบจะคืนค่าทันที หากไม่พบจึงวิ่งไปดาวน์โหลดจากเครือข่ายแล้วบันทึกลงแคช
+2. **Stale-While-Revalidate (เร็วทันที อัปเดตเบื้องหลัง):**
+   - เหมาะกับ: รายการแคตตาล็อกเนื้อ (`/products`, `/api/meats`)
+   - หลักการ: คืนค่าจากแคชให้ผู้ใช้ทันท่วงที พร้อมส่ง Request ไปยังเซิร์ฟเวอร์เบื้องหลังเพื่ออัปเดตแคชสำหรับรอบหน้า
+3. **Network-Only (เครือข่ายเท่านั้น ห้ามแคช):**
+   - เหมาะกับ: เส้นทางชำระเงิน (`/api/checkout`, `/api/payment`), ตะกร้าสินค้า, และการเรียก Server Action
+   - หลักการ: วิ่งตรงไปยังเซิร์ฟเวอร์เท่านั้น หากไม่มีสัญญาณอินเทอร์เน็ตจะล้มเหลวทันทีเพื่อป้องกันเงินสูญหาย
+
+### 2.3 Web Push Notifications และ VAPID Keys
+
+ระบบ Web Push ทำงานแบบ Decoupled ผ่านมาตรฐาน W3C Push API:
+1. แอปหน้าบ้านสร้าง **PushSubscription** ผ่าน `serviceWorkerRegistration.pushManager.subscribe()` โดยส่ง VAPID Public Key เข้าไป
+2. เบราว์เซอร์จะเชื่อมต่อไปยัง Push Service ของผู้ผลิตระบบปฏิบัติการ (เช่น Google FCM สำหรับ Chrome, Apple APNs สำหรับ Safari) และคืนค่า Subscription Endpoint พร้อมคีย์เข้ารหัส (`p256dh` และ `auth`)
+3. เมื่อเซิร์ฟเวอร์หลังร้านต้องการแจ้งเตือน เช่น "เนื้อ Dry-Aged 45 วันของคุณพร้อมจัดส่งแล้ว" เซิร์ฟเวอร์จะเซ็นรับรองด้วย VAPID Private Key และส่ง Payload เข้ารหัสไปยัง Endpoint นั้น
+
+<Callout type="warning" title="ความปลอดภัยของ VAPID Keys">
+VAPID Private Key ต้องถูกเก็บไว้เป็นความลับบนเซิร์ฟเวอร์หลังบ้านใน Environment Variable เท่านั้น ห้ามเปิดเผยหรือมี Prefix เป็น NEXT_PUBLIC_ เด็ดขาด มิฉะนั้นผู้อื่นจะสามารถสวมรอยส่ง Push แจ้งเตือนหลอกไปยังลูกค้าของคุณได้
+</Callout>
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ในระบบ **Smart Butcher Marketplace** เราจะเปลี่ยนเว็บให้กลายเป็นแอปพลิเคชันเนื้อสดระดับพรีเมียมที่ติดตั้งได้ มีแคชรายการเนื้อสเต๊ก และรองรับการแจ้งเตือนสเตตัสการจัดส่ง
+
+### ตัวอย่างที่ 1: การสร้าง Web Manifest และการตั้งค่า Serwist Service Worker
+
+เริ่มจากการสร้างไฟล์ Manifest แบบไดนามิกด้วย TypeScript และคอนฟิก Service Worker
+
+```typescript filename="src/app/manifest.ts"
+import type { MetadataRoute } from "next";
+
+export default function manifest(): MetadataRoute.Manifest {
+  return {
+    name: "Smart Butcher Marketplace — เนื้อพรีเมียมเกรดโอมากาเสะ",
+    short_name: "SmartButcher",
+    description: "ตลาดซื้อขายเนื้อวากิวญี่ปุ่น สเต๊ก Dry-Aged และเนื้อบ่มพิเศษระดับพรีเมียม",
+    start_url: "/",
+    display: "standalone",
+    background_color: "#171717",
+    theme_color: "#991b1b",
+    orientation: "portrait",
+    categories: ["shopping", "food"],
+    icons: [
+      {
+        src: "/icons/icon-192x192.png",
+        sizes: "192x192",
+        type: "image/png",
+        purpose: "maskable",
+      },
+      {
+        src: "/icons/icon-512x512.png",
+        sizes: "512x512",
+        type: "image/png",
+        purpose: "any",
+      },
+    ],
+    shortcuts: [
+      {
+        name: "แคตตาล็อกเนื้อวากิว A5",
+        url: "/products?category=WAGYU_A5",
+        icons: [{ src: "/icons/shortcut-wagyu.png", sizes: "96x96" }],
+      },
+      {
+        name: "สถานะตู้บ่มเนื้อ Dry-Aged",
+        url: "/orders/dry-aging-tracker",
+        icons: [{ src: "/icons/shortcut-tracker.png", sizes: "96x96" }],
+      },
+    ],
+  };
+}
+```
+
+```typescript filename="next.config.ts"
+import type { NextConfig } from "next";
+import withSerwistInit from "@serwist/next";
+
+const withSerwist = withSerwistInit({
+  swSrc: "src/app/sw.ts",
+  swDest: "public/sw.js",
+  disable: process.env.NODE_ENV === "development", // ปิดในโหมด Dev เพื่อความสะดวกในการดีบัก
+});
+
+const nextConfig: NextConfig = {
+  reactStrictMode: true,
+  poweredByHeader: false,
+};
+
+export default withSerwist(nextConfig);
+```
+
+```typescript filename="src/app/sw.ts"
+import { defaultCache } from "@serwist/next/worker";
+import type { PrecacheEntry, SerwistGlobalConfig } from "serwist";
+import {
+  CacheFirst,
+  ExpirationPlugin,
+  NetworkOnly,
+  Serwist,
+  StaleWhileRevalidate,
+} from "serwist";
+
+declare global {
+  interface WorkerGlobalScope extends SerwistGlobalConfig {
+    __SW_MANIFEST: (PrecacheEntry | string)[] | undefined;
+  }
+}
+
+declare const self: ServiceWorkerGlobalScope;
+
+const serwist = new Serwist({
+  // รายการไฟล์ Precache ที่ Next.js สร้างขึ้นอัตโนมัติ
+  precacheEntries: self.__SW_MANIFEST,
+  skipWaiting: true,
+  clientsClaim: true,
+  navigationPreload: true,
+  runtimeCaching: [
+    // 1. กลยุทธ์ Cache-First สำหรับรูปภาพเนื้อสเต๊ก
+    {
+      matcher: ({ url }) =>
+        url.pathname.startsWith("/_next/image") ||
+        url.pathname.startsWith("/uploads/meats/"),
+      handler: new CacheFirst({
+        cacheName: "meat-product-images-v1",
+        plugins: [
+          new ExpirationPlugin({
+            maxEntries: 100, // บันทึกรูปได้สูงสุด 100 ชนิด
+            maxAgeSeconds: 30 * 24 * 60 * 60, // มีอายุ 30 วัน
+          }),
+        ],
+      }),
+    },
+
+    // 2. กลยุทธ์ Stale-While-Revalidate สำหรับแคตตาล็อกสินค้า
+    {
+      matcher: ({ url }) =>
+        url.pathname.startsWith("/api/catalog") ||
+        url.pathname.startsWith("/api/meats"),
+      handler: new StaleWhileRevalidate({
+        cacheName: "meat-catalog-api-v1",
+        plugins: [
+          new ExpirationPlugin({
+            maxEntries: 50,
+            maxAgeSeconds: 5 * 60, // แคชไว้ 5 นาทีและอัปเดตเบื้องหลัง
+          }),
+        ],
+      }),
+    },
+
+    // 3. กลยุทธ์ Network-Only สำหรับธุรกรรมสำคัญ (ห้ามแคชเด็ดขาด)
+    {
+      matcher: ({ url }) =>
+        url.pathname.startsWith("/api/checkout") ||
+        url.pathname.startsWith("/api/payment") ||
+        url.pathname.startsWith("/api/orders"),
+      handler: new NetworkOnly(),
+    },
+
+    // รวมกฎแคชเริ่มต้นของ Serwist สำหรับ JS/CSS Chunks
+    ...defaultCache,
+  ],
+
+  // กำหนดหน้าจอ Fallback เมื่อผู้ใช้เน็ตหลุด
+  fallbacks: {
+    entries: [
+      {
+        url: "/~offline",
+        matcher({ request }) {
+          return request.destination === "document";
+        },
+      },
+    ],
+  },
+});
+
+serwist.addEventListeners();
+
+// ดักจับ Event เมื่อมี Web Push ส่งมาจากหลังบ้าน
+self.addEventListener("push", (event) => {
+  if (!event.data) return;
+
+  try {
+    const data = event.data.json();
+    const title = data.title || "Smart Butcher Marketplace";
+    const options: NotificationOptions = {
+      body: data.message,
+      icon: "/icons/icon-192x192.png",
+      badge: "/icons/badge-72x72.png",
+      data: {
+        targetUrl: data.url || "/orders",
+      },
+    };
+
+    event.waitUntil(self.registration.showNotification(title, options));
+  } catch (err) {
+    console.error("[SW] Push event parse error:", err);
+  }
+});
+
+// ดักจับเมื่อผู้ใช้คลิกการแจ้งเตือน
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const targetUrl = event.notification.data?.targetUrl || "/";
+
+  event.waitUntil(
+    self.clients.matchAll({ type: "window" }).then((clientList) => {
+      for (const client of clientList) {
+        if (client.url === targetUrl && "focus" in client) {
+          return client.focus();
+        }
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(targetUrl);
+      }
+    })
+  );
+});
+```
+
+---
+
+### ตัวอย่างที่ 2: หน้าจอ Offline Fallback และ Network Status Indicator
+
+เมื่อลูกค้าเปิดเว็บขณะอยู่ในพื้นที่อับสัญญาณหรืออินเทอร์เน็ตขาดหาย Service Worker จะส่งหน้า Fallback นี้ขึ้นมาแสดงแทน Error หน้าขาว พร้อมแสดงแถบเตือนสถานะการเชื่อมต่อ
+
+```tsx filename="src/app/~offline/page.tsx"
+import React from "react";
+import Link from "next/link";
+
+export default function OfflineFallbackPage() {
+  return (
+    <main className="min-h-screen flex items-center justify-center p-6 bg-neutral-900 text-neutral-100">
+      <div className="max-w-md w-full text-center space-y-6 p-8 rounded-3xl bg-neutral-800/80 border border-neutral-700 shadow-2xl backdrop-blur-md">
+        <div className="text-6xl animate-bounce">🥩📡</div>
+        <div className="space-y-2">
+          <h1 className="text-2xl font-black tracking-tight text-white">
+            สัญญาณอินเทอร์เน็ตขาดหาย
+          </h1>
+          <p className="text-sm text-neutral-400 leading-relaxed">
+            คุณกำลังอยู่ในโหมดออฟไลน์ รายการเนื้อวากิวและข้อมูลคำสั่งซื้อที่เคยเปิดดูแล้วยังคงเปิดดูได้จากแคชของเครื่อง
+          </p>
+        </div>
+
+        <div className="p-4 bg-neutral-900/60 rounded-2xl border border-neutral-700/50 text-left text-xs space-y-2">
+          <div className="flex items-center gap-2 text-amber-400 font-semibold">
+            <span>⚠️ ข้อจำกัดโหมดออฟไลน์:</span>
+          </div>
+          <ul className="list-disc list-inside text-neutral-400 space-y-1">
+            <li>ไม่สามารถสั่งซื้อหรือชำระเงินตัดบัตรใหม่ได้</li>
+            <li>การติดตามอุณหภูมิตู้บ่มเนื้อแบบสดจะหยุดชั่วคราว</li>
+          </ul>
+        </div>
+
+        <div className="flex flex-col gap-3">
+          <Link
+            href="/"
+            className="w-full py-3 bg-red-700 hover:bg-red-800 text-white font-semibold rounded-2xl transition duration-200"
+          >
+            กลับสู่หน้าแคตตาล็อกแคช
+          </Link>
+          <button
+            onClick={() => {
+              if (typeof window !== "undefined") window.location.reload();
+            }}
+            className="w-full py-3 bg-neutral-700 hover:bg-neutral-600 text-neutral-200 font-medium rounded-2xl transition duration-200"
+          >
+            ลองเชื่อมต่อใหม่อีกครั้ง
+          </button>
+        </div>
+      </div>
+    </main>
+  );
+}
+```
+
+```tsx filename="src/components/pwa/OfflineBanner.tsx"
+"use client";
+
+import React, { useEffect, useState } from "react";
+
+export function OfflineBanner() {
+  const [isOnline, setIsOnline] = useState<boolean>(true);
+
+  useEffect(() => {
+    // กำหนดค่าเริ่มต้นตามสถานะเบราว์เซอร์
+    setIsOnline(navigator.onLine);
+
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  if (isOnline) return null;
+
+  return (
+    <div className="fixed top-0 left-0 right-0 z-50 bg-amber-600 text-white px-4 py-2.5 text-center text-xs sm:text-sm font-semibold shadow-lg flex items-center justify-center gap-2 animate-in slide-in-from-top duration-300">
+      <span>⚡ กำลังทำงานในโหมดออฟไลน์ (ข้อมูลบางส่วนอาจไม่อัปเดต)</span>
+    </div>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 3: ระบบ Web Push Notification แจ้งเตือนสถานะการจัดส่งเนื้อสด
+
+ส่วนติดต่อผู้ใช้สำหรับขอสิทธิ์แจ้งเตือน และ Route Handler ฝั่งเซิร์ฟเวอร์ที่รับข้อมูล Push Subscription บันทึกลงฐานข้อมูล
+
+```typescript filename="src/lib/pwa/push-notifications.ts"
+// ฟังก์ชันแปลง Base64 URL เป็น Uint8Array สำหรับ VAPID Application Server Key
+function urlBase64ToUint8Array(base64String: string): Uint8Array {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
+export async function registerPushNotification(
+  userId: string,
+  vapidPublicKey: string
+): Promise<{ success: boolean; message: string }> {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    return { success: false, message: "เบราว์เซอร์นี้ไม่รองรับ Web Push Notifications" };
+  }
+
+  // 1. ตรวจสอบและขอ Permission จากผู้ใช้
+  const permission = await Notification.requestPermission();
+  if (permission !== "granted") {
+    return { success: false, message: "ผู้ใช้ปฏิเสธการรับการแจ้งเตือน" };
+  }
+
+  try {
+    const registration = await navigator.serviceWorker.ready;
+
+    // 2. สมัครรับ Push Subscription กับเบราว์เซอร์
+    const subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
+    });
+
+    // 3. ส่งข้อมูล Subscription กลับไปบันทึกลงฐานข้อมูลฝั่งเซิร์ฟเวอร์
+    const response = await fetch("/api/notifications/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId,
+        subscription,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error("Failed to store subscription on server");
+    }
+
+    return { success: true, message: "เปิดรับการแจ้งเตือนสถานะเนื้อเรียบร้อยแล้ว" };
+  } catch (error) {
+    console.error("[PWA Push] Subscription registration failed:", error);
+    return { success: false, message: "ไม่สามารถลงทะเบียนการแจ้งเตือนได้" };
+  }
+}
+```
+
+```typescript filename="src/app/api/notifications/subscribe/route.ts"
+import { NextRequest, NextResponse } from "next/server";
+
+interface PushSubscriptionBody {
+  userId: string;
+  subscription: {
+    endpoint: string;
+    keys: {
+      p256dh: string;
+      auth: string;
+    };
+  };
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const body: PushSubscriptionBody = await request.json();
+
+    if (!body.userId || !body.subscription?.endpoint) {
+      return NextResponse.json({ error: "Missing required subscription data" }, { status: 400 });
+    }
+
+    // ในการทำงานจริง: บันทึก Subscription ลงใน PostgreSQL / Prisma
+    // ตัวอย่าง: await prisma.pushSubscription.upsert({ ... })
+    console.log(
+      `[DATABASE] Registered Web Push for User ID: ${body.userId} at endpoint: ${body.subscription.endpoint.slice(0, 40)}...`
+    );
+
+    return NextResponse.json({ status: "subscribed" }, { status: 201 });
+  } catch (error) {
+    return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+  }
+}
+```
+
+```typescript filename="src/lib/pwa/send-delivery-alert.ts"
+// สคริปต์ฝั่ง Server Node.js สำหรับส่ง Push Alert เมื่อไรเดอร์เริ่มนำส่งเนื้อวากิว
+import webpush from "web-push";
+
+// ตั้งค่า VAPID Details (กุญแจลับปลอดภัย)
+webpush.setVapidDetails(
+  "mailto:logistics@smartbutcher.example.com",
+  process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || "key_test_vapid_public_key_demo",
+  process.env.VAPID_PRIVATE_KEY || "sec_prod_vapid_private_key_demo"
+);
+
+export async function notifyMeatOutForDelivery(params: {
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  customerName: string;
+  orderId: string;
+  driverName: string;
+}) {
+  const pushPayload = JSON.stringify({
+    title: "🥩 รถห้องเย็นกำลังนำส่งเนื้อสเต๊กของคุณ!",
+    message: `คุณ ${params.customerName}: ไรเดอร์ ${params.driverName} กำลังควบคุมอุณหภูมิ 0-4°C นำส่งคำสั่งซื้อ #${params.orderId}`,
+    url: `/orders/${params.orderId}/tracking`,
+  });
+
+  const pushSubscription = {
+    endpoint: params.endpoint,
+    keys: {
+      p256dh: params.p256dh,
+      auth: params.auth,
+    },
+  };
+
+  try {
+    await webpush.sendNotification(pushSubscription, pushPayload);
+    return { success: true };
+  } catch (err: unknown) {
+    const error = err as { statusCode?: number };
+    // หาก Push Service แจ้ง 410 Gone หรือ 404 แสดงว่า Subscription หมดอายุ ให้ลบออกจาก DB
+    if (error.statusCode === 410 || error.statusCode === 404) {
+      console.warn(`[Push Service] Subscription has expired for order: ${params.orderId}`);
+    }
+    return { success: false, error };
+  }
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ประเด็นข้อผิดพลาด | รูปแบบที่ผิดพลาด (Anti-pattern) | แนวปฏิบัติระดับ Senior Architect (Best Practice) |
+| :--- | :--- | :--- |
+| **แคชเส้นทางการตัดเงิน (Payment Caching)** | ใช้กลยุทธ์ `Stale-While-Revalidate` กับ `/api/checkout` ส่งผลให้เบราว์เซอร์รันข้อมูลชำระเงินเก่าซ้ำ | บังคับใช้กลยุทธ์ `Network-Only` กับ API ธุรกรรมการเงิน, การตัดสต็อก, และ Server Actions ทุกกรณี |
+| **ลืมกำหนด `skipWaiting` ใน Service Worker** | อัปเดตโค้ดเวอร์ชันใหม่แล้ว แต่บราวเซอร์ของลูกค้ายังคงรัน Service Worker ตัวเดิมที่รอปิดแท็บทั้งหมด | กำหนด `skipWaiting: true` และ `clientsClaim: true` ในคอนฟิก Serwist เพื่อให้ SW ตัวใหม่เข้าควบคุมแท็บทันที |
+| **เปิดเผย VAPID Private Key สู่หน้าบ้าน** | ประกาศกุญแจลับด้วยชื่อ `NEXT_PUBLIC_VAPID_PRIVATE_KEY` ทำให้ผู้อื่นดึงกุญแจไปส่ง Push สแปมใส่ลูกค้า | เก็บ Private Key ไว้เฉพาะใน Environment Variable ฝั่ง Server และใช้เฉพาะ Public Key ฝั่งหน้าบ้าน |
+| **Precache ไฟล์มีเดียขนาดมหึมา** | ใส่ภาพวิดีโอ 4K หรือไฟล์เสียงลงใน `precacheEntries` ทำให้ผู้ใช้เปลืองเน็ต 50-100MB ตั้งแต่เปิดเว็บครั้งแรก | พรีแคชเฉพาะ Core App Shell (JS/CSS/HTML Shell) ส่วนภาพเนื้อให้แคชตามการใช้งานจริงผ่าน `CacheFirst` |
+| **ไม่จัดการ Push Subscription หมดอายุ (410 Gone)** | เซิร์ฟเวอร์ยังคงส่ง Web Push วนลูปไปยัง Endpoint เดิมที่ลูกค้าถอนการติดตั้งไปแล้ว ส่งผลให้ถูก Push Service แบน | ดักจับ HTTP 410 / 404 Response ในฟังก์ชันส่ง Push แล้วทำการลบ Record Subscription นั้นออกจากฐานข้อมูลทันที |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรทำ Progressive Web App (PWA):
+- **ร้านค้า E-Commerce และ Food Delivery:** ที่ต้องการฟีเจอร์ Add to Home Screen เพื่อเพิ่มความถี่ในการกลับมาสั่งซื้อซ้ำโดยไม่ต้องเสียค่าพัฒนา Native App
+- **แพลตฟอร์มที่ต้องทำงานในสภาพแวดล้อมสัญญาณไม่เสถียร:** เช่น ผู้ตรวจคลังเนื้อในห้องเย็น หรือไรเดอร์ขนส่งตามซอยที่เน็ตขาดช่วง
+- **ระบบที่ต้องการ Real-time Delivery Notifications:** แจ้งเตือนสเตตัสเนื้อปรุงสุกหรือรถส่งของถึงหน้าบ้าน
+
+### ไม่ควรเน้นทำ PWA:
+- **แอปพลิเคชันที่ต้องพึ่งพาฮาร์ดแวร์เฉพาะทางขั้นสูงของมือถือ:** เช่น การเชื่อมต่อ Bluetooth อุปกรณ์การแพทย์, กล้องตรวจจับมิติแบบ LiDAR ลึก หรือ Background Geolocation ติดตามแบบเรียลไทม์ 24 ชม. (ควรพัฒนาด้วย React Native / Swift / Kotlin)
+- **ระบบภายในสำหรับคอมพิวเตอร์ตั้งโต๊ะ (Desktop Internal Tools):** หน้าเว็บ Backoffice ที่ใช้งานผ่านจอคอมพิวเตอร์สำนักงานที่มีสาย LAN เสถียรตลอดเวลา การทำ Service Worker Caching อาจสร้างปัญหา Cache Invalidation โดยไม่จำเป็น
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: ใน Next.js 16 App Router การผสาน Service Worker Caching เข้ากับ React Server Components (RSC) มีความท้าทายอย่างไร และเหตุใดการเลือกใช้กลยุทธ์ Caching จึงต้องระมัดระวังเรื่อง Route Handlers และ Server Actions เป็นพิเศษ?
+
+**แนวคำตอบเชิงลึก:**
+1. **ธรรมชาติของ RSC Stream vs Static HTML:**
+   - ใน App Router การนำทางระหว่างหน้าไม่ใช่แค่การดึงไฟล์ HTML ธรรมดา แต่ Next.js จะส่งคำขอที่มี Header พิเศษ (`RSC: 1`) เพื่อขอข้อมูล RSC Payload ซึ่งเป็น Flight Data Stream
+   - หาก Service Worker แคชเฉพาะ HTML หน้าแรก แต่ไม่แคช RSC Payload หรือแคชด้วยกลยุทธ์ที่ล้าสมัย (Stale Data) อาจทำให้เกิดปัญหา **Client-Server Desynchronization** หรือ Hydration Mismatch ได้
+2. **ความเสี่ยงใน Server Actions & Mutations:**
+   - Server Actions ทำงานผ่าน HTTP POST Request ไปยัง Action ID หาก Service Worker ดักจับ POST หรือพยายามคืนค่าแคช จะทำให้คำสั่งซื้อเนื้อซ้ำซ้อน หรือ State ในตระกร้าไม่ยอม Revalidate
+   - วิศวกรระดับ Senior ต้องกำหนด Route Matcher ใน Serwist ให้ข้าม (Bypass) คำขอประเภท POST, Server Action Headers, และเส้นทาง `/api/checkout` โดยบังคับใช้ `NetworkOnly` เสมอ
+3. **การแก้ปัญหาอย่างถูกต้องด้วย `@serwist/next`:**
+   - Serwist เข้าใจโครงสร้าง App Router โดยจะพรีแคชเฉพาะไฟล์ Chunk ใน `.next/static` เท่านั้น และใช้ `defaultCache` ที่ออกแบบมาเพื่อรองรับ Next.js Router Cache โดยไม่ไปรบกวน Dynamic Rendering ฝั่งเซิร์ฟเวอร์
+
+---
+
+### คำถามที่ 2: อธิบายวงจรชีวิต (Lifecycle) ของระบบ Web Push Notifications ตั้งแต่ขั้นตอนการสร้าง VAPID Keys ไปจนถึงการแสดงผลการแจ้งเตือนเมื่อไรเดอร์ส่งเนื้อวากิวถึงบ้าน และคุณมีแนวทางจัดการกับ Push Subscription ที่หมดอายุ (Stale Subscriptions) อย่างไร?
+
+**แนวคำตอบเชิงลึก:**
+วงจรชีวิตของ Web Push ประกอบด้วย 4 ขั้นตอนหลัก:
+
+1. **VAPID Key Generation & Handshake:**
+   - ระบบสร้างคู่กุญแจ VAPID (Voluntary Application Server Identification) ประกอบด้วย Public Key และ Private Key
+   - เมื่อผู้ใช้กดยินยอมรับการแจ้งเตือน หน้าบ้านจะเรียก `pushManager.subscribe({ applicationServerKey })` เพื่อจับมือกับ Push Service (เช่น Mozilla autopush, Google FCM, Apple WebPush)
+   - Push Service สร้าง **PushSubscription** ซึ่งประกอบด้วย `endpoint` URL เฉพาะของเครื่องนั้น พร้อมกุญแจเข้ารหัสสองตัว (`p256dh` กุญแจสาธารณะของไคลเอ็นต์ และ `auth` สตริงลับสำหรับการพิสูจน์ตัวตน)
+2. **Subscription Persistence:**
+   - Frontend ส่ง Payload Subscription กลับไปบันทึกที่ `/api/notifications/subscribe` เพื่อเชื่อมโยง User ID เข้ากับ Endpoint ในฐานข้อมูล
+3. **Payload Dispatching & Encryption:**
+   - เมื่อสถานะการจัดส่งเนื้อเปลี่ยนเป็น "Out for Delivery" เซิร์ฟเวอร์หลังบ้านจะใช้ไลบรารี `web-push` เข้ารหัสข้อความด้วยอัลกอริทึม RFC 8291 (Message Encryption for Web Push) โดยใช้กุญแจ `p256dh` ของผู้รับ และเซ็นชื่อ JWT ด้วย VAPID Private Key
+   - ยิงคำขอไปยัง Endpoint ของ Push Service ซึ่งจะส่งต่อข้อมูลไปยังอุปกรณ์ปลายทาง แม้แอปจะปิดอยู่
+4. **Service Worker Push Event & Stale Cleanup:**
+   - Service Worker บนเครื่องผู้ใช้ดักจับ Event `'push'` ถอดรหัส JSON และเรียก `self.registration.showNotification()`
+   - **การจัดการ Subscription ที่หมดอายุ:** หากผู้ใช้ถอนการติดตั้ง PWA หรือล้างข้อมูลเบราว์เซอร์ Push Service จะตอบกลับ HTTP Status `410 Gone` หรือ `404 Not Found` กลับมายังเซิร์ฟเวอร์ส่งข้อความ เราต้องเขียนโค้ดดักจับ Exception นี้ และทำการลบ Subscription Record นั้นออกจากฐานข้อมูลทันที เพื่อรักษาความสะอาดของฐานข้อมูลและลดภาระการยิงแจ้งเตือนที่สูญเปล่า
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [Next.js Optimization Architecture](/docs/nextjs/optimization) — การเพิ่มประสิทธิภาพรูปภาพและสคริปต์
+- [Next.js Web Vitals & Audits](/docs/nextjs/web-vitals) — การตรวจวัด Core Web Vitals (INP, LCP, CLS)
+- [Next.js Production Deployment](/docs/nextjs/deployment) — การตั้งค่า Dockerfile, CDN Caching และ Standalone Build
+- [Next.js Error & Loading States](/docs/nextjs/error-handling) — การจัดการ Fallback States และ Error Boundaries

@@ -1,0 +1,313 @@
+---
+title: Route Handlers
+category: Frontend
+parentTitle: Next.js 16
+version: route.ts (Next.js 16)
+updatedAt: 2026-10-23
+---
+
+# Next.js 16 Route Handlers Architecture
+
+คู่มือเชิงลึกระดับ Senior ในการสร้าง Custom Request Handlers (`route.ts`) ใน Next.js 16, การรับ Webhook ชำระเงินพร้อมตรวจสอบ Cryptographic Signature, การป้องกัน Replay Attacks, การจัดการ CORS Headers สำหรับระบบภายนอก, และการสตรีมข้อมูลแบบเรียลไทม์ด้วย `TransformStream`
+
+---
+
+## 1. แนวคิด (Concept)
+
+**Route Handlers** (เขียนในไฟล์ `route.ts` หรือ `route.js`) คือฟังก์ชันฝั่งเซิร์ฟเวอร์ใน Next.js App Router ที่ทำหน้าที่เหมือน REST API Controllers โดยสร้างขึ้นบนพื้นฐานของมาตรฐาน **Web Request & Response APIs**:
+- เข้ามาแทนที่ API Routes เดิมของ Pages Router (`pages/api/*`)
+- รองรับ HTTP Methods มาตรฐาน: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, และ `OPTIONS`
+- สามารถเลือกรันบนสภาพแวดล้อมได้ทั้ง **Node.js Runtime** (รองรับ Node APIs เต็มรูปแบบ) หรือ **Edge Runtime** (Latency ต่ำพิเศษ)
+- เป็นหัวใจหลักในการรับคำขอจากระบบภายนอก เช่น ธนาคาร, Payment Gateways (Stripe, Omise), Mobile Applications, หรือการสตรีม Server-Sent Events (SSE)
+
+```text
++--------------------------------------------------------------------------------------------------+
+|                            Next.js 16 Route Handlers Architecture                                |
++--------------------------------------------------------------------------------------------------+
+| 1. External Caller (Stripe / Omise Webhook / Mobile App / Partner ERP)                           |
+|    - HTTP POST /api/webhooks/payment                                                             |
+|    - Headers: Stripe-Signature: t=1729670400,v1=a8f..., Idempotency-Key: idemp-987              |
+|                                        |                                                         |
+| 2. Route Handler (route.ts)            v                                                         |
+|    +--------------------------------------------------------------------------------------+     |
+|    | [Phase 1: Security & Anti-Replay]                                                    |     |
+|    | - อ่าน Raw Request Body (ArrayBuffer / text) โดยห้ามแปลงเป็น JSON ทันที               |     |
+|    | - ตรวจสอบ Timestamp ป้องกัน Replay Attack (ยอมรับผลต่างไม่เกิน 300 วินาที)           |     |
+|    | - คำนวณ HMAC-SHA256 Signature เปรียบเทียบกับ Header ด้วย crypto.timingSafeEqual     |     |
+|    | [Phase 2: Idempotency Gate]                                                          |     |
+|    | - เช็กว่า Event ID เคยประมวลผลแล้วหรือไม่ใน Redis / DB ป้องกันการตัดสต็อกเนื้อซ้ำ     |     |
+|    | [Phase 3: Domain Mutation & Transaction]                                             |     |
+|    | - อัปเดตสถานะ Order: 'PAID' -> ส่งคำสั่งตัดเนื้อไปยังหน้าเขียง (Butcher Station)    |     |
+|    +--------------------------------------------------------------------------------------+     |
+|                                        |                                                         |
+| 3. Response Output                     v                                                         |
+|    - NextResponse.json({ received: true }, { status: 200 })                                      |
++--------------------------------------------------------------------------------------------------+
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 ทำไมต้องอ่าน Raw Body ในการตรวจสอบ Webhook Signature?
+ในระบบชำระเงิน (Stripe หรือ Omise) ฝั่ง Gateway จะนำ Payload ดิบที่เป็น String/Bytes มาคำนวณ Hash ด้วยความลับ (Webhook Secret):
+- หากคุณเรียกใช้ `await request.json()` ตัว Parser ของ JavaScript อาจเรียงลำดับคีย์ของ JSON ใหม่ หรือตัด Whitespace ส่งผลให้ Hash ที่คำนวณได้ไม่ตรงกับค่าที่เซิร์ฟเวอร์ส่งมา
+- **Senior Rule:** ต้องอ่านข้อมูลผ่าน `await request.text()` หรือ `await request.arrayBuffer()` เท่านั้น จากนั้นจึงนำ Raw String นี้ไปตรวจสอบ Cryptographic Signature ก่อนที่จะแปลงเป็น Object
+
+### 2.2 Replay Attack Prevention และ Timing Attack Mitigation
+1. **Replay Attack:** ผู้ไม่หวังดีดักจับ Webhook ที่สำเร็จแล้ว แล้วส่งคำขอนั้นซ้ำๆ เพื่อหวังให้ระบบแจกสินค้าหรือยืนยันคำสั่งซื้อฟรี:
+   - ตรวจสอบ Timestamp ของ Signature (Header `t=...`) หากเกิน 5 นาที (300 วินาที) ให้ปฏิเสธคำขอทันที
+   - บันทึก `eventId` ลงใน Key-Value Store พร้อมตั้ง TTL เพื่อเป็น Idempotency Lock
+2. **Timing Safe Comparison:**
+   - การใช้ `signature === calculatedSignature` เปิดช่องโหว่ **Timing Attack** (ผู้โจมตีวัดเวลาที่ CPU ใช้เปรียบเทียบทีละตัวอักษรเพื่อแกะ Signature)
+   - ต้องใช้ `crypto.timingSafeEqual()` เพื่อให้เวลาในการเปรียบเทียบเท่ากันเสมอไม่ว่าจะผิดที่ตัวอักษรใด
+
+### 2.3 การจัดการ CORS ใน Route Handlers
+เบราว์เซอร์จะส่งคำขอ `OPTIONS` (Preflight Request) เข้ามาถามก่อนหากโดเมนภายนอกยิงคำขอข้าม Domain:
+- เราต้องเขียนฟังก์ชัน `export async function OPTIONS()` เพื่อตอบกลับ Headers เช่น `Access-Control-Allow-Origin`, `Access-Control-Allow-Methods`, และ `Access-Control-Allow-Headers`
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: Payment Webhook Handler (Omise/Stripe Verification, Anti-Replay, และ Idempotent State)
+
+ตัวอย่าง Route Handler ที่สมบูรณ์แบบสำหรับการรับการยืนยันชำระเงินค่าเนื้อสเต๊กวากิว A5 ป้องกันการโกงทุกรูปแบบ
+
+```typescript filename="src/app/api/webhooks/payment/route.ts"
+import { NextRequest, NextResponse } from 'next/server';
+import crypto from 'node:crypto';
+
+// บังคับให้รันบน Node.js Runtime เพื่อใช้งาน Native Crypto และ Database Drivers
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+const WEBHOOK_SECRET = process.env.PAYMENT_WEBHOOK_SECRET || 'whsec_smart_butcher_production_secret';
+const TOLERANCE_SECONDS = 300; // ยอมรับความคลาดเคลื่อนเวลาไม่เกิน 5 นาที
+
+// Mock In-memory Cache สำหรับเก็บ Processed Events ป้องกัน Replay Attack ในเครื่องทดสอบ
+const processedEvents = new Set<string>();
+
+export async function POST(request: NextRequest) {
+  try {
+    // 1. อ่าน Header ลายเซ็นดิจิทัล
+    const signatureHeader = request.headers.get('x-payment-signature');
+    if (!signatureHeader) {
+      return NextResponse.json({ error: 'Missing cryptographic signature header' }, { status: 400 });
+    }
+
+    // แยก Timestamp (t) และ Signature Hash (v1) ตัวอย่าง: "t=1729670400,v1=abcdef..."
+    const parts = Object.fromEntries(
+      signatureHeader.split(',').map((part) => {
+        const [k, v] = part.split('=');
+        return [k.trim(), v ? v.trim() : ''];
+      })
+    );
+
+    const timestamp = parseInt(parts.t, 10);
+    const receivedSignature = parts.v1;
+
+    if (!timestamp || !receivedSignature) {
+      return NextResponse.json({ error: 'Malformed signature payload' }, { status: 400 });
+    }
+
+    // 2. ป้องกัน Replay Attack: ตรวจสอบ Timestamp Drift
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    if (Math.abs(currentTimestamp - timestamp) > TOLERANCE_SECONDS) {
+      return NextResponse.json(
+        { error: 'Timestamp outside tolerance window. Potential replay attack.' },
+        { status: 400 }
+      );
+    }
+
+    // 3. อ่าน Raw Request Body เพื่อนำมาคำนวณ HMAC SHA-256
+    const rawBody = await request.text();
+    const payloadToSign = `${timestamp}.${rawBody}`;
+
+    const expectedSignature = crypto
+      .createHmac('sha256', WEBHOOK_SECRET)
+      .update(payloadToSign, 'utf8')
+      .digest('hex');
+
+    // 4. เปรียบเทียบ Signature ด้วย Constant-time Comparison (ป้องกัน Timing Attacks)
+    const expectedBuffer = Buffer.from(expectedSignature, 'utf8');
+    const receivedBuffer = Buffer.from(receivedSignature, 'utf8');
+
+    if (
+      expectedBuffer.length !== receivedBuffer.length ||
+      !crypto.timingSafeEqual(expectedBuffer, receivedBuffer)
+    ) {
+      return NextResponse.json({ error: 'Invalid cryptographic signature' }, { status: 401 });
+    }
+
+    // 5. เมื่อ Signature ถูกต้อง จึงแปลง Raw Body เป็น JSON
+    const event = JSON.parse(rawBody);
+
+    // 6. ตรวจสอบ Idempotency ป้องกันการตัดสต็อกเนื้อซ้ำซ้อน
+    if (processedEvents.has(event.id)) {
+      console.warn(`[Webhook] Event ${event.id} ได้รับการประมวลผลไปแล้ว (Idempotent Hit)`);
+      return NextResponse.json({ received: true, status: 'already_processed' }, { status: 200 });
+    }
+
+    // 7. จัดการ Business Logic ตามประเภท Event
+    if (event.type === 'charge.complete' || event.type === 'payment_intent.succeeded') {
+      const orderId = event.data.metadata.orderId;
+      const amountPaid = event.data.amount;
+
+      console.log(`[Order Paid] ออเดอร์ ${orderId} ชำระเงินสำเร็จ ฿${amountPaid / 100}`);
+      
+      // อัปเดตสถานะในฐานข้อมูล: สั่งเขียงเนื้อเตรียมตัดสเต๊กตามสเปก
+      // await db.order.update({ where: { id: orderId }, data: { status: 'PAID', paidAt: new Date() } });
+
+      // บันทึก Event ID กัน Replay ในอนาคต
+      processedEvents.add(event.id);
+    }
+
+    return NextResponse.json({ received: true }, { status: 200 });
+  } catch (error) {
+    console.error('[Webhook Error]', error);
+    return NextResponse.json({ error: 'Internal Webhook Processing Error' }, { status: 500 });
+  }
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: Real-time Order Tracking SSE Stream & CORS Management
+
+ตัวอย่าง Route Handler ที่สตรีมสถานะการหั่นเนื้อและบรรจุภัณฑ์แบบ Server-Sent Events (SSE) ด้วย Web Streams API พร้อมจัดการ CORS ให้กับแอปมือถือ
+
+```typescript filename="src/app/api/orders/[id]/track-stream/route.ts"
+import { NextRequest, NextResponse } from 'next/server';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+interface Props {
+  params: Promise<{ id: string }>;
+}
+
+// 1. ฟังก์ชันจัดการ Preflight CORS สำหรับแอปพลิเคชันภายนอก
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Max-Age': '86400',
+    },
+  });
+}
+
+// 2. ฟังก์ชัน GET ที่คืนค่า ReadableStream ในรูปแบบ Server-Sent Events (SSE)
+export async function GET(request: NextRequest, { params }: Props) {
+  const { id: orderId } = await params;
+
+  const encoder = new TextEncoder();
+
+  // สร้าง ReadableStream ส่งสัญญาณอัปเดตกระบวนการตัดแต่งเนื้อแบบเรียลไทม์
+  const stream = new ReadableStream({
+    async start(controller) {
+      const butcherSteps = [
+        { step: 'AGING_ROOM', message: 'นำเนื้อวากิว A5 ออกจากห้องบ่มเกลือหิมาลายัน' },
+        { step: 'CUTTING', message: 'เชฟเขียงเนื้อกำลังตัดสเต๊กความหนา 1.5 นิ้ว' },
+        { step: 'VACUUM_PACK', message: 'บรรจุสูญญากาศและควบคุมความเย็น -18°C' },
+        { step: 'DISPATCH', message: 'ส่งมอบกล่องควบคุมอุณหภูมิให้ Rider พร้อมส่ง' },
+      ];
+
+      for (let i = 0; i < butcherSteps.length; i++) {
+        // จำลองเวลาการทำงานจริงของเขียงเนื้อ (หน่วงเวลา 1.5 วินาทีต่อขั้นตอน)
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+
+        const eventData = {
+          orderId,
+          stepIndex: i + 1,
+          totalSteps: butcherSteps.length,
+          status: butcherSteps[i].step,
+          description: butcherSteps[i].message,
+          timestamp: new Date().toISOString(),
+        };
+
+        // ส่งข้อมูลตามรูปแบบมาตรฐาน SSE: "data: ...\n\n"
+        const chunk = `data: ${JSON.stringify(eventData)}\n\n`;
+        controller.enqueue(encoder.encode(chunk));
+      }
+
+      // ปิด Stream เมื่อกระบวนการเสร็จสิ้น
+      controller.close();
+    },
+  });
+
+  return new NextResponse(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+    },
+  });
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ปัญหาที่พบบ่อย | รูปแบบที่ผิด (Anti-pattern) | รูปแบบที่ถูกต้องระดับ Senior (Best Practice) |
+| :--- | :--- | :--- |
+| **อ่าน `request.json()` ก่อนเช็ก Signature** | แปลง Body เป็น JSON ก่อน แล้วแปลงกลับเป็น String เพื่อ Hash ทำให้ลายเซ็นไม่ตรงกัน | อ่าน `request.text()` เก็บไว้เป็น Raw String เพื่อตรวจสอบ Signature จากนั้นจึงเรียก `JSON.parse()` |
+| **ใช้ `===` เปรียบเทียบ Cryptographic Hash** | เปรียบเทียบสตริงธรรมดา เปิดช่องโหว่ Side-channel Timing Attack | ใช้ `crypto.timingSafeEqual(bufA, bufB)` เพื่อให้ความเร็วในการประมวลผลสม่ำเสมอเสมอ |
+| **ไม่มีการตรวจจับ Replay Attacks** | ไม่เช็ก Timestamp ใน Webhook ปล่อยให้แฮกเกอร์นำ Payload เก่ายิงซ้ำเพื่อปลดล็อกคำสั่งซื้อ | ตรวจสอบ Timestamp Drift ไม่เกิน 5 นาที และบันทึก Idempotency Key ในแคช |
+| **เขียนไฟล์ `route.ts` ซ้อนกับ `page.tsx`** | ประกาศทั้ง `page.tsx` และ `route.ts` ในโฟลเดอร์เดียวกัน ทำให้ Next.js สับสนและ Build ไม่ผ่าน | แยกโฟลเดอร์ให้ชัดเจน เช่น UI อยู่ที่ `src/app/orders/[id]/page.tsx` ส่วน API อยู่ที่ `src/app/api/orders/[id]/route.ts` |
+| **ลืมตั้ง Header `no-cache` ใน SSE Stream** | ปล่อยให้การเชื่อมต่อ Stream ถูกแคชไว้โดย Browser หรือ Intermediate Proxy | ใส่ Headers `'Content-Type': 'text/event-stream'` และ `'Cache-Control': 'no-cache, no-transform'` เสมอ |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Route Handlers (`route.ts`) เมื่อ:
+- **รับ Webhooks จาก Payment Gateways และ Third-party Services:** เช่น Stripe, Omise, 2C2P, LINE Pay
+- **ให้บริการ Public RESTful API สำหรับ Mobile Application หรือ Partner ERP:** ที่ต้องการ Custom JSON Response, CORS, หรือ Authentication ผ่าน Bearer Token
+- **การส่งออกข้อมูลไฟล์ขนาดใหญ่ (File Streaming):** เช่น ส่งไฟล์ PDF ใบกำกับภาษี หรือ Excel สรุปยอดขายเขียงเนื้อ
+- **Real-time Server-Sent Events (SSE):** ส่งการแจ้งเตือนสดไปยังแดชบอร์ด
+
+### ไม่ควรใช้ Route Handlers เมื่อ:
+- **Form Submissions และ Data Mutations ภายในเว็บตัวเอง:** ควรใช้ **Server Actions** (`'use server'`) เพราะให้ Type Safety เต็มรูปแบบและผสานกับ React Server Components ได้แนบเนียนกว่า
+- **การจัดเส้นทาง URL หรือการตรวจสิทธิ์ก่อนเข้าหน้าเว็บ:** ควรใช้ **Middleware** (`src/middleware.ts`) เพราะทำงานที่ขอบ Edge ก่อนเข้าสู่ Request Lifecycle
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: ทำไมการตรวจสอบ Webhook Signature จาก Payment Gateway จึงต้องทำบน Raw Request Body เสมอ และหากนักพัฒนาเผลอแปลงเป็น JSON ด้วย `await request.json()` จะส่งผลกระทบอย่างไร?
+
+**แนวคำตอบเชิงลึก:**
+การตรวจสอบ Webhook Signature ทำงานบนหลักการ **Cryptographic Hash (HMAC-SHA256)**:
+1. ฝั่ง Gateway (เช่น Stripe หรือ Omise) จะนำข้อความดิบ (Raw Byte String) ของคำขอ มารวมกับ Timestamp และ Webhook Secret เพื่อคำนวณเป็นค่า Hash ส่งมาใน Header
+2. หากเราเรียก `await request.json()` ก่อน:
+   - Parser ของ JavaScript จะทำการ Parse สตริงเป็น In-memory Object
+   - เมื่อเราพยายามนำ Object นั้นมาแปลงกลับเป็นสตริงด้วย `JSON.stringify(body)` ลำดับของ Key ใน Object อาจสลับตำแหน่งกัน (เช่น `{ a: 1, b: 2 }` กลายเป็น `{ b: 2, a: 1 }`) หรือช่องว่าง (Whitespaces/Newlines) หายไป
+   - แม้ข้อมูลจะมีความหมายเหมือนเดิม แต่ไบต์ของข้อความเปลี่ยนไปแม้แต่ไบต์เดียว จะทำให้ค่า Hash ที่ได้เปลี่ยนไปอย่างสิ้นเชิง (Avalanche Effect)
+3. ส่งผลให้การตรวจสอบ Signature ล้มเหลว (Invalid Signature 401) ตลอดเวลา ดังนั้น Senior Developer จะต้องดึง `await request.text()` หรือ `arrayBuffer()` มาคำนวณ Hash ก่อนเสมอ เมื่อผ่านแล้วจึงนำข้อความนั้นไปแปลงเป็น JSON
+
+---
+
+### คำถามที่ 2: อธิบายกลไกการเกิด Replay Attack ในระบบ Webhook ของร้านค้าออนไลน์ และอธิบายแนวทางป้องกันอย่างครอบคลุมในระดับสถาปัตยกรรม?
+
+**แนวคำตอบเชิงลึก:**
+- **กลไกการเกิด (The Attack Vector):**
+  - สมมติว่าลูกค้าซื้อเนื้อสเต๊กวากิว 1 ชิ้นและจ่ายเงินสำเร็จ Gateway ส่งคำขอ HTTP POST ไปยัง `/api/webhooks/payment` พร้อม Body และ Signature ที่ถูกต้อง 100%
+  - ผู้โจมตีที่ดักฟัง Network Traffic (Man-in-the-Middle) หรือบุคคลภายในสามารถบันทึกคำขอนั้นเก็บไว้ แล้วส่ง HTTP Request ก้อนเดิมเป๊ะๆ ซ้ำเข้ามาที่เซิร์ฟเวอร์อีก 100 ครั้ง
+  - หากระบบเราตรวจแค่ว่า "Signature ตรงกับ Body หรือไม่" คำขอทั้ง 100 ครั้งจะผ่านหมด ทำให้ระบบอาจตัดสต็อกเนื้อเพิ่ม หรือเพิ่มแต้มสะสมให้ลูกค้าซ้ำซ้อนโดยไม่ได้จ่ายเงินเพิ่ม
+- **แนวทางป้องกันระดับสถาปัตยกรรม (Comprehensive Defense):**
+  1. **Timestamp Drift Tolerance:** Header ของ Webhook จะต้องมี Timestamp (`t=...`) ที่ Gateway แนบมา นำเวลานี้มาหักลบกับเวลาปัจจุบันของเซิร์ฟเวอร์ (`Math.abs(serverNow - webhookTimestamp)`) หากห่างกันเกินกำหนด (เช่น เกิน 300 วินาที) ให้ Reject ทันที
+  2. **Idempotency Locking (Deduplication):** ทุก Webhook จะมี Unique `event.id` หรือ Transaction Reference เมื่อเซิร์ฟเวอร์ประมวลผลคำขอแรกสำเร็จ ให้นำ `event.id` ไปบันทึกลง Distributed Cache (เช่น Redis) พร้อมกำหนด TTL 24 ชั่วโมง โดยใช้คำสั่งแบบ Atomic เช่น `SET NX` หากมีคำขอซ้ำเข้ามา ให้ตอบกลับ `200 OK` ทันทีโดยไม่ต้องรันคำสั่งตัดสต็อกซ้ำ
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [Next.js Server Actions](/docs/nextjs/server-actions) — การทำ Mutations ภายในแอป Next.js โดยไม่ต้องสร้าง Endpoint
+- [Next.js Middleware & Proxy](/docs/nextjs/middleware) — การตรวจสิทธิ์คำขอด่านหน้าสุด
+- [Next.js Multi-layer Caching](/docs/nextjs/caching) — การควบคุมแคชใน Route Handlers
+- [Next.js Database & API Integration](/docs/nextjs/database) — การต่อยอด Route Handlers ร่วมกับ Prisma Transactions

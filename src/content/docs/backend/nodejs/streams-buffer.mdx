@@ -1,0 +1,332 @@
+---
+title: Streams & Buffer
+category: BACKEND
+parentTitle: Node.js
+version: Node.js 22 LTS
+updatedAt: 2026-10-23
+---
+
+## 1. แนวคิด (Concept)
+
+ลองจินตนาการถึงสถานการณ์สิ้นปีของ **Smart Butcher Marketplace**:
+> ผู้บริหารต้องการดาวน์โหลดรายงานสรุปยอดขายเนื้อสด ประวัติการสั่งซื้อ และข้อมูลการชำระเงินของลูกค้าทั้งหมดตลอด 3 ปีที่ผ่านมา ไฟล์ CSV มีขนาดข้อมูลรวมสูงถึง **5GB** (มีคำสั่งซื้อมากกว่า 10,000,000 แถว)
+
+หากนักพัฒนาเขียนโค้ดด้วยแนวคิดดั้งเดิมแบบ **Buffering**:
+1. โหลดข้อมูลทั้งหมดจาก PostgreSQL ขึ้นมาเก็บไว้ในตัวแปร Array ในหน่วยความจำ RAM
+2. แปลงก้อนข้อมูลทั้งหมดเป็นสตริง CSV ก้อนมหึมา
+3. สั่ง `res.send(hugeCsvString)`
+
+สิ่งที่เกิดขึ้นอย่างหลีกเลี่ยงไม่ได้ใน Node.js คือ:
+- **`ERR_STRING_TOO_LONG`:** V8 Engine มีข้อจำกัดขนาดของสตริงสูงสุดอยู่ที่ประมาณ 512MB ถึง 1GB
+- **`JavaScript heap out of memory`:** เซิร์ฟเวอร์จะกิน RAM ทะลุขีดจำกัด 1.4GB - 2GB จนโพรเซส Crash ดับทันที
+- **Server Starvation:** ระหว่างที่กำลังรวบรวมก้อนข้อมูล เซิร์ฟเวอร์จะไม่สามารถตอบสนองคำสั่งซื้อเนื้อสดของลูกค้ารายอื่นได้เลย
+
+ทางออกที่ทรงพลังที่สุดของ Node.js คือ **Streams (การส่งข้อมูลแบบสายธาร)**:
+แทนที่จะรอให้ข้อมูลครบ 5GB ในหน่วยความจำ เราจะมองข้อมูลเสมือนน้ำที่ไหลผ่านท่อประปา โดยอ่านข้อมูลจาก Database ทีละชุดเล็กๆ (Chunk) ขนาดเพียง 64KB ส่งผ่านตัวแปลง (Transform Stream) เป็นบรรทัด CSV แล้วส่งต่อไปยังท่อส่ง HTTP Response สู่เบราว์เซอร์ของลูกค้าทันที ทำให้เซิร์ฟเวอร์สามารถส่งออกไฟล์ขนาด 5GB หรือแม้แต่ 100GB ได้โดยใช้ **RAM คงที่เพียง 30MB เท่านั้น!**
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 1. โครงสร้างหน่วยความจำ Binary Buffer ใน Node.js V8
+JavaScript ดั้งเดิมในเบราว์เซอร์ถูกออกแบบมาเพื่อจัดการสตริงข้อความ ไม่ได้ถูกออกแบบมาเพื่อจัดการข้อมูลดิบระดับไบนารี (Raw Binary Data เช่น ไฟล์รูปภาพเนื้อสด, วิดีโอ หรือสตรีมเน็ตเวิร์ก)
+
+Node.js จึงสร้างคลาส **`Buffer`** ขึ้นมา:
+- หน่วยความจำของ Buffer ไม่ได้จัดสรรอยู่บน V8 Garbage-Collected JavaScript Heap แต่อยู่บน **Off-heap Memory (C++ Memory Allocation ผ่าน `malloc`)** 
+- มีขนาดคงที่ (Fixed-size) และไม่สามารถขยายขนาดได้
+- **`Buffer.alloc(size)`:** จัดสรรหน่วยความจำและเคลียร์ค่าเดิมให้เป็นเลข 0 ทั้งหมด ปลอดภัยจากข้อมูลรั่วไหล
+- **`Buffer.allocUnsafe(size)`:** จัดสรรหน่วยความจำทันทีโดยไม่เคลียร์ข้อมูลเก่า ทำงานเร็วกว่ามากแต่มีความเสี่ยงด้านความปลอดภัย (อาจมีเศษข้อมูลรหัสผ่านเดิมค้างอยู่หากจัดการไม่ระวัง)
+- **Node.js Slab Allocation:** สำหรับ Buffer ขนาดเล็กกว่า 4KB (`Buffer.poolSize / 2`) Node.js จะจัดสรรผ่านพูลหน่วยความจำขนาด 8KB ก้อนเดียว เพื่อลดจำนวน System Calls และลดภาระการกระจายตัวของหน่วยความจำ (Memory Fragmentation)
+
+```text filename="docs/backend/buffer-memory-layout.txt"
+  Node.js Process Memory Space
+ ┌─────────────────────────────────────────────────────────┐
+ │  V8 JavaScript Heap (< 2GB Standard Limit)              │
+ │  - JS Objects, Arrays, Closures, Variables             │
+ └─────────────────────────────────────────────────────────┘
+ ┌─────────────────────────────────────────────────────────┐
+ │  C++ Native Off-Heap Memory                             │
+ │  - Node.js Buffers (Raw binary data, images, chunks)    │
+ │  - Libuv Threadpool & Socket Buffers                    │
+ └─────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 2. ชนิดของสตรีมทั้ง 4 ชนิด (The 4 Stream Types)
+1. **Readable Stream:** ท่อต้นทางสำหรับอ่านข้อมูล เช่น `fs.createReadStream()`, `http.IncomingMessage` (`req`)
+2. **Writable Stream:** ท่อปลายทางสำหรับเขียนข้อมูล เช่น `fs.createWriteStream()`, `http.ServerResponse` (`res`)
+3. **Duplex Stream:** ท่อที่อ่านและเขียนได้ทั้งสองทิศทางแบบอิสระต่อกัน เช่น `net.Socket`
+4. **Transform Stream:** Duplex Stream พิเศษที่ข้อมูลที่อ่านเข้ามาจะถูกดัดแปลง/คำนวณก่อนส่งออกไปยังท่อเขียน เช่น `zlib.createGzip()` (บีบอัดข้อมูล) หรือการแปลง JSON Object เป็น CSV Row
+
+---
+
+### 3. ปัญหา Backpressure และกลไก HighWaterMark
+เมื่อท่อต้นทาง (Producer เช่น การอ่านไฟล์จาก SSD) ปล่อยน้ำออกมาด้วยความเร็ว 100MB/s แต่ท่อปลายทาง (Consumer เช่น ไคลเอนต์ที่ดาวน์โหลดผ่าน 3G บนมือถือ) สามารถรับน้ำได้เพียง 1MB/s น้ำจะล้นท่อและสะสมอยู่ใน RAM ของเซิร์ฟเวอร์จนเกิด Out of Memory ปรากฏการณ์นี้เรียกว่า **Backpressure (แรงดันย้อนกลับ)**
+
+Node.js จัดการปัญหานี้ผ่านกลไกภายใน:
+- สตรีมแต่ละตัวจะมีค่า **`highWaterMark`** (ค่าเริ่มต้น 16KB สำหรับ Object Mode และ 64KB สำหรับ Binary Data)
+- เมื่อ Consumer รับข้อมูลไม่ทันจน Buffer ในท่อสะสมถึงขีดจำกัด `highWaterMark` คำสั่ง `writable.write(chunk)` จะคืนค่าเป็น `false`
+- Readable Stream จะทำการหยุดการอ่านทันที (`readable.pause()`)
+- เมื่อ Consumer เคลียร์ Buffer จนมีที่ว่างแล้ว จะส่งสัญญาณผ่านเหตุการณ์ **`drain`**
+- Readable Stream จะกลับมาส่งน้ำต่อ (`readable.resume()`)
+
+```text filename="docs/backend/backpressure-flow.txt"
+[ Database Cursor ] ──► (อ่านเร็ว 50MB/s)
+         │
+         ▼
+[ Transform Stream ] ──► (แปลงเป็น CSV)
+         │
+         ▼
+[ Writable Stream: HTTP Response (Client มือถือ 3G รับได้ 500KB/s) ]
+         │
+         ├── Buffer เต็มขีดจำกัด highWaterMark! ──► res.write() คืนค่า false
+         ▼
+[ ส่งสัญญาณ Backpressure: สั่งหยุดชะลอการอ่านจาก Database ชั่วคราว (PAUSE) ]
+         │
+         └── เมื่อ Client โหลดข้อมูลก้อนเดิมเสร็จ พ่น Event 'drain' ──► อ่านต่อ (RESUME)
+```
+
+---
+
+### 4. ทำไมต้องใช้ `stream.pipeline` แทน `.pipe()`?
+ในอดีต นักพัฒนานิยมเขียน:
+```typescript filename="legacy-stream-pipe.ts"
+readable.pipe(transform).pipe(writable);
+```
+**อันตรายร้ายแรงของ `.pipe()`:**
+หากมี Error เกิดขึ้นกลางทางในท่อ `transform` หรือปลายทาง `writable` หลุดการเชื่อมต่อ ตัว `.pipe()` จะ **ไม่ทำการปิดหรือทำลาย (Destroy) สตรีมอื่นในสายธารนั้นโดยอัตโนมัติ** ส่งผลให้ File Descriptor หรือ Socket ค้างคาในหน่วยความจำ กลายเป็น Memory Leak เรื้อรัง
+
+ใน Node.js ยุคใหม่ วิศวกรต้องใช้ **`stream.promises.pipeline`** เท่านั้น เพราะจะดักจับ Error ในทุกท่อ ปิดสตรีมทุกตัวโดยอัตโนมัติเมื่อเกิดข้อผิดพลาด และรองรับ async/await ร่วมกับ `AbortSignal` อย่างสมบูรณ์
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสร้าง Custom Transform Stream แปลง Object ออเดอร์เนื้อเป็นแถว CSV
+
+ตัวอย่างการสร้างคลาส Transform Stream ในโหมด `objectMode` เพื่อแปลงข้อมูล Record แต่ละแถวของคำสั่งซื้อเนื้อวากิวให้เป็นข้อความ CSV พร้อมจัดการ Header บรรทัดแรกอย่างแม่นยำ
+
+```typescript filename="src/streams/order-csv.transform.ts"
+import { Transform, TransformCallback } from 'node:stream';
+
+export interface ButcherOrderRecord {
+  orderId: string;
+  customerEmail: string;
+  meatName: string;
+  category: string;
+  weightKg: number;
+  totalPrice: number;
+  status: string;
+  orderedAt: Date;
+}
+
+export class OrderCsvTransform extends Transform {
+  private isHeaderWritten = false;
+
+  constructor() {
+    // กำหนด objectMode: true เพื่อรับ Input เป็น JavaScript Object และส่งออกเป็น Buffer/String
+    super({ objectMode: true });
+  }
+
+  _transform(chunk: ButcherOrderRecord, encoding: BufferEncoding, callback: TransformCallback): void {
+    try {
+      let output = '';
+
+      // เขียน CSV Header เพียงครั้งเดียวที่จุดเริ่มต้นของไฟล์
+      if (!this.isHeaderWritten) {
+        output += 'Order ID,Customer Email,Meat Item,Category,Weight (KG),Total Price (THB),Status,Ordered At\n';
+        this.isHeaderWritten = true;
+      }
+
+      // ทำความสะอาดและครอบข้อมูลด้วย Double Quote เพื่อป้องกันปัญหา Comma ในชื่อสินค้า
+      const safeMeatName = `"${chunk.meatName.replace(/"/g, '""')}"`;
+      const safeEmail = `"${chunk.customerEmail.replace(/"/g, '""')}"`;
+      const safeDate = chunk.orderedAt.toISOString();
+
+      output += `${chunk.orderId},${safeEmail},${safeMeatName},${chunk.category},${chunk.weightKg.toFixed(2)},${chunk.totalPrice.toFixed(2)},${chunk.status},${safeDate}\n`;
+
+      // ส่ง Chunk ต่อไปยังท่อถัดไป
+      this.push(output);
+      callback();
+    } catch (err: unknown) {
+      callback(err instanceof Error ? err : new Error('เกิดข้อผิดพลาดในการแปลง CSV'));
+    }
+  }
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: การสตรีมส่งออกรายงานยอดขายขนาด 5GB บีบอัด Gzip ตรงสู่ HTTP Response
+
+ในตัวอย่างนี้ เราจะจำลองการสตรีมข้อมูลยอดขายเนื้อสดหลายล้านแถวจากฐานข้อมูล ส่งผ่าน `OrderCsvTransform` บีบอัดด้วย `zlib.createGzip()` และยิงตรงเข้าสู่ `res` (HTTP ServerResponse) โดยใช้ `stream.promises.pipeline`
+
+```typescript filename="src/controllers/export-orders.controller.ts"
+import { Controller, Get, Res, Logger } from '@nestjs/common';
+import type { Response } from 'express';
+import { pipeline } from 'node:stream/promises';
+import { Readable } from 'node:stream';
+import { createGzip } from 'node:zlib';
+import { OrderCsvTransform, ButcherOrderRecord } from '../streams/order-csv.transform';
+
+@Controller('reports')
+export class ExportOrdersController {
+  private readonly logger = new Logger(ExportOrdersController.name);
+
+  @Get('orders/export-csv-stream')
+  async exportLargeOrderReport(@Res() res: Response) {
+    this.logger.log('--- เริ่มต้นสตรีมมิ่งรายงานยอดขายเนื้อสดขนาดใหญ่ ---');
+
+    // 1. ตั้งค่า HTTP Headers สำหรับการดาวน์โหลดไฟล์แบบสตรีมมิ่ง
+    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader('Content-Disposition', 'attachment; filename="butcher-sales-report.csv.gz"');
+    // ใช้ Transfer-Encoding: chunked เพื่อแจ้งเบราว์เซอร์ว่าจะส่งข้อมูลมาเรื่อยๆ โดยไม่ต้องระบุ Content-Length ล่วงหน้า
+    res.setHeader('Transfer-Encoding', 'chunked');
+
+    // 2. สร้าง Readable Stream จำลองการอ่านข้อมูลด้วย Database Cursor (เช่น Prisma Query Raw Cursor)
+    const totalRecords = 500_000; // จำลอง 500,000 ออเดอร์
+    let currentRecord = 0;
+
+    const databaseCursorStream = new Readable({
+      objectMode: true,
+      // highWaterMark 100 รายการในหน่วยความจำ เพื่อคุมปริมาณ RAM ให้ไม่เกิน 30MB
+      highWaterMark: 100,
+      read() {
+        // จำลองการปล่อย Record ออกมาเป็นระลอก
+        let canContinue = true;
+        while (canContinue && currentRecord < totalRecords) {
+          currentRecord++;
+          const sampleRecord: ButcherOrderRecord = {
+            orderId: `ORD-${currentRecord.toString().padStart(7, '0')}`,
+            customerEmail: `customer_${currentRecord % 1000}@smartbutcher.com`,
+            meatName: currentRecord % 2 === 0 ? 'Miyazaki Wagyu A5 Ribeye' : 'Australian Black Angus Striploin',
+            category: 'Premium Beef',
+            weightKg: 1.25,
+            totalPrice: currentRecord % 2 === 0 ? 4500.0 : 1850.0,
+            status: 'COMPLETED',
+            orderedAt: new Date(Date.now() - currentRecord * 60000),
+          };
+
+          // push() คืนค่า false เมื่อ Buffer ใน Readable เต็ม (เกิด Backpressure)
+          canContinue = this.push(sampleRecord);
+        }
+
+        // เมื่ออ่านข้อมูลจนครบทุกแถว ให้ push(null) เพื่อปิดสตรีมต้นทาง
+        if (currentRecord >= totalRecords) {
+          this.push(null);
+        }
+      },
+    });
+
+    const csvTransformer = new OrderCsvTransform();
+    const gzipCompressor = createGzip({ level: 6 });
+
+    try {
+      // 3. เชื่อมต่อสายธารด้วย pipeline() การันตีความปลอดภัยและ Cleanup อัตโนมัติ
+      await pipeline(
+        databaseCursorStream,
+        csvTransformer,
+        gzipCompressor,
+        res, // HTTP Response เป็น Writable Stream
+      );
+
+      this.logger.log(`สตรีมรายงานยอดขายเนื้อสำเร็จครบ ${totalRecords} รายการ`);
+    } catch (err: unknown) {
+      this.logger.error('เกิดข้อผิดพลาดขณะสตรีมข้อมูล หรือลูกค้ายกเลิกการดาวน์โหลดกลางคัน:', err);
+      // หากยังไม่ได้ส่ง Header ไปยัง Client สามารถส่ง Error ตอบกลับได้
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'ไม่สามารถสร้างรายงานยอดขายได้' });
+      }
+    }
+  }
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+### ❌ โค้ดที่ผิด: อ่านไฟล์ทั้งหมดเข้า RAM และต่อท่อด้วย `.pipe()` โดยไม่ดักจับ Error
+
+```typescript filename="bad-stream-export.ts"
+// ผิดมหันต์ 1: อ่านไฟล์ 5GB ด้วย fs.readFileSync หรือสะสมใน String ก้อนเดียว
+const bigData = fs.readFileSync('/data/huge-sales.csv'); // V8 Heap Crash ทันที!
+res.send(bigData);
+
+// ผิดมหันต์ 2: ใช้ .pipe() ต่อกันแบบไม่มีการจัดการข้อผิดพลาด
+readStream
+  .pipe(transformStream)
+  .pipe(res);
+// หากไคลเอนต์ปิดเบราว์เซอร์หนี (Connection Reset by Peer)
+// readStream จะไม่ถูกสั่ง destroy ทำให้ตัวอ่านฐานข้อมูลยังคงทำงานต่อไปอย่างไร้จุดหมาย (Resource Leak)
+```
+
+### ✅ โค้ดที่ถูก: ใช้ `stream.promises.pipeline` และรองรับ AbortSignal เสมอ
+
+```typescript filename="good-stream-export.ts"
+import { pipeline } from 'node:stream/promises';
+
+// ถูกต้อง: pipeline จะทำการดักจับ Error ทุกจุด หากไคลเอนต์กดยกเลิกกลางคัน 
+// มันจะสั่ง .destroy() ทุกสตรีมในสายธารทันที คืน RAM และปิด Database Cursor อย่างปลอดภัย
+try {
+  await pipeline(sourceStream, transformStream, res, {
+    signal: req.signal, // ยกเลิกทันทีเมื่อ HTTP Request หลุดการเชื่อมต่อ
+  });
+} catch (err) {
+  logger.warn('การส่งข้อมูลถูกยกเลิกอย่างปลอดภัย');
+}
+```
+
+<Callout type="tip" title="การใช้ AbortSignal ใน Node.js 22 Streams">
+ตั้งแต่ Node.js 18+ และสมบูรณ์แบบใน Node.js 22 LTS ตัวฟังก์ชัน `pipeline` รองรับออปชัน `{ signal: req.signal }` จากไคลเอนต์ ทำให้เมื่อผู้ใช้งานกดปิดหน้าเว็บหรือหยุดดาวน์โหลด ตัวสตรีมจะหยุดสูบข้อมูลจาก Database ทันที ช่วยประหยัด I/O และหน่วยความจำของเซิร์ฟเวอร์ได้อย่างมหาศาล
+</Callout>
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Streams & Buffer:
+- การนำเข้า (Import) หรือส่งออก (Export) ไฟล์ขนาดใหญ่ เช่น รายการธุรกรรม, ไฟล์ CSV/Excel หลายแสนแถว
+- การประมวลผลไฟล์มัลติมีเดีย เช่น การอัปโหลดรูปภาพชิ้นเนื้อสดขนาด 20MB ขึ้น Cloud Storage โดยไม่ต้องเซฟลงดิสก์เซิร์ฟเวอร์ก่อน
+- การเข้ารหัส/ถอดรหัส (Crypto) หรือการบีบอัดข้อมูล (Gzip / Brotli) แบบ Real-time
+- การเชื่อมต่อ Microservices แบบสตรีมมิ่ง เช่น gRPC หรือ Server-Sent Events
+
+### ไม่ควรใช้:
+- ข้อมูลขนาดเล็กระดับไม่กี่กิโลไบต์ เช่น อ็อบเจกต์ JSON ข้อมูลโปรไฟล์ลูกค้า `User` ทั่วไป (การใช้ Streams จะมีค่า Code Complexity และ Overhead เกินความจำเป็น)
+- การคำนวณที่ต้องเข้าถึงข้อมูลแบบสุ่ม (Random Access) เช่น ต้องอ่านไบต์ที่ 50 แล้วกระโดดไปไบต์ที่ 2,000,000 ทันที (สตรีมถูกออกแบบมาเพื่อ Sequential Access ทีละ Chunk)
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### Q1: อธิบายกลไก "Backpressure" ใน Node.js Streams อย่างละเอียด และจะเกิดอะไรขึ้นหากเราเขียน Custom Writable Stream โดยเพิกเฉยต่อค่าที่ส่งกลับจาก `write()`?
+**แนวคำตอบเชิงลึก:**
+**Backpressure** คือกลไกที่ควบคุมความสมดุลระหว่างอัตราความเร็วในการผลิตข้อมูล (Producer Rate) กับอัตราความเร็วในการบริโภคข้อมูล (Consumer Rate)
+
+เมื่อ Readable Stream ส่งข้อมูลผ่านคำสั่ง `writable.write(chunk)` ตัว Writable Stream จะนำข้อมูลไปเก็บไว้ใน Internal Buffer 
+- หาก Buffer สะสมข้อมูลจนถึงขนาดขีดจำกัด `highWaterMark` (ค่าเริ่มต้น 16KB สำหรับ Object หรือ 64KB สำหรับ Buffer) ตัวคำสั่ง `writable.write()` จะส่งคืนค่า `false` เพื่อเป็นสัญญาณเตือนว่า: *"หยุดส่งข้อมูลก่อน ฉันประมวลผลไม่ทันแล้ว"*
+- ตัว Readable Stream จะต้องหยุดการดึงข้อมูล (`pause()`) และรอจนกระทั่ง Consumer ประมวลผลจน Buffer ว่างลงและส่ง Event `'drain'` ออกมา จึงจะเริ่มส่งข้อมูลต่อ (`resume()`)
+
+**หากเพิกเฉยต่อค่า `false`:**
+หาก Producer ยังคงฝืนยิงข้อมูลเข้ามาเรื่อยๆ โดยไม่สนใจสัญญาณ Backpressure ตัว Writable Stream จะต้องจำใจจัดสรรหน่วยความจำ RAM ใน Node.js เพิ่มขึ้นเรื่อยๆ เพื่อเก็บก้อนข้อมูลที่ค้างคิว ผลลัพธ์คือเกิด **Memory Leak มหาศาล** และระบบจะพังทลายลงด้วยข้อผิดพลาด `JavaScript heap out of memory` ทันที
+
+---
+
+### Q2: ในการจัดสรร Buffer ระหว่าง `Buffer.alloc()` และ `Buffer.allocUnsafe()` มีความแตกต่างกันอย่างไรในแง่ของสถาปัตยกรรม และเหตุใด `Buffer.allocUnsafe()` จึงมีความเสี่ยงต่อช่องโหว่ด้านความปลอดภัย (Security Vulnerability)?
+**แนวคำตอบเชิงลึก:**
+1. **`Buffer.alloc(size)`:** Node.js จะขอพื้นที่หน่วยความจำดิบจาก OS และทำกระบวนการ **Zero-fill** (เขียนเลขศูนย์ทับทุกไบต์ในหน่วยความจำนั้น) ทำให้มั่นใจได้ว่าข้อมูลใน Buffer สะอาดบริสุทธิ์ แต่มีข้อเสียคือใช้ CPU Cycle และเวลาในการเขียนศูนย์ทับ
+2. **`Buffer.allocUnsafe(size)`:** Node.js จะขอพื้นที่หน่วยความจำและส่งคืน Pointer กลับมาให้ใช้งานทันที โดย **ไม่มีการ Zero-fill** ทำให้มีความเร็วในการจัดสรรสูงมาก (เหมาะสำหรับงานที่รู้แน่ชัดว่าจะเขียนข้อมูลของตัวเองทับทุกไบต์ทันที เช่น การอ่านข้อมูลจาก Socket มาทับทันที)
+
+**ความเสี่ยงด้านความปลอดภัย (CWE-457: Use of Uninitialized Memory):**
+หากใช้ `Buffer.allocUnsafe(1024)` แล้วส่ง Buffer ก้อนนั้นออกไปให้ผู้ใช้ทางเน็ตเวิร์กโดยที่เขียนข้อมูลทับไม่ครบ 1024 ไบต์ เศษข้อมูลเดิมที่เคยอยู่ใน RAM ตำแหน่งนั้นของเซิร์ฟเวอร์ (เช่น รหัสผ่านของลูกค้ารายอื่น, API Secret Keys หรือข้อมูลบัตรเครดิตที่ถูกประมวลผลก่อนหน้า) อาจรั่วไหลออกไปสู่ไคลเอนต์ภายนอกได้ ซึ่งเป็นช่องโหว่ประเภท Data Leakage ขั้นวิกฤต
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เพื่อความเชี่ยวชาญในการจัดการทรัพยากรระดับล่างของ Node.js แนะนำให้ศึกษาหัวข้อต่อไปนี้:
+1. การจัดการ Event Loop และ I/O Phase: [Event Loop](/docs/backend/nodejs/event-loop)
+2. การคำนวณงานหนักคู่ขนานและการวิเคราะห์ RAM: [Workers & Memory](/docs/backend/nodejs/workers-memory)
+3. การอัปโหลดไฟล์ขนาดใหญ่ด้วย Multer: [Multer Pipeline](/docs/backend/file-upload/multer-pipeline)
+4. การสร้าง Structured Logging ระดับองค์กร: [Enterprise Logging](/docs/backend/nestjs/enterprise-logging)

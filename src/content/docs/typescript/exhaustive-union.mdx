@@ -1,0 +1,332 @@
+---
+title: Exhaustive Check
+category: Frontend
+parentTitle: TypeScript
+version: TypeScript 5.x
+updatedAt: 2026-10-23
+---
+
+# TypeScript 5.x Exhaustive Check & Discriminated Unions
+
+สถาปัตยกรรมระดับ Senior ในการรับประกันความครบถ้วนสมบูรณ์ของโค้ด (Exhaustiveness Checking) ด้วย Discriminated Unions และ Type `never`: การสร้างฟังก์ชันผู้ช่วย `assertNever`, การดักจับสถานะออเดอร์เนื้อสเต๊กใหม่ที่เพิ่มเข้ามาในอนาคตไม่ให้หลุดรอดตอน Compile-time, และการเขียน Pattern Matching ให้ปลอดภัยระดับ 100%
+
+---
+
+## 1. แนวคิด (Concept)
+
+ในระบบ E-commerce ขนาดใหญ่ ข้อมูลทางธุรกิจมักมีสถานะที่หลากหลายและเปลี่ยนแปลงตลอดเวลา เช่น สถานะของคำสั่งซื้อเนื้อวากิว (`OrderStatus`):
+- เริ่มต้นมีเพียง `'PENDING'`, `'PAID'`, `'COMPLETED'`
+- ในเวลาต่อมา ธุรกิจเติบโตขึ้น ทีมงานเพิ่มสถานะ `'DRY_AGING'`, `'CUTTING'`, `'DELIVERING'`, `'CANCELLED'`, `'REFUNDED'`
+
+หากนักพัฒนาเขียนเงื่อนไขด้วย `switch-case` หรือ `if-else` ธรรมดา:
+```typescript filename="src/types/flawed-switch.ts"
+switch (order.status) {
+  case 'PENDING': return 'รอการชำระเงิน';
+  case 'PAID': return 'ชำระเงินแล้ว กำลังนำเนื้อเข้าห้องบ่ม';
+  case 'COMPLETED': return 'จัดส่งสำเร็จ';
+  // ลืมเขียนดัก 'REFUNDED' หรือ 'CUTTING' !
+}
+```
+JavaScript จะปล่อยให้โค้ดส่วนนี้ผ่านไปอย่างเงียบๆ และคืนค่า `undefined` ส่งผลให้ UI บนหน้าจอแสดงผลผิดเพี้ยน หรือร้ายแรงกว่านั้นคือระบบหลังบ้านไม่ยอมคืนสต็อกเนื้อให้ลูกค้า
+
+**Exhaustive Check (การตรวจสอบความครอบคลุมแบบสมบูรณ์)** คือเทคนิคที่ใช้ประโยชน์จาก Type `never` ของ TypeScript เพื่อบังคับให้คอมไพเลอร์ฟ้อง Error ทันทีในจังหวะเขียนโค้ด (Compile-Time) หากนักพัฒนาเขียนเงื่อนไขไม่ครอบคลุมสถานะทั้งหมดที่ประกาศไว้ใน Discriminated Union!
+
+```text
++--------------------------------------------------------------------------------------------------+
+|                            Compile-Time Exhaustive Check Mechanism                               |
++--------------------------------------------------------------------------------------------------+
+| 1. Discriminated Union: type OrderStatus = 'PENDING' | 'CUTTING' | 'DELIVERING' | 'REFUNDED'     |
+|                                                                                                  |
+| 2. Switch Statement Flow:                                                                        |
+|    - case 'PENDING':    ---> Type Narrowing: เหลือ ('CUTTING' | 'DELIVERING' | 'REFUNDED')        |
+|    - case 'CUTTING':    ---> Type Narrowing: เหลือ ('DELIVERING' | 'REFUNDED')                   |
+|    - case 'DELIVERING': ---> Type Narrowing: เหลือ ('REFUNDED')                                  |
+|                                                                                                  |
+| 3. Unhandled Case Detected!                                                                      |
+|    - default:                                                                                    |
+|        assertNever(order.status);                                                                |
+|                    ~~~~~~~~~~~~                                                                  |
+|   ❌ TS2345: Argument of type 'string' (REFUNDED) is not assignable to parameter of type 'never'. |
+|   (ระบบบังคับให้คุณเขียน case 'REFUNDED' ให้ครบก่อน จึงจะยอมคอมไพล์ผ่าน!)                          |
++--------------------------------------------------------------------------------------------------+
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 The Bottom Type: `never`
+ในทฤษฎีเซตของ TypeScript Type System นั้น `never` คือ **Bottom Type** (เซตว่าง):
+- ไม่มีค่าใดๆ ในภาษาสามารถกำหนดให้กับ `never` ได้ (ยกเว้นตัว `never` เอง)
+- เมื่อเราเขียน Type Narrowing ผ่าน `switch` หรือ `if`:
+  - ในแต่ละ `case` คอมไพเลอร์จะ "ตัด" สมาชิกของ Union นั้นออกไปทีละตัว
+  - หากเราเขียนดักครบทุกเคส สมาชิกของตัวแปรในบล็อก `default:` จะถูกหักล้างจนหมดสิ้น กลายเป็นเซตว่าง หรือ Type `never` โดยสมบูรณ์
+
+### 2.2 ฟังก์ชันผู้ช่วย `assertNever`
+หัวใจของการทำ Exhaustive Check คือการสร้างฟังก์ชันที่รับเฉพาะพารามิเตอร์ประเภท `never` เท่านั้น:
+
+```typescript filename="src/utils/assert-never.ts"
+export function assertNever(value: never): never {
+  throw new Error(`Unhandled discriminated union case: ${JSON.stringify(value)}`);
+}
+```
+- **Compile-time Guarantee:** หากมีเคสใดตกค้าง TypeScript จะฟ้องว่าไม่สามารถส่งค่านั้นเข้าฟังก์ชันได้
+- **Runtime Safety:** หากมีข้อมูลแปลกปลอมจาก Third-party API ยิงเข้ามาเกินกว่า Spec ตอนรัน ฟังก์ชันจะโยน Exception ที่มีข้อความชัดเจนทันที
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: Basic Discriminated Union & Order Status Label Resolver
+
+การแปลงสถานะคำสั่งซื้อเนื้อสเต๊กพรีเมียมเป็นข้อความและสี Badge บนหน้าจอ โดยรับประกันว่าจะไม่มีสถานะใดหลุดรอด
+
+```typescript filename="src/types/order-status.ts"
+import { assertNever } from '@/utils/type-guards';
+
+// 1. กำหนดสถานะวงจรชีวิตของคำสั่งซื้อเนื้อ (Discriminated String Union)
+export type OrderStatus =
+  | 'AWAITING_PAYMENT'  // รอลูกค้าโอนเงิน
+  | 'DRY_AGING_ROOM'   // เนื้อกำลังบ่มในห้องเกลือหิมาลายัน
+  | 'BUTCHER_CUTTING'  // มาสเตอร์บุชเชอร์กำลังตัดแต่งตามความหนาที่ระบุ
+  | 'COLD_CHAIN_TRANSIT' // ไรเดอร์กำลังจัดส่งในกล่องควบคุมอุณหภูมิ -18°C
+  | 'DELIVERED'        // ลูกค้าได้รับเนื้อเรียบร้อย
+  | 'CANCELLED'        // ยกเลิกคำสั่งซื้อ
+  | 'REFUNDED';        // คืนเงินสำเร็จ
+
+export interface StatusBadgeConfig {
+  label: string;
+  badgeClass: string;
+}
+
+// 2. ฟังก์ชันแปลงสถานะเป็น Config การแสดงผล
+export function getOrderStatusBadge(status: OrderStatus): StatusBadgeConfig {
+  switch (status) {
+    case 'AWAITING_PAYMENT':
+      return { label: 'รอชำระเงิน', badgeClass: 'bg-amber-950 text-amber-400 border-amber-800' };
+
+    case 'DRY_AGING_ROOM':
+      return { label: 'กำลังบ่มดรายเอจ', badgeClass: 'bg-purple-950 text-purple-400 border-purple-800' };
+
+    case 'BUTCHER_CUTTING':
+      return { label: 'เชฟกำลังตัดแต่งเนื้อ', badgeClass: 'bg-blue-950 text-blue-400 border-blue-800' };
+
+    case 'COLD_CHAIN_TRANSIT':
+      return { label: 'ควบคุมความเย็นระหว่างจัดส่ง', badgeClass: 'bg-cyan-950 text-cyan-400 border-cyan-800' };
+
+    case 'DELIVERED':
+      return { label: 'จัดส่งสำเร็จ', badgeClass: 'bg-emerald-950 text-emerald-400 border-emerald-800' };
+
+    case 'CANCELLED':
+      return { label: 'ยกเลิกแล้ว', badgeClass: 'bg-stone-800 text-stone-400 border-stone-700' };
+
+    case 'REFUNDED':
+      return { label: 'คืนเงินเรียบร้อย', badgeClass: 'bg-red-950 text-red-400 border-red-800' };
+
+    default:
+      // ดักจับที่ระดับคอมไพเลอร์: หากในอนาคตมีการเพิ่ม 'PARTIALLY_DELIVERED' เข้ามา
+      // บรรทัดนี้จะแดงทันที พร้อมแจ้งเตือนว่าสถานะนั้นยังไม่ถูกจัดการ!
+      return assertNever(status);
+  }
+}
+```
+
+ไฟล์ Utility สร้าง Type-safe Assert Guard:
+
+```typescript filename="src/utils/type-guards.ts"
+/**
+ * ฟังก์ชันตรวจสอบความสมบูรณ์แบบ Exhaustiveness Check
+ * รับประกันว่าทุกกรณีของ Discriminated Union ถูกจัดการครบถ้วน
+ */
+export function assertNever(x: never): never {
+  throw new Error(`Critical Error: Unhandled discriminated union variant detected: ${JSON.stringify(x)}`);
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: Advanced Enterprise Meat Order Event Sourcing & State Machine
+
+ในระบบโรงเชือดเนื้อและกระจายสินค้า เราออกแบบคำสั่งการเปลี่ยนแปลงสถานะเป็น Event Objects (Tagged Union) ที่แต่ละ Event มี Payload เฉพาะตัวไม่เหมือนกัน
+
+```typescript filename="src/types/order-events.ts"
+// วัตถุ Event แต่ละตัวมี discriminator คือฟิลด์ `type`
+export type MeatOrderEvent =
+  | {
+      type: 'ORDER_PLACED';
+      orderId: string;
+      customerName: string;
+      itemsCount: number;
+    }
+  | {
+      type: 'PAYMENT_CONFIRMED';
+      orderId: string;
+      amountPaid: number;
+      paymentMethod: 'PROMPTPAY' | 'CREDIT_CARD';
+    }
+  | {
+      type: 'BUTCHER_ASSIGNED';
+      orderId: string;
+      butcherName: string;
+      stationNumber: number;
+    }
+  | {
+      type: 'CUT_COMPLETED';
+      orderId: string;
+      actualWeightGrams: number;
+      wasteTrimGrams: number;
+    }
+  | {
+      type: 'DISPATCHED_COLD_CHAIN';
+      orderId: string;
+      trackingCode: string;
+      boxTemperature: number; // อุณหภูมิขณะแพ็ก
+    }
+  | {
+      type: 'ORDER_CANCELLED';
+      orderId: string;
+      reason: string;
+    };
+```
+
+สร้าง Reducer/Processor ที่จัดการ Event ทุกรูปแบบอย่างปลอดภัย 100%:
+
+```typescript filename="src/services/order-event-processor.ts"
+import type { MeatOrderEvent } from '@/types/order-events';
+import { assertNever } from '@/utils/type-guards';
+
+export interface OrderState {
+  orderId: string;
+  status: string;
+  actualWeight?: number;
+  assignedButcher?: string;
+  trackingNumber?: string;
+  cancellationReason?: string;
+}
+
+/**
+ * Event Reducer สำหรับคำนวณ State ของคำสั่งซื้อเนื้อ
+ * รับประกันว่าทุก Event Type มีตัวจัดการที่ถูกต้องและเข้าถึง Type-safe Payload ได้โดยตรง
+ */
+export function processOrderEvent(currentState: OrderState, event: MeatOrderEvent): OrderState {
+  switch (event.type) {
+    case 'ORDER_PLACED':
+      return {
+        ...currentState,
+        orderId: event.orderId,
+        status: 'PLACED',
+      };
+
+    case 'PAYMENT_CONFIRMED':
+      console.log(`[Billing] ออเดอร์ ${event.orderId} ชำระเงิน ฿${event.amountPaid} ผ่าน ${event.paymentMethod}`);
+      return {
+        ...currentState,
+        status: 'PAID',
+      };
+
+    case 'BUTCHER_ASSIGNED':
+      return {
+        ...currentState,
+        status: 'IN_PREPARATION',
+        assignedButcher: `${event.butcherName} (เขียงที่ ${event.stationNumber})`,
+      };
+
+    case 'CUT_COMPLETED':
+      console.log(`[Butcher] ตัดเนื้อเสร็จสิ้น: ชั่งจริง ${event.actualWeightGrams}g, เศษตกแต่ง ${event.wasteTrimGrams}g`);
+      return {
+        ...currentState,
+        status: 'CUT_READY',
+        actualWeight: event.actualWeightGrams,
+      };
+
+    case 'DISPATCHED_COLD_CHAIN':
+      if (event.boxTemperature > 0) {
+        console.warn(`[Alert] อุณหภูมิกล่องเนื้อสูงเกินมาตรฐาน: ${event.boxTemperature}°C`);
+      }
+      return {
+        ...currentState,
+        status: 'SHIPPED',
+        trackingNumber: event.trackingCode,
+      };
+
+    case 'ORDER_CANCELLED':
+      return {
+        ...currentState,
+        status: 'CANCELLED',
+        cancellationReason: event.reason,
+      };
+
+    default:
+      // หากมีการเพิ่ม event.type ตัวใหม่ เช่น 'REFUND_PROCESSED' เข้ามาใน Union
+      // TypeScript จะแจ้งเตือนทันทีว่า argument ของ type { type: 'REFUND_PROCESSED' } ไม่สามารถ assign ให้ never ได้
+      return assertNever(event);
+  }
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ปัญหาที่พบบ่อย | รูปแบบที่ผิด (Anti-pattern) | รูปแบบที่ถูกต้องระดับ Senior (Best Practice) |
+| :--- | :--- | :--- |
+| **ใช้ `default: break;` ละเลยเคสที่เหลือ** | ปล่อยให้บล็อก default ผ่านไปโดยไม่ทำอะไร ทำให้เมื่อมีสถานะใหม่เพิ่มเข้ามา ระบบเงียบและเกิดบั๊ก | ผูก `default: return assertNever(val);` เพื่อให้คอมไพเลอร์แจ้งเตือนทันทีในหน้าต่าง IDE |
+| **โยน Generic Error ใน Default** | เขียน `default: throw new Error('Invalid')` ซึ่งรู้ผลเฉพาะตอน **Runtime บน Production** | ใช้ `assertNever` ที่รับ Type `never` เพื่อให้ตรวจจับได้ตั้งแต่ **Compile-time ในเครื่อง Dev** |
+| **ใช้ String ธรรมดาแทน Discriminated Union** | ประกาศ `status: string` ทำให้ไม่สามารถทำ Type Narrowing ใดๆ ได้ | ประกาศ Literal Union Type เช่น `'PAID' \| 'PENDING' \| 'DELIVERED'` อย่างเจาะจง |
+| **ตั้งชื่อ Discriminator Property ไม่ตรงกัน** | บางอ็อบเจกต์ใช้ `type: 'A'` อีกอันใช้ `kind: 'B'` ทำให้ TypeScript ไม่สามารถจำแนกเคสได้ | ใช้ชื่อพร็อพเพอร์ตี้เดียวกันสำหรับเป็น Discriminator เสมอ (เช่น `type` หรือ `status`) |
+| **เขียน `return` ก่อนตรวจครบทุกเคส** | เขียน `if` ดักแค่ 2 เงื่อนไขแล้วส่งคืนค่าเริ่มต้น ทำให้บั๊กสถานะใหม่เล็ดลอด | ออกแบบโครงสร้างให้ครอบคลุมทุกกิ่งก้าน (Exhaustive Branching) |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Exhaustive Check เมื่อ:
+- **State Machines และ Business Workflows:** ระบบที่มีสถานะการดำเนินงานชัดเจน เช่น สถานะออเดอร์, สถานะการชำระเงิน, สถานะการจัดส่ง
+- **Event-Driven Architectures (Event Sourcing):** ฟังก์ชัน Reducer ที่ต้องรับมือกับ Message Types หลากหลายจาก Kafka, RabbitMQ หรือ Webhooks
+- **UI Component Variants & Actions:** ตัวเลือกชุดธีม, ขนาดปุ่ม (`'sm' | 'md' | 'lg' | 'xl'`), หรือ Navigation Breadcrumb Types
+
+### ไม่ควรใช้เมื่อ:
+- **ข้อมูลเปิดกว้างที่ไม่ทราบขอบเขตล่วงหน้า (Unbounded Strings):** ข้อมูลความคิดเห็นลูกค้า, คำค้นหา Search Query, รหัสสินค้าที่เป็น Dynamic ID
+- **Union ที่อนุญาตให้มี Fallback ทั่วไปได้โดยเจตนา:** ในกรณีที่ต้องการให้สถานะอื่นๆ ทั้งหมดใช้ค่า Default เดียวกันอย่างจงใจ และยอมรับการเปลี่ยนแปลงในอนาคต
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: Type `never` ใน TypeScript คืออะไร และกลไกเบื้องหลังทำให้ฟังก์ชัน `assertNever` ตรวจจับเคสที่ตกหล่นใน Compile-time ได้อย่างไร?
+
+**แนวคำตอบเชิงลึก:**
+1. **ธรรมชาติของ Type `never`:**
+   - ในระบบ Type System ของ TypeScript ตัว `never` คือ **Bottom Type** ซึ่งเป็นซับไทป์ของทุกไทป์ แต่ไม่มีไทป์ใดสามารถเป็นซับไทป์ของมันได้
+   - ค่าเดียวที่สามารถกำหนดให้กับตัวแปรประเภท `never` ได้ คือตัวมันเองเท่านั้น
+2. **กลไกการตรวจจับใน `assertNever`:**
+   - เมื่อเราเขียน `switch (status)` บนตัวแปร Discriminated Union TypeScript จะใช้เทคนิคที่เรียกว่า **Control Flow Analysis (Type Narrowing)**
+   - ทุกครั้งที่โค้ดวิ่งผ่าน `case` ตัวแปรนั้นจะถูกหักสมาชิกใน Union นั้นออก
+   - หากเราเขียน `case` ครบทุกกรณี ตัวแปรนั้นจะไม่เหลือความเป็นไปได้ใดๆ อีกเลยในสายตาของคอมไพเลอร์ ซึ่งทาง Type Theory จะถูกลดรูปกลายเป็น `never`
+   - เมื่อเข้าบล็อก `default: assertNever(status)` การส่งตัวแปรที่เป็น `never` เข้าฟังก์ชันที่รับ `never` จะผ่านฉลุย
+   - **แต่ถ้าหาก** มีเคสใดตกหล่น (เช่น เพิ่ม `'EXPIRED'` เข้ามาใหม่) ตัวแปร `status` ในบล็อก `default` จะยังคงมี Type เป็น `'EXPIRED'` ไม่ใช่ `never`
+   - เมื่อพยายามส่ง `'EXPIRED'` เข้าฟังก์ชัน `assertNever(x: never)` คอมไพเลอร์จะตรวจจับ Type Mismatch และหยุดการคอมไพล์ทันที!
+
+---
+
+### คำถามที่ 2: เปรียบเทียบความแตกต่างระหว่างการทำ Exhaustiveness Checking ด้วย `assertNever` กับการใช้ Return Type Annotation บนฟังก์ชัน และทำไมการใช้ทั้งสองอย่างควบคู่กันจึงเป็น Best Practice สูงสุด?
+
+**แนวคำตอบเชิงลึก:**
+- **การใช้ Return Type Annotation บนฟังก์ชัน:**
+  - ตัวอย่าง: `function getBadge(status: OrderStatus): BadgeConfig`
+  - หากเราลืมเขียน `case` ใดเคสหนึ่ง และฟังก์ชันหลุดไปโดยไม่มีการ `return` หรือคืนค่า `undefined` TypeScript จะฟ้อง Error ว่า `Function lacks ending return statement and return type does not include 'undefined'`
+  - **ข้อจำกัด:** ไม่บอกชัดเจนว่าลืมเคสไหน และถ้าในเคสนั้นดันเผลอคืนค่า default ที่ผิดความหมาย โค้ดก็ยังคอมไพล์ผ่าน
+- **การใช้ `assertNever` ในบล็อก Default:**
+  - ชี้เป้าอย่างแม่นยำ 100% ว่า Variant ใดของ Union ที่ยังไม่ได้เขียน `case` มารองรับ (เช่น `Argument of type '"REFUNDED"' is not assignable to 'never'`)
+  - มี Runtime Fail-safe หากมีข้อมูลหลุดเข้ามาตอนแอปพลิเคชันกำลังทำงาน
+- **ทำไมจึงควรใช้ร่วมกัน:**
+  - การระบุ Return Type Annotation ช่วยการันตี Contract ฝั่งขาออก (Output Contract)
+  - ขณะที่ `assertNever` ช่วยการันตีความครอบคลุมของฝั่งขาเข้า (Input Exhaustiveness) เมื่อใช้ร่วมกันจะเกิดความปลอดภัยระดับเกราะสองชั้น (Two-tier Type Safety)
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [TypeScript Branded Types](/docs/typescript/branded-types) — การจำลอง Nominal Typing ป้องกันความสับสนของ Primitive
+- [TypeScript Type-safe API Client](/docs/typescript/typed-api-client) — การสร้าง End-to-End Type Safety ร่วมกับ OpenAPI
+- [TypeScript Narrowing & Type Guards](/docs/typescript/narrowing) — การบีบสอบข้อมูลเชิงลึก
+- [TypeScript Advanced Types](/docs/typescript/advanced-types) — Conditional Types และ Template Literal Types

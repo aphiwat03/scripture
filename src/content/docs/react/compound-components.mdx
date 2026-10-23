@@ -1,0 +1,455 @@
+---
+title: Compound Components
+category: Frontend
+parentTitle: React 19
+version: Design Patterns & React 19
+updatedAt: 2026-10-23
+---
+
+# React 19 Compound Components Pattern
+
+สถาปัตยกรรมระดับ Senior ในการสร้าง UI Components ด้วย Compound Component Pattern: การแชร์ State ภายในด้วย React Context และ Guarded Custom Hook, การลดปัญหา Prop Drilling และ Prop Explosion, การคืนสิทธิ์ควบคุม UI ให้ผู้เรียกใช้ (Inversion of Control), และกรณีศึกษาตัวปรับแต่งการตัดแต่งเนื้อสเต๊ก `<MeatOrderConfigurator>`
+
+---
+
+## 1. แนวคิด (Concept)
+
+**Compound Components Pattern** คือรูปแบบการออกแบบคอมโพเนนต์ขั้นสูงใน React ที่จำลองพฤติกรรมขององค์ประกอบดั้งเดิมใน HTML เช่น `<select>` และ `<option>`:
+- องค์ประกอบย่อย (Subcomponents) ทำงานร่วมกันเพื่อบรรลุวัตถุประสงค์เดียว โดยแชร์สถานะการทำงาน (Implicit State) ภายในร่วมกันโดยที่ผู้เรียกใช้ไม่ต้องส่ง Props วนไปมา (No Prop Drilling)
+- **Inversion of Control (IoC):** ผู้เรียกใช้คอมโพเนนต์สามารถจัดเรียงลำดับ ปรับแต่งโครงสร้าง DOM หรือแทรกองค์ประกอบคั่นกลางได้อย่างอิสระ โดยไม่ทำให้การทำงานภายในพังทลาย
+- **ขจัดปัญหา Prop Explosion:** ไม่ต้องสร้างคอมโพเนนต์ยักษ์ที่รับ 20-30 Props (เช่น `showThickness={true}`, `thicknessTitle="ความหนา"`, `agingStyle="badge"`) ซึ่งทำให้โค้ดยากต่อการบำรุงรักษา
+
+```text
++--------------------------------------------------------------------------------------------------+
+|                            Compound Components Architecture                                      |
++--------------------------------------------------------------------------------------------------+
+| <MeatOrderConfigurator defaultCut="RIBEYE">  <--- Root Provider (State & Handlers Hub)            |
+|   |                                                                                              |
+|   +-- <MeatOrderConfigurator.CutOption value="RIBEYE">     <--- Subcomponent A                   |
+|   |   |-- อาศัย State จาก Root Context อัตโนมัติ                                                |
+|   |                                                                                              |
+|   +-- <div className="my-custom-wrapper">                  <--- Custom Markup คั่นกลางได้อิสระ   |
+|   |     <MeatOrderConfigurator.ThicknessControl />         <--- Subcomponent B                   |
+|   |   </div>                                                                                     |
+|   |                                                                                              |
+|   +-- <MeatOrderConfigurator.AgingSelector />              <--- Subcomponent C                   |
+|   +-- <MeatOrderConfigurator.PriceSummary />               <--- แสดงราคาสุทธิคำนวณสด            |
+|   +-- <MeatOrderConfigurator.SubmitButton />               <--- สั่งตัดเนื้อส่งให้เขียง           |
+|                                                                                                  |
++--------------------------------------------------------------------------------------------------+
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 React Context ในยุค React 19
+ใน React 19 เราสามารถใช้งาน `<Context value={...}>` ได้โดยตรงโดยไม่ต้องเขียน `.Provider` ซ้ำซ้อน:
+- การใช้ Context เป็นกลไกหลักในการส่งผ่าน Implicit State สู่ลูกหลานทุกระดับชั้น (Deeply Nested Subcomponents)
+- **Guarded Custom Hook:** เพื่อป้องกันไม่ให้นักพัฒนานำ Subcomponent เช่น `<MeatOrderConfigurator.CutOption>` ไปวางนอกขอบเขตของ Root เราจะต้องสร้าง Guarded Hook ที่สั่ง `throw new Error()` ทันทีหากค่า Context เป็น `null`
+
+```typescript filename="src/hooks/use-meat-config.ts"
+function useMeatConfiguratorContext() {
+  const context = useContext(MeatConfiguratorContext);
+  if (!context) {
+    throw new Error('MeatOrderConfigurator compound components must be rendered within <MeatOrderConfigurator>');
+  }
+  return context;
+}
+```
+
+### 2.2 Static Property Assignment
+การแนบคอมโพเนนต์ลูกเข้ากับคอมโพเนนต์แม่ด้วย Dot Notation:
+```typescript filename="src/components/meat/configurator-exports.ts"
+MeatOrderConfigurator.CutOption = CutOption;
+MeatOrderConfigurator.Thickness = ThicknessControl;
+```
+- ช่วยให้การนำเข้า (Import) สะอาดเรียบง่าย นำเข้าแค่ `MeatOrderConfigurator` ตัวเดียวก็สามารถเข้าถึงคอมโพเนนต์ลูกทั้งหมดได้ทันที
+- ส่งเสริมการทำ Code Autocompletion บน IDE ช่วยให้ผู้พัฒนามองเห็น API Surface ทั้งหมดของชุดคอมโพเนนต์
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: Basic Compound Pattern (กล่องเลือกประเภทการบ่มเนื้อ Dry-Aged Selector)
+
+ตัวอย่างพื้นฐานสำหรับการสร้างกล่องเลือกวันบ่มเนื้อ ที่ให้ผู้เรียกใช้เลือกวาง Title หรือสลับปุ่มได้ตามใจชอบ
+
+```tsx filename="src/components/meat/aging-box.tsx"
+'use client';
+
+import React, { createContext, useContext, useState, type ReactNode } from 'react';
+
+interface AgingContextValue {
+  selectedDays: number;
+  selectDays: (days: number) => void;
+}
+
+const AgingContext = createContext<AgingContextValue | null>(null);
+
+function useAgingContext() {
+  const ctx = useContext(AgingContext);
+  if (!ctx) {
+    throw new Error('AgingBox sub-components must be wrapped in <AgingBox>');
+  }
+  return ctx;
+}
+
+// 1. Root Component (React 19 Context syntax)
+interface AgingBoxProps {
+  initialDays?: number;
+  onChange?: (days: number) => void;
+  children: ReactNode;
+}
+
+export function AgingBox({ initialDays = 30, onChange, children }: AgingBoxProps) {
+  const [selectedDays, setSelectedDays] = useState(initialDays);
+
+  const selectDays = (days: number) => {
+    setSelectedDays(days);
+    onChange?.(days);
+  };
+
+  return (
+    <AgingContext value={{ selectedDays, selectDays }}>
+      <div className="rounded-3xl border border-stone-800 bg-stone-900/80 p-6 text-stone-100">
+        {children}
+      </div>
+    </AgingContext>
+  );
+}
+
+// 2. Sub-components
+AgingBox.Title = function AgingBoxTitle({ children }: { children: ReactNode }) {
+  return <h3 className="text-xl font-bold text-white mb-2">{children}</h3>;
+};
+
+AgingBox.Description = function AgingBoxDescription({ children }: { children: ReactNode }) {
+  return <p className="text-sm text-stone-400 mb-6">{children}</p>;
+};
+
+interface OptionProps {
+  days: number;
+  label: string;
+}
+
+AgingBox.Option = function AgingBoxOption({ days, label }: OptionProps) {
+  const { selectedDays, selectDays } = useAgingContext();
+  const isSelected = selectedDays === days;
+
+  return (
+    <button
+      type="button"
+      onClick={() => selectDays(days)}
+      className={`px-4 py-3 rounded-2xl border text-sm font-semibold transition ${
+        isSelected
+          ? 'border-red-600 bg-red-950/60 text-white shadow-lg shadow-red-950/30'
+          : 'border-stone-800 bg-stone-950 text-stone-400 hover:border-stone-700'
+      }`}
+    >
+      {days} วัน — {label}
+    </button>
+  );
+};
+```
+
+---
+
+### ตัวอย่างที่ 2: Advanced Production `<MeatOrderConfigurator>`
+
+ชุดคอมโพเนนต์ระดับองค์กรสำหรับร้านขายเนื้อสเต๊กพรีเมียม ให้ลูกค้าเลือกชิ้นเนื้อ ความหนา ระยะเวลาบ่ม พร้อมคำนวณราคาสด และส่งข้อมูลการสั่งซื้อ
+
+```tsx filename="src/components/meat/meat-order-configurator.tsx"
+'use client';
+
+import React, { createContext, useContext, useState, useMemo, type ReactNode } from 'react';
+
+export type CutType = 'RIBEYE' | 'STRIPLOIN' | 'TENDERLOIN' | 'T_BONE';
+
+export interface ConfiguratorState {
+  cut: CutType;
+  thicknessInches: number;
+  dryAgedDays: number;
+  weightGrams: number;
+  customNotes: string;
+}
+
+interface ConfiguratorContextValue {
+  state: ConfiguratorState;
+  setCut: (cut: CutType) => void;
+  setThickness: (thickness: number) => void;
+  setAging: (days: number) => void;
+  setCustomNotes: (notes: string) => void;
+  totalEstimatedPrice: number;
+}
+
+const ConfiguratorContext = createContext<ConfiguratorContextValue | null>(null);
+
+function useMeatConfig() {
+  const ctx = useContext(ConfiguratorContext);
+  if (!ctx) {
+    throw new Error('Subcomponent must be used inside <MeatOrderConfigurator>');
+  }
+  return ctx;
+}
+
+// อัตราคำนวณราคาฐานต่อกรัมของเนื้อแต่ละส่วน
+const BASE_RATES: Record<CutType, number> = {
+  RIBEYE: 4.8,      // 4.8 บาท/กรัม (฿4,800/kg)
+  STRIPLOIN: 4.2,   // 4.2 บาท/กรัม
+  TENDERLOIN: 5.5,  // 5.5 บาท/กรัม
+  T_BONE: 3.9,      // 3.9 บาท/กรัม
+};
+
+// 1. Root Component
+interface RootProps {
+  defaultCut?: CutType;
+  onOrderSubmit?: (config: ConfiguratorState, price: number) => void;
+  children: ReactNode;
+}
+
+export function MeatOrderConfigurator({
+  defaultCut = 'RIBEYE',
+  onOrderSubmit,
+  children,
+}: RootProps) {
+  const [state, setState] = useState<ConfiguratorState>({
+    cut: defaultCut,
+    thicknessInches: 1.5,
+    dryAgedDays: 45,
+    weightGrams: 400, // ชิ้นมาตรฐาน 400 กรัม
+    customNotes: '',
+  });
+
+  const totalEstimatedPrice = useMemo(() => {
+    const baseRate = BASE_RATES[state.cut];
+    // ตัวคูณความพรีเมียมของการบ่มเนื้อ (ยิ่งบ่มนาน น้ำระเหยเยอะ ต้นทุนสูงขึ้น)
+    const agingMultiplier = 1 + (state.dryAgedDays / 100) * 0.4;
+    return Math.round(state.weightGrams * baseRate * agingMultiplier);
+  }, [state.cut, state.dryAgedDays, state.weightGrams]);
+
+  const value: ConfiguratorContextValue = {
+    state,
+    setCut: (cut) => setState((prev) => ({ ...prev, cut })),
+    setThickness: (thicknessInches) => setState((prev) => ({ ...prev, thicknessInches })),
+    setAging: (dryAgedDays) => setState((prev) => ({ ...prev, dryAgedDays })),
+    setCustomNotes: (customNotes) => setState((prev) => ({ ...prev, customNotes })),
+    totalEstimatedPrice,
+  };
+
+  return (
+    <ConfiguratorContext value={value}>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          onOrderSubmit?.(state, totalEstimatedPrice);
+        }}
+        className="rounded-3xl border border-stone-800 bg-stone-900/90 p-8 shadow-2xl backdrop-blur space-y-6"
+      >
+        {children}
+      </form>
+    </ConfiguratorContext>
+  );
+}
+
+// 2. Subcomponent: Cut Selection Grid
+MeatOrderConfigurator.CutGrid = function MeatCutGrid({ children }: { children: ReactNode }) {
+  return (
+    <div>
+      <label className="text-xs font-bold uppercase tracking-wider text-stone-400 block mb-3">
+        1. เลือกสเปกชิ้นเนื้อ (Prime Cut)
+      </label>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">{children}</div>
+    </div>
+  );
+};
+
+interface CutCardProps {
+  cut: CutType;
+  title: string;
+  marbling: string;
+}
+
+MeatOrderConfigurator.CutCard = function MeatCutCard({ cut, title, marbling }: CutCardProps) {
+  const { state, setCut } = useMeatConfig();
+  const isSelected = state.cut === cut;
+
+  return (
+    <button
+      type="button"
+      onClick={() => setCut(cut)}
+      className={`p-4 rounded-2xl border text-left transition flex flex-col justify-between ${
+        isSelected
+          ? 'border-red-600 bg-red-950/40 text-white shadow-lg ring-1 ring-red-500'
+          : 'border-stone-800 bg-stone-950/60 text-stone-300 hover:border-stone-700'
+      }`}
+    >
+      <span className="font-bold text-sm">{title}</span>
+      <span className="text-xs text-red-400 font-medium mt-2">{marbling}</span>
+    </button>
+  );
+};
+
+// 3. Subcomponent: Thickness Range Control
+MeatOrderConfigurator.ThicknessControl = function MeatThicknessControl() {
+  const { state, setThickness } = useMeatConfig();
+
+  return (
+    <div className="p-4 rounded-2xl bg-stone-950/60 border border-stone-800">
+      <div className="flex justify-between items-center mb-2">
+        <label htmlFor="thickness-slider" className="text-xs font-bold uppercase text-stone-400">
+          2. ความหนาของสเต๊ก (นิ้ว)
+        </label>
+        <span className="text-base font-extrabold text-white">{state.thicknessInches} นิ้ว</span>
+      </div>
+      <input
+        id="thickness-slider"
+        type="range"
+        min="0.75"
+        max="3.0"
+        step="0.25"
+        value={state.thicknessInches}
+        onChange={(e) => setThickness(parseFloat(e.target.value))}
+        className="w-full accent-red-600 cursor-pointer"
+      />
+      <div className="flex justify-between text-[11px] text-stone-500 mt-1">
+        <span>0.75 นิ้ว (Quick Sear)</span>
+        <span>1.5 นิ้ว (Chef Standard)</span>
+        <span>3.0 นิ้ว (Tomahawk Cut)</span>
+      </div>
+    </div>
+  );
+};
+
+// 4. Subcomponent: Price & Weight Summary
+MeatOrderConfigurator.Summary = function MeatSummary() {
+  const { state, totalEstimatedPrice } = useMeatConfig();
+
+  return (
+    <div className="p-5 rounded-2xl bg-stone-950 border border-stone-800 flex flex-col sm:flex-row justify-between sm:items-center gap-4">
+      <div>
+        <span className="text-xs text-stone-400 block">สรุปสเปก: {state.cut} • บ่ม {state.dryAgedDays} วัน • หนา {state.thicknessInches} นิ้ว</span>
+        <span className="text-xs text-stone-500">น้ำหนักประมาณ {state.weightGrams} กรัม</span>
+      </div>
+      <div className="text-right">
+        <span className="text-xs text-stone-400 block">ยอดรวมโดยประมาณ</span>
+        <span className="text-3xl font-black text-red-500">฿{totalEstimatedPrice.toLocaleString()}</span>
+      </div>
+    </div>
+  );
+};
+
+// 5. Subcomponent: Submit Action
+MeatOrderConfigurator.SubmitButton = function MeatSubmitButton({ label = 'ส่งคำสั่งตัดเนื้อ' }: { label?: string }) {
+  return (
+    <button
+      type="submit"
+      className="w-full py-4 rounded-2xl bg-red-600 hover:bg-red-700 text-white font-bold text-base transition active:scale-[0.99] shadow-xl shadow-red-950/40"
+    >
+      {label}
+    </button>
+  );
+};
+```
+
+การนำไปใช้งานจริงอย่างยืดหยุ่นในหน้าสั่งซื้อ:
+
+```tsx filename="src/app/order-custom-cut/page.tsx"
+'use client';
+
+import { MeatOrderConfigurator } from '@/components/meat/meat-order-configurator';
+
+export default function OrderCustomCutPage() {
+  return (
+    <div className="max-w-2xl mx-auto py-12 px-4">
+      <h1 className="text-3xl font-black text-white mb-6">🥩 สั่งตัดสเต๊กคัสตอมตามใจคุณ</h1>
+
+      {/* สังเกตความยืดหยุ่น: สามารถแทรกหัวข้อ คำเตือน หรือสลับตำแหน่งองค์ประกอบได้อย่างอิสระ */}
+      <MeatOrderConfigurator
+        defaultCut="RIBEYE"
+        onOrderSubmit={(config, price) => {
+          alert(`ยืนยันการตัด: ${config.cut} ราคา ฿${price.toLocaleString()}`);
+        }}
+      >
+        <MeatOrderConfigurator.CutGrid>
+          <MeatOrderConfigurator.CutCard cut="RIBEYE" title="Ribeye A5" marbling="BMS 10-12" />
+          <MeatOrderConfigurator.CutCard cut="STRIPLOIN" title="Striploin" marbling="BMS 8-9" />
+          <MeatOrderConfigurator.CutCard cut="TENDERLOIN" title="Tenderloin" marbling="BMS 9" />
+          <MeatOrderConfigurator.CutCard cut="T_BONE" title="T-Bone Dry Aged" marbling="Prime" />
+        </MeatOrderConfigurator.CutGrid>
+
+        <MeatOrderConfigurator.ThicknessControl />
+
+        <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-800/40 text-xs text-amber-300">
+          💡 สเต๊กความหนา 1.5 นิ้วขึ้นไป แนะนำให้เตรียมเครื่องวัดอุณหภูมิเนื้อแบบแกนเข็ม (Probe)
+        </div>
+
+        <MeatOrderConfigurator.Summary />
+        <MeatOrderConfigurator.SubmitButton label="ยืนยันส่งคำสั่งตัดไปยังเขียงเนื้อพรีเมียม" />
+      </MeatOrderConfigurator>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ปัญหาที่พบบ่อย | รูปแบบที่ผิด (Anti-pattern) | รูปแบบที่ถูกต้องระดับ Senior (Best Practice) |
+| :--- | :--- | :--- |
+| **Monolithic Component with Giant Props** | สร้าง `<MeatConfigurator cuts={...} showThickness={true} headerTitle="..." />` เกิน 25 props | แตกย่อยเป็น Compound Pattern คืนสิทธิ์การจัดวาง JSX ให้ผู้เรียกใช้ (Inversion of Control) |
+| **ไม่ตรวจสอบ Guarded Hook** | เรียกใช้ `useContext` แล้วนำค่าไปใช้งานทันที เมื่อลูกหลานอยู่นอก Root จะขึ้นข้อผิดพลาด Cannot read properties of null | เขียน Guarded Hook ที่ `throw new Error(...)` แจ้งเตือนนักพัฒนาอย่างชัดเจนทันที |
+| **สับสนระหว่าง Re-render กับ Context** | นำ State ทุกอย่างรวมไว้ใน Context ก้อนเดียว ทำให้การเลื่อน Slider แค่ 1 ช่อง สั่ง Re-render ทุกการ์ดเนื้อ | แยก Context ตามการเปลี่ยนแปลง หรือใช้ `useMemo` ห่อหุ้ม Value ก้อน Context เพื่อตัดการ Render ที่ไม่จำเป็น |
+| **จำกัดตำแหน่งการวางลูกหลาน (Tight DOM Coupling)** | เขียนโค้ดแบบ `React.Children.map` บังคับให้ลูกหลานต้องเป็นชั้นแรกเท่านั้น ห้ามมี `<div>` ครอบ | ใช้ React Context เพื่อให้ส่งต่อ State ข้ามโครงสร้าง HTML Nested ได้ทุกความลึก |
+| **ลืมกำหนด Accessible Roles** | สร้าง Custom Card โดยลืมใส่ `type="button"` ทำให้กด Submit ฟอร์มไม่ได้ตั้งใจ | ระบุ Semantic Elements และ ARIA attributes ครบถ้วนใน Subcomponents |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Compound Components เมื่อ:
+- **ชุด UI ที่มีความสัมพันธ์ของ State แนบแน่นแต่โครงสร้างการจัดวางยืดหยุ่น:** Tabs, Accordion, Stepper, Select Box, Custom Cut Configurators
+- **Design System Libraries:** คอมโพเนนต์ระดับแกนกลางขององค์กรที่ต้องการให้ทีมอื่นๆ นำไปปรับแต่งหน้าตาหรือ Layout ได้อย่างอิสระ
+- **ฟอร์มการกำหนดค่าสินค้าที่มีหลายขั้นตอนย่อย (Complex Product Builders):** เช่น การปรับแต่งสูตรสเต๊ก, การเลือกแพ็กเกจของขวัญเนื้อพรีเมียม
+
+### ไม่ควรใช้ Compound Components เมื่อ:
+- **คอมโพเนนต์เรียบง่ายที่ไม่มีการเปลี่ยนแปลง Layout:** เช่น ปุ่มกดธรรมดา, Avatar, หรือ Badge เล็กๆ
+- **คอมโพเนนต์ที่โครงสร้างถูกตรึงตายตัว 100%:** หากหน้าตานั้นไม่มีวันสลับลำดับการแสดงผล การส่ง Props ปกติจะเข้าใจได้ง่ายกว่าและลดความซับซ้อนของโค้ด
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: เปรียบเทียบความแตกต่างระหว่างการแชร์ State ใน Compound Component ผ่าน `React.Children.map` ร่วมกับ `React.cloneElement` กับการใช้ `React.createContext` ใน React 19?
+
+**แนวคำตอบเชิงลึก:**
+1. **วิธีการดั้งเดิม (`React.Children.map` & `React.cloneElement`):**
+   - ข้อจำกัดใหญ่ที่สุดคือ **ทำงานได้เฉพาะกับลูกหลานโดยตรงระดับที่ 1 (Direct Children Only)**
+   - หากผู้ใช้งานเผลอเอา `<div>` มาครอบเพื่อจัด Flexbox หรือ Grid ตัว `cloneElement` จะไม่สามารถฉีด Props ทะลุเข้าไปยัง Subcomponent จริงๆ ได้
+   - โค้ดมีความเปราะบางสูงมาก และฝืนธรรมชาติการเขียน JSX
+2. **วิธีการสมัยใหม่ด้วย React Context:**
+   - ทลายข้อจำกัดเรื่องลำดับชั้น: Subcomponent สามารถฝังลึกอยู่ใน DOM Tree ชั้นไหนก็ได้ (Deeply Nested)
+   - ไม่มีการกลายพันธุ์ Props (No Prop Mutation)
+   - ใน React 19 การใช้ Context ยังสะอาดขึ้นด้วยไวยากรณ์ `<Context value={...}>` และทำงานได้อย่างเต็มประสิทธิภาพร่วมกับ Compiler ยุคใหม่
+
+---
+
+### คำถามที่ 2: อะไรคือหลักการ "Inversion of Control (IoC)" ในการออกแบบ React Component และ Compound Components Pattern ช่วยบรรลุเป้าหมายนี้ได้อย่างไร?
+
+**แนวคำตอบเชิงลึก:**
+- **Inversion of Control (IoC):** คือแนวคิดการ "โอนสิทธิ์และอำนาจการควบคุม" ในการตัดสินใจเรื่องการแสดงผล (Rendering Decision) และโครงสร้าง (Structure) จากตัว Component ผู้ให้บริการ คืนกลับไปให้ตัว Developer ผู้เรียกใช้งาน:
+  - ในสถาปัตยกรรมแบบเดิม (Monolithic Component) ตัว Component จะพยายามทำทุกอย่างด้วยตัวเองและบังคับให้ผู้ใช้ส่ง Props มาสั่ง เช่น `renderHeader`, `footerPosition="bottom"`, `badgeColor="red"`
+  - เมื่อความต้องการของธุรกิจเพิ่มขึ้น คอมโพเนนต์จะบวมจนควบคุมไม่ได้
+- **การบรรลุเป้าหมายด้วย Compound Components:**
+  - ตัว Root Component จะควบคุมเฉพาะ **"Business Logic และ State"** (เช่น ชิ้นเนื้อที่เลือก, ราคารวม, ฟังก์ชันคำนวณ)
+  - ปล่อยให้ **"การจัดวาง Layout และ Visual Styling"** เป็นหน้าที่ของผู้เรียกใช้
+  - ผู้เรียกใช้สามารถวาง `.ThicknessControl` ไว้ก่อน `.CutGrid` หรือจะแทรกแบนเนอร์โฆษณาคั่นกลางก็ทำได้ทันทีโดยไม่ต้องแก้โค้ดภายใน Component แม่แม้แต่บรรทัดเดียว
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [React 19 Accessibility Components](/docs/react/accessibility-components) — การผสาน Compound Components กับมาตรฐาน WCAG
+- [React 19 Architecture](/docs/react/architecture) — วงจรชีวิตของ Component และ Context Performance
+- [React Error & Suspense](/docs/react/error-suspense) — การจัดการ Error Boundary สำหรับ Context
+- [TypeScript Advanced Types](/docs/typescript/advanced-types) — การกำหนด Type แบบ Strict สำหรับ Compound Props

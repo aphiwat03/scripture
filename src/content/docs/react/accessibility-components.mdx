@@ -1,0 +1,447 @@
+---
+title: Accessibility (A11y)
+category: Frontend
+parentTitle: React 19
+version: WCAG 2.1 AA & React 19
+updatedAt: 2026-10-23
+---
+
+# React 19 Accessible Components & WCAG 2.1 AA Standards
+
+คู่มือระดับ Senior ในการพัฒนา UI Components ให้สอดคล้องกับมาตรฐานการเข้าถึง WCAG 2.1 ระดับ AA ด้วย React 19: การสร้าง Focus Trap ใน Dialog/Drawer, การจัดการ Roving Tabindex ด้วย Keyboard Navigation, การประกาศข้อความต่อ Screen Reader ด้วย `aria-live`, และการรองรับ `prefers-reduced-motion`
+
+---
+
+## 1. แนวคิด (Concept)
+
+**Web Accessibility (A11y)** คือหลักการออกแบบและพัฒนาเว็บแอปพลิเคชันเพื่อให้บุคคลทุกคนสามารถใช้งานได้อย่างเท่าเทียม รวมถึงผู้มีความบกพร่องทางสายตา การได้ยิน หรือการเคลื่อนไหวที่ต้องพึ่งพา **Screen Reader** หรือคีย์บอร์ดเพียงอย่างเดียว
+
+ในสถาปัตยกรรม **React 19**:
+- **Semantic HTML First:** ปรัชญาสำคัญที่สุดคือการใช้ Native HTML Elements (เช่น `<button>`, `<dialog>`, `<nav>`, `<fieldset>`) ให้ถูกต้องก่อนคิดจะใช้ ARIA เพราะ Native Elements มี Accessibility Tree ในตัวเบราว์เซอร์สมบูรณ์แบบ
+- **Focus Management:** เมื่อเปิด Dialog หรือ Drawer ขึ้นมา ระบบต้องล็อกโฟกัส (Focus Trap) ไม่ให้ผู้ใช้กด Tab ทะลุออกไปข้างนอก และเมื่อปิดหน้าต่าง ต้องคืนโฟกัสกลับไปยังปุ่มเดิมที่เปิดขึ้นมา
+- **Screen Reader Feedback:** การเปลี่ยนแปลงที่เกิดขึ้นบนหน้าจอแบบ Dynamic (เช่น น้ำหนักเนื้อเปลี่ยน หรือราคาอัปเดต) ต้องถูกประกาศผ่าน `aria-live="polite"`
+
+```text
++--------------------------------------------------------------------------------------------------+
+|                            Accessible Dialog Focus Trap Lifecycle                                |
++--------------------------------------------------------------------------------------------------+
+| 1. Trigger State                                                                                 |
+|    - User กดปุ่ม "เลือกความหนาเนื้อสเต๊ก" (Focused: triggerButtonRef)                            |
+|    - เก็บ activeElement ไว้ในหน่วยความจำ                                                         |
+|                                        |                                                         |
+| 2. Dialog Mount & Focus Shift          v                                                         |
+|    +--------------------------------------------------------------------------------------+     |
+|    | - Dialog เปิดขึ้นมา (role="dialog", aria-modal="true", aria-labelledby="dialog-title") |     |
+|    | - ย้าย Focus ไปยังองค์ประกอบแรกสุด (First Focusable Element)                           |     |
+|    | - สแกน Focusable Nodes ทั้งหมด: [ปุ่มความหนา 1 นิ้ว, 1.5 นิ้ว, ปุ่มตกลง, ปุ่มปิด]        |     |
+|    +--------------------------------------------------------------------------------------+     |
+|                                        |                                                         |
+| 3. Keyboard Navigation Loop            v                                                         |
+|    - กด Tab จากปุ่มสุดท้าย -> วนกลับมาปุ่มแรกสุด (Trap Focus)                                     |
+|    - กด Shift+Tab จากปุ่มแรก -> วนไปปุ่มสุดท้าย                                                  |
+|    - กดปุ่ม Escape -> ปิด Dialog ทันที                                                           |
+|                                        |                                                         |
+| 4. Dialog Close & Focus Restoration    v                                                         |
+|    - Unmount Dialog จาก DOM                                                                      |
+|    - คืน Focus กลับไปที่ triggerButtonRef ตัวเดิมทันที (ไม่หลุดไปที่ <body>)                      |
++--------------------------------------------------------------------------------------------------+
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 กฎเหล็กข้อแรกของ ARIA (First Rule of ARIA)
+> *"If you can use a native HTML element or attribute with the semantics and behavior you require already built-in, instead of re-purposing an element and adding ARIA, then do so."*
+
+- **อย่าทำ:** `<div role="button" tabIndex={0} onClick={handleClick}>` เพราะต้องเขียนดักปุ่ม Enter, Spacebar, Focus Outline, และ ARIA State เองทั้งหมด
+- **ควรทำ:** `<button type="button" onClick={handleClick}>` เบราว์เซอร์จัดการเรื่อง Keyboard Interactivity และ Accessibility Tree ให้อัตโนมัติ
+
+### 2.2 การจัดการ Dynamic Announcements (`aria-live`)
+เมื่อคำสั่งซื้อเนื้อสเต๊กถูกอัปเดตราคาจากการชั่งน้ำหนักสด คนตาดีจะเห็นตัวเลขเปลี่ยนบนหน้าจอ แต่ผู้ใช้ Screen Reader จะไม่ทราบเลยหากไม่มีการประกาศ:
+- **`aria-live="polite"`:** รอให้ Screen Reader พูดประโยคปัจจุบันจบก่อน แล้วจึงอ่านข้อความอัปเดต (เหมาะกับการอัปเดตราคา, เพิ่มสินค้าลงตะกร้า)
+- **`aria-live="assertive"`:** ขัดจังหวะการพูดของ Screen Reader ทันที (เหมาะกับการแจ้งเตือนข้อผิดพลาดร้ายแรง เช่น ระบบชำระเงินล้มเหลว)
+
+### 2.3 การเคารพสิทธิ์ผู้ใช้ด้วย `prefers-reduced-motion`
+ผู้ใช้บางรายมีภาวะ Vestibular Disorders (อาการวิงเวียนศีรษะจากการเคลื่อนไหว):
+- ระบบปฏิบัติการรองรับการตั้งค่าปิด Animation
+- โค้ด CSS/Tailwind และ Framer Motion ต้องดักฟัง Media Query `prefers-reduced-motion` เพื่อปิดหรือลดการหมุน/เลื่อนของโมดัลสเต๊ก
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: Live Announcer Hook และ Dynamic Meat Weight Calculator
+
+สร้าง Custom Hook สำหรับส่งเสียงประกาศไปยัง Screen Reader เมื่อน้ำหนักและราคาเนื้อสเต๊กเปลี่ยน พร้อมรองรับ `prefers-reduced-motion`
+
+```tsx filename="src/hooks/use-announce.ts"
+'use client';
+
+import { useState, useCallback, useEffect } from 'react';
+
+type AnnouncePoliteness = 'polite' | 'assertive';
+
+/**
+ * Hook สำหรับประกาศข้อความไปยัง Screen Reader ผ่าน Accessibility Live Region
+ */
+export function useAnnounce() {
+  const [announcement, setAnnouncement] = useState('');
+  const [politeness, setPoliteness] = useState<AnnouncePoliteness>('polite');
+
+  const announce = useCallback((message: string, mode: AnnouncePoliteness = 'polite') => {
+    setPoliteness(mode);
+    // ล้างข้อความสั้นๆ เพื่อให้ Screen Reader ตรวจจับการเปลี่ยนแปลงของ DOM ใหม่
+    setAnnouncement('');
+    setTimeout(() => {
+      setAnnouncement(message);
+    }, 50);
+  }, []);
+
+  return { announcement, politeness, announce };
+}
+```
+
+นำ Hook ไปผูกเข้ากับคอมโพเนนต์คำนวณราคาเนื้อตัดสด:
+
+```tsx filename="src/components/meat/meat-weight-calculator.tsx"
+'use client';
+
+import { useState } from 'react';
+import { useAnnounce } from '@/hooks/use-announce';
+
+interface MeatProps {
+  name: string;
+  pricePerGram: number; // บาทต่อกรัม
+}
+
+export function MeatWeightCalculator({ name, pricePerGram }: MeatProps) {
+  const [grams, setGrams] = useState(350); // น้ำหนักเริ่มต้น 350 กรัม
+  const { announcement, politeness, announce } = useAnnounce();
+
+  const totalPrice = grams * pricePerGram;
+
+  const handleWeightChange = (newGrams: number) => {
+    setGrams(newGrams);
+    const newPrice = newGrams * pricePerGram;
+    // ส่งเสียงบอก Screen Reader โดยไม่ขัดจังหวะ
+    announce(`ปรับน้ำหนัก ${name} เป็น ${newGrams} กรัม ยอดรวมสุทธิ ${newPrice.toLocaleString()} บาท`, 'polite');
+  };
+
+  return (
+    <div className="p-6 rounded-3xl bg-stone-900 border border-stone-800 text-stone-100 max-w-md">
+      {/* ซ่อน Live Region จากสายตา แต่ให้ Screen Reader อ่านออกเสียง */}
+      <div
+        role="status"
+        aria-live={politeness}
+        aria-atomic="true"
+        className="sr-only"
+      >
+        {announcement}
+      </div>
+
+      <h3 className="text-xl font-bold text-white mb-2">{name}</h3>
+      <p className="text-sm text-stone-400 mb-6">เลือกน้ำหนักชิ้นสเต๊กที่ต้องการตัดสด</p>
+
+      {/* ควบคุมน้ำหนักด้วยปุ่ม Semantic Button */}
+      <div className="flex items-center justify-between gap-4">
+        <button
+          type="button"
+          onClick={() => handleWeightChange(Math.max(200, grams - 50))}
+          disabled={grams <= 200}
+          aria-label={`ลดน้ำหนัก 50 กรัม ปัจจุบัน ${grams} กรัม`}
+          className="w-12 h-12 rounded-2xl bg-stone-800 hover:bg-stone-700 disabled:opacity-40 text-xl font-bold flex items-center justify-center transition active:scale-95 motion-reduce:transform-none"
+        >
+          -
+        </button>
+
+        <div className="text-center">
+          <span className="text-3xl font-extrabold text-white tracking-tight">{grams}</span>
+          <span className="text-stone-400 text-sm ml-1">กรัม</span>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => handleWeightChange(Math.min(1000, grams + 50))}
+          disabled={grams >= 1000}
+          aria-label={`เพิ่มน้ำหนัก 50 กรัม ปัจจุบัน ${grams} กรัม`}
+          className="w-12 h-12 rounded-2xl bg-stone-800 hover:bg-stone-700 disabled:opacity-40 text-xl font-bold flex items-center justify-center transition active:scale-95 motion-reduce:transform-none"
+        >
+          +
+        </button>
+      </div>
+
+      <div className="mt-8 pt-4 border-t border-stone-800 flex justify-between items-end">
+        <span className="text-sm text-stone-400">ราคารวมโดยประมาณ:</span>
+        <span className="text-2xl font-black text-red-500">
+          ฿{totalPrice.toLocaleString()}
+        </span>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: Fully Accessible Steak Customizer Dialog พร้อม Focus Trap & Roving Tabindex
+
+ตัวอย่าง Modal ปรับแต่งความหนาและการบ่มเนื้อ ที่มี Focus Trap สมบูรณ์แบบ คืนโฟกัสสู่ปุ่มเดิม และใช้ Arrow Keys เลื่อนเลือกตัวเลือกตามมาตรฐาน WAI-ARIA Radio Group
+
+```tsx filename="src/components/meat/accessible-steak-dialog.tsx"
+'use client';
+
+import { useState, useRef, useEffect, useCallback } from 'react';
+
+const THICKNESS_OPTIONS = [
+  { id: 't-1', label: '1.0 นิ้ว (Thin Cut)', desc: 'เหมาะสำหรับย่างเร็วบนกระทะเหล็กหล่อ' },
+  { id: 't-1.5', label: '1.5 นิ้ว (Standard Master)', desc: 'สมดุลความกรอบนอกและความฉ่ำในระดับสูงสุด' },
+  { id: 't-2', label: '2.0 นิ้ว (Roast Cut)', desc: 'เหมาะสำหรับการทำ Reverse Sear หรือ Sous-vide' },
+];
+
+export function AccessibleSteakDialog() {
+  const [isOpen, setIsOpen] = useState(false);
+  const [selectedIndex, setSelectedIndex] = useState(1); // ค่าเริ่มต้น 1.5 นิ้ว
+
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const radioRefs = useRef<(HTMLDivElement | null)[]>([]);
+
+  // 1. จัดการ Focus Trap และปุ่ม Escape
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent) => {
+      if (!isOpen || !dialogRef.current) return;
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setIsOpen(false);
+        return;
+      }
+
+      if (e.key === 'Tab') {
+        // ค้นหา Focusable Elements ภายใน Dialog
+        const focusableElements = dialogRef.current.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        );
+        const firstElement = focusableElements[0];
+        const lastElement = focusableElements[focusableElements.length - 1];
+
+        if (e.shiftKey) {
+          // กดย้อนกลับ Shift + Tab จากตัวแรก ให้วนไปตัวสุดท้าย
+          if (document.activeElement === firstElement) {
+            e.preventDefault();
+            lastElement?.focus();
+          }
+        } else {
+          // กด Tab จากตัวสุดท้าย ให้วนกลับมาตัวแรก
+          if (document.activeElement === lastElement) {
+            e.preventDefault();
+            firstElement?.focus();
+          }
+        }
+      }
+    },
+    [isOpen]
+  );
+
+  // 2. ควบคุมวงจรชีวิตของ Focus: เมื่อเปิดย้ายเข้า Dialog / เมื่อปิดคืนไปที่ Trigger
+  useEffect(() => {
+    if (isOpen) {
+      window.addEventListener('keydown', handleKeyDown);
+      // ย้าย Focus ไปยังตัวเลือกที่ถูกเลือกอยู่ทันที
+      setTimeout(() => {
+        radioRefs.current[selectedIndex]?.focus();
+      }, 50);
+    } else {
+      window.removeEventListener('keydown', handleKeyDown);
+      // คืนโฟกัสกลับไปยังปุ่มเปิดเดิม
+      triggerRef.current?.focus();
+    }
+
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, handleKeyDown, selectedIndex]);
+
+  // 3. Roving Tabindex สำหรับ Radio Group: เลื่อนด้วย Arrow Keys
+  const handleRadioKeyDown = (e: React.KeyboardEvent, index: number) => {
+    let nextIndex = index;
+
+    if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      nextIndex = (index + 1) % THICKNESS_OPTIONS.length;
+    } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      nextIndex = (index - 1 + THICKNESS_OPTIONS.length) % THICKNESS_OPTIONS.length;
+    }
+
+    if (nextIndex !== index) {
+      setSelectedIndex(nextIndex);
+      radioRefs.current[nextIndex]?.focus();
+    }
+  };
+
+  return (
+    <div>
+      {/* ปุ่มกดเปิด Modal (Trigger Button) */}
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={() => setIsOpen(true)}
+        aria-haspopup="dialog"
+        aria-expanded={isOpen}
+        className="px-6 py-3 rounded-2xl bg-red-600 hover:bg-red-700 text-white font-semibold transition"
+      >
+        กำหนดสเปกการตัดเนื้อสเต๊ก
+      </button>
+
+      {isOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+          role="presentation"
+        >
+          <div
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="dialog-title"
+            aria-describedby="dialog-desc"
+            className="w-full max-w-lg bg-stone-900 border border-stone-800 rounded-3xl p-6 text-stone-100 shadow-2xl animate-in fade-in motion-reduce:animate-none"
+          >
+            <div className="flex justify-between items-center pb-4 border-b border-stone-800">
+              <h2 id="dialog-title" className="text-xl font-bold text-white">
+                ความหนาของชิ้นสเต๊กวากิว A5
+              </h2>
+              <button
+                type="button"
+                onClick={() => setIsOpen(false)}
+                aria-label="ปิดหน้าต่างปรับแต่ง"
+                className="text-stone-400 hover:text-white p-2 rounded-xl hover:bg-stone-800 transition"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p id="dialog-desc" className="text-sm text-stone-400 mt-3 mb-6">
+              ใช้ปุ่มลูกศร (Arrow Keys) บนคีย์บอร์ดเพื่อเลือกความหนาที่ต้องการ
+            </p>
+
+            {/* WAI-ARIA Radio Group พร้อม Roving Tabindex */}
+            <div
+              role="radiogroup"
+              aria-label="ตัวเลือกความหนาของเนื้อสเต๊ก"
+              className="space-y-3"
+            >
+              {THICKNESS_OPTIONS.map((opt, idx) => {
+                const isSelected = selectedIndex === idx;
+                return (
+                  <div
+                    key={opt.id}
+                    ref={(el) => {
+                      radioRefs.current[idx] = el;
+                    }}
+                    role="radio"
+                    aria-checked={isSelected}
+                    tabIndex={isSelected ? 0 : -1} // Roving Tabindex
+                    onClick={() => setSelectedIndex(idx)}
+                    onKeyDown={(e) => handleRadioKeyDown(e, idx)}
+                    className={`p-4 rounded-2xl border cursor-pointer transition focus:outline-none focus:ring-2 focus:ring-red-500 ${
+                      isSelected
+                        ? 'border-red-600 bg-red-950/40 text-white'
+                        : 'border-stone-800 bg-stone-950/50 text-stone-300 hover:border-stone-700'
+                    }`}
+                  >
+                    <div className="font-semibold text-base">{opt.label}</div>
+                    <div className="text-xs text-stone-400 mt-1">{opt.desc}</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="mt-8 pt-4 border-t border-stone-800 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setIsOpen(false)}
+                className="px-5 py-2.5 rounded-xl border border-stone-700 hover:bg-stone-800 text-sm font-medium transition"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  alert(`ยืนยันการตัดความหนา: ${THICKNESS_OPTIONS[selectedIndex].label}`);
+                  setIsOpen(false);
+                }}
+                className="px-6 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-sm font-semibold transition"
+              >
+                บันทึกการตัดเนื้อ
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ปัญหาที่พบบ่อย | รูปแบบที่ผิด (Anti-pattern) | รูปแบบที่ถูกต้องระดับ Senior (Best Practice) |
+| :--- | :--- | :--- |
+| **สร้างปุ่มกดด้วย `<div>` หรือ `<span>`** | `<div onClick={submit}>` ซึ่ง Screen Reader ไม่รู้ว่าเป็นปุ่ม และกด Enter/Spacebar ไม่ได้ | ใช้ `<button type="button">` หรือเพิ่ม `role="button"` และ `tabIndex={0}` พร้อม KeyDown Handler |
+| **Focus หลุดทะลุออกจาก Dialog** | ปล่อยให้ผู้ใช้กด Tab ทะลุออกจาก Modal ไปยังลิงก์ในหน้าพื้นหลังที่ถูกบดบังอยู่ | สร้าง **Focus Trap** ดักจับปุ่ม Tab และ Shift+Tab ให้วนอยู่ภายใน Element ใน Dialog เสมอ |
+| **ลืมคืน Focus เมื่อปิด Modal** | ปิด Modal แล้วปล่อยให้โฟกัสเด้งกลับไปที่ `document.body` ทำให้ผู้ใช้คีย์บอร์ดหลงตำแหน่ง | บันทึก `triggerRef` ไว้และสั่ง `triggerRef.current.focus()` ในตอน Unmount |
+| **ใช้ `aria-live="assertive"` พร่ำเพรื่อ** | ตั้งค่า Assertive ทุกครั้งที่พิมพ์ตัวอักษร ทำให้ขัดจังหวะการอ่านของ Screen Reader อย่างน่ารำคาญ | ใช้ `aria-live="polite"` สำหรับข้อมูลทั่วไป และเก็บ `assertive` ไว้เฉพาะข้อผิดพลาดวิกฤตเท่านั้น |
+| **บังคับรัน Animation โดยไม่สนใจการตั้งค่าผู้ใช้** | สร้างเอฟเฟกต์หมุนภาพเนื้อสเต๊ก 3D แบบรวดเร็วโดยไม่รองรับผู้ป่วยทางสายตา | ใส่ CSS Rule `motion-reduce:transform-none` หรือตรวจสอบผ่าน `window.matchMedia('(prefers-reduced-motion: reduce)')` |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้การออกแบบ Accessible Components เมื่อ:
+- **ทุกระบบที่มีผู้ใช้งานจริง (Production-grade Websites):** สอดคล้องกับมาตรฐานทางกฎหมายสากล (เช่น European Accessibility Act หรือ ADA ในสหรัฐอเมริกา)
+- **Modal, Drawer, และ Complex Overlays:** หน้าต่างคำสั่งซื้อ, หน้าต่างเลือกชิ้นเนื้อ, ตะกร้าสินค้าด้านข้าง
+- **Interactive Custom Form Controls:** เช่น Custom Dropdown, Radio Groups, Rating Stars, Tabs Selection
+
+### ไม่ควรใช้ ARIA แบบพร่ำเพรื่อเมื่อ:
+- **สามารถแทนที่ด้วย Native Semantic Elements ได้:** เช่น ไม่ต้องใส่ `role="heading" aria-level={1}` หากสามารถใช้ `<h1>` ได้โดยตรง
+- **องค์ประกอบสำหรับตกแต่งล้วนๆ (Decorative Elements):** ไอคอนตกแต่งที่ไม่มีผลต่อความหมาย ควรใส่ `aria-hidden="true"` เพื่อไม่ให้ Screen Reader ส่งเสียงรบกวน
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: อธิบายกลไกการทำ Focus Trap ภายใน Modal และอธิบายว่าทำไมการ "คืนโฟกัส" (Focus Restoration) ไปยัง Element เดิมหลังปิด Modal จึงเป็นสิ่งสำคัญยิ่งยวดตามมาตรฐาน WCAG?
+
+**แนวคำตอบเชิงลึก:**
+1. **Focus Trap Mechanism:**
+   - เมื่อ Modal เปิดขึ้นมา สิ่งสำคัญคือผู้ใช้งานคีย์บอร์ด (Power User หรือผู้พิการทางการเคลื่อนไหว) จะต้องไม่สามารถกดปุ่ม `Tab` ทะลุออกไปยัง Element ที่อยู่บนหน้าพื้นหลังได้
+   - เราใช้ JavaScript ดักฟัง Event `keydown` ที่ระดับ Dialog Container
+   - เมื่อผู้ใช้กด `Tab` ที่ Focusable Node ตัวสุดท้ายของ Modal ระบบจะสั่ง `e.preventDefault()` และบังคับย้ายโฟกัสกลับไปยัง Focusable Node ตัวแรก
+   - ในทางกลับกัน หากกด `Shift + Tab` ที่ตัวแรก จะต้องวนกลับไปยังตัวสุดท้าย
+2. **ความสำคัญของ Focus Restoration:**
+   - ตามเกณฑ์ WCAG 2.1 Success Criterion 2.4.3 (Focus Order) ผู้ใช้ที่พึ่งพาคีย์บอร์ดหรือ Screen Reader จะท่องเว็บตามลำดับ Focus ล่าสุด
+   - หากปิด Modal แล้วระบบไม่คืนโฟกัสกลับไปยังปุ่มเดิม (Trigger Button) โฟกัสจะตกลงไปอยู่ที่ `document.body`
+   - ส่งผลให้ผู้ใช้ต้องกด Tab เริ่มต้นใหม่ตั้งแต่ Header บนสุดของเว็บไซต์ สร้างความสับสนและสูญเสีย Context การนำทางอย่างรุนแรง
+
+---
+
+### คำถามที่ 2: ความแตกต่างระหว่าง `aria-live="polite"` และ `aria-live="assertive"` คืออะไร และมีหลักเกณฑ์ในการเลือกใช้อย่างไรในระบบ E-commerce ตลาดสดออนไลน์?
+
+**แนวคำตอบเชิงลึก:**
+ความแตกต่างอยู่ที่ **ลำดับความสำคัญในการส่งเสียงแทรก (Interruption Priority)**:
+- **`aria-live="polite"`:**
+  - สั่งให้ Screen Reader รอคอยให้ผู้ใช้ฟังข้อความปัจจุบันจนจบเสียก่อน หรือรอให้ผู้ใช้หยุดพิมพ์
+  - เหมาะสำหรับ: การแจ้งเตือนข้อมูลที่ไม่เร่งด่วนแต่มีประโยชน์ เช่น เมื่อลูกค้ากดเพิ่มน้ำหนักเนื้อสเต๊ก แล้วราคาสุทธิคำนวณใหม่ หรือการแจ้งเตือนว่า *"เพิ่มวากิว A5 ลงตะกร้าแล้ว"*
+- **`aria-live="assertive"`:**
+  - สั่งให้ Screen Reader ขัดจังหวะคำพูดปัจจุบันทันที เพื่ออ่านข้อความนี้ออกเสียงออกมาอย่างเร่งด่วนที่สุด
+  - เหมาะสำหรับ: สถานการณ์ฉุกเฉินหรือข้อผิดพลาดที่ต้องการการตัดสินใจทันที เช่น *"บัตรเครดิตถูกปฏิเสธ กรุณาตรวจสอบข้อมูล"* หรือการเตือนหมดเวลาการล็อกสต็อกเนื้อในหน้าชำระเงิน *"เหลือเวลาอีก 60 วินาทีในการทำรายการ"*
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [React 19 Compound Components](/docs/react/compound-components) — การออกแบบส่วนประกอบ UI ที่ส่งต่อ State อย่างเป็นมิตรต่อ A11y
+- [React 19 Hooks Architecture](/docs/react/architecture) — วงจรชีวิตของ Component และ Ref Management
+- [Next.js Optimization](/docs/nextjs/optimization) — การเพิ่มประสิทธิภาพเว็บไซต์ควบคู่กับ Accessibility
+- [React Error & Suspense](/docs/react/error-suspense) — การแสดง Fallback UI ที่รองรับ Screen Reader

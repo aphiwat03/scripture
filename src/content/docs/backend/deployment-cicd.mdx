@@ -1,0 +1,521 @@
+---
+title: CI/CD & Deploy
+category: BACKEND
+version: Docker + GitHub Actions + VPS (Traefik)
+updatedAt: 2026-10-23
+---
+
+# CI/CD & Deploy
+
+ในสถาปัตยกรรมระบบอีคอมเมิร์ซ **Smart Butcher Marketplace** ที่มีการซื้อขายเนื้อวากิวพรีเมียมและการจัดส่งสินค้าควบคุมความเย็นตลอด 24 ชั่วโมง ความต่อเนื่องของการให้บริการ (High Availability) และความเร็วในการส่งมอบคุณสมบัติใหม่ๆ สู่ Production อย่างปลอดภัยมีความสำคัญระดับวิกฤต การอัปเดตระบบหรือการปรับปรุงฐานข้อมูลจะต้องไม่ส่งผลให้ลูกค้าที่กำลังสแกนจ่ายเงิน PromptPay หรือกำลังประมูลเนื้อ A5 เจอกับหน้าจอ "502 Bad Gateway"
+
+เอกสารฉบับนี้กำหนดมาตรฐานสถาปัตยกรรมระดับ **Senior Principal Architect** ในการนำ Backend **NestJS 11** ขึ้นสู่ระบบคลาวด์ Production บนเครื่อง Virtual Private Server (**VPS** เช่น Hetzner, DigitalOcean หรือ Linode) โดยใช้ **Docker Compose** ร่วมกับ **Traefik Reverse Proxy** ที่จัดการใบรับรอง SSL/TLS (Let's Encrypt) อัตโนมัติ, การสร้างไปป์ไลน์ **CI/CD ผ่าน GitHub Actions** สำหรับทดสอบและ Build Multi-stage Container Image ไปเก็บไว้ที่ **GitHub Container Registry (`ghcr.io`)**, ตลอดจนการรันคำสั่ง **Prisma Migration แบบ Zero-Downtime** และการปิดระบบอย่างนุ่มนวล (**Graceful Shutdown**)
+
+---
+
+## 1. แนวคิด (Concept)
+
+### 1.1 สถาปัตยกรรม Modern VPS + Container Orchestration
+แม้ว่า Managed Kubernetes หรือ Cloud Run จะเป็นทางเลือกยอดนิยม แต่องค์กรระดับกลางหรือสตาร์ทอัพที่ต้องการความคุ้มค่าด้านต้นทุนและประสิทธิภาพความเร็วสูงสุดต่อดอลลาร์ มักเลือกใช้ VPS ประสิทธิภาพสูง (เช่น Bare-metal Cloud 8-16 vCPU พร้อม NVMe SSD) ในราคาที่ประหยัดกว่าหลายเท่าตัว
+
+การวางระบบ Production บน VPS ให้ได้มาตรฐานระดับ Enterprise จำเป็นต้องมีส่วนประกอบ 4 ชั้น:
+1. **Network Ingress & Reverse Proxy (Traefik)**: รับทราฟฟิกภายนอกที่พอร์ต 80/443 ทำ SSL Termination ด้วย Let's Encrypt อัตโนมัติ และทำ Dynamic Service Discovery ผ่าน Docker Labels
+2. **Container Runtime (Docker Engine + Compose)**: แยก Environment ระหว่างแอปพลิเคชันอย่างเด็ดขาด กำหนดขอบเขตหน่วยความจำและ CPU (`deploy.resources.limits`)
+3. **Database & Storage Layer (PostgreSQL + Redis)**: จัดเก็บข้อมูลลง Persistent Volumes ที่มีการทำ Automated Daily Snapshot Backup นอกไซต์
+4. **CI/CD Pipeline (GitHub Actions)**: จัดการตั้งแต่การ Lint, Unit/Integration Test, Build Docker Image ไปจนถึงการ Deploy ข้าม SSH อย่างปลอดภัย
+
+```mermaid
+flowchart TD
+    subgraph Client_Traffic ["ผู้ใช้งานภายนอก (Internet)"]
+        User["ลูกค้าสั่งซื้อเนื้อวากิว (HTTPS)"]
+    end
+
+    subgraph VPS_Node ["Production Cloud VPS (Ubuntu 24.04 LTS)"]
+        Traefik["Traefik v3 (Edge Ingress / Reverse Proxy)<br/>- Auto Let's Encrypt TLS<br/>- Dynamic Routing via Docker Socket"]
+        
+        subgraph Backend_Cluster ["Backend Services (Zero-Downtime)"]
+            App1["Smart Butcher API (Instance A)<br/>NestJS 11 + Prisma"]
+            App2["Smart Butcher API (Instance B)<br/>NestJS 11 + Prisma"]
+        end
+
+        subgraph Infrastructure ["Stateful Persistence"]
+            Postgres[("PostgreSQL 16 DB<br/>Persistent NVMe Volume")]
+            Redis[("Redis 7 Cluster<br/>BullMQ Queue + Cache")]
+        end
+    end
+
+    User -->|Port 443| Traefik
+    Traefik -->|Round-Robin| App1
+    Traefik -->|Round-Robin| App2
+    App1 --> Postgres
+    App2 --> Postgres
+    App1 --> Redis
+    App2 --> Redis
+```
+
+<Callout type="warning" title="คำเตือนร้ายแรง: ห้ามรันคำสั่ง prisma migrate dev บน Production">
+คำสั่ง `prisma migrate dev` มีไว้สำหรับสภาพแวดล้อม Development บนเครื่องเครื่องนักพัฒนาเท่านั้น คำสั่งนี้จะทำการเปรียบเทียบ Schema และ **อาจสั่ง Drop Database หรือ Reset ข้อมูลทั้งหมดทิ้งทันที** หากพบว่าประวัติ Migration ไม่ตรงกัน! สำหรับ Production ต้องรันคำสั่ง `prisma migrate deploy` เท่านั้น ซึ่งจะทำหน้าที่อ่านเฉพาะไฟล์ SQL ในโฟลเดอร์ `migrations` ที่ยังไม่เคยรัน และบันทึกลงตาราง `_prisma_migrations` โดยไม่มีการ Reset ฐานข้อมูล
+</Callout>
+
+### 1.2 กลยุทธ์การอัปเกรดระบบโดยไม่หยุดชะงัก (Zero-Downtime Deployment)
+เพื่อไม่ให้คำสั่งซื้อเนื้อสะดุด การอัปเกรดโค้ดใหม่ต้องใช้กลยุทธ์ **Rolling Update** หรือ **Blue-Green Deployment**:
+1. เซิร์ฟเวอร์เวอร์ชันเก่า (V1) ยังคงให้บริการตามปกติ
+2. รันสคริปต์สตาร์ทคอนเทนเนอร์เวอร์ชันใหม่ (V2)
+3. Traefik และ Docker Healthcheck ตรวจสอบว่า V2 ผ่านจุดตรวจสุขภาพ (`/health/ready`)
+4. เมื่อ V2 แข็งแรงสมบูรณ์ Traefik จะสลับส่งทราฟฟิกคำขอใหม่ไปยัง V2
+5. เซิร์ฟเวอร์ส่งสัญญาณ `SIGTERM` ไปยัง V1 เพื่อให้ประมวลผลคำขอที่ค้างอยู่ (In-flight requests) และงานคิว BullMQ ที่ทำอยู่ให้เสร็จสิ้น (Graceful Shutdown) ก่อนจะปิดตัวลงอย่างปลอดภัย
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 สถาปัตยกรรม Dynamic Routing ของ Traefik ผ่าน Docker Labels
+ต่างจาก Nginx แบบดั้งเดิมที่ต้องคอยแก้ไขไฟล์คอนฟิก `nginx.conf` และสั่ง Reload ทุกครั้งที่เพิ่มหรือเปลี่ยนคอนเทนเนอร์ **Traefik** เชื่อมต่อโดยตรงกับ Docker Daemon (`/var/run/docker.sock`):
+- เมื่อคอนเทนเนอร์ NestJS เริ่มทำงาน Traefik จะอ่านค่า Labels ที่แปะอยู่กับคอนเทนเนอร์นั้นโดยอัตโนมัติ
+- คอนฟิก Routing Rule เช่น `Host(`api.smartbutcher.com`)` จะถูกเพิ่มเข้า Routing Table ทันทีในหน่วยมิลลิวินาที
+- จัดการขอและต่ออายุใบรับรองความปลอดภัย HTTPS SSL อัตโนมัติผ่าน ACME TLS Challenge โดยไม่ต้องมี Cron Job เสริม
+
+### 2.2 วงจรชีวิตการปิดระบบอย่างนุ่มนวล (Graceful Shutdown Mechanics)
+เมื่อ Docker สั่งหยุดคอนเทนเนอร์ (`docker stop`):
+1. Docker Daemon ส่งสัญญาณ **`SIGTERM`** ไปยังโปรเซสหมายเลข 1 (PID 1) ของคอนเทนเนอร์
+2. NestJS ดักจับสัญญาณนี้ผ่าน `app.enableShutdownHooks()`
+3. API หยุดรับคำขอใหม่ และเริ่มกระบวนการ:
+   - ปล่อยให้คำขอ HTTP ที่กำลังตัดบัตรหรือคำนวณราคาเนื้อทำงานจนเสร็จสิ้น (รอสูงสุดตาม Timeout เช่น 10 วินาที)
+   - สั่งให้ BullMQ Worker หยุดดึงงานใหม่จาก Redis และรอให้งานส่งอีเมลใบเสร็จที่กำลังรันอยู่ทำงานจนเสร็จ
+   - ปิด Connection Pool ของ Prisma Database และ Redis
+4. โปรเซสจบการทำงานด้วย Exit Code 0 อย่างสะอาด ป้องกันข้อมูลเสียหาย
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Docker as Docker Daemon
+    participant NestJS as NestJS Application (PID 1)
+    participant Client as ผู้ใช้ที่กำลังจ่ายเงิน
+    participant DB as PostgreSQL Database
+
+    Docker->>NestJS: ส่งสัญญาณ SIGTERM (เตรียมปิดเครื่อง)
+    Note over NestJS: app.enableShutdownHooks() ทำงาน
+    NestJS->>NestJS: ปิด Ingress ไม่รับ HTTP Request ใหม่
+    Client->>NestJS: คำขอที่ยังประมวลผลค้างอยู่ (In-flight Request)
+    NestJS->>DB: ดำเนินธุรกรรมตัดเงินและเซฟข้อมูลจนเสร็จ
+    NestJS-->>Client: ตอบกลับ 200 OK สั่งซื้อสำเร็จ
+    NestJS->>DB: ตัดการเชื่อมต่อ Prisma Connection Pool
+    NestJS->>Docker: สิ้นสุดโปรเซส (Exit 0)
+    Note over Docker: ปิด Container อย่างสมบูรณ์แบบโดยไม่มี Transaction สูญหาย
+```
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: Multi-stage Production Dockerfile ประสิทธิภาพสูงและความปลอดภัยระดับ CIS Benchmark
+
+Dockerfile นี้ใช้เทคนิค Multi-stage Build แยกชั้นการติดตั้ง dependencies, การคอมไพล์ TypeScript, และชั้นรันจริงที่ใช้ User ธรรมดา (`node`) เพื่อป้องกันช่องโหว่ Container Escape:
+
+```dockerfile filename="Dockerfile"
+# ==========================================
+# ชั้นที่ 1: Dependencies Cache Base
+# ==========================================
+FROM node:22-alpine AS deps
+WORKDIR /app
+
+# ติดตั้ง OpenSSL สำหรับ Prisma Client Engine บน Alpine Linux
+RUN apk add --no-cache openssl libc6-compat
+
+# ก็อปปี้เฉพาะไฟล์ระบุเวอร์ชันแพ็กเกจเพื่อทำ Docker Layer Caching
+COPY package.json package-lock.json ./
+COPY prisma ./prisma/
+
+# ติดตั้ง dependencies ทั้งหมดรวมถึง devDependencies สำหรับใช้ในการ Build
+RUN npm ci
+
+# ทำการ Generate Prisma Client สำหรับ Linux Musl
+RUN npx prisma generate
+
+# ==========================================
+# ชั้นที่ 2: Builder
+# ==========================================
+FROM node:22-alpine AS builder
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/prisma ./prisma
+COPY . .
+
+# คอมไพล์ NestJS TypeScript เป็น JavaScript ที่โฟลเดอร์ /dist
+RUN npm run build
+
+# ล้าง devDependencies ออก ให้เหลือเฉพาะ Production Dependencies เพื่อประหยัดพื้นที่
+RUN npm prune --production
+
+# ==========================================
+# ชั้นที่ 3: Production Runner (Lean & Secure)
+# ==========================================
+FROM node:22-alpine AS runner
+WORKDIR /app
+
+# ติดตั้ง dumb-init เพื่อจัดการ Signal (PID 1) สำหรับ Node.js Graceful Shutdown
+RUN apk add --no-cache dumb-init openssl
+
+ENV NODE_ENV=production
+ENV PORT=3000
+
+# กำหนดสิทธิ์ความปลอดภัย: ไม่รันด้วย root user เด็ดขาด
+USER node
+
+# ก็อปปี้เฉพาะไฟล์ที่จำเป็นต่อการรันจริง
+COPY --chown=node:node --from=builder /app/node_modules ./node_modules
+COPY --chown=node:node --from=builder /app/dist ./dist
+COPY --chown=node:node --from=builder /app/prisma ./prisma
+COPY --chown=node:node --from=builder /app/package.json ./package.json
+
+EXPOSE 3000
+
+# ใช้ dumb-init ห่อหุ้มโปรเซสเพื่อส่งผ่าน SIGTERM ได้อย่างถูกต้อง
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+
+CMD ["node", "dist/main.js"]
+```
+
+---
+
+### ตัวอย่างที่ 2: การตั้งค่า Production Docker Compose พร้อม Traefik Dynamic Reverse Proxy
+
+ไฟล์นี้กำหนดโครงสร้างของระบบบน VPS รวมถึงคอนฟิก Labels สำหรับ Traefik ในการทำ Auto HTTPS และ Load Balancing:
+
+```yaml filename="docker-compose.prod.yml"
+version: '3.8'
+
+services:
+  # -------------------------------------------------------------
+  # Traefik v3: Edge Router, Auto SSL Let's Encrypt & Ingress
+  # -------------------------------------------------------------
+  traefik:
+    image: traefik:v3.1
+    container_name: smart-butcher-traefik
+    restart: always
+    ports:
+      - '80:80'
+      - '443:443'
+    command:
+      - '--api.dashboard=false'
+      - '--providers.docker=true'
+      - '--providers.docker.exposedbydefault=false'
+      - '--entrypoints.web.address=:80'
+      - '--entrypoints.websecure.address=:443'
+      # บังคับ Redirect HTTP ทั้งหมดไปเป็น HTTPS โดยอัตโนมัติ
+      - '--entrypoints.web.http.redirections.entrypoint.to=websecure'
+      - '--entrypoints.web.http.redirections.entrypoint.scheme=https'
+      # คอนฟิกการขอใบรับรอง SSL อัตโนมัติผ่าน Let's Encrypt
+      - '--certificatesresolvers.myresolver.acme.tlschallenge=true'
+      - '--certificatesresolvers.myresolver.acme.email=admin@smartbutcher.com'
+      - '--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json'
+    volumes:
+      - '/var/run/docker.sock:/var/run/docker.sock:ro'
+      - 'traefik_ssl:/letsencrypt'
+    networks:
+      - butcher_network
+
+  # -------------------------------------------------------------
+  # Smart Butcher Backend API (NestJS 11 Cluster)
+  # -------------------------------------------------------------
+  api:
+    image: ghcr.io/smart-butcher/marketplace-backend:latest
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://postgres:${DB_PASSWORD}@postgres:5432/smart_butcher_prod?schema=public
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      OMISE_PUBLIC_KEY: ${OMISE_PUBLIC_KEY}
+      OMISE_SECRET_KEY: ${OMISE_SECRET_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - butcher_network
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2048M
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    healthcheck:
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:3000/health/ready']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.docker.network=butcher_network'
+      # กำหนด Host Domain สำหรับระบบ API
+      - 'traefik.http.routers.api.rule=Host(`api.smartbutcher.com`)'
+      - 'traefik.http.routers.api.entrypoints=websecure'
+      - 'traefik.http.routers.api.tls.certresolver=myresolver'
+      - 'traefik.http.services.api.loadbalancer.server.port=3000'
+      - 'traefik.http.services.api.loadbalancer.healthcheck.path=/health/ready'
+      - 'traefik.http.services.api.loadbalancer.healthcheck.interval=10s'
+
+  # -------------------------------------------------------------
+  # PostgreSQL 16 Enterprise Database
+  # -------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: smart-butcher-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: smart_butcher_prod
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - butcher_network
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d smart_butcher_prod']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # -------------------------------------------------------------
+  # Redis 7 Cache & BullMQ Queue Broker
+  # -------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: smart-butcher-redis
+    restart: always
+    command: ['redis-server', '--requirepass', '${REDIS_PASSWORD}']
+    volumes:
+      - redis_data:/data
+    networks:
+      - butcher_network
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-a', '${REDIS_PASSWORD}', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  traefik_ssl:
+  postgres_data:
+  redis_data:
+
+networks:
+  butcher_network:
+    driver: bridge
+```
+
+---
+
+### ตัวอย่างที่ 3: GitHub Actions Automated CI/CD Workflow และ Zero-Downtime Deployment Script
+
+ไปป์ไลน์ GitHub Actions นี้รันอัตโนมัติเมื่อมีการ Merge โค้ดเข้า branch `main` ทำการทดสอบ Build อัปโหลด Image ไปยัง GHCR และ SSH เข้า VPS เพื่อรันการอัปเดตแบบ Zero-Downtime:
+
+```yaml filename=".github/workflows/backend-ci-cd.yml"
+name: Backend CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # -------------------------------------------------------------
+  # Job 1: Test & Lint Quality Gate
+  # -------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Prisma Generate
+        run: npx prisma generate
+
+      - name: Run Linter Check
+        run: npm run lint
+
+      - name: Run Unit Tests
+        run: npm run test
+
+  # -------------------------------------------------------------
+  # Job 2: Build & Push Multi-arch Docker Image
+  # -------------------------------------------------------------
+  build-and-push:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: actions/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # -------------------------------------------------------------
+  # Job 3: Zero-Downtime Deploy to Production VPS
+  # -------------------------------------------------------------
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to VPS via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          script: |
+            cd /opt/smart-butcher
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            
+            # 1. Pull Docker Image ล่าสุดลงมาเตรียมไว้
+            docker compose -f docker-compose.prod.yml pull api
+            
+            # 2. รัน Database Migration อัตโนมัติด้วย Container ชั่วคราว
+            echo "Executing Prisma Database Migration..."
+            docker run --rm \
+              --network butcher_network \
+              -e DATABASE_URL="postgresql://postgres:${{ secrets.DB_PASSWORD }}@postgres:5432/smart_butcher_prod?schema=public" \
+              ghcr.io/${{ github.repository }}:latest \
+              npx prisma migrate deploy
+            
+            # 3. สั่ง Rolling Update แอปพลิเคชัน API โดยไม่มี Downtime
+            echo "Deploying new API container instance..."
+            docker compose -f docker-compose.prod.yml up -d --no-deps --scale api=2 --no-recreate api
+            
+            # รอ 15 วินาทีให้ Traefik Healthcheck ตรวจพบคอนเทนเนอร์ใหม่
+            sleep 15
+            
+            # คัดคอนเทนเนอร์เวอร์ชันเก่าออก
+            docker compose -f docker-compose.prod.yml up -d --no-deps --scale api=1 api
+            
+            # ล้าง Docker Images เก่าที่ไม่ได้ใช้งาน (Housekeeping)
+            docker image prune -f
+            echo "Deployment completed successfully!"
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+### 4.1 Anti-pattern: การฝัง Secret Keys หรือไฟล์ `.env` ลงใน Docker Image
+```dockerfile
+# ❌ ผิดมหันต์: คัดลอก .env ลงไปใน Image ทำให้ใครก็ตามที่ Pull Image สามารถอ่านรหัสผ่านฐานข้อมูลได้
+COPY .env.production .env
+```
+
+**แนวทางที่ถูกต้อง (Best Practice)**:
+ส่งผ่าน Environment Variables ผ่าน Docker Compose, Doppler, หรือ GitHub Actions Secrets ในจังหวะ Runtime เท่านั้น ห้ามฝังไฟล์รหัสผ่านใน Dockerfile เด็ดขาด
+
+### 4.2 Anti-pattern: การรัน Node.js เป็น Process `root` (UID 0) ใน Container
+หากเกิดช่องโหว่ประเภท Remote Code Execution (RCE) ในโค้ดภายนอก แฮกเกอร์จะได้สิทธิ์ root ทันที และสามารถเจาะทะลุ Docker ไปควบคุมระบบปฏิบัติการหลักของ VPS ได้
+
+**แนวทางที่ถูกต้อง (Best Practice)**:
+ระบุคำสั่ง `USER node` ใน Dockerfile เสมอ เพื่อจำกัดสิทธิ์ให้เป็น Non-root User ธรรมดา
+
+### 4.3 Anti-pattern: สั่งรีสตาร์ทคอนเทนเนอร์ตรงๆ โดยไม่มี Health Check
+การใช้คำสั่ง `docker compose restart api` จะฆ่าคอนเทนเนอร์ทันที ทำให้คำขอที่ลูกค้ากำลังโอนเงินซื้อเนื้อวากิวถูกตัดขาด และผู้ใช้จะพบหน้าจอสีขาว 502
+
+**แนวทางที่ถูกต้อง (Best Practice)**:
+ติดตั้ง Readiness Probe (`/health/ready`) ใน NestJS และใช้กลยุทธ์ `--scale api=2` ร่วมกับ Traefik Healthcheck เพื่อสลับทราฟฟิกเฉพาะเมื่อคอนเทนเนอร์ใหม่พร้อมทำงาน 100% เท่านั้น
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้สถาปัตยกรรม VPS + Docker Compose + Traefik เมื่อ:
+1. **ต้องการประสิทธิภาพสูงสุดต่อต้นทุน (Cost-to-Performance Ratio)**: VPS สเปกสูง (เช่น 8 Cores, 32GB RAM ราคา $40/เดือน) สามารถรองรับโหลดคำสั่งซื้อได้หลายหมื่นคำขอต่อวัน โดยเสียค่าใช้จ่ายน้อยกว่า AWS EKS หรือ Managed Services หลายเท่า
+2. **ระบบต้องการความเรียบง่ายในการบำรุงรักษา (Operational Simplicity)**: ทีมวิศวกรขนาด 3-10 คนสามารถดูแลระบบได้โดยไม่ต้องมีผู้เชี่ยวชาญ Kubernetes โดยเฉพาะ
+3. **ต้องการควบคุม Infrastructure และข้อมูลได้อย่างสมบูรณ์**: ข้อมูลคำสั่งซื้อและรูปภาพชิ้นเนื้อถูกจัดเก็บในเซิร์ฟเวอร์ที่มีความเสถียรและสามารถทำ Encrypted Backup ได้ตามต้องการ
+
+### สิ่งที่ไม่ควรทำ (เมื่อใดที่ควรขยับไปใช้ Kubernetes / Managed Cloud):
+1. **เมื่อระบบมีทราฟฟิกผันผวนอย่างรุนแรงและคาดเดาไม่ได้**: หากทราฟฟิกกระโดดจาก 1,000 คนเป็น 1,000,000 คนภายใน 3 นาที (เช่น แคมเปญระดับประเทศที่ต้องใช้ Auto-scaling ข้ามหลายเครื่องเซิร์ฟเวอร์แบบ Real-time) ควรพิจารณาใช้ AWS ECS Fargate หรือ Kubernetes
+2. **ห้ามรันฐานข้อมูล Production โดยไม่มี Automated Off-site Backup**: การเก็บไฟล์ฐานข้อมูลไว้บน VPS เครื่องเดียวโดยไม่มีการซิงค์ Snapshot ไปเก็บไว้ที่ Cloud Object Storage (เช่น S3 หรือ Backblaze B2) มีความเสี่ยงต่อการสูญเสียข้อมูลหากดิสก์ของเครื่อง VPS พังเสียหาย
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### Q1: ในระบบ Production ที่มีทราฟฟิกการสั่งซื้อตลอดเวลา เราจะจัดการ Database Schema Migration (Prisma Migration) อย่างไรให้เป็นแบบ Zero-Downtime โดยที่โค้ดเก่าและโค้ดใหม่สามารถทำงานร่วมกับฐานข้อมูลได้โดยไม่เกิด Error?
+> **แนวคำตอบระดับ Principal Architect:**
+> เราต้องใช้รูปแบบการออกแบบที่เรียกว่า **Expand and Contract Pattern (หรือ Parallel Change)** ซึ่งแบ่งการ Deploy ออกเป็น 3 ระยะ:
+> 1. **ระยะที่ 1: Expand (ขยาย Schema แบบ Backward-Compatible)**:
+>    - ห้ามทำการ Rename Column หรือ Drop Column ตรงๆ เด็ดขาด
+>    - ตัวอย่าง: หากต้องการเปลี่ยนชื่อคอลัมน์ `price` เป็น `unitPriceSatang` ให้สร้างคอลัมน์ใหม่เพิ่มขึ้นมาพร้อมยอมรับค่า Nullable ได้ (`unitPriceSatang Int?`)
+>    - รัน `prisma migrate deploy` โค้ด Backend เวอร์ชันเดิมยังคงทำงานกับคอลัมน์เก่าได้ตามปกติ
+> 2. **ระยะที่ 2: Transition (เขียนข้อมูลลงสองฝั่ง / Dual Writing)**:
+>    - อัปเดตโค้ด Backend ใหม่ให้อ่านจากคอลัมน์ใหม่ หากไม่มีให้อ่านจากเก่า และเมื่อมีการบันทึกข้อมูล ให้เขียนลงทั้งสองคอลัมน์
+>    - รัน Database Script แบ็กฟิลข้อมูลย้อนหลังจากคอลัมน์เก่าไปยังคอลัมน์ใหม่
+> 3. **ระยะที่ 3: Contract (ตัดคอลัมน์เก่าทิ้ง)**:
+>    - เมื่อแน่ใจว่าระบบทั้งหมดใช้คอลัมน์ใหม่สมบูรณ์แล้ว จึงสร้าง Migration รอบถัดไปเพื่อลบคอลัมน์เก่าออกได้อย่างปลอดภัย 100%
+
+### Q2: อธิบายความแตกต่างระหว่าง Liveness Probe กับ Readiness Probe ในการทำ Container Health Check และหากคอนฟิก Readiness Probe ผิดพลาดจะส่งผลกระทบต่อ Traefik Load Balancer อย่างไร?
+> **แนวคำตอบระดับ Principal Architect:**
+> - **Liveness Probe (`/health/live`)**: บ่งบอกว่า *"โปรเซสของแอปพลิเคชันยังมีชีวิตอยู่หรือไม่ (Deadlocked / Frozen หรือไม่?)"* หาก Endpoint นี้คืนค่า 500 หรือ Timeout ระบบ Docker Daemon จะสั่งฆ่าคอนเทนเนอร์ทิ้งและรีสตาร์ทใหม่
+> - **Readiness Probe (`/health/ready`)**: บ่งบอกว่า *"แอปพลิเคชันพร้อมที่จะรับทราฟฟิกจากผู้ใช้งานภายนอกแล้วหรือยัง?"* ต้องตรวจสอบ Dependency ภายใน เช่น เชื่อมต่อ PostgreSQL สำเร็จ, Redis ตอบกลับ PING, และโหลดค่า Configuration ครบถ้วน
+> - **ผลกระทบหากคอนฟิกผิดพลาดกับ Traefik**:
+>   - Traefik อาศัย Readiness Probe ในการตัดสินใจส่งคำขอ HTTP เข้าไปยังคอนเทนเนอร์
+>   - หากไม่กำหนด Readiness Probe หรือใช้เพียง Liveness Probe: ในจังหวะ Deploy คอนเทนเนอร์ใหม่ที่เพิ่งเปิดตัวขึ้นมาแต่ยังต่อฐานข้อมูลไม่เสร็จ Traefik จะรีบยิงคำขอของลูกค้าเข้าไปทันที ส่งผลให้ลูกค้าได้รับข้อผิดพลาด 500 หรือ Database Connection Timeout
+>   - การมี Readiness Probe ที่รัดกุมช่วยรับประกันว่า Traefik จะส่งลูกค้าเข้าไปยังคอนเทนเนอร์ใหม่ก็ต่อเมื่อระบบต่อฐานข้อมูลและอุ่นเครื่อง (Warmed up) เสร็จสมบูรณ์แล้วเท่านั้น
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เพื่อความเชี่ยวชาญด้านวิศวกรรมการติดตั้งและส่งมอบระบบระดับ Production ขอแนะนำให้ศึกษาหัวข้อต่อไปนี้:
+
+1. สถาปัตยกรรมคอนเทนเนอร์ระดับสูง: [Docker Architecture Guide](/docs/backend/docker)
+2. การดูแลจัดการฐานข้อมูลและการ Deploy: [Prisma ORM Architecture](/docs/backend/prisma-orm)
+3. การสร้าง Endpoint ตรวจสอบสุขภาพระบบ: [NestJS Health Checks](/docs/backend/nestjs/health-check)
+4. มาตรฐานความปลอดภัยของเซิร์ฟเวอร์ Production: [Enterprise Security](/docs/backend/security)
+5. สถาปัตยกรรมการออกแบบ REST API ระดับองค์กร: [REST API Best Practices](/docs/backend/rest-api)

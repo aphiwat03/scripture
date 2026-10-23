@@ -1,0 +1,355 @@
+---
+title: Multi-layer Caching
+category: Frontend
+parentTitle: Next.js 16
+version: Next.js 16 Cache Architecture
+updatedAt: 2026-10-23
+---
+
+# Next.js 16 Multi-layer Caching Architecture
+
+เจาะลึกสถาปัตยกรรมการแคช 4 ระดับใน Next.js, นวัตกรรมการแคชยุคใหม่ใน Next.js 16 ด้วย Directive `'use cache'`, การควบคุมอายุแคชผ่าน Cache Life Profiles, การติดแท็กข้อมูล Semantic Data ด้วย `unstable_cacheTag`, และกลยุทธ์ Stale-While-Revalidate ระดับโปรดักชัน
+
+---
+
+## 1. แนวคิด (Concept)
+
+Next.js มีสถาปัตยกรรมการแคชที่ทรงพลังและซับซ้อนที่สุดในบรรดาเว็บเฟรมเวิร์กสมัยใหม่ ออกแบบมาเพื่อลดภาระงานของฐานข้อมูล (Database Offloading), มอบเวลาการโหลดหน้าเว็บที่รวดเร็วทันที (Instant Page Loads), และลดต้นทุน Infrastructure ผ่านการผสานการทำงาน 4 เลเยอร์หลัก:
+
+```text
++--------------------------------------------------------------------------------------------------+
+|                            The 4 Caching Layers of Next.js Architecture                          |
++--------------------------------------------------------------------------------------------------+
+| [Layer 1] Router Cache (Client Memory)                                                           |
+|           - เก็บ RSC Payload ไว้ในเบราว์เซอร์ของผู้ใช้                                            |
+|           - ทำให้อัตราการสลับหน้า (Client-side Navigation) เกิดขึ้นทันที 0ms                      |
+|                                         ^                                                        |
+|                                         | (Network Boundary)                                     |
+|                                         v                                                        |
+| [Layer 2] Full Route Cache (Server Disk / CDN)                                                   |
+|           - แคช HTML และ RSC Payload ทั้งหน้าไว้ที่ Server ตอน Build หรือ Revalidation           |
+|           - ให้บริการแก่ผู้ใช้ทุกคนทันทีแบบ Static Page                                          |
+|                                         ^                                                        |
+|                                         |                                                        |
+| [Layer 3] Data Cache (Server Persistent Store)                                                   |
+|           - แคชผลลัพธ์ของคำขอข้อมูล (fetch หรือฟังก์ชันที่หุ้มด้วย cache) ข้าม Requests            |
+|           - อยู่คงทนแม้จะ Restart เซิร์ฟเวอร์ จนกว่าจะสั่ง Invalidate ผ่าน Revalidation Tags     |
+|                                         ^                                                        |
+|                                         |                                                        |
+| [Layer 4] Request Memoization (React Render Pass)                                                |
+|           - ตัดการเรียกซ้ำของฟังก์ชันเดียวกันในรอบการ Render RSC เดียวกัน (Deduplication)          |
+|           - อายุสั้นมาก: ตายทันทีเมื่อการประมวลผลคำขอ HTTP นั้นเสร็จสิ้น                           |
++--------------------------------------------------------------------------------------------------+
+```
+
+ใน **Next.js 16**:
+- ปรัชญาการแคชเปลี่ยนจาก "Cache by Default" เป็น **"Dynamic by Default, Opt-in to Cache"**
+- แนะนำ Directive ใหม่ระดับปฏิวัติวงการ: `'use cache'` สำหรับ Cache Components และ Asynchronous Functions
+- กำหนดอายุการใช้งานและการทำลายแคชด้วยฟังก์ชัน `unstable_cacheLife` และ `unstable_cacheTag` แบบ Declarative
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 วิเคราะห์ 4 เลเยอร์อย่างละเอียด
+
+| เลเยอร์แคช | สถานที่จัดเก็บ | อายุของแคช (Lifetime) | ขอบเขตการแชร์ (Scope) | วิธีการ Invalidate |
+| :--- | :--- | :--- | :--- | :--- |
+| **Request Memoization** | Server Memory (React) | รอบเดียวของการ Render (Single Request) | คำขอเฉพาะบุคคล | สิ้นสุด Request โดยอัตโนมัติ |
+| **Data Cache** | Server Storage / CDN | คงทนถาวร (Persistent ข้าม Deployments) | แชร์ให้ผู้ใช้ทุกคน | `revalidateTag()`, `revalidatePath()` |
+| **Full Route Cache** | Server Storage / CDN | คงทนถาวรจนกว่า Data Cache จะเปลี่ยน | แชร์ให้ผู้ใช้ทุกคน | อัปเดตอัตโนมัติเมื่อ Data Cache ถูกล้าง |
+| **Router Cache** | Browser Memory | Session เบราว์เซอร์ (30 วินาที - 5 นาที) | เบราว์เซอร์คนเดียว | `router.refresh()`, Server Actions |
+
+### 2.2 นวัตกรรม Next.js 16: `'use cache'` Directive
+ก่อน Next.js 16 การแคชมักผูกติดอยู่กับคำสั่ง `fetch()` ซึ่งมีข้อจำกัดร้ายแรงเมื่อโปรเจกต์ต้องการเรียกฐานข้อมูลตรงผ่าน ORM (เช่น Prisma / Drizzle) หรือทำงานหนักเชิงคำนวณ (CPU-bound)
+
+ใน Next.js 16 คุณสามารถใส่ `'use cache'` ไว้ที่หัวไฟล์ หรือหัวฟังก์ชัน หรือแม้กระทั่งหัวคอมโพเนนต์:
+- **ฟังก์ชันระดับ Function:** ฟังก์ชันจะคืนค่าที่ถูกแคชไว้ตาม Parameters ที่ส่งเข้ามา
+- **คอมโพเนนต์ระดับ Component:** Rendered JSX / RSC Payload ของคอมโพเนนต์นั้นจะถูกแคชแยกอิสระ (Cache Components) แม้ว่าหน้าเพจหลักจะเป็น Dynamic Route ก็ตาม
+
+<Callout type="note" title="การทำงานร่วมกับ Dynamic APIs">
+เมื่อใช้ `'use cache'` ฟังก์ชันหรือคอมโพเนนต์นั้นจะต้องไม่เรียกใช้ Dynamic Functions เช่น `cookies()`, `headers()` หรือ `searchParams` ภายในขอบเขตของมัน มิฉะนั้น Next.js จะแจ้งเตือนข้อผิดพลาดในขณะ Compile
+</Callout>
+
+### 2.3 กลยุทธ์ Stale-While-Revalidate (SWR)
+เมื่อข้อมูลใน Data Cache ถึงกำหนดเวลา Revalidate:
+1. ผู้ใช้คนที่ 1 ที่ส่งคำขอเข้ามาจะยังคงได้รับ **ข้อมูลเก่า (Stale Data)** ทันทีโดยไม่มีอาการค้างหรือหน่วง
+2. เบื้องหลังเซิร์ฟเวอร์ Next.js จะยิง Background Worker ไปดึงข้อมูลใหม่จากฐานข้อมูล
+3. เมื่อ Background Worker ได้ข้อมูลใหม่สำเร็จ ระบบจะอัปเดต Data Cache และ Full Route Cache
+4. ผู้ใช้คนที่ 2 เป็นต้นไปจะได้รับ **ข้อมูลใหม่ (Fresh Data)** ทันที
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การใช้ Data Cache ร่วมกับ Semantic Tags และ Revalidation
+
+ระบบจัดการแคชข้อมูลหมวดหมู่เนื้อสเต๊ก (`Category`) และแคตตาล็อกสินค้าเนื้อวัวดรายเอจ (`Product`) โดยใช้ Semantic Tag เพื่อรองรับการล้างแคชแบบ Real-time เมื่อเขียงเนื้ออัปเดตสต็อก
+
+```typescript filename="src/services/catalog-cache.ts"
+import { unstable_cache } from 'next/cache';
+
+export interface ProductItem {
+  id: string;
+  name: string;
+  cutType: 'RIBEYE' | 'STRIPLOIN' | 'TENDERLOIN' | 'T_BONE';
+  marblingScore: number; // A3 - A5
+  pricePerKg: number;
+  stockGrams: number;
+  dryAgedDays: number;
+}
+
+// จำลองการเชื่อมต่อฐานข้อมูลหรือ Backend ERP
+async function fetchProductsFromDatabase(category: string): Promise<ProductItem[]> {
+  // สมมติว่ามี Delay 1.2 วินาทีจากการคำนวณสูตรบ่มเนื้อ
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+
+  return [
+    {
+      id: 'prod-wagyu-a5',
+      name: 'Miyazaki Wagyu A5 Ribeye 45-Day Dry Aged',
+      cutType: 'RIBEYE',
+      marblingScore: 5,
+      pricePerKg: 5800,
+      stockGrams: 4500,
+      dryAgedDays: 45,
+    },
+    {
+      id: 'prod-angus-prime',
+      name: 'Black Angus Prime Striploin 30-Day Dry Aged',
+      cutType: 'STRIPLOIN',
+      marblingScore: 4,
+      pricePerKg: 2400,
+      stockGrams: 12000,
+      dryAgedDays: 30,
+    },
+  ];
+}
+
+/**
+ * ดึงรายการสินค้าพร้อมแคชผลลัพธ์ผ่าน Data Cache
+ * ผูกแท็ก 'catalog-products' และ 'catalog-[category]'
+ */
+export const getCachedProductsByCategory = (category: string) =>
+  unstable_cache(
+    async () => fetchProductsFromDatabase(category),
+    ['catalog-products-key', category], // Cache Key ส่วนตัว
+    {
+      revalidate: 3600, // Revalidate อัตโนมัติทุก 1 ชั่วโมง (Time-based SWR)
+      tags: ['catalog', `category-${category}`, 'inventory'], // Semantic Tags
+    }
+  )();
+```
+
+การสั่งล้างแคชผ่าน Server Action เมื่อพ่อค้าเขียงเนื้อตัดแต่งเนื้อชิ้นใหม่เข้าคลัง:
+
+```typescript filename="src/actions/inventory-actions.ts"
+'use server';
+
+import { revalidateTag, revalidatePath } from 'next/cache';
+
+export async function updateMeatInventory(productId: string, addedWeightGrams: number) {
+  try {
+    // 1. บันทึกข้อมูลลงฐานข้อมูลจริง
+    console.log(`[DB] อัปเดตสต็อกเนื้อ ${productId}: +${addedWeightGrams}g`);
+
+    // 2. สั่ง Invalidate ข้อมูลที่มีแท็ก 'inventory' และ 'catalog'
+    // ทุกหน้าจอที่ดึงข้อมูลผ่าน getCachedProductsByCategory จะถูกทำลายแคชทันที
+    revalidateTag('inventory');
+    
+    // 3. บังคับ Revalidate หน้าแสดงผลหมวดหมู่เนื้อสเต๊ก
+    revalidatePath('/cuts/[category]', 'page');
+
+    return { success: true, message: 'อัปเดตสต็อกและล้างแคชเรียบร้อยแล้ว' };
+  } catch (error) {
+    return { success: false, error: 'ไม่สามารถอัปเดตสต็อกได้' };
+  }
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: Modern Next.js 16 Cache Components (`'use cache'`, `unstable_cacheLife`, และ `unstable_cacheTag`)
+
+ใน Next.js 16 เราสามารถแยกแคชคอมโพเนนต์ที่เปลี่ยนแปลงช้า (เช่น ประวัติการบ่มเนื้อและรายละเอียดสายพันธุ์) ออกจากคอมโพเนนต์ที่ผันผวนเร็ว (เช่น ราคาตลาดและจำนวนชิ้นที่เหลือ)
+
+```typescript filename="src/components/meat/dry-aged-showcase.tsx"
+import { unstable_cacheLife as cacheLife, unstable_cacheTag as cacheTag } from 'next/cache';
+
+interface ShowcaseProps {
+  slug: string;
+}
+
+interface MeatDetail {
+  slug: string;
+  title: string;
+  originFarm: string;
+  tastingNotes: string[];
+  recommendedDoneness: string;
+}
+
+// ฟังก์ชันดึงข้อมูลสายพันธุ์และกรรมวิธีบ่ม (ข้อมูลไม่ค่อยเปลี่ยน แคชนาน 1 สัปดาห์)
+async function getMeatStaticProfile(slug: string): Promise<MeatDetail> {
+  'use cache';
+  cacheLife('days'); // กำหนด Profile ให้แคชข้ามวัน
+  cacheTag('meat-profiles', `profile-${slug}`);
+
+  // Query ข้อมูลประวัติการคัดเกรดเนื้อ
+  return {
+    slug,
+    title: 'Japanese Kuroge Washu Dry Aged 60 Days',
+    originFarm: 'Nozaki Farm, Kagoshima',
+    tastingNotes: ['Hazelnut', 'Shiitake Umami', 'Sweet Butter'],
+    recommendedDoneness: 'Medium Rare (54°C)',
+  };
+}
+
+// คอมโพเนนต์อิสระที่ถูกแคชด้วย 'use cache' (Cache Component)
+export async function DryAgedProfileCard({ slug }: ShowcaseProps) {
+  'use cache';
+  cacheLife('hours');
+  cacheTag('showcase-cards', `card-${slug}`);
+
+  const profile = await getMeatStaticProfile(slug);
+
+  return (
+    <div className="rounded-2xl border border-stone-800 bg-stone-900/60 p-6 text-stone-100 backdrop-blur-md">
+      <div className="flex items-center justify-between pb-4 border-b border-stone-800">
+        <div>
+          <span className="text-xs uppercase tracking-wider text-amber-500 font-semibold">Specialty Cut</span>
+          <h3 className="text-2xl font-bold text-white mt-1">{profile.title}</h3>
+        </div>
+        <span className="px-3 py-1 text-xs rounded-full bg-amber-950 text-amber-300 border border-amber-800">
+          60-Day Reserve
+        </span>
+      </div>
+
+      <div className="mt-4 space-y-3">
+        <p className="text-sm text-stone-400">
+          <strong className="text-stone-300">ฟาร์มต้นกำเนิด:</strong> {profile.originFarm}
+        </p>
+        <div>
+          <strong className="text-xs uppercase text-stone-400 tracking-wide block mb-1.5">
+            Tasting Notes อัตลักษณ์ความหอม:
+          </strong>
+          <div className="flex flex-wrap gap-2">
+            {profile.tastingNotes.map((note) => (
+              <span key={note} className="px-2.5 py-1 text-xs bg-stone-800 text-stone-200 rounded-lg">
+                🥩 {note}
+              </span>
+            ))}
+          </div>
+        </div>
+        <p className="text-xs text-amber-400/90 pt-2 border-t border-stone-800/80">
+          🔥 ความสุกที่แนะนำเพื่อรสสัมผัสสูงสุด: <strong>{profile.recommendedDoneness}</strong>
+        </p>
+      </div>
+    </div>
+  );
+}
+```
+
+นำ Cache Component ไปประกอบลงในหน้าเพจสินค้าที่มี Dynamic Inventory:
+
+```tsx filename="src/app/products/[slug]/page.tsx"
+import { Suspense } from 'react';
+import { DryAgedProfileCard } from '@/components/meat/dry-aged-showcase';
+
+interface PageProps {
+  params: Promise<{ slug: string }>;
+}
+
+// หน้าเพจหลักเป็น Dynamic Rendering เพื่อคำนวณราคาโปรโมชันสดตามลูกค้า
+export default async function MeatDetailPage({ params }: PageProps) {
+  const { slug } = await params;
+
+  return (
+    <main className="max-w-5xl mx-auto px-4 py-12">
+      <h1 className="text-3xl font-extrabold text-white mb-8">รายละเอียดและสัมผัสเนื้อพิเศษ</h1>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+        {/* คอมโพเนนต์ที่ 1: ดึงแคชจาก Server Cache ทันที ไม่ต้อง Re-render ข้อมูลประวัติเนื้อ */}
+        <Suspense fallback={<div className="h-64 rounded-2xl bg-stone-900 animate-pulse" />}>
+          <DryAgedProfileCard slug={slug} />
+        </Suspense>
+
+        {/* คอมโพเนนต์ที่ 2: Dynamic ส่วนสั่งซื้อที่คำนวณน้ำหนักสดตามคำขอ */}
+        <div className="p-6 rounded-2xl bg-stone-950 border border-stone-800">
+          <h4 className="text-lg font-bold text-white mb-2">เลือกขนาดชิ้นสเต๊กที่ต้องการ</h4>
+          <p className="text-sm text-stone-400 mb-6">ตัดสดตามน้ำหนัก พร้อมจัดส่งควบคุมอุณหภูมิ -18°C</p>
+          <button className="w-full py-3 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-xl transition">
+            สั่งตัดเนื้อชิ้นนี้
+          </button>
+        </div>
+      </div>
+    </main>
+  );
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ปัญหาที่พบบ่อย | รูปแบบที่ผิด (Anti-pattern) | รูปแบบที่ถูกต้องระดับ Senior (Best Practice) |
+| :--- | :--- | :--- |
+| **แคชข้อมูลส่วนตัวผู้ใช้ลงใน Data Cache** | นำคำขอข้อมูลโปรไฟล์ลูกค้า เช่น ที่อยู่จัดส่ง หรือบัตรเครดิตไปผูกกับแคชระดับแชร์ | ข้อมูลที่เป็นส่วนบุคคล (User-specific) ต้องไม่แคชในระดับแชร์ หรือต้องใช้ Dynamic Rendering พร้อม `cookies()` |
+| **สับสนระหว่าง Router Cache กับ Data Cache** | ข้อมูลในฐานข้อมูลเปลี่ยนแล้ว แต่กดเปลี่ยนหน้าในเบราว์เซอร์ยังเห็นข้อมูลเดิม จึงคิดว่า Data Cache ไม่ทำงาน | ทำความเข้าใจว่า Client Router Cache จำค่าไว้ในเบราว์เซอร์ 30 วินาที ต้องสั่ง `router.refresh()` เมื่อต้องการรีเฟรช |
+| **สั่ง `revalidatePath('/')` เพื่อล้างข้อมูลทั้งระบบ** | สั่งล้างแคชทั้งแอปทุกครั้งที่มีการกดไลก์สินค้าหรือสั่งซื้อเนื้อ 1 ชิ้น | ใช้ Semantic `revalidateTag('tag-name')` เพื่อทำลายแคชเฉพาะจุดอย่างแม่นยำ ไม่กระทบประสิทธิภาพส่วนอื่น |
+| **เรียกใช้ Dynamic APIs ในบล็อก `'use cache'`** | พยายามอ่าน `headers()` หรือ `cookies()` ภายในฟังก์ชันที่ประกาศ `'use cache'` | ส่งค่าที่ต้องการผ่าน Function Parameters แทน เช่น `getCachedDiscount(userTier)` |
+| **ปล่อยให้แคชไม่มีวันหมดอายุโดยไร้กลยุทธ์** | ตั้งเวลา Revalidate เป็น 0 วัน หรือลืมใส่ Tag Revalidation จนข้อมูลสต็อกเนื้อไม่ตรงกับความจริง | กำหนด TTL ที่สมเหตุสมผลผ่าน `unstable_cacheLife` ควบคู่กับ Event-driven Revalidation เสมอ |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Next.js Multi-layer Caching เมื่อ:
+- **ข้อมูลที่มีการอ่านซ้ำบ่อยครั้งแต่เปลี่ยนแปลงน้อย:** แคตตาล็อกเนื้อสเต๊ก, รายละเอียดสายพันธุ์วัว, บทความคู่มือการย่างเนื้อ, ข้อมูลสาขาหน้าร้าน
+- **ผลลัพธ์จากการคำนวณที่ใช้เวลาประมวลผลสูง (Heavy Computation):** เช่น การวิเคราะห์ต้นทุนเฉลี่ยของเนื้อบ่มดรายเอจตามระยะเวลา
+- **API ภายนอกที่มี Rate Limit หรือคิดค่าบริการตามคำขอ:** เช่น การดึงอัตราแลกเปลี่ยนเงินตรา หรือค่าดัชนีราคาเนื้อนำเข้า
+
+### ไม่ควรใช้ Caching (หรือต้อง Opt-out) เมื่อ:
+- **ข้อมูลการทำธุรกรรมทางการเงินและตัดสต็อกแบบเรียลไทม์:** ยอดคงเหลือของเนื้อชิ้นพรีเมียมในขณะกด Checkout ต้องเป็นข้อมูลสดจากฐานข้อมูลเสมอ
+- **แดชบอร์ดส่วนบุคคลและข้อมูลส่วนบุคคล (PII):** ข้อมูลประวัติการสั่งซื้อของผู้ใช้, ข้อมูลบัตรเครดิต
+- **หน้าที่มีการแสดงผลตามเวลาจริงแบบมิลลิวินาที:** เช่น กระดานประมูลเนื้อวากิวสด
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: อธิบายความแตกต่างระหว่าง Request Memoization และ Data Cache ใน Next.js ทั้งในแง่ของวงจรชีวิต (Lifecycle) และกลไกการทำงาน?
+
+**แนวคำตอบเชิงลึก:**
+สองเลเยอร์นี้ทำหน้าที่ต่างกันอย่างสิ้นเชิงแม้จะเกี่ยวข้องกับการดึงข้อมูล:
+1. **Request Memoization (React Feature):**
+   - เป็นฟีเจอร์ของ React ไม่ใช่ของ Next.js โดยตรง
+   - ทำงานเฉพาะในระหว่างการเรนเดอร์คำขอ HTTP ครั้งเดียว (Single Server Render Pass)
+   - หากในหน้าเพจมีคอมโพเนนต์ `<Header>`, `<Sidebar>`, และ `<MainContent>` ที่สั่ง `fetch('/api/user/me')` เหมือนกันเป๊ะ React จะจำผลลัพธ์และยิงคำขอจริงเพียง **1 ครั้ง** เท่านั้น
+   - **อายุ:** ตายทันทีเมื่อเรนเดอร์ HTML/RSC Payload เสร็จสิ้น และไม่ถูกแชร์ข้ามผู้ใช้
+2. **Data Cache (Next.js Feature):**
+   - เป็นเลเยอร์การจัดเก็บแบบถาวร (Persistent Key-Value Store) บนเซิร์ฟเวอร์หรือ CDN
+   - บันทึกผลลัพธ์ข้ามคำขอ HTTP (Cross-request) และข้ามผู้ใช้ (Shared across users)
+   - แม้คำขอจะจบไปแล้ว หรือผู้ใช้อีกคนหนึ่งเปิดเว็บขึ้นมาในอีก 10 นาทีต่อมา Next.js จะดึงข้อมูลจาก Data Cache มาส่งให้ทันทีโดยไม่ต้องต่อฐานข้อมูล
+   - **อายุ:** คงทนถาวรจนกว่าจะถึงเวลา TTL ที่ตั้งไว้ หรือถูกสั่งล้างผ่าน `revalidateTag()` หรือ `revalidatePath()`
+
+---
+
+### คำถามที่ 2: นวัตกรรม `'use cache'` ใน Next.js 16 แก้ปัญหาอะไรของการแคชแบบเดิมใน Next.js 14-15 และมีหลักการทำงานอย่างไร?
+
+**แนวคำตอบเชิงลึก:**
+ใน Next.js เวอร์ชันก่อนหน้า การแคชของ Server Components ผูกติดอยู่กับ Fetch API (`fetch(url, { next: { revalidate: 60 } })`) หรือต้องใช้ฟังก์ชัน wrapper พิเศษอย่าง `unstable_cache`:
+1. **ปัญหาของการแคชแบบเดิม:**
+   - หากดึงข้อมูลผ่าน ORM (เช่น Prisma หรือ Drizzle) หรือรันอัลกอริทึมคำนวณในตัวโค้ด จะไม่ได้รับ Data Cache อัตโนมัติ ต้องเขียน Boilerplate ครอบโค้ดด้วย `unstable_cache` ซึ่งจัดการ Cache Keys ยุ่งยาก
+   - Component ที่ต้องการแสดงผลแบบ Static เล็กๆ ภายในหน้า Dynamic Route ถูกบังคับให้กลายเป็น Dynamic ไปด้วยทั้งหมด (All-or-Nothing Dynamic Rendering)
+2. **การทำงานของ `'use cache'` ใน Next.js 16:**
+   - เป็น **Compiler-level Directive** ที่เปลี่ยนคอมโพเนนต์หรือฟังก์ชัน Asynchronous ใดๆ ให้กลายเป็นหน่วยแคชอิสระ (Cache Components)
+   - สามารถระบุการใช้งานร่วมกับ `unstable_cacheLife('hours' | 'days' | customProfile)` และ `unstable_cacheTag('tag')` ได้อย่างเป็นธรรมชาติ
+   - ผลลัพธ์จากการ Render ของ Cache Component จะถูก Serialize และเก็บไว้ใน Cache Store ทำให้เราสามารถผสมผสานคอมโพเนนต์ที่แคชไว้ (Static subtrees) เข้ากับคอมโพเนนต์ที่ Dynamic สดใหม่ได้อย่างสมบูรณ์แบบในหน้าเดียว
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [Next.js Data Fetching & Caching](/docs/nextjs/data-fetching) — รากฐานการทำ Fetching และ Suspense Boundaries
+- [Next.js Server Actions](/docs/nextjs/server-actions) — การสั่ง Revalidation Tags หลังจากการ Mutation ข้อมูล
+- [Next.js Optimization](/docs/nextjs/optimization) — การเพิ่มความเร็วแอปพลิเคชันด้วย Image และ Font Optimization
+- [Next.js Error Handling](/docs/nextjs/error-handling) — การจัดการ Error ร่วมกับ Suspense และ Cache

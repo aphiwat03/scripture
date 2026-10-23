@@ -1,0 +1,621 @@
+---
+title: Web Analytics
+category: Frontend
+parentTitle: Next.js 16
+version: Vercel Analytics + Speed Insights
+updatedAt: 2026-10-23
+---
+
+# Web Analytics
+
+คู่มือสถาปัตยกรรมการตรวจวัดข้อมูลการใช้งานเว็บไซต์ (Web Analytics), การติดตาม Conversion Funnel, และการเก็บค่า Core Web Vitals แบบ Real User Monitoring ใน Next.js 16 ด้วย `@vercel/analytics`, `@vercel/speed-insights`, และ `@next/third-parties` ภายใต้มาตรฐาน Privacy-First ตามกฎหมาย PDPA และ GDPR
+
+---
+
+## 1. แนวคิด (Concept)
+
+ในยุคของ Modern Web และกฎหมายคุ้มครองข้อมูลส่วนบุคคล (PDPA ในประเทศไทย และ GDPR ในสหภาพยุโรป) สถาปัตยกรรม Analytics แบบดั้งเดิมที่อาศัย Third-party Cookies, Client-side Fingerprinting ข้ามโดเมน, และการรันสคริปต์ขนาดมหึมาที่บล็อก Main Thread กำลังกลายเป็นภาระทั้งในแง่กฎหมายและประสิทธิภาพของเว็บไซต์
+
+**Next.js 16 สนับสนุนแนวทาง Privacy-First Web Analytics ผ่าน 3 เสาหลัก:**
+
+1. **First-Party Data Collection:** รวบรวมข้อมูลผ่าน Edge Network และ First-party Context โดยไม่ฝัง Persistent Identifier หรือ Third-party Tracking Cookies
+2. **Zero Performance Overhead:** สคริปต์น้ำหนักเบาพิเศษ (น้อยกว่า 3KB) ที่ทำงานแบบ Asynchronous / Deferred เพื่อไม่ให้ส่งผลกระทบต่อคะแนน Largest Contentful Paint (LCP) และ Interaction to Next Paint (INP)
+3. **Consent & Preference Driven:** มีระบบตรวจจับสัญญาณปฏิเสธการติดตามระดับเบราว์เซอร์ (`Do Not Track` และ `Global Privacy Control`) พร้อมรองรับ Consent Management Platform (CMP) ก่อนเริ่มยิงสคริปต์การตลาด
+
+```text
++----------------------------------------------------------------------------------------------------+
+|                         Next.js 16 Privacy-First Analytics Architecture                            |
++----------------------------------------------------------------------------------------------------+
+|                                                                                                    |
+|  [ User Browser Navigation ]                                                                       |
+|         |                                                                                          |
+|         +--> [ Privacy Check: navigator.doNotTrack & GPC Signal ]                                  |
+|         |      |-> If Enabled: Drop Marketing Tags, Limit to Anonymous Aggregate Only               |
+|         |                                                                                          |
+|         +--> [ Cookie Consent State: Stored in Secure First-party Cookie ]                         |
+|                |                                                                                   |
+|                +-- [ Strictly Necessary: Always Active (Performance Telemetry) ]                   |
+|                |     - @vercel/speed-insights (Core Web Vitals RUM)                                |
+|                |                                                                                   |
+|                +-- [ Functional & Usage Analytics: Consent Granted ]                               |
+|                |     - @vercel/analytics (Cookie-less, Hashed Daily Session)                       |
+|                |     - Custom Funnel Events: view_meat_cut, add_to_cart, checkout_completed        |
+|                |                                                                                   |
+|                +-- [ Marketing & Advertising Tags: Explicit Consent Only ]                         |
+|                      - @next/third-parties/google (<GoogleTagManager> / <GoogleAnalytics>)         |
+|                      - Dynamic Injection via NextScript Strategy (afterInteractive)                |
+|                                                                                                    |
++----------------------------------------------------------------------------------------------------+
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 กลไก Cookie-less Tracking ของ Vercel Analytics
+
+`@vercel/analytics` แตกต่างจาก Google Analytics 4 ยุคดั้งเดิมอย่างสิ้นเชิง:
+
+- **ไม่มีการเก็บ Cookies:** ไม่มีการสร้าง `_ga`, `_gid`, หรือ Persistent UUID ใดๆ ลงใน `document.cookie` หรือ `localStorage`
+- **Daily Salted Hash Generation:** ระบบจะสร้าง Session Token ชั่วคราวบนเซิร์ฟเวอร์ Edge โดยใช้อัลกอริทึมเข้ารหัสทางเดียว:
+  `Hash = SHA-256(Client IP + User-Agent + Daily Salt + Domain)`
+- **อัตโนมัติในการล้างข้อมูล:** ตัว `Daily Salt` จะถูกหมุนเวียนเปลี่ยนค่าใหม่ทุกๆ เที่ยงคืน UTC ทำให้ไม่สามารถติดตามพฤติกรรมของผู้ใช้รายเดิมข้ามวัน (Cross-day Tracking) หรือข้ามเว็บไซต์ (Cross-site Profiling) ได้ จึงได้รับการยกเว้นไม่ต้องขอความยินยอมสำหรับคุกกี้ติดตามตามข้อกำหนด PDPA สากล
+
+### 2.2 สถาปัตยกรรม Speed Insights และ RUM (Real User Monitoring)
+
+`@vercel/speed-insights` ถูกสร้างขึ้นบน Web Vitals API ของเบราว์เซอร์เพื่อบันทึก Real User Metrics:
+- ตรวจวัดคะแนน INP, LCP, CLS, FCP, และ TTFB ของผู้ใช้งานจริงในสภาพแวดล้อมเครือข่าย 4G/5G และอุปกรณ์เคลื่อนที่ต่างๆ
+- ส่งข้อมูลกลับไปยัง Vercel Ingest Endpoint ผ่าน `navigator.sendBeacon()` ซึ่งทำงานในพื้นหลัง และไม่บล็อกการปิดหน้าเว็บหรือการเปลี่ยนเส้นทาง (Unload Lifecycle)
+
+### 2.3 การปรับแต่ง Google Tag Manager ผ่าน `@next/third-parties`
+
+การติดตั้ง Google Tag Manager (GTM) แบบคลาสสิกด้วยการแปะโค้ด `<script>` ใน `<head>` มักทำให้เกิดปัญหา **Long Tasks** และฉุดคะแนน PageSpeed ลงอย่างรุนแรง
+
+แพ็กเกจ `@next/third-parties/google` ของทีมงาน Next.js แก้ปัญหานี้โดย:
+- ใช้ฟังก์ชัน `afterInteractive` ในการโหลดคอนเทนเนอร์หลังจากที่ React Hydration เสร็จสิ้น
+- ให้คุณสมบัติ Fallback สำหรับเบราว์เซอร์ที่ปิด JavaScript ผ่าน `<noscript>` อัตโนมัติ
+- รองรับการส่ง Consent Mode v2 (เช่น `ad_storage: 'denied'`, `analytics_storage: 'denied'`) ก่อนที่สคริปต์จะถูกดาวน์โหลด
+
+<Callout type="note" title="ความต่างระหว่าง @vercel/analytics และ Google Analytics">
+@vercel/analytics มุ่งเน้นความเรียบง่าย เป็นส่วนตัว และวิเคราะห์เชิง Aggregate ภายใน First-party สำหรับทีมพัฒนา ส่วน GA4/GTM มุ่งเน้นการวิเคราะห์แคมเปญการตลาด, Attribution Modeling และ Retargeting ซึ่งต้องมีการขอ Cookie Consent อย่างเคร่งครัด
+</Callout>
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ในระบบ **Smart Butcher Marketplace** เราจะสร้างระบบติดตามพฤติกรรมการซื้อเนื้อสเต๊กพรีเมียม (Wagyu A5, Dry-Aged Ribeye) โดยมีระบบคัดกรองความยินยอม (Consent Banner) และการส่ง Type-safe Custom Events
+
+### ตัวอย่างที่ 1: การติดตั้ง Analytics Provider ใน Root Layout ร่วมกับ Consent State
+
+```tsx filename="src/components/analytics/AnalyticsProvider.tsx"
+"use client";
+
+import React, { createContext, useContext, useEffect, useState } from "react";
+import { Analytics } from "@vercel/analytics/react";
+import { SpeedInsights } from "@vercel/speed-insights/next";
+import { GoogleTagManager } from "@next/third-parties/google";
+
+export interface ConsentPreferences {
+  analytics: boolean;
+  marketing: boolean;
+  necessary: boolean;
+}
+
+interface AnalyticsContextValue {
+  consent: ConsentPreferences;
+  updateConsent: (prefs: Partial<ConsentPreferences>) => void;
+  isDntActive: boolean;
+}
+
+const AnalyticsContext = createContext<AnalyticsContextValue | null>(null);
+
+const STORAGE_KEY = "smart_butcher_cookie_consent";
+
+export function AnalyticsProvider({
+  children,
+  gtmId,
+}: {
+  children: React.ReactNode;
+  gtmId?: string;
+}) {
+  const [consent, setConsent] = useState<ConsentPreferences>({
+    necessary: true,
+    analytics: false,
+    marketing: false,
+  });
+  const [isDntActive, setIsDntActive] = useState<boolean>(false);
+  const [isMounted, setIsMounted] = useState<boolean>(false);
+
+  useEffect(() => {
+    setIsMounted(true);
+
+    // 1. ตรวจสอบสัญญาณ Do Not Track (DNT) และ Global Privacy Control (GPC)
+    const dntSignal =
+      navigator.doNotTrack === "1" ||
+      window.doNotTrack === "1" ||
+      (navigator as unknown as { globalPrivacyControl?: boolean }).globalPrivacyControl === true;
+
+    setIsDntActive(dntSignal);
+
+    // 2. ดึงค่าความยินยอมที่เคยบันทึกไว้ใน LocalStorage / First-party Cookie
+    const savedConsent = localStorage.getItem(STORAGE_KEY);
+    if (savedConsent) {
+      try {
+        const parsed = JSON.parse(savedConsent) as ConsentPreferences;
+        // หากผู้ใช้เปิด DNT จะปฏิเสธการตลาดโดยเด็ดขาด
+        if (dntSignal) {
+          setConsent({ ...parsed, marketing: false });
+        } else {
+          setConsent(parsed);
+        }
+      } catch {
+        // Fallback default preferences
+      }
+    }
+  }, []);
+
+  const updateConsent = (prefs: Partial<ConsentPreferences>) => {
+    const nextConsent: ConsentPreferences = {
+      necessary: true,
+      analytics: prefs.analytics ?? consent.analytics,
+      marketing: isDntActive ? false : (prefs.marketing ?? consent.marketing),
+    };
+
+    setConsent(nextConsent);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(nextConsent));
+
+    // ส่งสัญญาณ Consent Mode v2 ไปยัง DataLayer ของ Google หากมี GTM
+    if (typeof window !== "undefined" && window.dataLayer) {
+      window.dataLayer.push({
+        event: "consent_update",
+        consent_analytics: nextConsent.analytics ? "granted" : "denied",
+        consent_marketing: nextConsent.marketing ? "granted" : "denied",
+      });
+    }
+  };
+
+  return (
+    <AnalyticsContext.Provider value={{ consent, updateConsent, isDntActive }}>
+      {children}
+
+      {/* Speed Insights รวบรวม Core Web Vitals RUM เชิงเทคนิค (ไม่มีข้อมูลระบุตัวตน) */}
+      <SpeedInsights />
+
+      {/* Vercel Analytics ทำงานเมื่อผู้ใช้ยินยอม หรือในโหมด Privacy-First */}
+      {isMounted && consent.analytics && (
+        <Analytics
+          beforeSend={(event) => {
+            // กรอง URL Query Parameters ที่อาจมีข้อมูล PII หลุดมา
+            if (event.url.includes("token=") || event.url.includes("email=")) {
+              const cleanedUrl = new URL(event.url);
+              cleanedUrl.searchParams.delete("token");
+              cleanedUrl.searchParams.delete("email");
+              return { ...event, url: cleanedUrl.toString() };
+            }
+            return event;
+          }}
+        />
+      )}
+
+      {/* Google Tag Manager โหลดเฉพาะเมื่อได้รับความยินยอมด้านการตลาดและการวิเคราะห์ */}
+      {isMounted && consent.marketing && gtmId && (
+        <GoogleTagManager gtmId={gtmId} />
+      )}
+    </AnalyticsContext.Provider>
+  );
+}
+
+export function useAnalyticsConsent() {
+  const context = useContext(AnalyticsContext);
+  if (!context) {
+    throw new Error("useAnalyticsConsent must be used within an AnalyticsProvider");
+  }
+  return context;
+}
+```
+
+```tsx filename="src/app/layout.tsx"
+import React from "react";
+import type { Metadata } from "next";
+import { AnalyticsProvider } from "@/components/analytics/AnalyticsProvider";
+import { CookieConsentBanner } from "@/components/consent/CookieConsentBanner";
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: "Smart Butcher Marketplace — เนื้อพรีเมียมเกรดโอมากาเสะ",
+  description: "ตลาดซื้อขายเนื้อวากิวญี่ปุ่น สเต๊ก Dry-Aged และเนื้อบ่มพิเศษระดับพรีเมียม",
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="th">
+      <body className="antialiased bg-neutral-50 text-neutral-900 min-h-screen">
+        <AnalyticsProvider gtmId={process.env.NEXT_PUBLIC_GTM_ID}>
+          {children}
+          {/* แบนเนอร์ขอความยินยอมตามมาตรฐาน PDPA */}
+          <CookieConsentBanner />
+        </AnalyticsProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: ระบบส่ง Custom Events วัด E-Commerce Conversion Funnel
+
+เราจะออกแบบ Type-safe Dispatcher สำหรับวัดอัตราการเปลี่ยนผ่านในขั้นตอนการสั่งซื้อเนื้อ (Funnel Analytics):
+1. `view_meat_cut`: เปิดดูรายละเอียดเนื้อ
+2. `select_meat_weight`: เลือกล็อตและน้ำหนัก
+3. `add_to_cart`: เพิ่มลงในตะกร้า
+4. `initiate_checkout`: เข้าสู่หน้ากรอกที่อยู่จัดส่ง
+5. `checkout_completed`: ชำระเงินสำเร็จ
+
+```typescript filename="src/lib/analytics/events.ts"
+import { track } from "@vercel/analytics";
+
+// ประกาศ Type และ Schema ของ Event ในระบบอย่างเข้มงวด
+export type FunnelEventMap = {
+  view_meat_cut: {
+    sku: string;
+    cutName: string;
+    category: "WAGYU_A5" | "DRY_AGED" | "BLACK_ANGUS";
+    pricePerGram: number;
+  };
+  select_meat_weight: {
+    sku: string;
+    weightGrams: number;
+    marblingScore: number;
+    estimatedPrice: number;
+  };
+  add_to_cart: {
+    sku: string;
+    cutName: string;
+    weightGrams: number;
+    quantity: number;
+    totalPrice: number;
+  };
+  initiate_checkout: {
+    cartItemCount: number;
+    cartTotalAmount: number;
+    userTier: "PLATINUM" | "GOLD" | "STANDARD";
+  };
+  checkout_completed: {
+    orderId: string;
+    totalAmount: number;
+    paymentMethod: "CREDIT_CARD" | "PROMPTPAY" | "WALLET";
+    itemCount: number;
+  };
+};
+
+// ฟังก์ชันศูนย์กลางในการ Dispatch Event ไปยังทุกแพลตฟอร์มที่เปิดใช้งาน
+export function dispatchAnalyticsEvent<K extends keyof FunnelEventMap>(
+  eventName: K,
+  payload: FunnelEventMap[K]
+): void {
+  // 1. ส่งไปยัง Vercel Analytics (ถ้าเปิดใช้งาน)
+  try {
+    track(eventName, payload as Record<string, string | number | boolean | null>);
+  } catch (err) {
+    console.debug("[Analytics] Failed to track on Vercel Analytics:", err);
+  }
+
+  // 2. ส่งต่อไปยัง Google Tag Manager dataLayer (สำหรับ GA4 และ Meta Pixel)
+  if (typeof window !== "undefined" && window.dataLayer) {
+    window.dataLayer.push({
+      event: eventName,
+      ecommerce: payload,
+    });
+  }
+}
+```
+
+```tsx filename="src/components/cart/MeatAddToCartAction.tsx"
+"use client";
+
+import React, { useState } from "react";
+import { dispatchAnalyticsEvent } from "@/lib/analytics/events";
+
+interface MeatProductProps {
+  sku: string;
+  title: string;
+  category: "WAGYU_A5" | "DRY_AGED" | "BLACK_ANGUS";
+  marblingScore: number;
+  pricePerGram: number;
+}
+
+export function MeatAddToCartAction({ product }: MeatProductProps) {
+  const [selectedWeight, setSelectedWeight] = useState<number>(350); // น้ำหนักเริ่มต้น 350 กรัม
+  const [quantity, setQuantity] = useState<number>(1);
+  const [isAdded, setIsAdded] = useState<boolean>(false);
+
+  const calculateTotalPrice = () => selectedWeight * product.pricePerGram * quantity;
+
+  const handleWeightChange = (weight: number) => {
+    setSelectedWeight(weight);
+
+    // ยิง Event เมื่อลูกค้าปรับขนาดชิ้นเนื้อ
+    dispatchAnalyticsEvent("select_meat_weight", {
+      sku: product.sku,
+      weightGrams: weight,
+      marblingScore: product.marblingScore,
+      estimatedPrice: weight * product.pricePerGram * quantity,
+    });
+  };
+
+  const handleAddToCart = () => {
+    const totalPrice = calculateTotalPrice();
+
+    // 1. Dispatch Event เพื่อวิเคราะห์ Conversion Funnel
+    dispatchAnalyticsEvent("add_to_cart", {
+      sku: product.sku,
+      cutName: product.title,
+      weightGrams: selectedWeight,
+      quantity,
+      totalPrice,
+    });
+
+    setIsAdded(true);
+    setTimeout(() => setIsAdded(false), 2000);
+  };
+
+  return (
+    <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-2xl p-6 space-y-6">
+      <div>
+        <h3 className="text-xl font-bold text-neutral-900 dark:text-neutral-100">{product.title}</h3>
+        <p className="text-sm text-neutral-500">ลายไขมันแทรก Marbling BMS Level {product.marblingScore}</p>
+      </div>
+
+      {/* ตัวเลือกน้ำหนักเนื้อสเต๊ก */}
+      <div className="space-y-2">
+        <label className="text-sm font-semibold text-neutral-700 dark:text-neutral-300">
+          เลือกขนาดตัดชิ้นเนื้อ (Weight):
+        </label>
+        <div className="grid grid-cols-3 gap-3">
+          {[250, 350, 500].map((weight) => (
+            <button
+              key={weight}
+              type="button"
+              onClick={() => handleWeightChange(weight)}
+              className={`py-2 px-3 text-sm font-medium rounded-xl border transition ${
+                selectedWeight === weight
+                  ? "bg-red-700 text-white border-red-700 shadow-sm"
+                  : "bg-white dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 border-neutral-300 dark:border-neutral-700 hover:border-neutral-400"
+              }`}
+            >
+              {weight}g
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ราคารวมคำนวณสด */}
+      <div className="flex justify-between items-baseline pt-4 border-t border-neutral-100 dark:border-neutral-800">
+        <span className="text-sm text-neutral-500">ราคาสุทธิคำนวณตามน้ำหนัก:</span>
+        <span className="text-2xl font-black text-red-600">
+          ฿{calculateTotalPrice().toLocaleString()}
+        </span>
+      </div>
+
+      <button
+        onClick={handleAddToCart}
+        className="w-full py-3.5 bg-red-700 hover:bg-red-800 text-white font-semibold rounded-xl shadow-md transition duration-200 flex justify-center items-center gap-2"
+      >
+        {isAdded ? "✓ เพิ่มลงในตะกร้าเรียบร้อย" : "เพิ่มชิ้นเนื้อลงในตะกร้า"}
+      </button>
+    </div>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 3: แบนเนอร์ Cookie Consent ที่เคารพ DNT และกฎหมาย PDPA
+
+```tsx filename="src/components/consent/CookieConsentBanner.tsx"
+"use client";
+
+import React, { useState } from "react";
+import { useAnalyticsConsent } from "@/components/analytics/AnalyticsProvider";
+
+export function CookieConsentBanner() {
+  const { consent, updateConsent, isDntActive } = useAnalyticsConsent();
+  const [isOpen, setIsOpen] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return !localStorage.getItem("smart_butcher_cookie_consent");
+  });
+  const [showDetailedSettings, setShowDetailedSettings] = useState<boolean>(false);
+  const [draftAnalytics, setDraftAnalytics] = useState<boolean>(true);
+  const [draftMarketing, setDraftMarketing] = useState<boolean>(false);
+
+  if (!isOpen) return null;
+
+  const handleAcceptAll = () => {
+    updateConsent({
+      analytics: true,
+      marketing: !isDntActive, // ถ้าเปิด DNT จะไม่เปิดการตลาดให้
+    });
+    setIsOpen(false);
+  };
+
+  const handleAcceptEssentialOnly = () => {
+    updateConsent({
+      analytics: false,
+      marketing: false,
+    });
+    setIsOpen(false);
+  };
+
+  const handleSaveCustomPreferences = () => {
+    updateConsent({
+      analytics: draftAnalytics,
+      marketing: isDntActive ? false : draftMarketing,
+    });
+    setIsOpen(false);
+  };
+
+  return (
+    <div className="fixed bottom-4 left-4 right-4 md:left-auto md:right-6 md:max-w-lg z-50 p-6 bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-2xl shadow-2xl space-y-4">
+      <div className="space-y-1">
+        <h4 className="text-lg font-bold text-neutral-900 dark:text-neutral-100 flex items-center gap-2">
+          <span>🥩 นโยบายความเป็นส่วนตัวและคุกกี้</span>
+        </h4>
+        <p className="text-xs text-neutral-600 dark:text-neutral-400 leading-relaxed">
+          Smart Butcher Marketplace ใช้คุกกี้ที่จำเป็นและเทคโนโลยีวิเคราะห์พฤติกรรมเพื่อพัฒนาคุณภาพการบริการและวิเคราะห์ประสิทธิภาพของร้านค้าเนื้อพรีเมียม
+          {isDntActive && (
+            <span className="block mt-1 text-amber-600 dark:text-amber-400 font-medium">
+              * ตรวจพบสัญญาณ Do Not Track: ระบบจะปิดกั้นคุกกี้การตลาดโดยอัตโนมัติ
+            </span>
+          )}
+        </p>
+      </div>
+
+      {showDetailedSettings && (
+        <div className="space-y-3 pt-2 border-t border-neutral-200 dark:border-neutral-800 text-xs">
+          <div className="flex justify-between items-center">
+            <div>
+              <p className="font-semibold text-neutral-800 dark:text-neutral-200">คุกกี้ที่จำเป็น (Strictly Necessary)</p>
+              <p className="text-neutral-500">จำเป็นสำหรับการทำงานของระบบตะกร้าและชำระเงิน</p>
+            </div>
+            <input type="checkbox" checked disabled className="h-4 w-4 rounded accent-red-700" />
+          </div>
+
+          <div className="flex justify-between items-center">
+            <div>
+              <p className="font-semibold text-neutral-800 dark:text-neutral-200">การวัดประสิทธิภาพและการวิเคราะห์ (Analytics)</p>
+              <p className="text-neutral-500">ช่วยให้เราทราบว่าชิ้นเนื้อชนิดใดได้รับความนิยม</p>
+            </div>
+            <input
+              type="checkbox"
+              checked={draftAnalytics}
+              onChange={(e) => setDraftAnalytics(e.target.checked)}
+              className="h-4 w-4 rounded accent-red-700"
+            />
+          </div>
+
+          <div className="flex justify-between items-center">
+            <div>
+              <p className="font-semibold text-neutral-800 dark:text-neutral-200">การตลาดและโฆษณา (Marketing)</p>
+              <p className="text-neutral-500">ส่งข้อเสนอโปรโมชันเนื้อวากิวที่ตรงใจ</p>
+            </div>
+            <input
+              type="checkbox"
+              disabled={isDntActive}
+              checked={isDntActive ? false : draftMarketing}
+              onChange={(e) => setDraftMarketing(e.target.checked)}
+              className="h-4 w-4 rounded accent-red-700 disabled:opacity-40"
+            />
+          </div>
+        </div>
+      )}
+
+      <div className="flex flex-col sm:flex-row gap-2 pt-2">
+        {showDetailedSettings ? (
+          <button
+            onClick={handleSaveCustomPreferences}
+            className="flex-1 py-2 px-3 text-xs font-semibold bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 rounded-xl"
+          >
+            บันทึกการตั้งค่า
+          </button>
+        ) : (
+          <>
+            <button
+              onClick={handleAcceptAll}
+              className="flex-1 py-2 px-3 text-xs font-semibold bg-red-700 hover:bg-red-800 text-white rounded-xl transition"
+            >
+              ยินยอมทั้งหมด
+            </button>
+            <button
+              onClick={handleAcceptEssentialOnly}
+              className="flex-1 py-2 px-3 text-xs font-semibold bg-neutral-200 dark:bg-neutral-800 hover:bg-neutral-300 dark:hover:bg-neutral-700 text-neutral-800 dark:text-neutral-200 rounded-xl transition"
+            >
+              เฉพาะที่จำเป็น
+            </button>
+          </>
+        )}
+        <button
+          onClick={() => setShowDetailedSettings(!showDetailedSettings)}
+          className="py-2 px-3 text-xs font-medium text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 underline"
+        >
+          {showDetailedSettings ? "ย่อกลับ" : "ตั้งค่าเอง"}
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ประเด็นปัญหา | แนวทางที่ผิดพลาด (Anti-pattern) | แนวปฏิบัติระดับ Senior Architect (Best Practice) |
+| :--- | :--- | :--- |
+| **ยิง GTM Script บล็อก Main Thread** | ฝังโค้ด `<script>` ของ Google Tag Manager ตรงๆ ใน `<head>` ทำให้บล็อกการ Parsing HTML และฉุดคะแนน INP | ใช้คอมโพเนนต์ `<GoogleTagManager>` จาก `@next/third-parties/google` ซึ่งโหลดแบบ `afterInteractive` อัตโนมัติ |
+| **ยิง Custom Event ข้อมูล PII** | ใส่เบอร์โทรศัพท์ลูกค้า, เลขที่อยู่จัดส่ง, หรืออีเมลลงใน Payload ของ Event `checkout_completed` | ส่งเฉพาะ Entity ID สากล (เช่น `orderId`, `sku`, `totalAmount`) และเก็บ PII ไว้เฉพาะในฐานข้อมูลหลังบ้าน |
+| **ละเลยสัญญาณ Do Not Track (DNT)** | บังคับโหลด Marketing Pixels ทุกกรณี แม้เบราว์เซอร์ของผู้ใช้จะส่งสัญญาณ `navigator.doNotTrack === "1"` | ตรวจสอบ DNT และ Global Privacy Control (GPC) ก่อนโหลดสคริปต์การตลาด เพื่อสอดคล้องกับข้อกำหนด Privacy สากล |
+| **ส่ง Event โดยไม่มี Type Safety** | เรียก `track("event_name", { random: "data" })` แบบ String ลอยๆ ก่อให้เกิดข้อผิดพลาดด้าน Data Schema ใน BigQuery | สร้าง Type Mapping กลาง (เช่น `FunnelEventMap`) ครอบคลุมทุก Event ป้องกันความผิดพลาดของชื่อฟิลด์ |
+| **โหลด Analytics ซ้ำซ้อนหลายตัว** | ติดตั้งทั้ง Google Analytics 4, Mixpanel, Hotjar, Segment และ Vercel Analytics โดยไม่มีเงื่อนไข | รวมศูนย์การจัดการผ่าน Tag Manager หรือใช้ Vercel Analytics ควบคู่กับ DataLayer เพียงตัวเดียวเพื่อลดภาระ CPU |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ `@vercel/analytics` และ `@vercel/speed-insights`:
+- **Next.js 16 Production Applications:** เพื่อติดตามการเติบโตของเว็บไซต์และวัดความเร็วการเรนเดอร์ในระดับ Real-world RUM
+- **แพลตฟอร์มที่ต้องการความสอดคล้องกับ PDPA/GDPR โดยไม่ต้องปวดหัวเรื่องคุกกี้:** เพราะ Vercel Analytics ไม่ใช้คุกกี้และไม่เก็บข้อมูลระบุตัวบุคคล
+- **ทีมวิศวกรที่ต้องการดู Core Web Vitals ราย Route:** ตรวจสอบว่าหน้าแคตตาล็อก `/products/[id]` มีค่า LCP แย่กว่าหน้าแรกอย่างไร
+
+### ควรใช้ Google Tag Manager / GA4 (`@next/third-parties`):
+- **ฝ่ายการตลาดที่ต้องการยิง Conversion Ads:** เช่น Google Search Ads, Facebook CAPI, TikTok Ads เพื่อทำ Conversion Attribution
+- **การวิเคราะห์ Cohort ระยะยาว:** วิเคราะห์พฤติกรรมการกลับมาซื้อซ้ำของลูกค้าข้าม 30-90 วัน
+
+### ไม่ควรใช้ Web Analytics:
+- **การจัดเก็บข้อมูลธุรกรรมการเงินหลัก (Financial Auditing):** ห้ามใช้ Analytics Event ในการคำนวณรายได้ทางบัญชี ให้ใช้ Database Record และ Payment Gateway Webhooks เป็นแหล่งข้อมูลความจริง (Single Source of Truth)
+- **การบันทึกข้อมูลความลับของผู้ใช้:** ห้ามยิง Event รหัสผ่าน, ข้อมูลบัตรเครดิต หรือข้อมูลสุขภาพ
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: สถาปัตยกรรม Cookie-less Analytics ของ Vercel มีหลักการทำงานอย่างไรในการนับจำนวน Unique Visitors โดยไม่ต้องใช้ Third-party Cookies และเหตุใดจึงสอดคล้องกับมาตรฐานความเป็นส่วนตัวระดับสากล?
+
+**แนวคำตอบเชิงลึก:**
+1. **การสร้าง Transient Daily Identifier บน Edge:**
+   - เมื่อผู้ใช้ส่ง HTTP Request ไปยังเว็บไซต์ Vercel Edge Server จะอ่านค่าพารามิเตอร์ของ Request ได้แก่ `Client IP Address`, `User-Agent Header`, `Host Domain`, และตัวแปรสุ่มความลับรายวัน (`Daily Salt`)
+   - นำค่าทั้งหมดมาเข้าฟังก์ชันแฮชทางเดียวแบบเข้ารหัส (เช่น SHA-256):
+     `HashedSession = Hash(IP + UserAgent + Host + DailySalt)`
+2. **การป้องกันการแกะรอยข้ามเวลา (Privacy Guarantee):**
+   - เซิร์ฟเวอร์ไม่เคยบันทึกค่า Raw IP หรือ User-Agent ลงในฐานข้อมูล ทำให้ไม่มีทางระบุตัวบุคคลย้อนกลับได้
+   - เมื่อข้ามสู่วันใหม่ (00:00 UTC) ตัว `Daily Salt` จะถูกสุ่มใหม่ ส่งผลให้ Hash ของผู้ใช้คนเดิมในวันถัดไปเปลี่ยนไปโดยสิ้นเชิง จึงป้องกันการสร้าง Profile สะสมข้ามวัน (No Long-term Profiling)
+3. **การสอดคล้องกับ PDPA และ GDPR:**
+   - เนื่องจากไม่มีการอ่านหรือเขียนข้อมูลใดๆ ลงในอุปกรณ์ปลายทางของผู้ใช้ (ไม่มี Cookies, ไม่มี LocalStorage, ไม่มี Canvas Fingerprinting) สถาปัตยกรรมนี้จึงไม่เข้าข่าย "การเข้าถึงอุปกรณ์ของผู้ใช้" ภายใต้ ePrivacy Directive ทำให้สามารถเก็บข้อมูลเชิงสถิติได้ทันทีโดยไม่ต้องรอแบนเนอร์กดยินยอม
+
+---
+
+### คำถามที่ 2: ในการผสาน Third-party Analytics สคริปต์ (เช่น GTM หรือ Meta Pixel) เข้ากับ Next.js 16 App Router คุณมีวิธีป้องกันไม่ให้สคริปต์เหล่านี้ฉุดคะแนน Core Web Vitals (โดยเฉพาะ INP และ LCP) ตกได้อย่างไร?
+
+**แนวคำตอบเชิงลึก:**
+1. **Deferred Loading ด้วย NextScript Strategy:**
+   - ใช้ `@next/third-parties/google` หรือ `<Script strategy="afterInteractive" />` เพื่อให้เบราว์เซอร์ดาวน์โหลดและคอมไพล์สคริปต์หลังจากที่ React Tree ฝั่งหน้าบ้านทำ Hydration เสร็จสิ้นแล้ว
+   - ช่วยให้ Main Thread ว่างพอสำหรับการตอบสนองต่อการคลิกหรือแตะหน้าจอของผู้ใช้ ป้องกันไม่ให้เกิด Input Delay ที่ทำลายค่า INP
+2. **Web Worker Offloading (Partytown Architecture):**
+   - สำหรับระบบที่มี Marketing Tags หนาแน่น สามารถโยกย้ายการประมวลผลของ Third-party Scripts ออกจาก Main Thread ไปรันบน Web Worker เบื้องหลังผ่าน Library อย่าง Partytown
+3. **DataLayer Queuing แทนการรัน Sync Call:**
+   - สถาปัตยกรรม Dispatcher ฝั่งหน้าบ้านต้องไม่รอผลลัพธ์ของ Third-party API โดยใช้รูปแบบ `window.dataLayer.push()` ซึ่งเป็นการนำข้อมูลใส่ Array ในหน่วยความจำ และให้สคริปต์ภายนอกมารับไปประมวลผลเมื่อซีพียูว่าง
+4. **Conditional Loading ตาม Consent:**
+   - อย่าเริ่มโหลดสคริปต์ GTM จนกว่าผู้ใช้จะให้ความยินยอม (Consent Gating) ซึ่งนอกจากจะถูกต้องตามกฎหมายแล้ว ยังช่วยให้ผู้ใช้กลุ่มที่ปฏิเสธได้รับประสบการณ์เว็บที่เร็วที่สุดในระดับ 100 คะแนนเต็มบน Lighthouse
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [Next.js Web Vitals & Audits](/docs/nextjs/web-vitals) — การตรวจวัดและปรับแต่ง Core Web Vitals ยุคใหม่ (INP, LCP, CLS)
+- [Next.js Optimization](/docs/nextjs/optimization) — การเพิ่มประสิทธิภาพรูปภาพ สคริปต์ และการควบคุม Bundle Size
+- [Next.js Middleware](/docs/nextjs/middleware) — การจัดการ Geolocation, First-party Rewrite และ Bot Detection
+- [React Performance Optimization](/docs/react/performance) — การลด Render Overheads และการแบ่งโค้ดด้วย Dynamic Imports

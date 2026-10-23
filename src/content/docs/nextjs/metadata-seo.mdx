@@ -1,0 +1,502 @@
+---
+title: Metadata & SEO
+category: Frontend
+parentTitle: Next.js 16
+version: Metadata API (Next.js 16)
+updatedAt: 2026-10-23
+---
+
+# Next.js 16 Metadata API & SEO Engineering
+
+คู่มือระดับ Senior ในการสร้างระบบ SEO และ Social Sharing ประสิทธิภาพสูงด้วย Next.js 16 Metadata API, การสร้าง Dynamic OpenGraph Image ด้วย `@vercel/og`, การสร้าง `sitemap.ts` และ `robots.ts` อัตโนมัติจากฐานข้อมูล, และการผสาน JSON-LD Structured Data เพื่อชิงตำแหน่ง Rich Results บน Google Search
+
+---
+
+## 1. แนวคิด (Concept)
+
+การทำ SEO (Search Engine Optimization) ใน Next.js App Router ได้รับการออกแบบใหม่ทั้งหมดผ่าน **Metadata API** ซึ่งทำงานบนฝั่งเซิร์ฟเวอร์แบบ Native:
+- ไม่จำเป็นต้องใช้ไลบรารีภายนอกอย่าง `react-helmet` อีกต่อไป
+- Next.js จะจัดการแทรกแท็ก `<title>`, `<meta>`, `<link rel="canonical">`, และ OpenGraph / Twitter Cards ลงใน `<head>` ของเอกสาร HTML โดยตรงก่อนส่งถึง Web Crawlers ของ Google หรือ Social Media Bots (Facebook, Twitter/X, LINE)
+- รองรับทั้งแบบ **Static Metadata** (สำหรับหน้าที่ข้อมูลคงที่) และ **Dynamic Metadata** (คำนวณตาม Dynamic Route Params เช่น หน้ารายละเอียดเนื้อสเต๊ก)
+
+```text
++--------------------------------------------------------------------------------------------------+
+|                            Next.js 16 Metadata & SEO Pipeline                                    |
++--------------------------------------------------------------------------------------------------+
+| 1. Googlebot / Social Crawler ขอเข้าถึง: /products/wagyu-a5-ribeye                               |
+|                                         |                                                        |
+| 2. Next.js Server Lifecycle             v                                                        |
+|    +--------------------------------------------------------------------------------------+    |
+|    | [Step 1] generateMetadata({ params }):                                               |    |
+|    |          - Query ข้อมูลเนื้อจาก DB / Data Cache                                      |    |
+|    |          - คำนวณ Title: "เนื้อวากิว A5 Miyazaki 45-Day Dry Aged | Smart Butcher"      |    |
+|    |          - ผูก Canonical URL, Description, Keywords, Robots Directives               |    |
+|    | [Step 2] opengraph-image.tsx (Edge ImageResponse):                                  |    |
+|    |          - เรนเดอร์ JSX เป็นภาพ PNG 1200x630px พร้อมโลโก้, เกรด Marbling, ราคา       |    |
+|    | [Step 3] Page Component (RSC):                                                       |    |
+|    |          - ฉีด JSON-LD Structured Data (Product + AggregateRating Schema)            |    |
+|    +--------------------------------------------------------------------------------------+    |
+|                                         |                                                        |
+| 3. Rendered Output                      v                                                        |
+|    - ส่ง HTML ที่สมบูรณ์แบบ 100% พร้อม Meta Tags และ Structured Data สู่ Search Engine         |
++--------------------------------------------------------------------------------------------------+
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 Metadata Resolution Hierarchy & Merging
+Next.js มีกฎเกณฑ์การรวม Metadata แบบลำดับชั้น (Shallow Merging):
+1. **Root Layout (`src/app/layout.tsx`):** กำหนด Metadata พื้นฐานระดับแอปพลิเคชัน เช่น `title.template: '%s | Smart Butcher Marketplace'` และ Base URL
+2. **Sub-layout / Page (`src/app/products/[slug]/page.tsx`):** เขียนทับหรือเติมเต็มค่าเฉพาะของหน้านั้นๆ
+3. **Execution Overlap:** ฟังก์ชัน `generateMetadata` และ Component ของ `page.tsx` มักดึงข้อมูลเดียวกัน Next.js แก้ปัญหานี้ด้วย **Request Memoization** ทำให้อ่านข้อมูลจากฐานข้อมูลหรือ API เพียงรอบเดียว ไม่เกิด Overhead ซ้ำซ้อน
+
+### 2.2 Dynamic OpenGraph Images (`@vercel/og`)
+การแชร์ลิงก์บนโซเชียลมีเดียต้องการภาพพรีวิวที่ดึงดูดสายตา:
+- ฟังก์ชัน `ImageResponse` แปลง JSX และ Tailwind CSS (subset) ให้กลายเป็นภาพ **PNG / SVG** โดยตรงที่ Edge Runtime ผ่านเอนจิน Satori
+- ลดความจำเป็นในการเตรียมภาพล่วงหน้าหรือเปิดโปรแกรมกราฟิก เมื่อมีเนื้อสเต๊กชิ้นใหม่เข้าระบบ ภาพ OG พร้อมราคาและป้ายเกรด A5 จะถูกวาดขึ้นทันทีแบบไดนามิก
+
+### 2.3 JSON-LD Structured Data
+Search Engine อย่าง Google ต้องการทำความเข้าใจข้อมูลเชิงลึก (Semantic Understanding):
+- การใส่ JSON-LD Schema (เช่น `Product`, `Offer`, `AggregateRating`, `BreadcrumbList`) ช่วยให้สินค้ามีโอกาสแสดงผลเป็น **Google Rich Snippet** (แสดงดาวรีวิว ราคา และสถานะสต็อกบนหน้าค้นหา)
+- ต้องฝังอยู่ในแท็ก `<script type="application/ld+json" />` โดยตรงใน Server Component
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: Dynamic Metadata & JSON-LD Structured Data ในหน้าสินค้าเนื้อ
+
+ตัวอย่างการสร้าง Metadata แบบไดนามิกพร้อมแทรก JSON-LD Product Schema ในหน้ารายละเอียดเนื้อสเต๊กพรีเมียม
+
+```tsx filename="src/app/products/[slug]/page.tsx"
+import type { Metadata, ResolvingMetadata } from 'next';
+import { notFound } from 'next/navigation';
+
+interface Props {
+  params: Promise<{ slug: string }>;
+}
+
+interface MeatProduct {
+  id: string;
+  slug: string;
+  name: string;
+  thaiName: string;
+  description: string;
+  origin: string;
+  marblingScore: number;
+  pricePerKg: number;
+  inStock: boolean;
+  ratingValue: number;
+  reviewCount: number;
+  imageUrl: string;
+}
+
+// ฟังก์ชันจำลองการดึงข้อมูลสินค้า (มี Request Memoization ในตัว)
+async function getMeatProduct(slug: string): Promise<MeatProduct | null> {
+  if (slug === 'wagyu-a5-ribeye') {
+    return {
+      id: 'prod-001',
+      slug: 'wagyu-a5-ribeye',
+      name: 'Miyazaki Wagyu A5 Ribeye Steak',
+      thaiName: 'เนื้อริบอายวากิว A5 มิยาซากิ ดรายเอจ 45 วัน',
+      description: 'เนื้อสเต๊กวากิว A5 แท้จากจังหวัดมิยาซากิ บ่มดรายเอจ 45 วัน เพิ่มความเข้มข้นของกลิ่นและรสสัมผัสละลายในปาก',
+      origin: 'Miyazaki, Japan',
+      marblingScore: 11,
+      pricePerKg: 6200,
+      inStock: true,
+      ratingValue: 4.9,
+      reviewCount: 128,
+      imageUrl: 'https://smartbutcher.com/images/products/wagyu-a5.jpg',
+    };
+  }
+  return null;
+}
+
+// 1. สร้าง Dynamic Metadata สำหรับ Search Engines & Social Cards
+export async function generateMetadata(
+  { params }: Props,
+  parent: ResolvingMetadata
+): Promise<Metadata> {
+  const { slug } = await params;
+  const product = await getMeatProduct(slug);
+
+  if (!product) {
+    return {
+      title: 'ไม่พบเนื้อชิ้นที่ต้องการค้นหา | Smart Butcher',
+      robots: { index: false, follow: false },
+    };
+  }
+
+  const previousImages = (await parent).openGraph?.images || [];
+  const canonicalUrl = `https://smartbutcher.com/products/${product.slug}`;
+
+  return {
+    title: `${product.thaiName} (เกรด BMS ${product.marblingScore})`,
+    description: product.description,
+    keywords: ['เนื้อวากิว A5', 'ริบอาย', 'ดรายเอจ', 'สเต๊กพรีเมียม', product.origin],
+    alternates: {
+      canonical: canonicalUrl,
+    },
+    openGraph: {
+      title: `${product.thaiName} | Smart Butcher Marketplace`,
+      description: product.description,
+      url: canonicalUrl,
+      siteName: 'Smart Butcher Marketplace',
+      type: 'website',
+      images: [
+        {
+          url: `/products/${product.slug}/opengraph-image`,
+          width: 1200,
+          height: 630,
+          alt: product.name,
+        },
+        ...previousImages,
+      ],
+    },
+    twitter: {
+      card: 'summary_large_image',
+      title: product.name,
+      description: product.description,
+      creator: '@SmartButcherTH',
+    },
+  };
+}
+
+// 2. Component หน้ารายละเอียดสินค้า พร้อม JSON-LD Schema
+export default async function ProductDetailPage({ params }: Props) {
+  const { slug } = await params;
+  const product = await getMeatProduct(slug);
+
+  if (!product) {
+    notFound();
+  }
+
+  // สร้าง Schema.org JSON-LD สำหรับ Google Rich Snippets
+  const jsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'Product',
+    name: product.thaiName,
+    image: product.imageUrl,
+    description: product.description,
+    sku: product.id,
+    brand: {
+      '@type': 'Brand',
+      name: 'Smart Butcher Selection',
+    },
+    offers: {
+      '@type': 'Offer',
+      url: `https://smartbutcher.com/products/${product.slug}`,
+      priceCurrency: 'THB',
+      price: product.pricePerKg,
+      priceValidUntil: '2026-12-31',
+      availability: product.inStock
+        ? 'https://schema.org/InStock'
+        : 'https://schema.org/OutOfStock',
+      itemCondition: 'https://schema.org/NewCondition',
+    },
+    aggregateRating: {
+      '@type': 'AggregateRating',
+      ratingValue: product.ratingValue,
+      reviewCount: product.reviewCount,
+      bestRating: 5,
+      worstRating: 1,
+    },
+  };
+
+  return (
+    <main className="max-w-6xl mx-auto px-4 py-12">
+      {/* ฝัง Structured Data สำหรับ Google Search Crawler */}
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
+        <div className="rounded-3xl overflow-hidden border border-stone-800 bg-stone-900 aspect-video flex items-center justify-center">
+          <span className="text-stone-400">ภาพชิ้นเนื้อวากิวเกรดพรีเมียม</span>
+        </div>
+
+        <div>
+          <span className="px-3 py-1 bg-red-950 text-red-400 text-xs font-semibold rounded-full border border-red-800">
+            {product.origin}
+          </span>
+          <h1 className="text-3xl font-bold text-white mt-3">{product.thaiName}</h1>
+          <p className="text-stone-400 text-sm mt-2">{product.name}</p>
+
+          <div className="flex items-center gap-2 mt-4 text-amber-400">
+            <span>⭐ {product.ratingValue}</span>
+            <span className="text-stone-500 text-sm">({product.reviewCount} รีวิวจากลูกค้าจริง)</span>
+          </div>
+
+          <div className="mt-6 p-4 rounded-2xl bg-stone-900 border border-stone-800">
+            <span className="text-xs text-stone-400 block">ราคาเริ่มต้นต่อกิโลกรัม</span>
+            <span className="text-3xl font-extrabold text-white">฿{product.pricePerKg.toLocaleString()}</span>
+          </div>
+
+          <p className="mt-6 text-stone-300 leading-relaxed">{product.description}</p>
+        </div>
+      </div>
+    </main>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: Dynamic OpenGraph Image (`ImageResponse`) และ Dynamic `sitemap.ts`
+
+สร้างภาพแชร์โซเชียลแบบไดนามิกที่มีลายเนื้อ ลายหินอ่อน และป้ายราคา พร้อมสร้าง Sitemap ดึงข้อมูลจากคลังสินค้าอัตโนมัติ
+
+```tsx filename="src/app/products/[slug]/opengraph-image.tsx"
+import { ImageResponse } from 'next/og';
+
+export const runtime = 'edge';
+export const alt = 'Smart Butcher Premium Cut Preview';
+export const size = { width: 1200, height: 630 };
+export const contentType = 'image/png';
+
+interface Props {
+  params: Promise<{ slug: string }>;
+}
+
+export default async function Image({ params }: Props) {
+  const { slug } = await params;
+  const formattedTitle = slug.replace(/-/g, ' ').toUpperCase();
+
+  return new ImageResponse(
+    (
+      <div
+        style={{
+          height: '100%',
+          width: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'space-between',
+          backgroundColor: '#0c0a09',
+          padding: '60px',
+          fontFamily: 'sans-serif',
+          border: '12px solid #7f1d1d',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+            <div
+              style={{
+                width: '48px',
+                height: '48px',
+                backgroundColor: '#dc2626',
+                borderRadius: '12px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#fff',
+                fontSize: '28px',
+                fontWeight: 'bold',
+              }}
+            >
+              🥩
+            </div>
+            <span style={{ fontSize: '28px', fontWeight: '800', color: '#ffffff', letterSpacing: '2px' }}>
+              SMART BUTCHER MARKETPLACE
+            </span>
+          </div>
+          <span
+            style={{
+              padding: '8px 24px',
+              backgroundColor: '#450a0a',
+              color: '#f87171',
+              borderRadius: '9999px',
+              fontSize: '20px',
+              fontWeight: '600',
+              border: '2px solid #991b1b',
+            }}
+          >
+            A5 Japanese Marbling Certified
+          </span>
+        </div>
+
+        <div>
+          <div style={{ fontSize: '24px', color: '#a8a29e', marginBottom: '12px', textTransform: 'uppercase' }}>
+            Dry-Aged Artisan Reserve Cut
+          </div>
+          <div
+            style={{
+              fontSize: '56px',
+              fontWeight: '900',
+              color: '#ffffff',
+              lineHeight: 1.15,
+            }}
+          >
+            {formattedTitle}
+          </div>
+        </div>
+
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'flex-end',
+            borderTop: '2px solid #292524',
+            paddingTop: '32px',
+          }}
+        >
+          <div style={{ display: 'flex', gap: '40px' }}>
+            <div>
+              <div style={{ fontSize: '16px', color: '#78716c' }}>TEMPERATURE</div>
+              <div style={{ fontSize: '24px', color: '#ffffff', fontWeight: '700' }}>-18°C Cold Chain</div>
+            </div>
+            <div>
+              <div style={{ fontSize: '16px', color: '#78716c' }}>AGING PROCESS</div>
+              <div style={{ fontSize: '24px', color: '#ffffff', fontWeight: '700' }}>45 Days Himalayan Salt</div>
+            </div>
+          </div>
+          <div style={{ fontSize: '20px', color: '#ef4444', fontWeight: 'bold' }}>
+            smartbutcher.com/products/{slug}
+          </div>
+        </div>
+      </div>
+    ),
+    {
+      ...size,
+    }
+  );
+}
+```
+
+ไฟล์สร้าง XML Sitemap ไดนามิกจากรายการเนื้อทั้งหมดในคลัง:
+
+```typescript filename="src/app/sitemap.ts"
+import type { MetadataRoute } from 'next';
+
+export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
+  const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://smartbutcher.com';
+
+  // 1. รายการเส้นทางหลักแบบสถิต
+  const staticRoutes: MetadataRoute.Sitemap = [
+    {
+      url: baseUrl,
+      lastModified: new Date(),
+      changeFrequency: 'daily',
+      priority: 1.0,
+    },
+    {
+      url: `${baseUrl}/cuts`,
+      lastModified: new Date(),
+      changeFrequency: 'daily',
+      priority: 0.9,
+    },
+    {
+      url: `${baseUrl}/about-dry-aged`,
+      lastModified: new Date(),
+      changeFrequency: 'monthly',
+      priority: 0.6,
+    },
+  ];
+
+  // 2. ดึงรายการ Slugs สินค้าเนื้อจากฐานข้อมูล
+  const meatSlugs = [
+    'wagyu-a5-ribeye',
+    'kuroge-washu-striploin',
+    'black-angus-prime-tomahawk',
+    'australian-mbs9-tenderloin',
+  ];
+
+  const productRoutes: MetadataRoute.Sitemap = meatSlugs.map((slug) => ({
+    url: `${baseUrl}/products/${slug}`,
+    lastModified: new Date(),
+    changeFrequency: 'weekly',
+    priority: 0.8,
+  }));
+
+  return [...staticRoutes, ...productRoutes];
+}
+```
+
+และไฟล์คอนฟิกกฎของ Search Engine Bot:
+
+```typescript filename="src/app/robots.ts"
+import type { MetadataRoute } from 'next';
+
+export default function robots(): MetadataRoute.Robots {
+  const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://smartbutcher.com';
+
+  return {
+    rules: [
+      {
+        userAgent: '*',
+        allow: '/',
+        disallow: ['/admin/', '/checkout/', '/account/', '/api/'],
+      },
+      {
+        userAgent: 'GPTBot',
+        disallow: ['/private/'],
+      },
+    ],
+    sitemap: `${baseUrl}/sitemap.xml`,
+  };
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ปัญหาที่พบบ่อย | รูปแบบที่ผิด (Anti-pattern) | รูปแบบที่ถูกต้องระดับ Senior (Best Practice) |
+| :--- | :--- | :--- |
+| **ใช้ `react-helmet` ใน Next.js App Router** | นำเข้าไลบรารี Client Side เดิม ทำให้เกิด Hydration Mismatch และ Googlebot มองไม่เห็น Meta Tags | ใช้ Native Metadata API (`generateMetadata` และ `export const metadata`) ใน Server Components |
+| **Hardcode Base URL ใน OpenGraph Image** | ใช้ Relative Path เช่น `og:image: '/og.png'` ซึ่งแพลตฟอร์มโซเชียลมีเดียไม่สามารถดาวน์โหลดภาพได้ | ต้องใช้ Absolute URL ที่มี Domain และ Protocol ครบถ้วนเสมอ เช่น `https://smartbutcher.com/og.png` |
+| **เขียน JSON-LD ใน Client Component** | ใช้ `useEffect` เพื่อสร้างและแทรก `<script>` ลงใน DOM ทำให้ Search Crawler สแกนไม่พบใน Initial HTML | วาง `<script type="application/ld+json">` ใน Server Component เพื่อให้ถูกส่งไปกับ HTML รอบแรก |
+| **ลืม Canonical Tag จนเกิดเนื้อหาซ้ำ (Duplicate Content)** | หน้าสินค้าเข้าถึงได้หลาย URL (เช่น มี URL Search Query) แต่ไม่มีการระบุ `canonical` ทำให้ Ranking ตก | ระบุ `alternates: { canonical: 'https://...' }` เพื่อยืนยัน URL หลักที่ถูกต้องต่อ Googlebot |
+| **ปล่อยให้หน้า Admin ติดดัชนีการค้นหา** | ลืมตั้ง `robots: { index: false }` ในหน้าจัดการคำสั่งซื้อของหลังบ้าน | ปิดกั้นใน `src/app/robots.ts` ควบคู่กับการประกาศ `noindex, nofollow` ใน Metadata ของ Layout หลังบ้าน |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Next.js Metadata API เมื่อ:
+- **หน้าสาธารณะที่ต้องการ Ranking บน Search Engine:** หน้าหลัก, หมวดหมู่เนื้อสเต๊ก, หน้ารายละเอียดสินค้า, บทความสูตรอาหาร
+- **การแชร์ลิงก์บน Social Platforms:** ต้องการให้พรีวิวใน Facebook, X/Twitter, LINE มีรูปสวยงามและข้อมูลถูกต้อง
+- **หน้า E-commerce ที่ต้องการ Rich Snippets:** หน้ารายการสินค้าที่ต้องการแสดงราคาและดาวรีวิวบนผลการค้นหา
+
+### ไม่ควรใช้ Metadata API (หรือต้องปิด Index) เมื่อ:
+- **หน้าส่วนตัวที่มีข้อมูลลับเฉพาะบุคคล:** หน้าใบเสร็จรับเงิน, หน้าแดชบอร์ดจัดการคำสั่งซื้อแอดมิน, หน้าแก้ไขโปรไฟล์ผู้ใช้
+- **API Endpoints หรือ Webhook Handlers:** Route ภายใต้ `/api/*` ไม่จำเป็นต้องมี Metadata HTML Tags
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: Next.js จัดการปัญหาประสิทธิภาพอย่างไรเมื่อทั้ง `generateMetadata` และ Component ของหน้า `page.tsx` มีการเรียกฟังก์ชันดึงข้อมูลจากฐานข้อมูลชุดเดียวกัน?
+
+**แนวคำตอบเชิงลึก:**
+Next.js แก้ไขปัญหานี้ผ่านสถาปัตยกรรม **Request Memoization** ของ React Server Components:
+1. เมื่อคำขอ HTTP เดินทางมาถึงเซิร์ฟเวอร์ Next.js จะประมวลผล `generateMetadata` ควบคู่ไปกับ Page Component
+2. หากทั้งสองส่วนเรียกฟังก์ชัน `fetch(url)` เดียวกัน หรือเรียกฟังก์ชันที่ถูกครอบด้วย `React.cache()` ตัวอย่างเช่น `const getProduct = cache(async (id) => db.find(id))`
+3. React จะทำการแคชผลลัพธ์ของคำขอนั้นไว้ในหน่วยความจำตลอดช่วงเวลา Render คำขอนั้น (Single Render Pass)
+4. ส่งผลให้การเชื่อมต่อไปยัง Database หรือ Microservice เกิดขึ้นจริงเพียง **ครั้งเดียวเท่านั้น** โดยไม่สร้าง Overhead ซ้ำซ้อน และยังคงความเป็น Clean Architecture ที่แยกระหว่างการเตรียม Metadata และการเรนเดอร์ UI ออกจากกันได้อย่างสวยงาม
+
+---
+
+### คำถามที่ 2: ในการทำ Dynamic Social Cards ขนาดใหญ่ ทำไมการใช้ `@vercel/og` (`ImageResponse`) ถึงมีประสิทธิภาพเหนือกว่าการใช้ Headless Chrome (Puppeteer) แบบดั้งเดิมอย่างมหาศาล?
+
+**แนวคำตอบเชิงลึก:**
+ความแตกต่างระหว่างสองโซลูชัน:
+- **สถาปัตยกรรมเดิม (Puppeteer / Headless Chrome):**
+  - ต้องเปิด Browser Process เต็มรูปแบบบนเซิร์ฟเวอร์ กินแรมหลายร้อยเมกะไบต์ต่ออินสแตนซ์
+  - Cold Start สูงมาก (ใช้เวลา 2-5 วินาทีในการบูตและจับภาพ Screenshot)
+  - ไม่สามารถรันบน Edge Runtime หรือ Serverless Function ขนาดเล็กได้ ทำให้ต้นทุนเซิร์ฟเวอร์สูงมาก
+- **สถาปัตยกรรมใหม่ (`@vercel/og` ผ่าน Satori & Resvg):**
+  - ไม่มีการเปิดเบราว์เซอร์จริง แต่ใช้ Satori แปลง JSX/HTML/CSS ให้กลายเป็นโครงสร้าง SVG เวกเตอร์โดยตรง
+  - แปลง SVG เป็นภาพ PNG ผ่านคอมไพเลอร์ Rust (Resvg) ที่คอมไพล์ลง WebAssembly
+  - ใช้หน่วยความจำน้อยมากและประมวลผลเสร็จในหลัก **มิลลิวินาที (10-50ms)**
+  - รันได้บน Edge Runtime ทั่วโลก ทำให้สามารถสร้างภาพการ์ดสินค้าเนื้อสเต๊กที่มีข้อมูลราคาและสต็อกล่าสุดส่งให้ผู้ใช้งานได้ทันทีแบบ Real-time โดยไม่เปลืองทรัพยากร
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [Next.js Multi-layer Caching](/docs/nextjs/caching) — การแคชข้อมูลและ Tag Revalidation
+- [Next.js Optimization](/docs/nextjs/optimization) — Image, Script, และ Font Optimization
+- [Next.js Advanced Routing](/docs/nextjs/advanced-routing) — Parallel Routes และ Intercepting Routes
+- [Next.js SSR & Server Components](/docs/nextjs/ssr) — พื้นฐานวงจรชีวิตของ Server-side Rendering

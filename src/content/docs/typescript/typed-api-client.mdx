@@ -1,0 +1,451 @@
+---
+title: Type-safe API Client
+category: Frontend
+parentTitle: TypeScript
+version: OpenAPI & TypeScript 5.x
+updatedAt: 2026-10-23
+---
+
+# TypeScript 5.x End-to-End Type-Safe API Client & OpenAPI
+
+สถาปัตยกรรมระดับ Senior ในการสร้าง End-to-End Type Safety ข้ามพรมแดน Fullstack: การแปลง NestJS Swagger/OpenAPI Spec สู่ TypeScript Types โดยอัตโนมัติด้วย `openapi-typescript`, การสร้าง Type-safe HTTP Client ด้วย `openapi-fetch`, การผสานเข้ากับ TanStack Query v5 `queryOptions`, และการขจัดปัญหา Type Mismatch ระหว่างหน้าบ้านและหลังบ้านอย่างถาวร
+
+---
+
+## 1. แนวคิด (Concept)
+
+หนึ่งในสาเหตุอันดับหนึ่งของบั๊กในระบบโปรดักชันคือ **Type Drift (การไม่ตรงกันของ Type ระหว่าง Frontend และ Backend)**:
+- Backend ปรับเปลี่ยนชื่อฟิลด์จาก `price` เป็น `pricePerKg` หรือเปลี่ยน Enum จาก `'PAID'` เป็น `'PAYMENT_COMPLETED'`
+- Frontend ไม่ทราบความเปลี่ยนแปลง และยังคงเรียกใช้ฟิลด์เดิม ทำให้หน้าเว็บพังหรือแสดงผลผิดพลาดแบบเงียบๆ
+- การเขียน Type ซ้ำซ้อนทั้งฝั่ง NestJS (DTOs) และฝั่ง React (Interfaces) สิ้นเปลืองเวลาและเกิดความผิดพลาดจากฝีมือมนุษย์ได้ง่าย
+
+**End-to-End Type Safety** แก้ปัญหานี้ด้วยการใช้ **Single Source of Truth**:
+1. NestJS Backend สร้าง OpenAPI (Swagger) JSON Schema ออกมาโดยอัตโนมัติจาก Decorators และ DTOs
+2. เครื่องมือ CLI แปลง OpenAPI Spec ให้กลายเป็น TypeScript Type Definitions ระดับพิกเซล
+3. Frontend Client ใช้ Type เหล่านี้ในการบังคับพิมพ์ Path, Query Parameters, Request Body และรับรู้ Response Type ตาม HTTP Status Code (200, 400, 404, 500) แบบ Discriminative
+
+```text
++--------------------------------------------------------------------------------------------------+
+|                            End-to-End Type Safety Pipeline                                       |
++--------------------------------------------------------------------------------------------------+
+| 1. Backend: NestJS REST API                                                                      |
+|    - @ApiProperty() บน DTOs (MeatProductDto, CreateOrderDto)                                     |
+|    - ส่งออกเอกสาร OpenAPI Spec อัตโนมัติ: https://api.smartbutcher.com/swagger-json             |
+|                                        |                                                         |
+| 2. Code Generation (Build / CI)        v                                                         |
+|    - npx openapi-typescript https://api... -o src/types/api-schema.d.ts                         |
+|    - ได้ Pure TypeScript Types แบบ Zero Runtime Cost                                             |
+|                                        |                                                         |
+| 3. Frontend Client: openapi-fetch      v                                                         |
+|    - const { data, error } = await client.GET('/api/v1/products/{id}', {                        |
+|        params: { path: { id: 'prod-001' } }, // บังคับใส่ Parameter ครบ                          |
+|      });                                                                                         |
+|    - data จะมี Type เป็น MeatProductDto ตรงกับหลังบ้าน 100% ทันทีโดยไม่ต้องเขียน Type เอง         |
+|                                        |                                                         |
+| 4. State Management: TanStack Query    v                                                         |
+|    - ห่อหุ้มด้วย queryOptions() ทำให้ Query Keys และ Query Data ได้รับ Type-safe อัตโนมัติ       |
++--------------------------------------------------------------------------------------------------+
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 ทำไมต้อง `openapi-typescript` แทนการ Generate SDK ตัวหนาเตอะ?
+เครื่องมือในอดีต (เช่น OpenAPI Generator หรือ Swagger Codegen Java-based):
+- จะ Generate ไฟล์โค้ด JavaScript ออกมาขนาดมหึมา (หลายหมื่นบรรทัด) ซึ่งหนัก Bundle Size และผูกขาดกับ Fetch Library เก่าๆ
+- **`openapi-typescript` แนวทางใหม่:** Generate ออกมาเฉพาะ **Type Definitions (`.d.ts`) บริสุทธิ์เท่านั้น**:
+  - Runtime ขนาด: **0 KB (ไม่มีโค้ด JS ถูกบันทึก)**
+  - คอมไพล์ได้เร็วที่สุดในโลก และใช้ Type System ขั้นสูงของ TypeScript 5.x เช่น Template Literal Types เพื่อแมป Path URL เช่น `'/products/{id}'`
+
+### 2.2 การเชื่อมโยงกับ `openapi-fetch`
+`openapi-fetch` เป็น Fetch Wrapper ขนาดเล็กมาก (น้อยกว่า 6 KB) ที่ใช้ Type Parameter จากไฟล์ `.d.ts`:
+- เมธอด `.GET()`, `.POST()`, `.PUT()`, `.DELETE()` จะตรวจสอบว่า URL ที่ส่งเข้ามามีอยู่ใน OpenAPI Spec หรือไม่
+- หาก URL นั้นมี Path Parameter (เช่น `{id}`) TypeScript จะบังคับให้เราส่ง `params: { path: { id: string } }`
+- คำนวณ Type ของคำตอบแยกตาม HTTP Status Code อย่างแม่นยำ เช่น ถ้าได้ 200 จะได้ Schema ความสำเร็จ แต่ถ้า 400 จะได้ Schema ของ Error DTO
+
+### 2.3 การทำงานร่วมกับ TanStack Query v5 `queryOptions`
+ใน TanStack Query v5 ฟังก์ชัน `queryOptions()` ช่วยสร้างสัญญาที่ผูก Cache Key และ Query Function เข้าด้วยกัน:
+- ช่วยให้ทั้งฝั่ง Data Fetching, Prefetching ใน Server Component, และ Invalidation ใน Mutation ใช้ Key และ Type ตัวเดียวกันเสมอ
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: OpenAPI Schema Generation และ Type-Safe Client Setup
+
+สมมติว่าหลังบ้านส่งออก Swagger Spec และเรา Generate เป็นไฟล์ `src/types/api-schema.d.ts`:
+
+```typescript filename="src/types/api-schema.d.ts"
+/**
+ * ไฟล์นี้ถูกสร้างโดยคำสั่ง:
+ * npx openapi-typescript http://localhost:4000/api-docs-json -o src/types/api-schema.d.ts
+ */
+export interface paths {
+  '/api/v1/meat-products': {
+    get: {
+      parameters: {
+        query?: {
+          category?: 'WAGYU' | 'ANGUS' | 'DRY_AGED';
+          minPrice?: number;
+          maxPrice?: number;
+          limit?: number;
+        };
+      };
+      responses: {
+        200: {
+          content: {
+            'application/json': {
+              items: components['schemas']['MeatProductDto'][];
+              totalCount: number;
+            };
+          };
+        };
+        400: {
+          content: {
+            'application/json': components['schemas']['ApiErrorDto'];
+          };
+        };
+      };
+    };
+  };
+
+  '/api/v1/meat-products/{id}': {
+    get: {
+      parameters: {
+        path: {
+          id: string;
+        };
+      };
+      responses: {
+        200: {
+          content: {
+            'application/json': components['schemas']['MeatProductDto'];
+          };
+        };
+        404: {
+          content: {
+            'application/json': components['schemas']['ApiErrorDto'];
+          };
+        };
+      };
+    };
+  };
+
+  '/api/v1/orders': {
+    post: {
+      requestBody: {
+        content: {
+          'application/json': components['schemas']['CreateOrderDto'];
+        };
+      };
+      responses: {
+        201: {
+          content: {
+            'application/json': components['schemas']['OrderReceiptDto'];
+          };
+        };
+        400: {
+          content: {
+            'application/json': components['schemas']['ApiErrorDto'];
+          };
+        };
+      };
+    };
+  };
+}
+
+export interface components {
+  schemas: {
+    MeatProductDto: {
+      id: string;
+      name: string;
+      cutType: string;
+      origin: string;
+      marblingScore: number;
+      pricePerKg: number;
+      inStock: boolean;
+    };
+    CreateOrderDto: {
+      productId: string;
+      weightGrams: number;
+      thicknessInches: number;
+      shippingAddress: string;
+    };
+    OrderReceiptDto: {
+      orderId: string;
+      trackingCode: string;
+      totalPrice: number;
+      estimatedDelivery: string;
+    };
+    ApiErrorDto: {
+      statusCode: number;
+      message: string;
+      timestamp: string;
+    };
+  };
+}
+```
+
+สร้าง Client กลางที่ผูก Type สัญญาอย่างเข้มงวด:
+
+```typescript filename="src/lib/api-client.ts"
+import createClient from 'openapi-fetch';
+import type { paths } from '@/types/api-schema';
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api.smartbutcher.com';
+
+// สร้าง Typed Client ที่รู้โครงสร้าง API ทุกเส้นทาง
+export const apiClient = createClient<paths>({
+  baseUrl: API_BASE_URL,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
+
+// Helper function ทดสอบการเรียกใช้ Type-safe API
+export async function getWagyuSteakDetail(productId: string) {
+  // บังคับพิมพ์ URL และ Params ถูกต้องเป๊ะๆ
+  const { data, error, response } = await apiClient.GET('/api/v1/meat-products/{id}', {
+    params: {
+      path: { id: productId },
+    },
+  });
+
+  if (error) {
+    // error จะมี Type เป็น ApiErrorDto อัตโนมัติเมื่อ response.status คือ 404
+    throw new Error(`[API Error ${response.status}]: ${error.message}`);
+  }
+
+  // data จะมี Type เป็น MeatProductDto 100%
+  return data;
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: ผสานร่วมกับ TanStack Query v5 `queryOptions` และ Mutations
+
+สร้าง Data Fetching Layer ระดับองค์กรที่ผูก Query Key, การดึงข้อมูล และการทำ Invalidation เข้าด้วยกัน
+
+```typescript filename="src/queries/meat-queries.ts"
+import { queryOptions } from '@tanstack/react-query';
+import { apiClient } from '@/lib/api-client';
+
+export interface CatalogFilterParams {
+  category?: 'WAGYU' | 'ANGUS' | 'DRY_AGED';
+  limit?: number;
+}
+
+/**
+ * รวม Query Key และ Query Function ไว้ในที่เดียวด้วย queryOptions
+ * ได้ Type Inferred อัตโนมัติโดยไม่ต้องประกาศ Generic <MeatProductDto[]> ซ้ำ
+ */
+export const meatCatalogQueryOptions = (filters: CatalogFilterParams = {}) =>
+  queryOptions({
+    queryKey: ['meat-catalog', filters],
+    queryFn: async () => {
+      const { data, error } = await apiClient.GET('/api/v1/meat-products', {
+        params: {
+          query: filters,
+        },
+      });
+
+      if (error) {
+        throw new Error(error.message || 'ไม่สามารถโหลดแคตตาล็อกเนื้อได้');
+      }
+
+      return data;
+    },
+    staleTime: 1000 * 60 * 5, // แคชฝั่ง Client 5 นาที
+  });
+
+export const meatDetailQueryOptions = (id: string) =>
+  queryOptions({
+    queryKey: ['meat-detail', id],
+    queryFn: async () => {
+      const { data, error } = await apiClient.GET('/api/v1/meat-products/{id}', {
+        params: {
+          path: { id },
+        },
+      });
+
+      if (error) {
+        throw new Error(error.message || `ไม่พบเนื้อรหัส ${id}`);
+      }
+
+      return data;
+    },
+    staleTime: 1000 * 60 * 10,
+  });
+```
+
+การสร้าง Custom Mutation Hook และนำไปใช้งานในหน้าสั่งซื้อ:
+
+```tsx filename="src/hooks/use-create-meat-order.ts"
+'use client';
+
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { apiClient } from '@/lib/api-client';
+import type { components } from '@/types/api-schema';
+
+type CreateOrderInput = components['schemas']['CreateOrderDto'];
+
+export function useCreateMeatOrder() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (input: CreateOrderInput) => {
+      const { data, error, response } = await apiClient.POST('/api/v1/orders', {
+        body: input,
+      });
+
+      if (error) {
+        throw new Error(error.message || 'เกิดข้อผิดพลาดในการส่งคำสั่งซื้อ');
+      }
+
+      return data;
+    },
+    onSuccess: (receipt) => {
+      console.log(`[Order Created] รหัสคำสั่งซื้อ ${receipt.orderId} เลขพัสดุ: ${receipt.trackingCode}`);
+      // สั่ง Invalidate แคตตาล็อกเพื่ออัปเดตสต็อกสดทันที
+      queryClient.invalidateQueries({ queryKey: ['meat-catalog'] });
+    },
+  });
+}
+```
+
+นำไปประกอบใน Client Component ของหน้ารายการเนื้อ:
+
+```tsx filename="src/components/meat/meat-catalog-view.tsx"
+'use client';
+
+import { useQuery } from '@tanstack/react-query';
+import { meatCatalogQueryOptions } from '@/queries/meat-queries';
+import { useCreateMeatOrder } from '@/hooks/use-create-meat-order';
+
+export function MeatCatalogView() {
+  // ดึงข้อมูลแคตตาล็อกด้วย Type-safe Query
+  const { data, isLoading, error } = useQuery(
+    meatCatalogQueryOptions({ category: 'WAGYU', limit: 10 })
+  );
+
+  const { mutate: createOrder, isPending: isOrdering } = useCreateMeatOrder();
+
+  if (isLoading) {
+    return <div className="text-stone-400 p-8 text-center animate-pulse">กำลังโหลดคลังเนื้อวากิว...</div>;
+  }
+
+  if (error) {
+    return <div className="text-red-400 p-8 text-center">เกิดข้อผิดพลาด: {error.message}</div>;
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-black text-white">เนื้อวากิวพิเศษพร้อมตัด (ทั้งหมด {data?.totalCount} รายการ)</h2>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+        {data?.items.map((meat) => (
+          <div key={meat.id} className="p-6 rounded-3xl bg-stone-900 border border-stone-800 flex flex-col justify-between">
+            <div>
+              <span className="text-xs uppercase text-red-500 font-bold">{meat.origin}</span>
+              <h3 className="text-xl font-bold text-white mt-1">{meat.name}</h3>
+              <p className="text-xs text-stone-400 mt-1">เกรดไขมันลายหินอ่อน BMS {meat.marblingScore}</p>
+            </div>
+
+            <div className="mt-6 pt-4 border-t border-stone-800 flex justify-between items-center">
+              <div>
+                <span className="text-[11px] text-stone-500 block">ราคา/กก.</span>
+                <span className="text-lg font-black text-white">฿{meat.pricePerKg.toLocaleString()}</span>
+              </div>
+
+              <button
+                type="button"
+                disabled={!meat.inStock || isOrdering}
+                onClick={() =>
+                  createOrder({
+                    productId: meat.id,
+                    weightGrams: 400,
+                    thicknessInches: 1.5,
+                    shippingAddress: '123 สุขุมวิท กรุงเทพฯ',
+                  })
+                }
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white text-xs font-bold transition"
+              >
+                {isOrdering ? 'กำลังสั่งตัด...' : meat.inStock ? 'สั่งตัด 400g' : 'สินค้าหมด'}
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ปัญหาที่พบบ่อย | รูปแบบที่ผิด (Anti-pattern) | รูปแบบที่ถูกต้องระดับ Senior (Best Practice) |
+| :--- | :--- | :--- |
+| **เขียน Type Interface ซ้ำด้วยตนเองบนหน้าบ้าน** | ก๊อปปี้คลาส DTO จาก NestJS มาแปะใน React เมื่อหลังบ้านแก้ หน้าบ้านไม่รู้ตัวและบั๊ก | ใช้ `openapi-typescript` สร้าง Type อัตโนมัติจาก Swagger JSON ในขั้นตอน CI/CD |
+| **ใช้ `any` ใน Response ของ Fetch** | `const data = (await res.json()) as any;` ทำลายการตรวจสอบของ TypeScript ทั้งหมด | ใช้ `openapi-fetch` เพื่อให้ Data และ Error ได้รับ Type ตรงตาม HTTP Status Code |
+| **สร้างรหัส SDK ก้อนยักษ์เข้า Git** | รัน Java generator แล้วคอมมิตไฟล์หลายร้อยไฟล์เข้า repository ทำให้ Git บวม | เจนเฉพาะ `.d.ts` Type Definitions ขนาดเล็ก และติดตั้งผ่าน Script Build อัตโนมัติ |
+| **กระจาย Query Key แบบ String ดิบๆ ในทุก Component** | เขียน `useQuery({ queryKey: ['products', id] })` ใน 10 ไฟล์ เมื่อต้องการแก้ Key ต้องตามแก้ทุกจุด | รวมศูนย์ผ่านฟังก์ชัน `queryOptions()` เพื่อแชร์ Key และ Fetch Function ร่วมกันแบบผูกขาด |
+| **ไม่ดักจับ Error Schema จาก OpenAPI** | สันนิษฐานว่าถ้า API พัง จะมีเฉพาะสตริงข้อความธรรมดา | ตรวจสอบ `error` object ที่แมปกับ `ApiErrorDto` ของหลังบ้านอย่างสมบูรณ์ |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Type-Safe API Client (OpenAPI) เมื่อ:
+- **โปรเจกต์ขนาดกลางถึงใหญ่ที่มีการแยกทีมชัดเจน:** ทีม Frontend และ Backend ทำงานร่วมกันบน REST API สเปก Swagger/OpenAPI
+- **ระบบที่มี Data Contract เปลี่ยนแปลงบ่อย:** ช่วยให้ทีมทราบทันทีตอนรัน `tsc` หรือ Build CI ว่า Backend มี Breaking Changes ตรงไหน
+- **แอปพลิเคชันที่ใช้ TanStack Query v5:** การผสาน `openapi-fetch` เข้ากับ `queryOptions` มอบ Developer Experience (DX) ระดับสูงสุด
+
+### ไม่ควรใช้เมื่อ:
+- **โปรเจกต์ Fullstack Monorepo ที่ใช้ tRPC:** หากหน้าบ้านและหลังบ้านเป็น TypeScript ทั้งคู่และอยู่ใน Monorepo เดียวกัน การใช้ **tRPC** จะให้ Type Safety โดยไม่ต้อง Generate เอกสาร OpenAPI คั่นกลาง
+- **ระบบที่ใช้ GraphQL:** มีเครื่องมือเฉพาะทางที่ดีกว่า เช่น GraphQL Code Generator (`@graphql-codegen`)
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: อธิบายความแตกต่างของสถาปัตยกรรม End-to-End Type Safety ระหว่าง tRPC กับ OpenAPI (`openapi-typescript`) และเหตุผลในการเลือกใช้ในระดับองค์กร?
+
+**แนวคำตอบเชิงลึก:**
+1. **tRPC Architecture:**
+   - **กลไก:** แชร์ Type โดยตรงระหว่าง Backend และ Frontend ผ่าน TypeScript Project References หรือ Monorepo Packages โดยไม่มีขั้นตอน Code Generation
+   - **ข้อจำกัด:** ทั้ง Backend และ Frontend **ต้องเขียนด้วย TypeScript เท่านั้น** และมักต้องการให้โค้ดอยู่ใน Monorepo เดียวกัน ไม่สามารถให้บริการแก่ Third-party หรือ Mobile Developers ที่เขียนด้วยภาษาอื่น (เช่น Swift, Kotlin, Go) ได้ง่าย
+2. **OpenAPI Architecture (`openapi-typescript`):**
+   - **กลไก:** ใช้ **Language-agnostic Industry Standard** (OpenAPI 3.0 / 3.1) เป็น Single Source of Truth
+   - **ข้อได้เปรียบระดับองค์กร:**
+     - Backend จะเขียนด้วย NestJS, Go, Java Spring Boot หรือ Python FastAPI ก็ได้ ทุกภาษาล้วนส่งออก OpenAPI Spec ได้
+     - หน้าบ้านใช้ `openapi-typescript` ดึง Spec มาสร้าง Types ที่มีน้ำหนัก 0 KB
+     - Third-party พาร์ตเนอร์ หรือแอปพลิเคชันมือถือ (iOS/Android) สามารถนำ Swagger Spec ตัวเดียวกันไป Generate SDK ในภาษาของตนเองได้ทันที
+     - เหมาะสมที่สุดสำหรับ Enterprise Architecture ที่มีความหลากหลายของเทคโนโลยี
+
+---
+
+### คำถามที่ 2: ฟังก์ชัน `queryOptions()` ใน TanStack Query v5 ช่วยยกระดับ Type Safety และสถาปัตยกรรมโค้ดอย่างไรเมื่อเทียบกับรูปแบบดั้งเดิมใน v4?
+
+**แนวคำตอบเชิงลึก:**
+- **ใน TanStack Query v4 (รูปแบบเดิม):**
+  - นักพัฒนามักประกาศ Query Key แยกไว้ที่หนึ่ง (`const KEYS = { detail: (id) => ['meat', id] }`)
+  - และเขียน Query Function แยกไว้อีกที่หนึ่ง (`const fetchMeat = (id) => ...`)
+  - เมื่อนำไปใช้ใน `useQuery({ queryKey: KEYS.detail(id), queryFn: () => fetchMeat(id) })` นักพัฒนาต้องใส่ Generic Type เอง เช่น `useQuery<MeatProductDto, Error>(...)` ซึ่งหากส่ง Key ผิด หรือเผลอเปลี่ยน Return Type ของ Fetch ฟังก์ชัน TypeScript อาจตรวจจับไม่พบ และการทำ `queryClient.prefetchQuery` ใน Server Component ก็ต้องพิมพ์ซ้ำทั้ง Key และ Function
+- **ใน TanStack Query v5 (ผ่าน `queryOptions`):**
+  - `queryOptions()` รวม **Query Key, Query Function, และ Type Contract เข้าเป็น Object เดียวกัน**
+  - **Type Inference อัตโนมัติ:** คืนค่า `UseQueryOptions` ที่รู้ทั้งประเภทของข้อมูล (`TData`) และประเภทข้อผิดพลาด (`TError`) ทันทีโดยไม่ต้องเขียน Generic ครอบ
+  - **Single Source of Truth ข้ามขอบเขต:** สามารถนำอ็อบเจกต์ที่ได้จาก `queryOptions` ไปส่งต่อให้ `useQuery(options)`, `useSuspenseQuery(options)`, `queryClient.prefetchQuery(options)`, หรือ `queryClient.invalidateQueries(options)` ได้อย่างไร้รอยต่อ ลดความผิดพลาดเรื่อง Key Mismatch เหลือศูนย์
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [TypeScript Branded Types](/docs/typescript/branded-types) — การผสาน Type-safe ID เข้ากับ Request Parameters
+- [TypeScript Exhaustive Check & Unions](/docs/typescript/exhaustive-union) — การจัดการ Status Codes และ Error DTOs ครบถ้วน
+- [Next.js Route Handlers](/docs/nextjs/route-handlers) — การสร้าง Backend API Endpoints ที่พร้อมต่อยอด OpenAPI
+- [TanStack Query Integration](/docs/tanstack-query) — กลยุทธ์การจัดการ Server Cache ฝั่ง Client

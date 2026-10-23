@@ -1,0 +1,399 @@
+---
+title: Cron Schedule
+category: BACKEND
+parentTitle: NestJS 11
+version: "@nestjs/schedule (NestJS 11)"
+updatedAt: 2026-10-23
+---
+
+## 1. แนวคิด (Concept)
+
+ในระบบ **Smart Butcher Marketplace** เมื่อลูกค้ากดสั่งจองเนื้อวัวเกรดพรีเมียม (เช่น Matsusaka Wagyu Ribeye หรือ Australian Tomahawk) ระบบจะทำการล็อคสต็อกเนื้อชิ้นนั้นไว้ชั่วคราวเป็นเวลา 30 นาที เพื่อรอให้ลูกค้าทำการโอนเงินและแนบสลิป หากลูกค้าไม่ได้ชำระเงินตามเวลาที่กำหนด สต็อกเนื้อสดชิ้นนั้นจะต้องถูกยกเลิกการจองและส่งกลับคืนเข้าสู่แคตตาล็อกสินค้า เพื่อให้ลูกค้าท่านอื่นสามารถกดซื้อได้
+
+งานในลักษณะนี้คืองานประเภท **Scheduled Background Tasks** หรือการรันงานตามรอบเวลาที่กำหนดไว้ล่วงหน้า (เช่น ทุกๆ 1 นาที, ทุกเที่ยงคืน หรือทุกสิ้นเดือน)
+
+NestJS 11 มีแพ็กเกจทางการคือ **`@nestjs/schedule`** ซึ่งใช้การประกาศคำสั่งผ่าน Decorator ที่เข้าใจง่าย เช่น `@Cron()`, `@Interval()`, หรือ `@Timeout()`
+
+อย่างไรก็ตาม เมื่อแอปพลิเคชันถูก Deploy สู่ระดับ Production ในสภาพแวดล้อมที่สเกลแบบ Multi-instance หรือ Multi-pod บน Kubernetes (เช่น มี 5 Pods ทำงานขนานกัน) คำสั่ง `@Cron()` แบบดั้งเดิมที่ทำงานในหน่วยความจำของแต่ละโหนด จะส่งผลให้ **ทุก Pod รันงานเดียวกันซ้ำพร้อมกัน 5 ครั้ง!** ก่อให้เกิดสภาวะ Race Condition คืนสต็อกเนื้อเกินจำนวนจริง หรือส่งอีเมลทวงเงินซ้ำซ้อน 
+
+วิศวกรระดับ Senior จึงจำเป็นต้องนำกลไก **Distributed Locking (Redis Lock / Redlock)** มาประสานการทำงาน เพื่อการันตีว่าในแต่ละรอบเวลา จะมี Pod เพียงโหนดเดียวเท่านั้นที่ได้สิทธิ์รันงาน
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### สถาปัตยกรรมตัวจัดตารางเวลาของ NestJS และปัญหา Split-Brain Cron
+
+```text filename="docs/backend/distributed-cron.txt"
+               ┌──────────────────────────────────────────────┐
+               │         Cron Schedule (0 0 * * * - Midnight) │
+               └──────┬───────────────────────┬───────────────┘
+                      │                       │
+           ┌──────────▼───────────┐┌──────────▼───────────┐
+           │ Pod 1 (Triggered)    ││ Pod 2 (Triggered)    │
+           └──────────┬───────────┘└──────────┬───────────┘
+                      │                       │
+                      ▼                       ▼
+      [ ขอ Redis Lock: SET lock:cron:cleanup-orders uuid NX PX 60000 ]
+                      │                       │
+             (ได้ Lock สำเร็จ: OK)     (ไม่ได้ Lock: NIL)
+                      │                       │
+                      ▼                       ▼
+          ┌───────────────────────┐       ┌───────────────────────┐
+          │ รันงานคืนสต็อกเนื้อ    │       │ ยกเลิกการทำงานรอบนี้   │
+          │ ยกเลิก Order ที่หมดอายุ│       │ (Skip - ป้องกันรันซ้ำ)│
+          └──────────┬────────────┘       └───────────────────────┘
+                     │
+                     ▼
+          [ ปล่อย Lock ด้วย Lua Script ]
+```
+
+### 1. Cron Expression Syntax
+รูปแบบการระบุเวลาตามมาตรฐาน Cron มีทั้งแบบ 5 ช่อง (Standard Unix) และ 6 ช่อง (Cron ใน Node.js ที่เพิ่มความละเอียดระดับวินาที):
+```text filename="docs/backend/cron-syntax.txt"
+*    *    *    *    *    *
+┬    ┬    ┬    ┬    ┬    ┬
+│    │    │    │    │    │
+│    │    │    │    │    └ day of week (0 - 7, 0/7 is Sun)
+│    │    │    │    └───── month (1 - 12)
+│    │    │    └────────── day of month (1 - 31)
+│    │    └─────────────── hour (0 - 23)
+│    └──────────────────── minute (0 - 59)
+└───────────────────────── second (0 - 59, optional ในมาตรฐาน NestJS)
+```
+
+### 2. Distributed Locking Algorithm ด้วย Redis
+เพื่อให้การรัน Cron งานปลอดภัยในสถาปัตยกรรม Cluster เราใช้คำสั่งของ Redis:
+```text filename="docs/backend/redis-lock-cmd.txt"
+SET lock:resource_name unique_lock_id NX PX 30000
+```
+- **`NX` (Not Exists):** บันทึกค่าลง Redis เฉพาะเมื่อ Key นี้ยังไม่มีอยู่เท่านั้น หากมีคนอื่นจองไว้แล้ว คำสั่งจะคืนค่า `nil`
+- **`PX 30000` (Milliseconds Expiry):** ลบ Key อัตโนมัติใน 30 วินาที ป้องกัน Deadlock หาก Pod ที่ได้ Lock เกิดไฟดับหรือ Crash ไปกะทันหัน
+- **Safe Release with Lua Script:** การปลดล็อคจะต้องตรวจสอบว่า `unique_lock_id` ตรงกับที่ตนเองถือไว้หรือไม่ เพื่อป้องกันไม่ให้ Pod ที่รันช้ากว่าเวลา TTL แอบไปปลดล็อคของคนอื่น
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การลงทะเบียน ScheduleModule และการรัน Task พื้นฐานในระบบเดี่ยว
+
+ตัวอย่างการตั้งค่า `@nestjs/schedule` เพื่อตรวจสอบออเดอร์เนื้อที่หมดอายุทุกๆ เที่ยงคืน
+
+```typescript filename="src/app.module.ts"
+import { Module } from '@nestjs/common';
+import { ScheduleModule } from '@nestjs/schedule';
+import { OrderCleanupModule } from './modules/order-cleanup/order-cleanup.module';
+
+@Module({
+  imports: [
+    // ลงทะเบียน ScheduleModule ระดับ Root เพื่อเปิดใช้งาน Cron Engine
+    ScheduleModule.forRoot(),
+    OrderCleanupModule,
+  ],
+})
+export class AppModule {}
+```
+
+```typescript filename="src/modules/order-cleanup/order-cleanup.service.ts"
+import { Injectable, Logger } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
+import { PrismaService } from '../prisma/prisma.service';
+
+@Injectable()
+export class OrderCleanupService {
+  private readonly logger = new Logger(OrderCleanupService.name);
+
+  constructor(private readonly prisma: PrismaService) {}
+
+  // รันทุกๆ เที่ยงคืน (00:00:00) ตามเวลาเซิร์ฟเวอร์
+  @Cron(CronExpression.EVERY_MIDNIGHT, {
+    name: 'cleanup-expired-butcher-orders',
+    timeZone: 'Asia/Bangkok', // กำหนดเขตเวลาให้ชัดเจนเพื่อป้องกันปัญหาเวลาเคลื่อน
+  })
+  async handleMidnightOrderCleanup() {
+    this.logger.log('--- เริ่มต้นตรวจสอบคำสั่งซื้อเนื้อที่ค้างชำระเกินกำหนดประจำเที่ยงคืน ---');
+
+    const expirationThreshold = new Date(Date.now() - 30 * 60 * 1000); // เกิน 30 นาที
+
+    // ดึงออเดอร์ที่ยังไม่จ่ายเงินและหมดเวลาแล้ว
+    const expiredOrders = await this.prisma.order.findMany({
+      where: {
+        status: 'PENDING_PAYMENT',
+        createdAt: { lt: expirationThreshold },
+      },
+      include: {
+        orderItems: true,
+      },
+      take: 100, // จำกัด Batch Size เพื่อไม่ให้บล็อก Database
+    });
+
+    if (expiredOrders.length === 0) {
+      this.logger.log('ไม่พบคำสั่งซื้อค้างชำระที่หมดอายุ');
+      return;
+    }
+
+    this.logger.warn(`พบออเดอร์ค้างชำระจำนวน ${expiredOrders.length} รายการ กำลังยกเลิกและคืนสต็อกเนื้อ...`);
+
+    for (const order of expiredOrders) {
+      await this.prisma.$transaction(async (tx) => {
+        // 1. คืนสต็อกเนื้อแต่ละชิ้นกลับเข้าสู่สินค้า
+        for (const item of order.orderItems) {
+          await tx.product.update({
+            where: { id: item.productId },
+            data: { stockKg: { increment: item.quantityKg } },
+          });
+        }
+
+        // 2. อัปเดตสถานะออเดอร์เป็น CANCELLED_EXPIRED
+        await tx.order.update({
+          where: { id: order.id },
+          data: { status: 'CANCELLED_EXPIRED' },
+        });
+      });
+
+      this.logger.log(`ยกเลิกออเดอร์ ${order.id} และคืนสต็อกเนื้อเรียบร้อยแล้ว`);
+    }
+
+    this.logger.log('--- เสร็จสิ้นภารกิจล้างออเดอร์ค้างชำระประจำวัน ---');
+  }
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: ระบบ Distributed Cron ระดับ Enterprise ด้วย Redis Lock
+
+ในสภาวะการทำงานแบบ High Availability บน Kubernetes เราสร้าง Decorator หรือ Service เพื่อครอบการทำงานของ `@Cron()` ด้วย Redis Lock พร้อมการปลดล็อคอย่างปลอดภัยผ่าน Lua Script
+
+```typescript filename="src/common/services/redis-lock.service.ts"
+import { Injectable, Logger } from '@nestjs/common';
+import Redis from 'ioredis';
+import { randomUUID } from 'node:crypto';
+
+@Injectable()
+export class RedisLockService {
+  private readonly logger = new Logger(RedisLockService.name);
+  private readonly redis: Redis;
+
+  constructor() {
+    this.redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+  }
+
+  /**
+   * พยายามครอบครอง Lock แบบไม่บล็อก
+   * @param resource ชื่อทรัพยากร เช่น 'cron:cleanup-orders'
+   * @param ttlMs ระยะเวลาถือครองสูงสุดก่อนปลดล็อคอัตโนมัติ (Milliseconds)
+   */
+  async acquireLock(resource: string, ttlMs: number): Promise<string | null> {
+    const lockKey = `locks:${resource}`;
+    const lockValue = randomUUID(); // สร้าง Unique Token เฉพาะของโหนดนี้
+
+    // ใช้ SET ... NX PX เพื่อการันตี Atomic Operation
+    const result = await this.redis.set(lockKey, lockValue, 'PX', ttlMs, 'NX');
+
+    if (result === 'OK') {
+      this.logger.debug(`[LOCK GRANTED] โหนดนี้ได้สิทธิ์รันงาน: ${resource} (Token: ${lockValue})`);
+      return lockValue;
+    }
+
+    this.logger.debug(`[LOCK DENIED] มีโหนดอื่นกำลังรันงาน ${resource} อยู่แล้ว ข้ามการทำงาน`);
+    return null;
+  }
+
+  /**
+   * ปลดล็อคอย่างปลอดภัยด้วย Lua Script (ลบเฉพาะเมื่อ Token ตรงกันเท่านั้น)
+   */
+  async releaseLock(resource: string, lockValue: string): Promise<boolean> {
+    const lockKey = `locks:${resource}`;
+    
+    // Lua Script ช่วยให้การตรวจสอบค่าและการลบเกิดขึ้นแบบ Atomic ในคำสั่งเดียว
+    const luaScript = `
+      if redis.call("get", KEYS[1]) == ARGV[1] then
+        return redis.call("del", KEYS[1])
+      else
+        return 0
+      end
+    `;
+
+    const result = await this.redis.eval(luaScript, 1, lockKey, lockValue);
+    const released = result === 1;
+
+    if (released) {
+      this.logger.debug(`[LOCK RELEASED] ปลดล็อคสำเร็จสำหรับงาน: ${resource}`);
+    }
+    return released;
+  }
+}
+```
+
+```typescript filename="src/modules/order-cleanup/distributed-cleanup.task.ts"
+import { Injectable, Logger } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
+import { RedisLockService } from '../../common/services/redis-lock.service';
+import { PrismaService } from '../prisma/prisma.service';
+
+@Injectable()
+export class DistributedCleanupTask {
+  private readonly logger = new Logger(DistributedCleanupTask.name);
+
+  constructor(
+    private readonly redisLock: RedisLockService,
+    private readonly prisma: PrismaService,
+  ) {}
+
+  // รันทุกๆ 5 นาทีเพื่อตรวจสอบเนื้อที่หมดอายุแบบแม่นยำ
+  @Cron(CronExpression.EVERY_5_MINUTES, {
+    timeZone: 'Asia/Bangkok',
+  })
+  async runDistributedCleanup() {
+    const resourceName = 'cron:order-stock-reclaim';
+    const lockTtlMs = 4 * 60 * 1000; // ล็อคไว้สูงสุด 4 นาที (น้อยกว่ารอบ 5 นาที)
+
+    // 1. ขอสิทธิ์ผ่าน Redis Lock
+    const lockToken = await this.redisLock.acquireLock(resourceName, lockTtlMs);
+
+    if (!lockToken) {
+      // โหนดอื่นได้สิทธิ์ไปแล้ว โหนดนี้สามารถหยุดทำงานรอบนี้ได้ทันที
+      return;
+    }
+
+    try {
+      this.logger.log('👑 [LEADER] โหนดนี้ได้รับเลือกให้เป็นผู้รัน Task คืนสต็อกเนื้อวากิว');
+
+      const expiredOrders = await this.prisma.order.findMany({
+        where: {
+          status: 'PENDING_PAYMENT',
+          createdAt: { lt: new Date(Date.now() - 30 * 60 * 1000) },
+        },
+        include: { orderItems: true },
+        take: 50,
+      });
+
+      for (const order of expiredOrders) {
+        await this.prisma.$transaction(async (tx) => {
+          for (const item of order.orderItems) {
+            await tx.product.update({
+              where: { id: item.productId },
+              data: { stockKg: { increment: item.quantityKg } },
+            });
+          }
+          await tx.order.update({
+            where: { id: order.id },
+            data: { status: 'CANCELLED_EXPIRED' },
+          });
+        });
+      }
+
+      this.logger.log(`ประมวลผลคืนสต็อกสำเร็จจำนวน ${expiredOrders.length} ออเดอร์`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown task error';
+      this.logger.error(`เกิดข้อผิดพลาดในการรัน Distributed Task: ${msg}`);
+    } finally {
+      // 2. ปลดล็อคคืนให้ระบบเสมอในบล็อก finally
+      await this.redisLock.releaseLock(resourceName, lockToken);
+    }
+  }
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+### ❌ โค้ดที่ผิด: รัน Cron ใน Multi-instance โดยไม่มี Lock และดึงข้อมูลมหาศาลทีเดียวทั้งหมด
+
+```typescript filename="bad-cron.task.ts"
+@Injectable()
+export class BadCronTask {
+  constructor(private prisma: PrismaService) {}
+
+  // ผิดมหันต์ 1: รัน Cron บน 4 Pods โดยไม่มี Lock
+  // ทั้ง 4 Pods วิ่งไปบวกสต็อกเนื้อชิ้นเดียวกันพร้อมกัน ทำให้เนื้อ 1 ชิ้นถูกคืนสต็อกเป็น 4 ชิ้น!
+  @Cron('* * * * *')
+  async badReclaim() {
+    // ผิดมหันต์ 2: คิวรี FindMany ข้อมูลทั้งหมดโดยไม่มี limit/take
+    // หากมี 200,000 ออเดอร์ ระบบจะดึงข้อมูลทั้งหมดขึ้นมาใส่ RAM จนเกิด V8 Out of Memory
+    const allExpired = await this.prisma.order.findMany({
+      where: { status: 'PENDING_PAYMENT' },
+    });
+    // ประมวลผลลูปมหาศาลบล็อก Event Loop
+  }
+}
+```
+
+### ✅ โค้ดที่ถูก: ใช้ Distributed Lock และประมวลผลแบบ Chunking / Cursor-based Pagination
+
+```typescript filename="good-cron.task.ts"
+// ถูกต้อง: แบ่งประมวลผลเป็นชุดเล็กๆ (Chunking) เพื่อให้ใช้ RAM คงที่และไม่บล็อกฐานข้อมูล
+const BATCH_SIZE = 100;
+let cursor: string | undefined = undefined;
+
+do {
+  const batch = await this.prisma.order.findMany({
+    take: BATCH_SIZE,
+    skip: cursor ? 1 : 0,
+    cursor: cursor ? { id: cursor } : undefined,
+    where: { status: 'PENDING_PAYMENT' },
+    orderBy: { id: 'asc' },
+  });
+
+  if (batch.length === 0) break;
+  // ประมวลผล batch
+  cursor = batch[batch.length - 1].id;
+} while (cursor);
+```
+
+<Callout type="warning" title="อันตรายของการใช้ TimeZone ในเซิร์ฟเวอร์">
+หลีกเลี่ยงการพึ่งพาเวลาท้องถิ่นของเครื่องโฮสต์ (System Local Time) เพราะคอนเทนเนอร์ใน Docker หรือ Cloud อาจถูกตั้งค่าเป็น UTC การระบุ Property `timeZone: 'Asia/Bangkok'` ภายใน Option ของ `@Cron()` จะช่วยการันตีว่าระบบจะรันงานตรงตามเวลาเที่ยงคืนของประเทศไทยเสมอ
+</Callout>
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้:
+- งานบำรุงรักษาระบบตามรอบเวลาที่แน่นอน เช่น การล้างคำสั่งซื้อที่หมดอายุ, การสรุปยอดขายประจำวัน, การหมุนเวียน Token
+- การซิงค์ข้อมูลกับระบบภายนอก (Data Syncing) เช่น อัปเดตราคากลางเนื้อวัวนำเข้าจากออสเตรเลียทุกเช้า 06:00 น.
+- การส่งรายงานสรุปยอดสต็อกเนื้อคงเหลือให้ผู้จัดการร้านผ่าน Telegram หรือ Slack ทุกสิ้นสัปดาห์
+
+### ไม่ควรใช้:
+- งานที่เกิดขึ้นตามเหตุการณ์ (Event-driven) เช่น เมื่อลูกค้าจ่ายเงินเสร็จแล้วต้องการส่งใบเสร็จทันที (ควรใช้ **Event Emitter** หรือ **BullMQ** แทนการรัน Cron วนเช็คทุก 5 วินาที)
+- งานที่ใช้เวลาประมวลผลยาวนานหลายชั่วโมงแบบคาดเดาไม่ได้ (ควรพิจารณาใช้ **Kubernetes CronJob** หรือแยกเป็น Dedicated Worker Service)
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### Q1: หากเรา Deploy แอปพลิเคชัน NestJS จำนวน 6 Replicas บน Kubernetes เรามีทางเลือกทางสถาปัตยกรรมกี่วิธีในการป้องกันไม่ให้ `@Cron()` รันงานซ้ำกัน 6 ครั้ง?
+**แนวคำตอบเชิงลึก:**
+มี 3 สถาปัตยกรรมหลักในการแก้ปัญหานี้:
+1. **Application-level Distributed Lock (Redis / Redlock):** ทุก Pod ยังคงมีโค้ด `@Cron()` แต่เมื่อถึงเวลา ทุก Pod จะแย่งกันขอ Lock ใน Redis ด้วยคำสั่ง `SET lock_key uuid NX PX ttl` โหนดที่ได้ไปจะเป็นผู้รันเพียงโหนดเดียว *ข้อดีคือไม่ต้องเพิ่ม Infrastructure ใหม่ ใช้ Redis ที่มีอยู่ได้ทันที*
+2. **Kubernetes CronJob (Cloud-Native Native):** ปิด `@nestjs/schedule` ภายในแอปพลิเคชันหลัก แล้วสร้าง Resource ชนิด `kind: CronJob` ใน Kubernetes ให้ Kubelet สปอน Pod ชั่วคราวขึ้นมารันเฉพาะงานนั้นตามตารางเวลา เมื่อรันเสร็จ Pod จะถูกทำลายทิ้ง *ข้อดีคือการันตี 1 instance แน่นอน และไม่กินทรัพยากรของ API Pods หลัก*
+3. **BullMQ Repeatable Jobs:** ใช้ฟีเจอร์ Repeatable Job ของ BullMQ ให้ Redis เป็นศูนย์กลางคอยปล่อย Job ตามรอบเวลา Cron เข้าคิว เพื่อให้ Worker เพียงโหนดเดียวที่ว่างดึงไปทำ *วิธีนี้เป็นที่นิยมสูงสุดในระบบ Enterprise Node.js เพราะมีระบบ Retry, Dashboard และ DLQ มาให้พร้อมสรรพ*
+
+---
+
+### Q2: ในการทำ Distributed Lock ด้วย Redis ทำไมการปลดล็อค (Release Lock) ถึงต้องใช้ Lua Script และหากใช้คำสั่ง `redis.del(key)` ธรรมดาจะเกิดช่องโหว่อะไร?
+**แนวคำตอบเชิงลึก:**
+หากเราใช้คำสั่ง `redis.del(key)` ธรรมดา จะเกิดช่องโหว่ร้ายแรงที่เรียกว่า **"Accidental Lock Release"**:
+
+สมมติว่า Pod A ได้ Lock สำหรับงานทำความสะอาดสต็อกเนื้อ โดยมี TTL 30 วินาที แต่เกิดเหตุการณ์เน็ตเวิร์กกระตุกหรือ GC Pause ทำให้ Pod A ทำงานช้านานถึง 35 วินาที:
+1. เมื่อครบ 30 วินาที Redis จะลบ Lock ของ Pod A ทิ้งโดยอัตโนมัติเนื่องจากหมดเวลา TTL
+2. Pod B เห็นว่า Lock ว่าง จึงเข้ายึด Lock และเริ่มต้นรันงาน
+3. เสี้ยววินาทีถัดมา Pod A เพิ่งทำงานเสร็จ และเรียกคำสั่ง `redis.del("locks:cleanup")` ส่งผลให้ Pod A **ไปแอบลบ Lock ของ Pod B ที่กำลังทำงานอยู่ทิ้ง!**
+4. ทำให้ Pod C เห็น Lock ว่างอีก และเข้ามาแทรกแซง กลายเป็นมี Pod B และ Pod C รันงานพร้อมกัน
+
+**การแก้ปัญหาด้วย Lua Script:**
+Script จะทำการตรวจสอบก่อนว่า Value ที่อยู่ใน Key ยังเป็น `unique_lock_id` ของ Pod ตัวเองหรือไม่:
+`if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end`
+และเนื่องจาก Redis ทำงานแบบ Single-threaded คำสั่งนี้จะทำงานแบบ Atomic ไม่สามารถถูกแทรกกลางคันได้ ทำให้ Pod A ไม่สามารถลบ Lock ของคนอื่นได้โดยเด็ดขาด
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เพื่อความเข้าใจระบบจัดตารางเวลาและระบบงานพื้นหลังอย่างสมบูรณ์ แนะนำให้ศึกษาหัวข้อต่อไปนี้:
+1. การจัดการงานเบื้องหลังด้วยคิวข้อความ: [Queue (BullMQ)](/docs/backend/nestjs/bullmq-queue)
+2. การแคชข้อมูลและคำสั่ง Redis ระดับสูง: [Redis Caching](/docs/backend/nestjs/redis-cache)
+3. การทำธุรกรรมฐานข้อมูลที่ปลอดภัยจาก Race Condition: [Prisma Transactions](/docs/backend/prisma-orm/transactions)
+4. การรัน Service บน Docker แบบมีสุขภาพดี: [Docker Volumes & Health](/docs/backend/docker/volumes-health)

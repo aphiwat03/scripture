@@ -1,0 +1,381 @@
+---
+title: Queue (BullMQ)
+category: BACKEND
+parentTitle: NestJS 11
+version: BullMQ + Redis (NestJS 11)
+updatedAt: 2026-10-23
+---
+
+## 1. แนวคิด (Concept)
+
+เมื่อลูกค้าในระบบ **Smart Butcher Marketplace** สั่งซื้อเนื้อวากิวและอัปโหลดภาพสลิปโอนเงินผ่านระบบธนาคาร กระบวนการตรวจสอบความถูกต้องจำเป็นต้องอาศัยโมเดล AI OCR ในการตรวจจับยอดเงิน, เลขที่บัญชี, วันเวลา, และลายน้ำดิจิทัล ซึ่งอาจกินเวลาประมวลผลนานถึง 3-8 วินาที หากเรานำงานนี้มาประมวลผลแบบ Synchronous ภายใน HTTP Request เดียวกัน:
+1. ผู้ใช้ต้องยืนรอหน้าจอนานเกินไป ส่งผลต่อประสบการณ์การใช้งาน (Bad UX)
+2. โพรเซส HTTP Server ต้องเปิดค้าง Connection ไว้ สิ้นเปลืองทรัพยากร Socket
+3. หากมีคำขอเข้ามาพร้อมกัน 500 รายการ เซิร์ฟเวอร์จะเกิดสภาวะ Event Loop Lag หรือ Worker ขาดแคลน และส่งผลให้ API ล่มทั้งหมด
+
+ทางออกสากลคือการใช้ **Message Queue Pattern (สถาปัตยกรรมคิวข้อความ)** โดยแบ่งบทบาทออกเป็น:
+- **Producer (ผู้สร้างงาน):** เมื่อลูกค้าอัปโหลดสลิป API Controller จะบันทึกออเดอร์ในสถานะ `PENDING_VERIFICATION` และโยนข้อมูลงาน (Job) ลงใน Queue บน Redis ภายในเวลาเพียง 5ms พร้อมตอบกลับผู้ใช้ทันที
+- **Queue Engine (Redis Streams & Sorted Sets):** จัดเก็บลำดับงาน รับประกันความคงทนของข้อมูล และบริหารจัดการสถานะของงาน
+- **Consumer / Worker (ผู้ประมวลผลงาน):** โหนดเบื้องหลังดึงงานจากคิวไปรันทีละรายการ (หรือแบบขนานตาม Concurrency ที่กำหนด) รัน AI OCR ตรวจสลิป อัปเดตสถานะออเดอร์เป็น `PAID` และสั่งพิมพ์ใบเสร็จ PDF
+
+ในระบบนิเวศของ Node.js และ NestJS 11 ตัวเลือกอันดับหนึ่งสำหรับ Message Queue คือ **BullMQ** ซึ่งถูกเขียนขึ้นมาใหม่ทั้งหมดบนรากฐานของ TypeScript และ Redis Streams ให้ประสิทธิภาพ ความทนทาน และฟีเจอร์ระดับสูงกว่า Bull v3 ดั้งเดิมอย่างมาก
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### วงจรชีวิตของ Job ใน BullMQ (Job Lifecycle)
+
+```text filename="docs/backend/bullmq-lifecycle.txt"
+           ┌──────────────┐
+           │   Waiting    │◄────────── (Job ถูกสร้างโดย Producer)
+           └──────┬───────┘
+                  │
+                  ▼ (Worker ว่าง และดึงงานไปทำ)
+           ┌──────────────┐
+           │    Active    │
+           └──────┬───────┘
+                  │
+        ┌─────────┴─────────┐
+        │                   │
+  (ประมวลผลสำเร็จ)    (เกิด Error / Exception)
+        │                   │
+        ▼                   ▼
+┌──────────────┐    ┌──────────────┐
+│  Completed   │    │    Failed    │
+└──────────────┘    └──────┬───────┘
+                           │
+                 (ยังมีสิทธิ์ Retry เหลืออยู่?)
+                           ├──► [Delayed] ──► (กลับเข้าสู่ Waiting ตาม Backoff Delay)
+                           │
+                           └──► [Dead Letter Queue / Unrecoverable]
+```
+
+### กลไกการทำงานระดับล่าง
+1. **Redis Data Structures:**
+   - **Streams & Lists:** ใช้เก็บงานที่รอการประมวลผล (`waiting`)
+   - **Sorted Sets (ZSET):** ใช้จัดการงานที่ต้องรอเวลา (`delayed`) โดยใช้ Unix Timestamp เป็น Score ทำให้การจัดตารางเวลารวดเร็วแบบ $O(\log N)$
+   - **Hashes:** ใช้เก็บ Payload ข้อมูลของ Job และ Metadata เช่น จำนวนครั้งที่ Retry, Stack trace ของ Error
+2. **Lock Renewal & Stalled Jobs Detection:**
+   เมื่อ Worker รับ Job ไปทำ มันจะเข้าถือครอง Distributed Lock ใน Redis โดยอัตโนมัติ หาก Worker เกิดไฟดับ (Pod crash) หรือ CPU ติดขัดจนไม่สามารถต่ออายุ Lock ได้ (Lock TTL หมด) BullMQ จะจัดประเภทงานนั้นเป็น **Stalled Job** และย้ายงานนั้นกลับเข้าคิวเพื่อให้ Worker ตัวอื่นรับไปทำต่อ ป้องกันปัญหางานตกหล่น
+3. **Exponential Backoff:**
+   เมื่อการเรียก AI Provider ภายนอกล้มเหลว (เช่น เจอ HTTP 429 Rate Limit) ระบบจะไม่ Retry ถี่ๆ ทันที แต่จะขยายระยะเวลาหน่วงแบบยกกำลังสอง: $2^n \times \text{delay}$ เช่น 2s, 4s, 8s, 16s เพื่อให้ระบบปลายทางฟื้นตัว
+4. **Dead Letter Queue (DLQ):**
+   หากงานล้มเหลวจนครบจำนวนโควตา Retry ที่กำหนด (เช่น 5 ครั้ง) Job จะถูกย้ายเข้าสู่สถานะ Failed ถาวร เพื่อให้นักพัฒนาสามารถเข้ามาตรวจสอบ Stack trace วิเคราะห์สลิปที่ปลอมแปลง และสั่ง Manual Retry ผ่าน Bull Board ได้
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การลงทะเบียน BullModule และการสร้าง Producer ใน OrdersService
+
+ตัวอย่างนี้แสดงการตั้งค่าการเชื่อมต่อ Redis ของ BullMQ และการส่ง Job เข้าคิวพร้อมกลยุทธ์ Exponential Backoff
+
+```typescript filename="src/app.module.ts"
+import { Module } from '@nestjs/common';
+import { BullModule } from '@nestjs/bullmq';
+import { OrdersModule } from './modules/orders/orders.module';
+
+@Module({
+  imports: [
+    // กำหนดการเชื่อมต่อ Redis ระดับ Global ของ BullMQ
+    BullModule.forRoot({
+      connection: {
+        host: process.env.REDIS_HOST || 'localhost',
+        port: parseInt(process.env.REDIS_PORT || '6379', 10),
+        password: process.env.REDIS_PASSWORD || undefined,
+      },
+    }),
+    OrdersModule,
+  ],
+})
+export class AppModule {}
+```
+
+```typescript filename="src/modules/orders/orders.module.ts"
+import { Module } from '@nestjs/common';
+import { BullModule } from '@nestjs/bullmq';
+import { OrdersController } from './orders.controller';
+import { OrdersService } from './orders.service';
+import { PaymentSlipProcessor } from './processors/payment-slip.processor';
+import { PrismaModule } from '../prisma/prisma.module';
+
+@Module({
+  imports: [
+    PrismaModule,
+    // ลงทะเบียนคิวชื่อ 'payment-processing'
+    BullModule.registerQueue({
+      name: 'payment-processing',
+      defaultJobOptions: {
+        attempts: 5, // อนุญาตให้ Retry ได้สูงสุด 5 ครั้งหาก AI ล่มชั่วคราว
+        backoff: {
+          type: 'exponential',
+          delay: 2000, // เริ่มต้นหน่วง 2 วินาที (2s, 4s, 8s, 16s, ...)
+        },
+        removeOnComplete: {
+          count: 1000, // เก็บประวัติงานสำเร็จไว้ไม่เกิน 1,000 งานเพื่อประหยัด RAM
+          age: 86400, // หรือเก็บไว้ไม่เกิน 24 ชั่วโมง
+        },
+        removeOnFail: false, // ห้ามลบงานที่ล้มเหลว เพื่อใช้เป็น Dead Letter Queue วิเคราะห์ข้อผิดพลาด
+      },
+    }),
+  ],
+  controllers: [OrdersController],
+  providers: [OrdersService, PaymentSlipProcessor],
+})
+export class OrdersModule {}
+```
+
+```typescript filename="src/modules/orders/orders.service.ts"
+import { Injectable, Logger } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
+import { PrismaService } from '../prisma/prisma.service';
+
+export interface VerifySlipJobPayload {
+  orderId: string;
+  userId: string;
+  slipImageUrl: string;
+  expectedAmount: number;
+}
+
+@Injectable()
+export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
+  constructor(
+    @InjectQueue('payment-processing') private readonly paymentQueue: Queue<VerifySlipJobPayload>,
+    private readonly prisma: PrismaService,
+  ) {}
+
+  async submitSlipForVerification(orderId: string, userId: string, slipImageUrl: string) {
+    // 1. ดึงข้อมูลออเดอร์เนื้อ
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+    });
+
+    if (!order) {
+      throw new Error(`ไม่พบออเดอร์รหัส ${orderId}`);
+    }
+
+    // 2. อัปเดตสถานะออเดอร์เป็น PENDING_VERIFICATION
+    await this.prisma.order.update({
+      where: { id: orderId },
+      data: { status: 'PENDING_VERIFICATION' },
+    });
+
+    // 3. ผลักงานเข้าคิวประมวลผลเบื้องหลัง
+    const job = await this.paymentQueue.add(
+      'verify-slip',
+      {
+        orderId: order.id,
+        userId,
+        slipImageUrl,
+        expectedAmount: Number(order.totalAmount),
+      },
+      {
+        priority: 1, // กำหนด Priority สูงเพื่อให้ลูกค้าได้รับผลตรวจรวดเร็ว
+      },
+    );
+
+    this.logger.log(`[JOB DISPATCHED] ส่งงานตรวจสลิปเข้าคิว รหัส Job ID: ${job.id} สำหรับออเดอร์: ${orderId}`);
+
+    return {
+      success: true,
+      message: 'ระบบได้รับสลิปแล้ว กำลังประมวลผลเบื้องหลังผ่าน AI Worker',
+      jobId: job.id,
+    };
+  }
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: การสร้าง WorkerHost Processor ตรวจสลิปด้วย AI และจัดการ Dead Letter Queue
+
+ใน NestJS 11 มาตรฐานการเขียน Consumer แนะนำให้สืบทอดคลาสจาก **`WorkerHost`** เพื่อ Type Safety สูงสุดและประสิทธิภาพสูงสุด
+
+```typescript filename="src/modules/orders/processors/payment-slip.processor.ts"
+import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
+import { Logger } from '@nestjs/common';
+import { Job } from 'bullmq';
+import { PrismaService } from '../../prisma/prisma.service';
+import { VerifySlipJobPayload } from '../orders.service';
+
+@Processor('payment-processing', {
+  concurrency: 4, // รองรับการตรวจสลิปพร้อมกันได้สูงสุด 4 งานใน Worker นี้
+})
+export class PaymentSlipProcessor extends WorkerHost {
+  private readonly logger = new Logger(PaymentSlipProcessor.name);
+
+  constructor(private readonly prisma: PrismaService) {
+    super();
+  }
+
+  // ฟังก์ชันหลักที่ดึง Job จากคิวมาประมวลผล
+  async process(job: Job<VerifySlipJobPayload>): Promise<{ verified: boolean; transactionRef: string }> {
+    this.logger.log(`[PROCESSING] กำลังตรวจสลิป Job ID: ${job.id} ครั้งที่: ${job.attemptsMade + 1}`);
+
+    const { orderId, expectedAmount, slipImageUrl } = job.data;
+
+    // จำลองการเรียก AI OCR Service (เช่น Vision AI) เพื่อแกะข้อมูลสลิป
+    const aiResult = await this.callAiSlipVerificationApi(slipImageUrl);
+
+    // ตรวจสอบความถูกต้องของยอดเงิน
+    if (aiResult.detectedAmount !== expectedAmount) {
+      this.logger.warn(`ยอดเงินในสลิปไม่ตรง: ออเดอร์ต้องการ ${expectedAmount} แต่ในสลิปคือ ${aiResult.detectedAmount}`);
+      
+      // บันทึกลงฐานข้อมูลว่าการชำระเงินไม่ถูกต้อง
+      await this.prisma.order.update({
+        where: { id: orderId },
+        data: { status: 'PAYMENT_FAILED' },
+      });
+
+      throw new Error(`ยอดเงินไม่ถูกต้อง (Detected: ${aiResult.detectedAmount}, Expected: ${expectedAmount})`);
+    }
+
+    // เมื่อถูกต้อง: บันทึก Payment และเปลี่ยนสถานะออเดอร์เป็น PAID
+    await this.prisma.$transaction(async (tx) => {
+      await tx.payment.create({
+        data: {
+          orderId,
+          amount: aiResult.detectedAmount,
+          transactionRef: aiResult.transactionRef,
+          status: 'SUCCESS',
+          paymentMethod: 'PROMPTPAY',
+        },
+      });
+
+      await tx.order.update({
+        where: { id: orderId },
+        data: { status: 'PAID' },
+      });
+    });
+
+    this.logger.log(`[VERIFIED SUCCESS] ออเดอร์เนื้อ ${orderId} ยืนยันการชำระเงินสำเร็จ`);
+    return { verified: true, transactionRef: aiResult.transactionRef };
+  }
+
+  // จำลอง API Call ภายนอก
+  private async callAiSlipVerificationApi(url: string) {
+    // หน่วงเวลาจำลองการประมวลผล OCR
+    await new Promise((res) => setTimeout(res, 1200));
+
+    // สมมติผลลัพธ์จากการอ่านสลิปสำเร็จ
+    return {
+      detectedAmount: 1450.0,
+      transactionRef: `TX-SLIP-${Date.now()}`,
+      bankCode: '004',
+    };
+  }
+
+  // ดักจับ Event เมื่อมี Job ล้มเหลวถาวร (DLQ Handling)
+  @OnWorkerEvent('failed')
+  async onJobFailed(job: Job<VerifySlipJobPayload>, err: Error) {
+    this.logger.error(
+      `[JOB DLQ ALERT] Job ID: ${job.id} สำหรับออเดอร์ ${job.data.orderId} ล้มเหลวถาวร: ${err.message}`,
+      err.stack,
+    );
+
+    // หาก Retry ครบทุกครั้งแล้วยังพัง ให้ส่งแจ้งเตือนเข้า Slack ห้องทีมแอดมิน Butcher Support
+    if (job.attemptsMade >= (job.opts.attempts || 1)) {
+      this.logger.fatal(`🚨 ส่งแจ้งเตือนด่วน: สลิปออเดอร์ ${job.data.orderId} ต้องใช้เจ้าหน้าที่ตรวจสอบแบบ Manual`);
+    }
+  }
+
+  @OnWorkerEvent('completed')
+  onJobCompleted(job: Job) {
+    this.logger.debug(`[JOB COMPLETED] งานรหัส ${job.id} เสร็จสิ้นอย่างสมบูรณ์`);
+  }
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+### ❌ โค้ดที่ผิด: รันงานหนักใน HTTP Request และสร้าง Worker แบบไม่มี Idempotency
+
+```typescript filename="bad-order-queue.ts"
+// ผิดมหันต์ 1: รัน AI OCR และสร้าง PDF โดยตรงใน Controller
+@Post('upload-slip')
+async badUploadSlip(@Body() body: any) {
+  // บล็อก Request นาน 8 วินาที Client ตัด Connection ทิ้ง เกิด 504 Gateway Timeout
+  const result = await heavyAiModel.process(body.image);
+  return result;
+}
+
+// ผิดมหันต์ 2: Worker ไม่เช็คสถานะก่อนตัดเงินซ้ำ (ขาด Idempotency)
+// หาก Worker ตัวแรกทำงานช้าจน Lock หลุด แล้ว Worker ตัวที่สองดึงงานไปรันซ้ำ 
+// ส่งผลให้ลูกค้าถูกตัดเงินซ้ำ หรือสร้างรายการ Payment เบิ้ล 2 ครั้งในฐานข้อมูล
+```
+
+### ✅ โค้ดที่ถูก: ใช้คิวแยกโหนดและทำ Idempotency Check ก่อนบันทึกธุรกรรม
+
+```typescript filename="good-order-queue.ts"
+// ถูกต้อง: เช็ค Transaction Reference เสมอก่อนบันทึกเพื่อรับประกัน Idempotency
+const existingPayment = await this.prisma.payment.findUnique({
+  where: { transactionRef: aiResult.transactionRef },
+});
+
+if (existingPayment) {
+  this.logger.warn(`ธุรกรรมนี้เคยถูกประมวลผลไปแล้ว ข้ามขั้นตอนเพื่อป้องกันการจ่ายซ้ำ`);
+  return;
+}
+```
+
+<Callout type="tip" title="กฎเหล็กของ Background Workers: Idempotency">
+ในระบบเครือข่ายแบบกระจายศูนย์ เหตุการณ์ **Network Glitch** หรือ **Worker Timeout** อาจทำให้ Job ตัวเดิมถูกส่งมารันซ้ำ (At-least-once delivery) เสมอ ดังนั้นโค้ดภายใน Worker ต้องออกแบบให้เป็น **Idempotent** (รัน 1 ครั้ง หรือรัน 10 ครั้ง ผลลัพธ์ในฐานข้อมูลต้องเหมือนเดิม ไม่บันทึกซ้ำซ้อน)
+</Callout>
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้:
+- งานที่ใช้เวลานานเกิน 200ms เช่น การประมวลผลรูปภาพเนื้อ, การสแกนสลิปด้วย AI, การสร้างไฟล์ใบเสร็จ PDF ขนาดใหญ่
+- การส่งอีเมลยืนยันคำสั่งซื้อ, การส่งข้อความ SMS OTP หรือ Push Notification ไปยังแอปพลิเคชัน
+- การนำส่ง Webhooks ไปยังระบบภายนอกที่มีโอกาสชั่วคราวและจำเป็นต้องมี Exponential Retry Strategy
+- การจำกัดอัตราความเร็ว (Rate Limiting / Smoothing Spikes) เพื่อป้องกันไม่ให้ Third-party API ถูกยิงจนเกินโควตา
+
+### ไม่ควรใช้:
+- การคิวรีข้อมูลที่ผู้ใช้ต้องรอหน้าจอนั้นทันที (Synchronous Read Operations เช่น ดึงราคาสินค้า หรือเข้าสู่ระบบ)
+- ข้อมูลชั่วคราวที่ไม่ต้องการความคงทนและต้องการความเร็วระดับไมโครวินาทีผ่าน Memory ท้องถิ่น
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### Q1: กลไก "Stalled Jobs" ใน BullMQ ทำงานอย่างไร และอะไรคือสาเหตุที่พบบ่อยที่สุดที่ทำให้ Job ติดสถานะ Stalled ใน Node.js?
+**แนวคำตอบเชิงลึก:**
+เมื่อ Worker ดึงงานไปทำ BullMQ จะสร้าง Distributed Lock ใน Redis โดยมีอายุ (Lock Duration) ตามที่กำหนด (ค่ามาตรฐานคือ 30 วินาที) โดยในระหว่างที่ Worker กำลังประมวลผล ตัว Worker จะส่งสัญญาณ Heartbeat ไปต่ออายุ Lock (`lock renewal`) อย่างต่อเนื่องผ่าน Event Loop
+
+**Stalled Job** จะเกิดขึ้นเมื่อ BullMQ ตัวตรวจจับพบว่า Lock ของงานนั้นหมดอายุลงโดยที่ไม่มีการแจ้งว่างานสำเร็จหรือล้มเหลว สาเหตุหลักใน Node.js ได้แก่:
+1. **Event Loop Blocked:** มีโค้ดคำนวณหนักๆ เช่น ลูป JSON ขนาดใหญ่ หรือเข้ารหัสข้อมูลแบบ Synchronous ทำให้ Event Loop ค้าง และตัว Worker ไม่สามารถส่งคำสั่งต่ออายุ Lock ใน Redis ได้ทัน
+2. **Worker Pod OOMKilled:** ตัวโหนดถูกระบบปฏิบัติการหรือ Kubernetes สั่งฆ่ากะทันหันเนื่องจากใช้หน่วยความจำเกินโควตา (Out-of-Memory)
+3. **Network Partition:** การเชื่อมต่อระหว่าง Worker กับ Redis Server ขาดหายเกินระยะเวลา Lock Duration
+
+BullMQ จะกู้คืนสถานะโดยการดึง Stalled Job กลับมาเข้าคิว `waiting` ใหม่อัตโนมัติ (ตามจำนวนครั้งที่คอนฟิกใน `maxStalledCount`) เพื่อป้องกันไม่ให้งานของผู้ใช้สูญหาย
+
+---
+
+### Q2: ในสถาปัตยกรรมระดับ Production เราควรแยกโหนด Producer และ Consumer (Worker) ออกจากกันอย่างไร และทำไมจึงไม่ควรรันทั้งสองส่วนใน Pod เดียวกัน?
+**แนวคำตอบเชิงลึก:**
+ในระบบระดับ Enterprise วิศวกรจะแยก Deployment ออกเป็น 2 กลุ่มอย่างชัดเจน:
+1. **API / Producer Pods:** มุ่งเน้นรับ HTTP Traffic จากผู้ใช้งาน มีความเร็วในการตอบสนองสูง ใช้ CPU น้อย และสเกลตามปริมาณ HTTP Requests ต่อวินาที (RPS)
+2. **Worker / Consumer Pods:** รันเฉพาะงานประมวลผลหนักๆ ในพื้นหลัง ใช้ CPU และ RAM สูง และสเกลตามความยาวของคิวใน Redis (Queue Depth / Lag Metric)
+
+**เหตุผลที่ไม่ควรรันร่วมกัน:**
+- **Resource Starvation:** หากงานประมวลผล AI หรือ Generate PDF กิน CPU 100% บนเครื่องเดียวกัน จะทำให้ตัว HTTP Server ไม่สามารถตอบสนอง Request สั่งซื้อเนื้อของลูกค้าใหม่ได้ (API ค้าง)
+- **Independent Scaling Policy:** ฝั่ง API ควร Scale-out ตามปริมาณทราฟฟิกเว็บ ขณะที่ฝั่ง Worker ควร Scale-out เมื่อมี Job ค้างในคิวสะสมเกิน 500 งาน การรวมกันจะทำให้ระบบคาดเดาการใช้ทรัพยากรไม่ได้
+- **Blast Radius Isolation:** หาก Worker ประมวลผลผิดพลาดจนเกิด Fatal OOM Crash ตัว Container ที่ถูกรีสตาร์ทจะไม่กระทบต่อลูกค้าที่กำลังคลิกดูสินค้าบนหน้าเว็บ
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เพื่อความต่อเนื่องในการสร้างระบบ Backend สเกลใหญ่ แนะนำให้ศึกษาหัวข้อต่อไปนี้:
+1. การจัดการแคชประสิทธิภาพสูงบน Redis: [Redis Caching](/docs/backend/nestjs/redis-cache)
+2. การตั้งเวลาทำงานอัตโนมัติตามตาราง: [Cron Schedule](/docs/backend/nestjs/cron-schedule)
+3. การเรียกใช้งาน AI โมเดลมาช่วยประมวลผลสลิป: [Groq Service Integration](/docs/backend/ai-integration/groq-service)
+4. การบันทึก Log การทำงานของ Worker: [Enterprise Logging](/docs/backend/nestjs/enterprise-logging)

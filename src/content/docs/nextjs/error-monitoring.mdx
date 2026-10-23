@@ -1,0 +1,637 @@
+---
+title: Error Monitoring (Sentry)
+category: Frontend
+parentTitle: Next.js 16
+version: "@sentry/nextjs v8.x"
+updatedAt: 2026-10-23
+---
+
+# Error Monitoring (Sentry)
+
+คู่มือสถาปัตยกรรมการตรวจจับ, รวบรวม และวิเคราะห์ข้อผิดพลาดแบบ Real-time Observability ใน Next.js 16 ครอบคลุมทั้ง Client Components, Server Components (RSC), Route Handlers, และ Server Actions ด้วย `@sentry/nextjs` พร้อมมาตรฐานความปลอดภัยระดับ Enterprise
+
+---
+
+## 1. แนวคิด (Concept)
+
+ในสถาปัตยกรรม Fullstack React ยุคดั้งเดิม การดักจับข้อผิดพลาดมักเกิดขึ้นเฉพาะบนเว็บเบราว์เซอร์ผ่าน `window.onerror` หรือ React Error Boundary ทั่วไป แต่ใน **Next.js 16 App Router** โลกของการประมวลผลถูกแบ่งออกเป็นหลาย Runtime อย่างชัดเจน:
+
+1. **Browser Runtime (Client Components):** เกิดข้อผิดพลาดด้าน UI Interaction, State Mutation, Hydration Mismatch และ Event Handlers
+2. **Node.js Server Runtime (Server Components & Server Actions):** เกิดข้อผิดพลาดด้าน Database Query, Microservices Communication, Cache Invalidation และ Disk I/O
+3. **Edge Runtime (Middleware & Edge Route Handlers):** ทำงานบนเซิร์ฟเวอร์กระจายตัวทั่วโลกที่มีข้อจำกัดด้าน Node.js APIs และ Memory Footprint
+
+```text
++----------------------------------------------------------------------------------------------------+
+|                         Next.js 16 Distributed Observability Pipeline                              |
++----------------------------------------------------------------------------------------------------+
+|                                                                                                    |
+|  [ Client Browser ]                                                                                |
+|    - React Error Boundary (error.tsx / global-error.tsx)                                           |
+|    - Browser Tracing & Session Replay (Masked PII)                                                 |
+|    - Custom Breadcrumbs (Clicks, Meat Cut Selection)                                               |
+|           |                                                                                        |
+|           v (Tunnel Route: /api/monitoring-tunnel ป้องกัน Ad-blocker)                                |
+|  +-----------------------------------------------------------------------------------------------+ |
+|  | Next.js Server (Node.js & Edge Runtime)                                                       | |
+|  |   - Server Component Render Errors (error.digest Correlation)                                 | |
+|  |   - Server Actions Tracing (withServerActionInstrumentation)                                  | |
+|  |   - OpenTelemetry & Distributed Tracing (sentry-trace, baggage headers)                       | |
+|  +-----------------------------------------------------------------------------------------------+ |
+|           |                                                                                        |
+|           v (Secure HTTPS with Scrubbed PII)                                                       |
+|  [ Sentry Cloud Platform / On-Premise Sentry ]                                                     |
+|    - Issue Grouping by Fingerprint & Stack Trace                                                   |
+|    - Release Health & Crash-free Session Percentage                                                |
+|    - Private Source Maps Resolution (Uploaded via Secure CI/CD)                                    |
+|                                                                                                    |
++----------------------------------------------------------------------------------------------------+
+```
+
+เมื่อเกิดข้อผิดพลาดใน Server Component ตัว Next.js จะทำการ Mask ข้อความ Error ดั้งเดิมทิ้ง และส่งกลับมาเฉพาะรหัส **`error.digest`** เพื่อป้องกันข้อมูลโครงสร้างระบบรั่วไหล ระบบ Error Monitoring ที่มีประสิทธิภาพจึงต้องสามารถเชื่อมโยงรหัส `digest` จากหน้าบ้าน เข้ากับ Stack Trace ดั้งเดิมบนเซิร์ฟเวอร์ และจับคู่กับ User Session ได้อย่างแม่นยำ
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 สถาปัตยกรรม 3 ไฟล์คอนฟิกของ `@sentry/nextjs`
+
+`@sentry/nextjs` v8 ออกแบบมาให้แยกคอนฟิกตาม Lifecycle ของแต่ละ Environment ในโปรเจกต์ Next.js:
+
+- **`sentry.client.config.ts`:** รันเฉพาะบนเว็บเบราว์เซอร์ ทำหน้าที่เริ่มต้น Browser Tracing, Session Replay, Network Request Breadcrumbs และดักจับ Unhandled Promise Rejection
+- **`sentry.server.config.ts`:** รันบน Node.js Process ฝั่งเซิร์ฟเวอร์ ผสานการทำงานเข้ากับ OpenTelemetry เพื่อตรวจจับ Span ของ Database Queries, Server Actions, และการเรนเดอร์ RSC
+- **`sentry.edge.config.ts`:** รันบน Vercel Edge Network หรือ Cloudflare Workers เน้นขนาดบันเดิลที่เล็กระดับ KiloBytes และใช้ Fetch API พื้นฐานในการส่ง Telemetry
+
+### 2.2 การอัปโหลด Source Maps อย่างปลอดภัยบน CI/CD
+
+โค้ด JavaScript ที่ผ่านการ Build ใน Production จะถูก Minify และ Tree-shake จนไม่สามารถอ่าน Stack Trace ได้ หากไม่ใช้ Source Maps ข้อความแจ้งเตือนใน Sentry จะแสดงเพียง `at e (app-12a8f.js:1:340)`
+
+แต่การเปิดให้ Source Maps เข้าถึงได้ผ่านอินเทอร์เน็ตสาธารณะถือเป็นช่องโหว่ความปลอดภัยระดับร้ายแรง เพราะผู้ไม่ประสงค์ดีสามารถ Reverse Engineer โค้ดต้นฉบับ ลอจิกการคิดราคา หรือซอร์สโค้ดของบริษัทได้ทั้งหมด
+
+**สถาปัตยกรรมที่ถูกต้อง:**
+1. Next.js สร้าง Source Maps ในขั้นตอน `next build`
+2. ปลั๊กอิน `@sentry/nextjs` ส่งไฟล์ `.map` ขึ้นไปยังเซิร์ฟเวอร์ของ Sentry โดยตรงผ่าน HTTPS พร้อมระบุ `release` และ `org/project`
+3. เปิดใช้งานออปชัน `hideSourceMaps: true` เพื่อสั่งลบ Source Mapping URL คอมเมนต์ออกจากท้ายไฟล์ `.js` และลบไฟล์ `.map` ทิ้งจากเอาต์พุต `.next/` ก่อนเสิร์ฟหน้าเว็บจริง
+
+<Callout type="warning" title="หลีกเลี่ยงการเปิดเผย Source Maps สู่สาธารณะ">
+ห้ามตั้งค่า productionBrowserSourceMaps: true ใน next.config.ts ควบคู่กับ Sentry เด็ดขาด เพราะ Next.js จะคัดลอกไฟล์ .map เข้าสู่ public assets ส่งผลให้ทุกคนสามารถดาวน์โหลดโค้ดต้นฉบับได้โดยตรงจากเบราว์เซอร์
+</Callout>
+
+### 2.3 การทำ PII Scrubbing (Data Sanitization)
+
+ตามมาตรฐานความปลอดภัย PDPA (Thailand) และ GDPR ข้อมูลระบุตัวตนของผู้ใช้ เช่น รหัสบัตรเครดิต, หมายเลขโทรศัพท์, รหัสผ่าน, และ Token การยืนยันตัวตน จะต้องไม่ถูกส่งไปยัง Third-party Service เด็ดขาด
+
+การกรองข้อมูลต้องทำผ่านฟังก์ชัน `beforeSend` และ `beforeSendTransaction` ในระดับ SDK Client ก่อนที่ Payload จะถูก Serialize ข้ามเครือข่าย
+
+```text
+Payload ก่อนส่ง -> [ Regex Scrubber: บัตรเครดิต/โทรศัพท์ ] -> [ Key Redactor: password/token ] -> ส่งไปยัง Sentry
+```
+
+### 2.4 Distributed Tracing และ Tunneling
+
+เพื่อป้องกันไม่ให้ Ad-blocker หรือ Browser Extension บล็อกการส่ง Telemetry ไปยังโดเมน `*.ingest.sentry.io` ทาง Sentry แนะนำให้ทำ **Tunnel Route**:
+- สร้าง Rewrite Endpoint ภายใน Next.js เช่น `/api/monitoring-tunnel`
+- บราวเซอร์ส่ง Telemetry มายังโดเมนเดียวกันกับเว็บไซต์ (First-party Context)
+- Next.js Route Handler ส่งต่อ Payload ไปยัง Sentry Ingest API แบบโปร่งใส
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+ในระบบ **Smart Butcher Marketplace** ที่มีการซื้อขายเนื้อวากิวพรีเมียม, เนื้อ Dry-Aged Tomahawk, และการชำระเงินตัดบัตรเครดิต เราต้องการการดักจับข้อผิดพลาดระดับสูงสุดโดยไม่เปิดเผยข้อมูลส่วนบุคคลของลูกค้า
+
+### ตัวอย่างที่ 1: การตั้งค่า Configuration Files & PII Scrubbing
+
+เริ่มต้นด้วยการตั้งค่า `next.config.ts`, `sentry.client.config.ts`, และ `sentry.server.config.ts`
+
+```typescript filename="next.config.ts"
+import { withSentryConfig } from "@sentry/nextjs";
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  reactStrictMode: true,
+  poweredByHeader: false,
+};
+
+// ห่อหุ้ม Next.js Config ด้วย Sentry Build Plugin
+export default withSentryConfig(nextConfig, {
+  // องค์กรและโปรเจกต์ที่ตั้งค่าไว้ใน Sentry Dashboard
+  org: "smart-butcher-group",
+  project: "marketplace-web",
+
+  // ซ่อน Source Maps จาก Bundle ของบราวเซอร์สาธารณะ
+  hideSourceMaps: true,
+
+  // อัปโหลดเฉพาะ Source Maps ที่จำเป็นเพื่อประหยัดเวลาบิลด์
+  widenClientFileUpload: true,
+
+  // ทำ Tunnel Route เพื่อป้องกัน Ad-blocker บล็อก Telemetry
+  tunnelRoute: "/api/monitoring-tunnel",
+
+  // ปิดการพิมพ์ข้อความ Sentry ระหว่างการรัน build ใน CI
+  silent: !process.env.CI,
+
+  // ป้องกันการรั่วไหลของ Source Maps ใน Production Server
+  sourcemaps: {
+    deleteSourcemapsAfterUpload: true,
+  },
+});
+```
+
+```typescript filename="src/sentry.client.config.ts"
+import * as Sentry from "@sentry/nextjs";
+
+// นิยาม Regular Expression สำหรับตรวจจับข้อมูลที่มีความอ่อนไหวสูง
+const SENSITIVE_PATTERNS = {
+  creditCard: /\b(?:\d[ -]*?){13,16}\b/g,
+  thaiPhoneNumber: /\b(?:0[689]\d{8}|0[2-57]\d{7})\b/g,
+  thaiNationalId: /\b\d{1}\s?\d{4}\s?\d{5}\s?\d{2}\s?\d{1}\b/g,
+};
+
+// ฟังก์ชันล้างข้อมูลอ่อนไหวออกจากข้อความหรือ Payload
+function sanitizeSensitiveString(input: string): string {
+  return input
+    .replace(SENSITIVE_PATTERNS.creditCard, "[REDACTED_PAYMENT_CARD]")
+    .replace(SENSITIVE_PATTERNS.thaiPhoneNumber, "[REDACTED_PHONE]")
+    .replace(SENSITIVE_PATTERNS.thaiNationalId, "[REDACTED_NATIONAL_ID]");
+}
+
+Sentry.init({
+  dsn: process.env.NEXT_PUBLIC_SENTRY_DSN,
+  environment: process.env.NEXT_PUBLIC_APP_ENV || "production",
+
+  // ปรับการเก็บ Performance Tracing ตามความเหมาะสม
+  tracesSampleRate: process.env.NODE_ENV === "production" ? 0.1 : 1.0,
+
+  // การตั้งค่า Session Replay แบบรัดกุมเพื่อความเป็นส่วนตัว
+  replaysSessionSampleRate: 0.05, // สุ่มอัดวิดีโอ 5% ของเซสชันปกติ
+  replaysOnErrorSampleRate: 1.0,  // หากเกิด Error จะบันทึก Replay ย้อนหลัง 100%
+
+  integrations: [
+    Sentry.replayIntegration({
+      maskAllText: true,           // ปิดบังข้อความทั้งหมดบนหน้าจอเพื่อความเป็นส่วนตัว
+      blockAllMedia: true,         // ปิดกั้นภาพและวิดีโอ
+      maskAllInputs: true,         // Mask ข้อมูลทุก Input โดยอัตโนมัติ
+    }),
+  ],
+
+  // Hook ดักกรองข้อมูลก่อนส่ง Telemetry ไปยัง Sentry Ingest
+  beforeSend(event, hint) {
+    // 1. ตรวจสอบและแปลงข้อความ Exception Message
+    if (event.exception?.values) {
+      for (const val of event.exception.values) {
+        if (val.value) {
+          val.value = sanitizeSensitiveString(val.value);
+        }
+      }
+    }
+
+    // 2. กรองข้อมูล Breadcrumbs ที่อาจมีข้อมูลพิมพ์จากผู้ใช้
+    if (event.breadcrumbs) {
+      event.breadcrumbs = event.breadcrumbs.map((crumb) => {
+        if (crumb.message) {
+          crumb.message = sanitizeSensitiveString(crumb.message);
+        }
+        return crumb;
+      });
+    }
+
+    // 3. กรองข้อมูล Header และ IP Address เพื่อสอดคล้องกับ PDPA
+    if (event.user) {
+      delete event.user.ip_address;
+    }
+
+    return event;
+  },
+});
+```
+
+```typescript filename="src/sentry.server.config.ts"
+import * as Sentry from "@sentry/nextjs";
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+  environment: process.env.APP_ENV || "production",
+
+  // Tracing สำหรับ Database Queries และ Server Actions
+  tracesSampleRate: process.env.NODE_ENV === "production" ? 0.2 : 1.0,
+
+  // กรอง Environment Variables ที่อาจเป็น Secret ก่อนส่งเข้า Context
+  beforeSend(event) {
+    if (event.request?.headers) {
+      delete event.request.headers["authorization"];
+      delete event.request.headers["cookie"];
+      delete event.request.headers["x-api-key"];
+    }
+    return event;
+  },
+});
+```
+
+---
+
+### ตัวอย่างที่ 2: การติดตาม Error และ Breadcrumbs ใน Meat Ordering Flow
+
+ในระบบการสั่งซื้อเนื้อสเต๊กพรีเมียม เราจะเชื่อมโยง Client Component เข้ากับ Server Action โดยมีการเพิ่ม Custom Breadcrumbs, การเชื่อมโยง Session, และการจับคู่ `error.digest`
+
+```typescript filename="src/types/marketplace.ts"
+export type MeatCutCategory = "WAGYU_A5" | "DRY_AGED_TOMAHAWK" | "ANGUS_RIBEYE";
+
+export interface MeatCut {
+  id: string;
+  sku: string;
+  title: string;
+  category: MeatCutCategory;
+  marblingScore: number;
+  weightGrams: number;
+  pricePerGram: number;
+  inventoryCount: number;
+}
+
+export interface User {
+  id: string;
+  email: string;
+  tier: "PLATINUM" | "GOLD" | "STANDARD";
+}
+
+export interface PaymentDetails {
+  method: "CREDIT_CARD" | "PROMPTPAY" | "WALLET";
+  token: string;
+  lastFourDigits: string;
+}
+
+export interface Order {
+  id: string;
+  userId: string;
+  items: Array<{ meatCutId: string; quantity: number; unitPrice: number }>;
+  totalAmount: number;
+  payment: PaymentDetails;
+  status: "PENDING" | "CONFIRMED" | "FAILED";
+}
+```
+
+```typescript filename="src/actions/order.ts"
+"use server";
+
+import * as Sentry from "@sentry/nextjs";
+import { MeatCut, Order, PaymentDetails, User } from "@/types/marketplace";
+
+interface CreateOrderInput {
+  user: User;
+  items: Array<{ meatCut: MeatCut; quantity: number }>;
+  payment: PaymentDetails;
+}
+
+export async function processMeatOrder(input: CreateOrderInput): Promise<{
+  success: boolean;
+  orderId?: string;
+  errorDigest?: string;
+  errorMessage?: string;
+}> {
+  return await Sentry.withServerActionInstrumentation(
+    "processMeatOrder",
+    {
+      recordResponse: true,
+    },
+    async () => {
+      // 1. ผูก Context ของผู้ใช้ (โดยไม่แนบข้อมูลส่วนบุคคลอ่อนไหว)
+      Sentry.setUser({
+        id: input.user.id,
+        segment: input.user.tier,
+      });
+
+      // 2. บันทึก Breadcrumb ลำดับขั้นตอนการเตรียมตัดเนื้อ
+      Sentry.addBreadcrumb({
+        category: "order.workflow",
+        message: `Customer initiated order with ${input.items.length} meat items`,
+        level: "info",
+        data: {
+          itemSkus: input.items.map((i) => i.meatCut.sku),
+          userTier: input.user.tier,
+        },
+      });
+
+      try {
+        // คำนวณยอดเงินรวม
+        const totalAmount = input.items.reduce((sum, item) => {
+          return sum + item.meatCut.weightGrams * item.meatCut.pricePerGram * item.quantity;
+        }, 0);
+
+        // ตรวจสอบสต็อกเนื้อในคลังเย็น
+        for (const item of input.items) {
+          if (item.meatCut.inventoryCount < item.quantity) {
+            throw new Error(`INSUFFICIENT_STOCK: Meat cut ${item.meatCut.sku} is out of stock`);
+          }
+        }
+
+        // จำลองขั้นตอนการเรียก Payment Gateway
+        if (input.payment.token.startsWith("tok_invalid")) {
+          const paymentFailure = new Error("GATEWAY_REJECTED: Credit card authorization failed");
+          // แนบข้อมูล Metadata เฉพาะสำหรับการวิเคราะห์ทางเทคนิค
+          Sentry.setContext("PaymentGateway", {
+            method: input.payment.method,
+            cardLastFour: input.payment.lastFourDigits,
+            totalAmount,
+          });
+          throw paymentFailure;
+        }
+
+        const confirmedOrderId = `ord_${Date.now()}`;
+
+        Sentry.addBreadcrumb({
+          category: "order.payment",
+          message: `Payment authorized successfully for order ${confirmedOrderId}`,
+          level: "info",
+        });
+
+        return {
+          success: true,
+          orderId: confirmedOrderId,
+        };
+      } catch (error) {
+        // ส่ง Exception เข้าสู่ Sentry พร้อม Tag ระดับความรุนแรง
+        const eventId = Sentry.captureException(error, {
+          tags: {
+            action: "processMeatOrder",
+            domain: "e-commerce-checkout",
+          },
+          extra: {
+            itemsCount: input.items.length,
+          },
+        });
+
+        // ใน Next.js เมื่อเกิด Server Error ใน Server Action เราจะส่ง Error ID กลับหน้าบ้าน
+        return {
+          success: false,
+          errorDigest: eventId,
+          errorMessage: error instanceof Error ? error.message : "Internal Meat Processing Error",
+        };
+      }
+    }
+  );
+}
+```
+
+```tsx filename="src/components/checkout/MeatCheckoutForm.tsx"
+"use client";
+
+import React, { useState, useTransition } from "react";
+import * as Sentry from "@sentry/nextjs";
+import { processMeatOrder } from "@/actions/order";
+import { MeatCut, User } from "@/types/marketplace";
+
+interface MeatCheckoutFormProps {
+  currentUser: User;
+  selectedMeat: MeatCut;
+}
+
+export function MeatCheckoutForm({ currentUser, selectedMeat }: MeatCheckoutFormProps) {
+  const [isPending, startTransition] = useTransition();
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [digestCode, setDigestCode] = useState<string | null>(null);
+  const [quantity, setQuantity] = useState<number>(1);
+  const [cardLastFour, setCardLastFour] = useState<string>("4242");
+
+  const handleCheckout = () => {
+    setErrorMessage(null);
+    setDigestCode(null);
+
+    // บันทึก Breadcrumb จากพฤติกรรมของลูกค้าบนหน้าบ้าน
+    Sentry.addBreadcrumb({
+      category: "ui.click",
+      message: `User clicked checkout for meat SKU: ${selectedMeat.sku}`,
+      level: "info",
+      data: {
+        sku: selectedMeat.sku,
+        marblingScore: selectedMeat.marblingScore,
+        quantity,
+      },
+    });
+
+    startTransition(async () => {
+      try {
+        const result = await processMeatOrder({
+          user: currentUser,
+          items: [{ meatCut: selectedMeat, quantity }],
+          payment: {
+            method: "CREDIT_CARD",
+            token: "tok_invalid_test_fail", // ตัวอย่าง Trigger Error
+            lastFourDigits: cardLastFour,
+          },
+        });
+
+        if (!result.success) {
+          setErrorMessage(result.errorMessage || "เกิดข้อผิดพลาดในการสั่งซื้อ");
+          setDigestCode(result.errorDigest || null);
+
+          // ส่ง Tag การสั่งซื้อไม่สำเร็จเข้า Client Context
+          Sentry.setTag("checkout_status", "failed");
+        } else {
+          alert(`สั่งซื้อสำเร็จ! รหัสคำสั่งซื้อ: ${result.orderId}`);
+        }
+      } catch (clientErr) {
+        // กรณีเครือข่ายหลุด หรือ Client Runtime พัง
+        const clientEventId = Sentry.captureException(clientErr);
+        setErrorMessage("ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ กรุณาลองใหม่อีกครั้ง");
+        setDigestCode(clientEventId);
+      }
+    });
+  };
+
+  return (
+    <div className="max-w-xl mx-auto p-6 bg-white dark:bg-neutral-900 rounded-2xl shadow-lg border border-neutral-200 dark:border-neutral-800 space-y-6">
+      <div className="border-b border-neutral-200 dark:border-neutral-800 pb-4">
+        <h2 className="text-2xl font-bold text-neutral-900 dark:text-neutral-100">
+          ยืนยันคำสั่งซื้อเนื้อเกรดพรีเมียม
+        </h2>
+        <p className="text-sm text-neutral-500">
+          {selectedMeat.title} (Marbling Score: A{selectedMeat.marblingScore})
+        </p>
+      </div>
+
+      <div className="space-y-4">
+        <div className="flex justify-between items-center text-sm">
+          <span className="text-neutral-600 dark:text-neutral-400">น้ำหนักสุทธิ:</span>
+          <span className="font-semibold">{selectedMeat.weightGrams} กรัม</span>
+        </div>
+        <div className="flex justify-between items-center text-sm">
+          <span className="text-neutral-600 dark:text-neutral-400">ราคาคำนวณ:</span>
+          <span className="font-semibold text-red-600">
+            {(selectedMeat.weightGrams * selectedMeat.pricePerGram * quantity).toLocaleString()} บาท
+          </span>
+        </div>
+
+        {/* Input ที่มีคลาส data-sentry-mask เพื่อป้องกันการแอบดูของ Session Replay */}
+        <div className="space-y-1">
+          <label className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">
+            หมายเลขบัตรเครดิต (Masked automatically)
+          </label>
+          <input
+            type="text"
+            readOnly
+            value={`**** **** **** ${cardLastFour}`}
+            className="w-full px-4 py-2 border rounded-lg bg-neutral-100 dark:bg-neutral-800 text-neutral-600"
+            data-sentry-mask
+          />
+        </div>
+      </div>
+
+      {errorMessage && (
+        <div className="p-4 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-xl space-y-1">
+          <p className="text-sm font-semibold text-red-700 dark:text-red-400">{errorMessage}</p>
+          {digestCode && (
+            <p className="text-xs text-red-500">
+              รหัสอ้างอิงสำหรับฝ่ายบริการลูกค้า (Incident ID):{" "}
+              <code className="font-mono bg-red-100 dark:bg-red-900/50 px-1 py-0.5 rounded">
+                {digestCode}
+              </code>
+            </p>
+          )}
+        </div>
+      )}
+
+      <button
+        onClick={handleCheckout}
+        disabled={isPending}
+        className="w-full py-3 bg-red-700 hover:bg-red-800 text-white font-medium rounded-xl transition duration-200 disabled:opacity-50"
+      >
+        {isPending ? "กำลังตัดชำระเงินและสำรองเนื้อ..." : "ยืนยันและชำระเงิน"}
+      </button>
+    </div>
+  );
+}
+```
+
+---
+
+### ตัวอย่างที่ 3: CI/CD Pipeline สำหรับการอัปโหลด Source Maps อย่างปลอดภัย
+
+ขั้นตอนบน GitHub Actions สำหรับการบิลด์โค้ด และส่ง Source Maps ไปยัง Sentry โดยไม่รั่วไหลไปยัง Docker Image หรือ Public Web
+
+```yaml filename=".github/workflows/deploy.yml"
+name: Production Build & Sentry Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build Next.js Application with Sentry Source Maps
+        env:
+          # ระบุ Token สำหรับการอัปโหลด Source Maps (กำหนดใน GitHub Secrets)
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: "smart-butcher-group"
+          SENTRY_PROJECT: "marketplace-web"
+          NEXT_PUBLIC_SENTRY_DSN: "https://key_test_public@o000000.ingest.sentry.io/000000"
+          SENTRY_DSN: "https://key_test_server@o000000.ingest.sentry.io/000000"
+          NEXT_PUBLIC_APP_ENV: "production"
+        run: |
+          echo "Building Next.js Standalone with Sentry Instrumentation..."
+          npm run build
+
+      - name: Verify Source Maps Cleanup
+        run: |
+          echo "Checking that .map files are not present in public bundle directory..."
+          # ตรวจสอบว่าไม่มีไฟล์ .map หลุดเข้าไปใน static directory
+          find .next/static -name "*.map" | grep -q . && exit 1 || echo "Source maps safely uploaded and purged."
+
+      - name: Create Sentry Release Notification
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: "smart-butcher-group"
+          SENTRY_PROJECT: "marketplace-web"
+        run: |
+          npx @sentry/cli releases set-commits --auto "${{ github.sha }}"
+          npx @sentry/cli releases finalize "${{ github.sha }}"
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ปัญหาที่พบบ่อย | รูปแบบที่ผิดพลาด (Anti-pattern) | แนวปฏิบัติระดับ Senior Architect (Best Practice) |
+| :--- | :--- | :--- |
+| **Source Maps รั่วไหลสู่สาธารณะ** | เปิด `productionBrowserSourceMaps: true` หรือปล่อยให้ไฟล์ `.map` ถูกเสิร์ฟผ่าน CDN สาธารณะ | ใช้ `hideSourceMaps: true` และเปิดใช้งาน `deleteSourcemapsAfterUpload: true` ใน `next.config.ts` เพื่อให้ Source Maps อยู่บน Sentry Dashboard เท่านั้น |
+| **ข้อมูลส่วนบุคคล (PII) ปนเปื้อนใน Log** | ปล่อยให้หมายเลขบัตรเครดิต, เบอร์โทรศัพท์, หรือรหัสผ่านของลูกค้าบันทึกเข้าไปใน Sentry Breadcrumbs | ดักจับด้วย Regular Expression ใน `beforeSend` และตั้งค่า `maskAllInputs: true` ในการบันทึก Session Replay |
+| **ละเลยการเชื่อมโยง `error.digest`** | เมื่อหน้าบ้านเกิด Crash นำข้อความ generic มาแสดงโดยไม่บันทึกหรือแจ้ง Event ID / Digest แก่ผู้ใช้ | นำรหัส `error.digest` ส่งกลับมาเป็น Incident Code เพื่อให้ทีม Support และ On-Call เชื่อมโยงปัญหาใน Sentry ได้ทันที |
+| **Ad-blocker สกัดกั้น Telemetry** | ส่ง Event ตรงไปยัง `o000000.ingest.sentry.io` ส่งผลให้เบราว์เซอร์ที่มี Ad-blocker ตัดข้อมูลทิ้งกว่า 20-30% | กำหนด `tunnelRoute: "/api/monitoring-tunnel"` ในคอนฟิก เพื่อส่งข้อมูลผ่าน First-party Domain ของเราเอง |
+| **การใช้ `captureException` ใน Try-Catch ทุกจุด** | ใส่ `Sentry.captureException` ใน Catch Block ของ Form Validation หรือ Business Logic ปกติ ทำให้โควตา Event เต็ม | ดักจับเฉพาะ Uncaught/System Exceptions ส่วน Validation Errors ให้ส่งผ่าน Discriminated Union ธรรมดา |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Sentry Error Monitoring:
+- **Production Enterprise Environments:** ที่ต้องการรักษาข้อตกลงระดับการให้บริการ (SLA) และลด Mean Time to Resolution (MTTR)
+- **Critical Business Transactions:** เช่น ระบบสั่งซื้อเนื้อสเต๊กพรีเมียม, การประมวลผลตัดยอดบัตรเครดิต, การตัดสต็อกสินค้าในคลังสินค้า
+- **การติดตามปัญหา Hydration Mismatch:** ตรวจสอบว่าคอมโพเนนต์ใดที่เรนเดอร์ HTML ฝั่งเซิร์ฟเวอร์ไม่ตรงกับฝั่งบราวเซอร์
+- **Session Replay สำหรับ Bug Reproduction:** ใช้ดูบันทึกการเคลื่อนไหวของผู้ใช้ก่อนที่จะเกิด Fatal Error ในขั้นตอน Checkout
+
+### ไม่ควรส่ง Event ไปยัง Sentry:
+- **ข้อผิดพลาดจากการกรอกฟอร์มผิดของผู้ใช้ (User Input Validation):** เช่น ลูกค้าลืมกรอกนามสกุล หรือกรอกรหัสไปรษณีย์ไม่ครบ 5 หลัก (ควรจัดการผ่าน Zod และแสดง UI Error ใต้ Input)
+- **HTTP 404 Not Found หรือ Expected Client Aborts:** ลูกค้าปิดหน้าต่างเบราว์เซอร์กะทันหัน หรือพิมพ์ URL ผิด (ควรคัดกรองออกจาก `beforeSend`)
+- **การใช้งานแทน Database Logging ทั่วไป:** ห้ามใช้ Sentry เป็นระบบ Audit Log สำรองสำหรับเก็บประวัติการกดปุ่มทั่วไปของพนักงาน
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: ใน Next.js 16 เมื่อเกิด Unhandled Exception ภายใน Server Component โค้ดฝั่งหน้าบ้านจะได้รับเฉพาะข้อความกลางพร้อม `error.digest` คุณจะออกแบบสถาปัตยกรรม Observability อย่างไรเพื่อเชื่อมโยงความผิดพลาดนี้กับ Sentry โดยไม่เปิดเผย Stack Trace สู่ผู้ใช้?
+
+**แนวคำตอบเชิงลึก:**
+1. **พฤติกรรมของ Next.js 16:** Next.js มีกลไก Server Error Masking ใน Production ซึ่งจะเปลี่ยนข้อความของ Uncaught Server Exception ให้เป็นข้อความมาตรฐาน และสร้างรหัส SHA Hash สั้นๆ เรียกว่า `error.digest` เพื่อป้องกัน Database Schema หรือ Internal IP รั่วไหล
+2. **การจับคู่ผ่าน Sentry Server SDK:**
+   - เมื่อ Exception เกิดขึ้นบน Server Component ตัว `@sentry/nextjs` ใน `sentry.server.config.ts` จะจับคู่เข้ากับ OpenTelemetry Span และบันทึก Full Stack Trace ต้นฉบับ
+   - Next.js จะแนบค่า `digest` เข้าไปในอ็อบเจกต์ Error อัตโนมัติ ซึ่ง Sentry SDK จะดึงค่านั้นมาตั้งค่าเป็น Tag ชื่อ `digest` ใน Event ของ Sentry ทันที
+3. **การจับคู่ฝั่ง Client Component:**
+   - ในไฟล์ `error.tsx` คอมโพเนนต์จะได้รับพารามิเตอร์ `{ error, reset }` โดย `error.digest` จะมีค่าตรงกันกับบนเซิร์ฟเวอร์
+   - เราสามารถเรียก `Sentry.captureException(error, { tags: { digest: error.digest } })` หรือแสดงรหัส Incident ID นี้บนหน้าจอ UI
+4. **กระบวนการสืบสวน (Incident Resolution):**
+   - เมื่อ On-call Engineer ได้รับรหัส Incident ID จากลูกค้า เพียงนำรหัส Digest นั้นไปค้นหาในช่อง Search ของ Sentry Dashboard (`digest:"1837482910"`)
+   - ระบบจะเปิดดู Event ฝั่ง Server ที่บันทึก Stack Trace, SQL Query, และสภาพแวดล้อมจริงได้ทันที โดยไม่มีการส่งข้อมูลลับใดๆ หลุดไปใน Response ของ HTTP สู่เบราว์เซอร์
+
+---
+
+### คำถามที่ 2: การเปิดใช้งาน Session Replay และ Tracing ในระบบ E-Commerce อาจเสี่ยงต่อการละเมิดกฎหมายคุ้มครองข้อมูลส่วนบุคคล (PDPA/GDPR) คุณมีกลยุทธ์ทางสถาปัตยกรรมอย่างไรในการปกป้องข้อมูลลูกค้า แต่ยังคงความสามารถในการแก้บั๊กของทีมวิศวกร?
+
+**แนวคำตอบเชิงลึก:**
+สถาปัตยกรรม Privacy-Preserving Observability ต้องวางมาตรการป้องกัน 4 ชั้น (Defense-in-Depth):
+
+1. **Client-side DOM Masking (Session Replay Level):**
+   - กำหนดค่า `maskAllText: true`, `maskAllInputs: true`, และ `blockAllMedia: true` ใน `replayIntegration` เพื่อให้ทุกตัวอักษรและอินพุตบนหน้าจอถูกแทนที่ด้วยสัญลักษณ์รูปดาว (`***`) และกล่องสี่เหลี่ยมสีเทา
+   - ใช้แอตทริบิวต์ HTML `data-sentry-mask` ครอบ Element เฉพาะเจาะจงที่แสดงข้อมูลอ่อนไหว เช่น ยอดเงินคงเหลือ, รหัสบัตรเครดิต, และที่อยู่จัดส่งเนื้อ
+   - อนุญาตเฉพาะปุ่ม UI นำทางเท่านั้นที่ใช้ `data-sentry-unmask` เพื่อให้เห็นเฉพาะ Flow การกดของผู้ใช้
+2. **Network Payload Filtering (`beforeSend` Level):**
+   - สร้าง Sanitize Pipeline ด้วย Regular Expressions ในการตรวจจับเลขบัตรเครดิต 16 หลัก, เลขบัตรประจำตัวประชาชนไทย 13 หลัก, และเบอร์โทรศัพท์
+   - ทำการ Redact ฟิลด์ที่ตรงกับเงื่อนไขให้กลายเป็น `[REDACTED_PAYMENT_CARD]` ทันทีในหน่วยความจำของเบราว์เซอร์ก่อนส่งข้อมูลออกจากเครื่องผู้ใช้
+3. **HTTP Header & User Anonymization:**
+   - ลบ `Authorization`, `Cookie`, และ `x-api-key` ออกจาก Request Headers เสมอ
+   - ปลด `ip_address` ออกจาก User Payload โดยตั้งค่าให้ Sentry จัดเก็บเฉพาะสุ่ม Anonymized User ID หรือ Customer Segment เช่น `tier: "PLATINUM"` เพื่อดูผลกระทบระดับ Segment โดยไม่ระบุตัวบุคคล
+4. **Sampling Rate Strategy:**
+   - ลด Session Replay ของผู้ใช้ทั่วไปเหลือเพียง 1-5% และเปิดใช้ `replaysOnErrorSampleRate: 1.0` เฉพาะเมื่อเกิด Exception ขึ้นจริง เพื่อลดปริมาณการบันทึกข้อมูลที่ไม่จำเป็นลง 95%
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [Next.js Error & Loading States](/docs/nextjs/error-handling) — สถาปัตยกรรม Error Boundaries, Suspense และ Server Error Redaction
+- [Next.js Server Actions](/docs/nextjs/server-actions) — การจัดการข้อผิดพลาดและความปลอดภัยในการ Mutation ข้อมูล
+- [Next.js Production Deployment](/docs/nextjs/deployment) — การตั้งค่า Dockerfile, Environment Variables และ Standalone Build
+- [Next.js Optimization Architecture](/docs/nextjs/optimization) — การเพิ่มประสิทธิภาพบิลด์และการควบคุมขนาด JavaScript Bundles
+- [React Error Boundaries & Suspense](/docs/react/error-suspense) — สถาปัตยกรรม Declarative Fallbacks และ Error Handling ใน React 19

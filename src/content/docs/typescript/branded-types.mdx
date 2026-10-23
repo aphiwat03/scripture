@@ -1,0 +1,349 @@
+---
+title: Branded Types
+category: Frontend
+parentTitle: TypeScript
+version: TypeScript 5.x
+updatedAt: 2026-10-23
+---
+
+# TypeScript 5.x Branded Types & Nominal Typing Simulation
+
+คู่มือเชิงลึกระดับ Senior ในการสร้าง Branded Types (Nominal Typing) บนระบบ Structural Type System ของ TypeScript 5.x: การกำจัดปัญหา Primitive Obsession, การใช้ `unique symbol` ป้องกัน Type Collision, Smart Constructors พร้อม Runtime Validation, และระบบ Type-safe Math สำหรับคำนวณราคาสเต๊กและน้ำหนักเนื้ออย่างปลอดภัย 100%
+
+---
+
+## 1. แนวคิด (Concept)
+
+TypeScript เป็นภาษาที่ใช้ระบบ **Structural Typing (Duck Typing)** ซึ่งหมายความว่า:
+> *"ถ้าโครงสร้างของสองสิ่งเหมือนกัน TypeScript จะถือว่าเป็น Type เดียวกันโดยสมบูรณ์"*
+
+แม้ว่าคุณจะตั้ง Type Alias แยกกันอย่างชัดเจน:
+```typescript filename="src/types/primitive-obsession.ts"
+type UserId = string;
+type OrderId = string;
+
+function cancelMeatOrder(userId: UserId, orderId: OrderId) { ... }
+```
+TypeScript จะยอมให้คุณเรียก `cancelMeatOrder(orderId, userId)` ได้อย่างอิสระโดยไม่มี Error แจ้งเตือนในตอนคอมไพล์เลย เพราะทั้งสองตัวแปรมีโครงสร้างแท้จริงเป็น `string` เหมือนกัน อาการนี้ในทางสถาปัตยกรรมซอฟต์แวร์เรียกว่า **Primitive Obsession**
+
+**Branded Types (หรือ Nominal Typing Simulation)** คือเทคนิคขั้นสูงในการ "ประทับตราเครื่องหมายการค้า" (Brand Tag) ที่ระดับ Type System เพื่อบอกคอมไพเลอร์ว่าแม้ค่า Run-time จะเป็น Primitive ธรรมดา (เช่น `string` หรือ `number`) แต่ที่ระดับ Compile-time มันคือคนละ Type โดยเด็ดขาด ห้ามนำมาส่งสลับกันเด็ดขาด!
+
+```text
++--------------------------------------------------------------------------------------------------+
+|                            Structural Typing vs Branded Types                                    |
++--------------------------------------------------------------------------------------------------+
+| [Structural Typing (เดิม)]                                                                       |
+|   const customerId: UserId = "usr_123";                                                          |
+|   const steakOrderId: OrderId = "ord_999";                                                       |
+|                                                                                                  |
+|   shipOrder(steakOrderId, customerId); // ผ่านฉลุย! (แต่ระบบส่งเนื้อผิดคน พังระดับ Production)   |
+|                                                                                                  |
+| [Branded Types (Nominal)]                                                                        |
+|   type UserId = string & { readonly [__brand]: 'UserId' };                                       |
+|   type OrderId = string & { readonly [__brand]: 'OrderId' };                                     |
+|                                                                                                  |
+|   shipOrder(steakOrderId, customerId);                                                           |
+|             ~~~~~~~~~~~~                                                                         |
+|   TS2345: Argument of type 'OrderId' is not assignable to parameter of type 'UserId'.           |
+|           Type 'OrderId' is missing property '[__brand]' of 'UserId'.                            |
++--------------------------------------------------------------------------------------------------+
+```
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### 2.1 ทำไมต้องใช้ `declare const __brand: unique symbol`?
+ในอดีต นักพัฒนามักใช้สตริงธรรมดาในการสร้าง Brand:
+```typescript filename="src/types/legacy-brand.ts"
+type BadBrand<T, B extends string> = T & { __brand: B };
+```
+- **ข้อเสีย:** พร็อพเพอร์ตี้ `__brand` จะปรากฏในตัวช่วย Autocomplete ของ IDE ทำให้นักพัฒนาเผลอกรอกค่า หรืออาจชนกับฟิลด์จริงใน JSON จากหลังบ้าน
+- **โซลูชันระดับ Senior:** ใช้ `unique symbol`:
+```typescript filename="src/types/symbol-brand.ts"
+declare const __brand: unique symbol;
+export type Brand<T, B> = T & { readonly [__brand]: B };
+```
+ตัวแปร Symbol ที่ถูก `declare` ไว้จะไม่มีตัวตนอยู่ใน Runtime JavaScript หลังคอมไพล์ (Zero Runtime Cost) และไม่สามารถเข้าถึงได้จากภายนอก
+
+### 2.2 Smart Constructors และ Type Predicates
+เนื่องจาก Branded Type เป็น Type สมมติที่คอมไพเลอร์สร้างขึ้น ตัวแปร Primitive ดิบๆ (Raw Primitives) จะไม่สามารถแปลงเป็น Branded Type ได้โดยตรง
+- เราต้องสร้าง **Smart Constructor** หรือ **Validation Function** ที่ทำหน้าที่ตรวจสอบความถูกต้อง (Runtime Validation) ก่อน
+- ใช้คำสั่ง Type Guard `val is BrandedType` เพื่อยกวิทยฐานะของค่าธรรมดาให้กลายเป็น Branded Type อย่างปลอดภัย
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: Foundation of Branded IDs และ Smart Constructors
+
+สร้างระบบ Branded ID เพื่อป้องกันการส่งสลับระหว่าง `UserId`, `ProductId`, และ `OrderId` ในระบบสั่งซื้อเนื้อสเต๊ก
+
+```typescript filename="src/types/brands.ts"
+// สัญลักษณ์เฉพาะระดับ Type-level ไม่ถูก Emit ออกมาในผลลัพธ์ JS
+declare const BrandSymbol: unique symbol;
+
+export type Brand<T, TBrand extends string> = T & {
+  readonly [BrandSymbol]: TBrand;
+};
+
+// กำหนด Nominal Types ของระบบเขียงเนื้อ
+export type UserId = Brand<string, 'UserId'>;
+export type ProductId = Brand<string, 'ProductId'>;
+export type OrderId = Brand<string, 'OrderId'>;
+
+// 1. Smart Constructor สำหรับ UserId (ต้องขึ้นต้นด้วย 'usr_' และยาว 10 ตัวอักษรขึ้นไป)
+export function parseUserId(raw: string): UserId {
+  if (!raw.startsWith('usr_') || raw.length < 8) {
+    throw new TypeError(`รหัสผู้ใช้ไม่ถูกต้อง: "${raw}" (ต้องขึ้นต้นด้วย usr_)`);
+  }
+  return raw as UserId;
+}
+
+// 2. Smart Constructor สำหรับ ProductId
+export function parseProductId(raw: string): ProductId {
+  if (!raw.startsWith('prod_')) {
+    throw new TypeError(`รหัสสินค้าเนื้อไม่ถูกต้อง: "${raw}" (ต้องขึ้นต้นด้วย prod_)`);
+  }
+  return raw as ProductId;
+}
+
+// 3. Smart Constructor สำหรับ OrderId
+export function parseOrderId(raw: string): OrderId {
+  if (!raw.startsWith('ord_')) {
+    throw new TypeError(`รหัสคำสั่งซื้อไม่ถูกต้อง: "${raw}"`);
+  }
+  return raw as OrderId;
+}
+```
+
+ทดสอบการใช้งานใน Service Layer:
+
+```typescript filename="src/services/order-service.ts"
+import {
+  type UserId,
+  type ProductId,
+  type OrderId,
+  parseUserId,
+  parseProductId,
+  parseOrderId,
+} from '@/types/brands';
+
+interface FulfillOrderParams {
+  customerId: UserId;
+  meatId: ProductId;
+  orderNumber: OrderId;
+}
+
+// ฟังก์ชันตัดแต่งเนื้อตามออเดอร์ บังคับตรวจสอบ Type อย่างเข้มงวด
+export function fulfillMeatOrder({ customerId, meatId, orderNumber }: FulfillOrderParams) {
+  console.log(`[Butcher] ตัดเนื้อชิ้น ${meatId} สำหรับลูกค้า ${customerId} ตามใบสั่ง ${orderNumber}`);
+  return { status: 'DISPATCHED' };
+}
+
+// ตัวอย่างการเรียกใช้:
+const rawUser = 'usr_somchai_88';
+const rawMeat = 'prod_wagyu_a5';
+const rawOrder = 'ord_2026_001';
+
+const validUser = parseUserId(rawUser);
+const validMeat = parseProductId(rawMeat);
+const validOrder = parseOrderId(rawOrder);
+
+// คอมไพล์ผ่านสมบูรณ์:
+fulfillMeatOrder({
+  customerId: validUser,
+  meatId: validMeat,
+  orderNumber: validOrder,
+});
+
+// หากเผลอสลับตัวแปร:
+// fulfillMeatOrder({ customerId: validOrder, meatId: validMeat, orderNumber: validUser });
+// ❌ คอมไพเลอร์แจ้ง Error ทันที:
+// Type 'OrderId' is not assignable to type 'UserId'.
+```
+
+---
+
+### ตัวอย่างที่ 2: Advanced Type-Safe Math Engine (เงินบาท THB, น้ำหนักกรัมเนื้อ, และอุณหภูมิความเย็น)
+
+ในการตัดเนื้อสเต๊กขาย เรามีตัวแปรตัวเลขหลายชนิด:
+- `MoneyTHB`: ราคาสุทธิหน่วยเป็นบาท
+- `WeightGrams`: น้ำหนักเนื้อหน่วยเป็นกรัม
+- `TemperatureCelsius`: อุณหภูมิตู้บ่มเนื้อห้ามเกิน 2°C
+- หากนำ `WeightGrams + MoneyTHB` จะต้องเกิด Compile Error ทันที!
+
+```typescript filename="src/types/units.ts"
+import { z } from 'zod';
+
+declare const UnitBrand: unique symbol;
+
+export type Branded<T, B extends string> = T & { readonly [UnitBrand]: B };
+
+// ประเภทข้อมูลตัวเลขเชิงธุรกิจ
+export type MoneyTHB = Branded<number, 'MoneyTHB'>;
+export type WeightGrams = Branded<number, 'WeightGrams'>;
+export type TemperatureCelsius = Branded<number, 'TemperatureCelsius'>;
+
+// 1. Zod Schemas พร้อมการ Transform เป็น Branded Types อัตโนมัติ
+export const MoneySchema = z
+  .number()
+  .nonnegative('ยอดเงินต้องไม่ติดลบ')
+  .transform((val) => val as MoneyTHB);
+
+export const WeightSchema = z
+  .number()
+  .positive('น้ำหนักเนื้อต้องมากกว่า 0 กรัม')
+  .max(50000, 'น้ำหนักเนื้อชิ้นเดียวต้องไม่เกิน 50 กิโลกรัม')
+  .transform((val) => val as WeightGrams);
+
+export const TemperatureSchema = z
+  .number()
+  .min(-25, 'อุณหภูมิต่ำกว่าขีดจำกัดตู้แช่แข็ง')
+  .max(4, 'อุณหภูมิตู้บ่มสูงเกินไป เนื้อจะเน่าเสีย')
+  .transform((val) => val as TemperatureCelsius);
+
+// 2. Type-Safe Math Operations
+export class MeatMath {
+  /**
+   * คำนวณราคาสเต๊กจากน้ำหนักและราคาต่อกรัม
+   */
+  static calculateSteakPrice(weight: WeightGrams, pricePerGram: MoneyTHB): MoneyTHB {
+    const rawTotal = (weight as number) * (pricePerGram as number);
+    return Math.round(rawTotal) as MoneyTHB;
+  }
+
+  /**
+   * บวกน้ำหนักเนื้อรวม (WeightGrams + WeightGrams = WeightGrams)
+   */
+  static addWeights(a: WeightGrams, b: WeightGrams): WeightGrams {
+    return ((a as number) + (b as number)) as WeightGrams;
+  }
+
+  /**
+   * รวมยอดเงินบาท (MoneyTHB + MoneyTHB = MoneyTHB)
+   */
+  static addMoney(a: MoneyTHB, b: MoneyTHB): MoneyTHB {
+    return ((a as number) + (b as number)) as MoneyTHB;
+  }
+}
+```
+
+นำไปประยุกต์ใช้ในฟังก์ชันคิดเงินตะกร้าสินค้าเนื้อพรีเมียม:
+
+```typescript filename="src/services/billing-calculator.ts"
+import {
+  type MoneyTHB,
+  type WeightGrams,
+  type TemperatureCelsius,
+  MoneySchema,
+  WeightSchema,
+  TemperatureSchema,
+  MeatMath,
+} from '@/types/units';
+
+interface SteakOrderItem {
+  productName: string;
+  weight: WeightGrams;
+  pricePerGram: MoneyTHB;
+  storageTemp: TemperatureCelsius;
+}
+
+export function processSteakItem(rawInput: {
+  productName: string;
+  weightGrams: number;
+  ratePerGram: number;
+  temp: number;
+}) {
+  // Validate และแปลงเป็น Branded Type ผ่าน Zod
+  const weight = WeightSchema.parse(rawInput.weightGrams);
+  const rate = MoneySchema.parse(rawInput.ratePerGram);
+  const temp = TemperatureSchema.parse(rawInput.temp);
+
+  const item: SteakOrderItem = {
+    productName: rawInput.productName,
+    weight,
+    pricePerGram: rate,
+    storageTemp: temp,
+  };
+
+  // คำนวณราคาแบบ Type-safe 100%
+  const itemTotalPrice = MeatMath.calculateSteakPrice(item.weight, item.pricePerGram);
+
+  console.log(`[Invoice] สินค้า: ${item.productName}`);
+  console.log(`- น้ำหนัก: ${item.weight}g (เก็บรักษาที่ ${item.storageTemp}°C)`);
+  console.log(`- ราคาสุทธิ: ฿${itemTotalPrice.toLocaleString()}`);
+
+  // ❌ ตัวอย่างที่คอมไพเลอร์จะบล็อกทันทีถ้าเผลอเขียนผิด:
+  // const badMath = MeatMath.addWeights(item.weight, itemTotalPrice);
+  // Error: Argument of type 'MoneyTHB' is not assignable to parameter of type 'WeightGrams'.
+
+  return { item, itemTotalPrice };
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+| ปัญหาที่พบบ่อย | รูปแบบที่ผิด (Anti-pattern) | รูปแบบที่ถูกต้องระดับ Senior (Best Practice) |
+| :--- | :--- | :--- |
+| **ใช้ Type Alias ธรรมดา** | `type UserId = string;` ซึ่งไม่มีผลต่อการตรวจจับของคอมไพเลอร์เลยแม้แต่น้อย | ใช้ Intersection ร่วมกับ Brand: `string & { readonly [BrandSymbol]: 'UserId' }` |
+| **ใช้สตริงคีย์ `__brand: string` ธรรมดา** | คีย์ชื่อ `__brand` หลุดเข้าไปใน JSON Serialization หรือกวน Autocomplete | ใช้ `declare const BrandSymbol: unique symbol;` ที่ไร้ตัวตนใน Runtime JS |
+| **Cast Type ตรงๆ ด้วย `as UserId` โดยไม่ Validate** | ทำ Type Assertion ดื้อๆ `const user = rawInput as UserId;` เมื่อข้อมูลผิดรูปแบบก็ทะลุเข้าสู่ระบบ | ใช้ Smart Constructor หรือ Zod Schema ที่มี Runtime Validation ก่อน Cast เสมอ |
+| **อนุญาตให้นำ Branded Number มาบวกกันตรงๆ** | ปล่อยให้นำ `price + weight` โดยไม่มี Wrapper Math Function ทำให้เสีย Brand กลายเป็น `number` ธรรมดา | สร้าง Type-safe Math Helper Class หรือ Pure Function สำหรับคำนวณหน่วยเฉพาะ |
+| **ตั้งชื่อ Brand ซ้ำกันข้ามโมดูล** | ใช้ String Literal `'ID'` ซ้ำกันในหลายๆ แฟ้ม ทำให้ Branded Types ปะปนกันได้ | ใช้ชื่อ Domain-specific ที่เจาะจง เช่น `'ButcherUser:Id'`, `'Catalog:ProductId'` |
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ Branded Types เมื่อ:
+- **Identifier IDs ในระบบขนาดใหญ่:** เช่น `UserId`, `OrderId`, `ProductId`, `InvoiceId` ป้องกันการส่งสลับพารามิเตอร์ในฟังก์ชันสำคัญ
+- **ตัวเลขที่มีหน่วยวัดทางกายภาพหรือทางการเงิน (Domain Units):** หน่วยเงิน (`THB`, `USD`), น้ำหนัก (`Grams`, `Kilograms`), อุณหภูมิ (`Celsius`)
+- **สตริงที่ผ่านกระบวนการทำความสะอาดแล้ว (Sanitized Strings):** เช่น `SanitizedHtml`, `HashedPassword`, `ValidatedEmail`
+
+### ไม่ควรใช้ Branded Types เมื่อ:
+- **โปรเจกต์ขนาดเล็กหรือสคริปต์สั้นๆ (Simple CRUD):** ซึ่งมีตัวแปรไม่กี่ตัว การเพิ่ม Branded Types อาจสร้างความซับซ้อนเกินจำเป็น (Over-engineering)
+- **ฟอร์ม UI ธรรมดาที่ไม่ได้เชื่อมโยงกับธุรกรรม:** หากเป็นเพียง Input ข้อความทั่วไป การใช้ Primitive `string` ร่วมกับ Zod ธรรมดาก็เพียงพอแล้ว
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### คำถามที่ 1: TypeScript เป็นภาษาแบบ Structural Typing เหตุใดสถาปัตยกรรมระดับ Enterprise จึงต้องจำลอง Nominal Typing ผ่าน Branded Types และเทคนิคนี้มีค่าใช้จ่าย (Runtime Overhead) หรือไม่?
+
+**แนวคำตอบเชิงลึก:**
+1. **ความจำเป็นในระบบ Enterprise:**
+   - ภายใต้ Structural Typing ของ TypeScript สอง Type ใดๆ ที่มีโครงสร้างเหมือนกันจะถือว่าแทนที่กันได้เสมอ
+   - ในระบบธุรกิจ เช่น ธนาคาร หรือ E-commerce การส่ง `transferMoney(fromAccountId, toAccountId, amount)` สลับตำแหน่งระหว่างบัญชีต้นทางและปลายทาง เป็นข้อผิดพลาดที่เกิดขึ้นบ่อยมากในระดับมนุษย์ (Human Error) เพราะทั้งหมดเป็น `string`
+   - Branded Types ช่วยเปลี่ยนการตรวจสอบจากเดิมที่ตรวจเฉพาะ Shape ให้กลายเป็นการตรวจสอบ **Semantic Identity (Nominal Typing)** ทำให้คอมไพเลอร์ทำหน้าที่เป็นเกราะป้องกันข้อผิดพลาดทางธุรกิจก่อนที่โค้ดจะขึ้น Production
+2. **Runtime Overhead:**
+   - **Zero Runtime Cost (0% Overhead):**
+   - การประกาศ `declare const __brand: unique symbol` เป็นการประกาศ Type Annotations ใน TypeScript เท่านั้น
+   - เมื่อคอมไพล์ผ่าน `tsc` โค้ดส่วน Brand Symbol และ Intersection ทั้งหมดจะถูกลบทิ้ง (Erased) เหลือเพียง Primitive ดิบๆ ในไฟล์ JavaScript
+   - ทำให้ได้ความปลอดภัยสูงสุดโดยไม่สูญเสียความเร็วและขนาด Memory แม้แต่ไบต์เดียว
+
+---
+
+### คำถามที่ 2: อธิบายความแตกต่างระหว่างการใช้ Zod `.brand()` กับการสร้าง Custom Unique Symbol ใน TypeScript และทั้งสองวิธีสามารถนำมาผสานกันได้อย่างไร?
+
+**แนวคำตอบเชิงลึก:**
+- **Zod `.brand<'BrandName'>()`:**
+  - เป็นฟังก์ชันสำเร็จรูปของไลบรารี Zod ที่ทำหน้าที่ทั้งสองระดับในคำสั่งเดียว:
+    1. **Runtime:** รันเงื่อนไขตรวจสอบ (เช่น `.min(1)`)
+    2. **Compile-time:** ประทับ Type Tag `z.BRAND<'BrandName'>` ลงใน Inferred Type อัตโนมัติ
+  - ข้อดีคือสะดวกมาก ไม่ต้องเขียนฟังก์ชันตรวจสอบเอง
+- **Custom Unique Symbol:**
+  - เหมาะสำหรับโปรเจกต์ที่ไม่ต้องการพึ่งพา Zod ในทุกเลเยอร์ เช่น Domain Layer บริสุทธิ์ หรือเมื่อต้องการสร้าง Type-safe Operators เฉพาะ (เช่น `MeatMath`)
+- **การผสานการทำงานร่วมกันอย่างสมบูรณ์แบบ:**
+  - เราสามารถนำ Zod มาทำหน้าที่เป็น Validation Layer ด่านหน้า (เช่น การรับ Input จาก Form หรือ REST API)
+  - จากนั้นใช้คำสั่ง `.transform((val) => val as MyCustomBrandedType)` เพื่อส่งค่าเข้าสู่ Domain Layer ที่คุมด้วย Custom Branded Types ได้อย่างสะอาดหมดจด
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+- [TypeScript Exhaustive Check & Unions](/docs/typescript/exhaustive-union) — การรับประกันความครบถ้วนของสถานะออเดอร์
+- [TypeScript Type-safe API Client](/docs/typescript/typed-api-client) — การสร้าง End-to-End Type Safety ร่วมกับ OpenAPI
+- [TypeScript Advanced Types](/docs/typescript/advanced-types) — Conditional Types และ Mapped Types
+- [TypeScript Narrowing & Type Guards](/docs/typescript/narrowing) — เทคนิคการบีบสอบประเภทข้อมูลอย่างปลอดภัย

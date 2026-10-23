@@ -1,0 +1,377 @@
+---
+title: Real-time (WS & SSE)
+category: BACKEND
+parentTitle: NestJS 11
+version: Socket.IO + Server-Sent Events (NestJS 11)
+updatedAt: 2026-10-23
+---
+
+## 1. แนวคิด (Concept)
+
+ในระบบ **Smart Butcher Marketplace** การติดตามสถานะการเตรียมเนื้อสดในห้องครัว (Butcher Kitchen Display System - KDS) ต้องการการอัปเดตข้อมูลแบบทันที (Real-time):
+- เมื่อลูกค้าสั่งซื้อเนื้อสเต๊กริบอายวากิว หน้าจอของหัวหน้าคนแล่เนื้อ (Master Butcher) ต้องเด้งออเดอร์ใหม่ขึ้นมาทันทีโดยไม่ต้องกดรีเฟรชเบราว์เซอร์
+- เมื่อคนแล่เนื้อกดปุ่ม "เริ่มแล่เนื้อ" หรือ "ชั่งน้ำหนักเสร็จสิ้น" สถานะบนสมาร์ทโฟนของลูกค้าต้องเปลี่ยนจาก `PREPARING` เป็น `CUTTING_WAGYU` และ `READY_FOR_DELIVERY` แบบเรียลไทม์
+
+ในโลกของการสื่อสารแบบ Real-time มี 2 กระบวนทัศน์หลักที่วิศวกรซอฟต์แวร์ต้องเลือกใช้งานให้ถูกต้องตามบริบท:
+1. **Server-Sent Events (SSE):** การส่งข้อมูลทิศทางเดียวจากเซิร์ฟเวอร์ไปยังไคลเอนต์ (Unidirectional / One-way Push) ทำงานบนโปรโตคอลมาตรฐาน HTTP/HTTPS ปกติ ผ่านการสตรีมข้อความชนิด `text/event-stream` เหมาะอย่างยิ่งสำหรับการแสดงผลความคืบหน้าของออเดอร์, การแจ้งเตือนราคาหุ้นเนื้อ หรือสตรีมผลลัพธ์จากโมเดล Generative AI
+2. **WebSockets (Socket.IO):** การเปิดช่องทางการสื่อสารสองทิศทางแบบเต็มรูปแบบ (Bi-directional Full-duplex) ผ่านการอัปเกรดการเชื่อมต่อ TCP เพียงครั้งเดียว เหมาะสำหรับระบบที่ทั้งสองฝั่งต้องส่งข้อมูลโต้ตอบกันอย่างต่อเนื่องและมี Latency ต่ำที่สุด เช่น ระบบแชทสดระหว่างลูกค้ากับบุชเชอร์ หรือการส่งพิกัดรถส่งเนื้อแบบเรียลไทม์
+
+NestJS 11 มอบความสามารถในการสร้างทั้ง **`@WebSocketGateway`** (ขับเคลื่อนด้วย Socket.IO หรือ ws) และ **`@Sse()`** Endpoint (ขับเคลื่อนด้วย RxJS Observables) ไว้อย่างไร้รอยต่อ
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### เปรียบเทียบสถาปัตยกรรม: HTTP Polling vs SSE vs WebSocket
+
+| คุณลักษณะ | Short / Long Polling | Server-Sent Events (SSE) | WebSockets (Socket.IO) |
+| :--- | :--- | :--- | :--- |
+| **ทิศทางการส่งข้อมูล** | ไคลเอนต์ร้องขอเป็นระยะ | Server -> Client (One-way) | ทั้งสองฝั่งพร้อมกัน (Full-duplex) |
+| **โปรโตคอลพื้นฐาน** | HTTP/1.1 หรือ HTTP/2 | HTTP/1.1 หรือ HTTP/2 | TCP (หลังผ่าน HTTP Upgrade) |
+| **Header Overhead** | สูงมาก (ส่ง Header ทุกรอบ) | ต่ำมาก (ส่ง Header ครั้งแรกครั้งเดียว) | ต่ำที่สุด (Frame header ขนาดเพียง 2-10 ไบต์) |
+| **Firewall / Proxy Friendly** | รองรับ 100% | รองรับ 100% (เป็น HTTP ปกติ) | อาจถูกบล็อกโดย Corporate Proxy บางแห่ง |
+| **Reconnection อัตโนมัติ** | ต้องเขียน Logic เอง | มี Built-in ใน EventSource ของเบราว์เซอร์ | Socket.IO จัดการให้โดยอัตโนมัติ |
+| **Multiplexing** | รองรับตามมาตรฐาน HTTP | รองรับดีเยี่ยมบน HTTP/2 (ไม่ติดโควตา 6 connections) | รันบน TCP แยกต่างหาก |
+
+```text filename="docs/backend/realtime-scaling.txt"
+                     ┌─────────────────────────────────────────┐
+                     │          Load Balancer (Ingress)        │
+                     └────────────┬───────────────┬────────────┘
+                                  │               │
+                     (Client A)   │               │   (Client B)
+                                  ▼               ▼
+                        ┌────────────────┐┌────────────────┐
+                        │  NestJS Node 1 ││  NestJS Node 2 │
+                        │ (Socket.IO Pod)││ (Socket.IO Pod)│
+                        └───────┬────────┘└────────┬───────┘
+                                │                  │
+                                ▼                  ▼
+                        ┌──────────────────────────────────┐
+                        │      Redis Pub/Sub Adapter       │
+                        │ (Channel: "kitchen-orders-room") │
+                        └──────────────────────────────────┘
+```
+
+### การสเกลระบบ Real-time ในระดับ Multi-Pod คลัสเตอร์
+เมื่อระบบมีเซิร์ฟเวอร์ NestJS มากกว่า 1 โหนด หาก Master Butcher เชื่อมต่ออยู่กับ **Node 1** แต่ลูกค้ายืนยันการชำระเงินที่ **Node 2** ตัว Node 2 จะไม่สามารถส่ง Event ข้ามเครื่องไปยัง Socket ของ Master Butcher บน Node 1 ได้โดยตรง เพราะ Connection Socket ถูกเก็บอยู่ใน RAM คนละเครื่อง
+
+เพื่อแก้ปัญหานี้ เราต้องติดตั้ง **`@socket.io/redis-adapter` (หรือ Redis Pub/Sub Streams)** เมื่อ Node 2 ทำการ Broadcast ข้อความ ตัว Socket.IO Adapter จะทำการ Publish ข้อความเข้า Redis Channel และ Redis จะทำการกระจาย (Fan-out) ไปยัง NestJS Pods ทุกตัว เพื่อส่งต่อข้อมูลไปยัง Socket ไคลเอนต์ที่เกี่ยวข้องอย่างแม่นยำ
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การใช้ Server-Sent Events (SSE) เพื่อสตรีมสถานะออเดอร์เนื้อสด
+
+ตัวอย่างนี้เหมาะสำหรับฝั่งลูกค้าที่ต้องการดูความคืบหน้าของออเดอร์เนื้อโดยไม่ต้องเปิด WebSocket Connection ให้เปลืองทรัพยากร
+
+```typescript filename="src/modules/orders/orders-sse.controller.ts"
+import { Controller, Sse, Param, MessageEvent } from '@nestjs/common';
+import { Observable, interval } from 'rxjs';
+import { map, switchMap, takeWhile } from 'rxjs/operators';
+import { PrismaService } from '../prisma/prisma.service';
+
+@Controller('orders')
+export class OrdersSseController {
+  constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * สตรีมสถานะการเตรียมเนื้อส่งตรงไปยังเบราว์เซอร์ลูกค้าผ่าน Server-Sent Events
+   * Frontend สามารถรับข้อมูลได้ผ่าน: const eventSource = new EventSource('/orders/ord_123/stream');
+   */
+  @Sse(':id/stream')
+  streamOrderStatus(@Param('id') orderId: string): Observable<MessageEvent> {
+    // โพลล์ตรวจสอบสถานะในฐานข้อมูลทุกๆ 2 วินาที แล้ว Push ไปยังไคลเอนต์
+    return interval(2000).pipe(
+      switchMap(async () => {
+        const order = await this.prisma.order.findUnique({
+          where: { id: orderId },
+          select: { id: true, status: true, updatedAt: true },
+        });
+
+        if (!order) {
+          throw new Error('ไม่พบข้อมูลคำสั่งซื้อ');
+        }
+
+        return order;
+      }),
+      // หยุดการสตรีมเมื่อเนื้อถูกจัดส่งสำเร็จ (DELIVERED) หรือถูกยกเลิก (CANCELLED)
+      takeWhile((order) => order.status !== 'DELIVERED' && order.status !== 'CANCELLED', true),
+      map((order) => ({
+        data: {
+          orderId: order.id,
+          status: order.status,
+          timestamp: order.updatedAt.toISOString(),
+          message: this.getStatusHumanMessage(order.status),
+        },
+      } as MessageEvent)),
+    );
+  }
+
+  private getStatusHumanMessage(status: string): string {
+    switch (status) {
+      case 'PENDING_PAYMENT':
+        return 'รอการชำระเงินและตรวจสอบสลิป';
+      case 'PAID':
+        return 'ชำระเงินสำเร็จ กำลังส่งรายการใหักุ๊กบุชเชอร์';
+      case 'PREPARING':
+        return 'กุ๊กกำลังคัดเลือกก้อนเนื้อวากิวจากตู้บ่ม Dry-Aged';
+      case 'CUTTING':
+        return 'ช่างกำลังแล่เนื้อตามความหนาที่คุณสั่ง (1.5 นิ้ว)';
+      case 'QUALITY_INSPECTED':
+        return 'ผ่านการตรวจสอบ Marbling Score และบรรจุกล่องควบคุมความเย็น';
+      case 'DELIVERED':
+        return 'เนื้อสดถึงมือคุณเรียบร้อยแล้ว';
+      default:
+        return 'กำลังอัปเดตสถานะ';
+    }
+  }
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: ระบบ WebSocket Gateway ครบวงจร (JWT Guard, Rooms และ Redis Adapter)
+
+การสร้าง Kitchen Display Gateway สำหรับห้องครัวบุชเชอร์ รองรับการยืนยันตัวตนด้วย JWT Token ขณะจับมือเชื่อมต่อ (Handshake) และการเข้าห้องตามสถานีแล่เนื้อ (Stations)
+
+```typescript filename="src/common/guards/ws-jwt.guard.ts"
+import { CanActivate, ExecutionContext, Injectable, Logger } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import { Socket } from 'socket.io';
+
+@Injectable()
+export class WsJwtGuard implements CanActivate {
+  private readonly logger = new Logger(WsJwtGuard.name);
+
+  constructor(private readonly jwtService: JwtService) {}
+
+  canActivate(context: ExecutionContext): boolean {
+    const client: Socket = context.switchToWs().getClient<Socket>();
+    
+    // ดึง JWT Token จาก handshake.auth หรือ handshake.headers
+    const token =
+      client.handshake.auth?.token ||
+      client.handshake.headers?.authorization?.replace('Bearer ', '');
+
+    if (!token) {
+      this.logger.warn(`[WS UNAUTHORIZED] การเชื่อมต่อถูกปฏิเสธเนื่องจากไม่มี Token: Socket ID ${client.id}`);
+      client.disconnect();
+      return false;
+    }
+
+    try {
+      // ถอดรหัสและตรวจสอบลายเซ็นของ Token
+      const payload = this.jwtService.verify(token, {
+        secret: process.env.JWT_SECRET || 'butcher-jwt-secret-2026',
+      });
+
+      // ผูกข้อมูล User เข้ากับ Socket Data เพื่อนำไปใช้ต่อใน Gateway Handlers
+      client.data.user = payload;
+      return true;
+    } catch (err: unknown) {
+      this.logger.error(`[WS TOKEN INVALID] ลายเซ็น Token ไม่ถูกต้อง: Socket ID ${client.id}`);
+      client.disconnect();
+      return false;
+    }
+  }
+}
+```
+
+```typescript filename="src/modules/kitchen/kitchen.gateway.ts"
+import {
+  WebSocketGateway,
+  WebSocketServer,
+  SubscribeMessage,
+  OnGatewayConnection,
+  OnGatewayDisconnect,
+  ConnectedSocket,
+  MessageBody,
+} from '@nestjs/websockets';
+import { UseGuards, Logger } from '@nestjs/common';
+import { Server, Socket } from 'socket.io';
+import { WsJwtGuard } from '../../common/guards/ws-jwt.guard';
+import { PrismaService } from '../prisma/prisma.service';
+
+@WebSocketGateway({
+  cors: {
+    origin: '*', // ใน Production ควรกำหนด Domain ชัดเจน เช่น https://kitchen.smartbutcher.com
+  },
+  namespace: '/kitchen',
+})
+export class KitchenGateway implements OnGatewayConnection, OnGatewayDisconnect {
+  private readonly logger = new Logger(KitchenGateway.name);
+
+  @WebSocketServer()
+  server: Server;
+
+  constructor(private readonly prisma: PrismaService) {}
+
+  // ดักจับการเชื่อมต่อ Socket ใหม่
+  handleConnection(client: Socket) {
+    this.logger.log(`[WS CONNECTED] ไคลเอนต์เชื่อมต่อเข้ามาใหม่: ${client.id}`);
+  }
+
+  // ดักจับเมื่อ Socket ตัดการเชื่อมต่อ
+  handleDisconnect(client: Socket) {
+    this.logger.log(`[WS DISCONNECTED] ไคลเอนต์ตัดการเชื่อมต่อ: ${client.id}`);
+  }
+
+  // เข้าห้องตามหมวดหมู่ชิ้นเนื้อ เช่น 'station:wagyu' หรือ 'station:pork'
+  @UseGuards(WsJwtGuard)
+  @SubscribeMessage('joinStation')
+  handleJoinStation(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { stationName: string },
+  ) {
+    const roomName = `station:${data.stationName}`;
+    client.join(roomName);
+    this.logger.log(`บุชเชอร์ ${client.data.user?.email || client.id} เข้าร่วมห้อง: ${roomName}`);
+
+    return { event: 'joined', room: roomName, status: 'success' };
+  }
+
+  // เมื่อคนแล่เนื้อกดอัปเดตสถานะของเนื้อ
+  @UseGuards(WsJwtGuard)
+  @SubscribeMessage('updateCutProgress')
+  async handleUpdateCutProgress(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { orderId: string; status: string; butcherNotes?: string },
+  ) {
+    this.logger.log(`[PROGRESS UPDATE] ออเดอร์ ${payload.orderId} เปลี่ยนสถานะเป็น: ${payload.status}`);
+
+    // อัปเดตลงฐานข้อมูล PostgreSQL
+    const updatedOrder = await this.prisma.order.update({
+      where: { id: payload.orderId },
+      data: { status: payload.status },
+      include: { orderItems: { include: { product: true } } },
+    });
+
+    // 1. Broadcast แจ้งเตือนทุกคนในห้องครัวสถานีเดียวกัน
+    this.server.to('station:wagyu').emit('orderStatusChanged', {
+      orderId: updatedOrder.id,
+      newStatus: updatedOrder.status,
+      updatedBy: client.data.user?.email,
+      timestamp: new Date().toISOString(),
+    });
+
+    // 2. Broadcast ออกไปทุกโหนดทั่วโลก (ผ่าน Redis Adapter)
+    return { success: true, orderId: updatedOrder.id };
+  }
+}
+```
+
+```typescript filename="src/main.ts"
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+import { RedisIoAdapter } from './common/adapters/redis-io.adapter';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+
+  // ติดตั้ง Redis Adapter เพื่อกระจาย Event ข้าม Multi-pod คลัสเตอร์
+  const redisIoAdapter = new RedisIoAdapter(app);
+  await redisIoAdapter.connectToRedis();
+  app.useWebSocketAdapter(redisIoAdapter);
+
+  await app.listen(3000);
+  console.log('Smart Butcher API & Real-time Gateway กำลังทำงานที่พอร์ต 3000');
+}
+bootstrap();
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+### ❌ โค้ดที่ผิด: ทำ Authentication ทุกๆ Event Message และเก็บ Socket State ใน Memory Map
+
+```typescript filename="bad-websocket.gateway.ts"
+@WebSocketGateway()
+export class BadWebSocketGateway {
+  // ผิดมหันต์ 1: เก็บ Socket Clients ไว้ใน Local Map 
+  // เมื่อมี 3 Pods รันบน Kubernetes Pod A จะไม่รู้จัก Socket ที่ต่ออยู่บน Pod B!
+  private connectedUsers = new Map<string, string>();
+
+  // ผิดมหันต์ 2: ถอดรหัสและ Verify JWT ซ้ำๆ ทุกครั้งที่มีการส่ง Event เล็กๆ เข้ามา
+  // สร้างภาระการคำนวณ Crypto PBKDF2/RSA ให้ CPU มหาศาล
+  @SubscribeMessage('ping')
+  handlePing(@MessageBody() data: any) {
+    const user = jwt.verify(data.token, 'secret'); // ช้ามาก!
+    return 'pong';
+  }
+}
+```
+
+### ✅ โค้ดที่ถูก: ตรวจสอบสิทธิ์ตั้งแต่ตอน Handshake และใช้ Redis Pub/Sub Adapter
+
+```typescript filename="good-websocket.gateway.ts"
+// ถูกต้อง: ดักจับและยืนยันตัวตนตอนทำ Connection Handshake เพียงครั้งเดียว
+// แล้วฝาก payload ไว้ใน client.data.user
+@WebSocketGateway()
+export class GoodWebSocketGateway {
+  @UseGuards(WsJwtGuard) // Guard ทำงานเฉพาะตอน Handshake
+  handleConnection(client: Socket) {
+    // client.data.user มีค่าพร้อมใช้งานทันทีโดยไม่ต้อง verify ซ้ำ
+  }
+
+  // ใช้ Socket.IO Rooms ร่วมกับ Redis Adapter เพื่อ Broadcast ข้าม Pod แบบไร้ขีดจำกัด
+}
+```
+
+<Callout type="note" title="การเลือกใช้ระหว่าง WebSocket vs SSE">
+หากระบบต้องการเพียงการแจ้งเตือนจากหลังบ้านไปหน้าบ้าน (เช่น ลูกค้าติดตามสถานะคำสั่งซื้อเนื้อวัว, การแจ้งเตือนสต็อกใกล้หมด) ให้เลือกใช้ **Server-Sent Events (SSE)** เป็นอันดับแรก เพราะทำงานผ่านพอร์ต HTTP ปกติ, รองรับ HTTP/2 อัตโนมัติ, และเบราว์เซอร์มีระบบ Reconnect ในตัวโดยไม่ต้องโหลดไลบรารีภายนอกขนาดใหญ่
+</Callout>
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้ WebSockets:
+- หน้าจอ Kitchen Display System (KDS) ในครัวที่มีการกดรับออเดอร์, ส่งสถานะตอบกลับ, และพูดคุยโต้ตอบสองทาง
+- ระบบแชทสดระหว่างลูกค้าที่กำลังเลือกเนื้อกับมาสเตอร์บุชเชอร์เพื่อสั่งตัดแต่งพิเศษ
+- ระบบ Live Bidding ประมูลเนื้อโคขุนสายพันธุ์หายากที่มีการแย่งเสนอราคาเสี้ยววินาที
+
+### ควรใช้ Server-Sent Events (SSE):
+- หน้า Tracking ออเดอร์สำหรับลูกค้า (สถานะ: กำลังแพ็ค -> รถออกเดินทาง)
+- สตรีมข้อความวิเคราะห์ลายหินอ่อนเนื้อจาก AI OCR ทีละ Token
+- แดชบอร์ดสรุปยอดขายสำหรับผู้บริหารที่ต้องการเห็นตัวเลขวิ่งขยับแบบเรียลไทม์
+
+### ไม่ควรใช้ทั้งคู่:
+- การร้องขอข้อมูลทั่วไปที่ไม่มีการเปลี่ยนแปลงบ่อย เช่น แคตตาล็อกสินค้า หรือข้อมูลส่วนตัวของ User (ควรใช้มาตรฐาน REST API ร่วมกับ Redis Cache)
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### Q1: หากต้องการทำระบบ Real-time Notifications ในแอปพลิเคชันที่มีผู้ใช้พร้อมกัน 100,000 คน เหตุใดการเลือกใช้ SSE ผ่าน HTTP/2 จึงประหยัดทรัพยากรเซิร์ฟเวอร์มากกว่า WebSocket?
+**แนวคำตอบเชิงลึก:**
+1. **TCP Connection Multiplexing บน HTTP/2:** ใน HTTP/2 คำขอแบบ SSE สามารถส่งผ่าน TCP Connection เดิมที่เบราว์เซอร์เปิดค้างไว้สำหรับหน้าเว็บได้เลย (Multiplexing) ไม่จำเป็นต้องสร้าง Connection ใหม่อีกเส้นเหมือน WebSocket ซึ่งช่วยประหยัด File Descriptors และลดภาระ Socket Handshake ของเซิร์ฟเวอร์
+2. **Memory Footprint:** การเชื่อมต่อ WebSocket ผ่าน Socket.IO มีค่า Overhead ของ Client/Server State Machine และ Memory Buffer สำหรับเก็บข้อความใน RAM สูงกว่า ขณะที่ SSE เป็นเพียงการเขียน Raw Text Stream ลงใน HTTP Response Buffer ธรรมดา
+3. **Infrastructure & Proxy Compatibility:** SSE วิ่งบนโปรโตคอล HTTP มาตรฐาน จึงผ่าน Firewalls, Corporate Proxies, และ Load Balancers (เช่น AWS ALB หรือ Cloudflare) ได้ทันทีโดยไม่ต้องตั้งค่า Connection Upgrade หรือปรับจูน Idle Timeout เป็นพิเศษเหมือน WebSocket
+
+---
+
+### Q2: ในสถาปัตยกรรม Socket.IO ระดับหลาย Pods กลไก Redis Adapter ทำงานอย่างไรในเบื้องหลัง และจะเกิดอะไรขึ้นหากเครือข่ายเชื่อมต่อกับ Redis ขาดหายไปชั่วขณะ?
+**แนวคำตอบเชิงลึก:**
+**กลไกการทำงาน:**
+เมื่อเราเรียกใช้คำสั่ง `server.to('kitchen-room').emit('new-order', orderData)` บน Pod 1:
+1. ตัว Redis Adapter บน Pod 1 จะแปลงคำสั่งและ Payload ให้กลายเป็นแพ็กเก็ตไบนารีหรือ JSON
+2. ทำการส่งคำสั่ง `PUBLISH socket.io#kitchen-room#... payload` ไปยัง Redis Pub/Sub Server
+3. Pod 2, Pod 3, และ Pod 4 ที่ทำการ `SUBSCRIBE` ช่องทางเดียวกันไว้ จะได้รับ Event นั้นพร้อมกัน
+4. แต่ละ Pod จะตรวจสอบหน่วยความจำของตนเองว่ามี Socket Clients ใดอยู่ในห้อง `kitchen-room` หรือไม่ แล้วทำการ Push ข้อมูลลง Socket จริงของโหนดนั้นๆ
+
+**หาก Redis ขาดการเชื่อมต่อชั่วคราว:**
+- ไคลเอนต์ที่ต่ออยู่กับ Pod เดียวกันจะยังคงส่งข้อความหากันได้เฉพาะภายในเครื่องนั้น (Local Room Broadcast ยังทำงาน)
+- แต่การ Broadcast ข้าม Pod จะหยุดทำงานทันที (Cross-pod messages dropped)
+- Socket.IO Adapter ยุคใหม่ (เช่น Redis Streams Adapter) สามารถคอนฟิกให้มี Message Backlog ชั่วคราวเพื่อนำส่งข้อความย้อนหลัง (Re-delivery) ทันทีที่ Redis กลับมาเชื่อมต่อได้
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เพื่อเพิ่มความสามารถในการพัฒนาระบบ Real-time ให้ปลอดภัยและขยายตัวได้ดี แนะนำให้ศึกษาหัวข้อต่อไปนี้:
+1. การตรวจสอบและป้องกันด้วย Guards: [Guards](/docs/backend/nestjs/guards)
+2. การสร้างและตรวจสอบสิทธิ์ด้วย JWT: [JWT HttpOnly](/docs/backend/authentication/jwt-httponly)
+3. การจัดการแคชประสิทธิภาพสูงบน Redis: [Redis Caching](/docs/backend/nestjs/redis-cache)
+4. การจัดการ Binary Buffer และ Streams ใน Node.js: [Streams & Buffer](/docs/backend/nodejs/streams-buffer)

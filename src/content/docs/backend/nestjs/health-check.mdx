@@ -1,0 +1,388 @@
+---
+title: Health Check
+category: BACKEND
+parentTitle: NestJS 11
+version: "@nestjs/terminus (NestJS 11)"
+updatedAt: 2026-10-23
+---
+
+## 1. แนวคิด (Concept)
+
+ในสถาปัตยกรรม Microservices และ Cloud-Native บน Kubernetes หรือ Docker Swarm การที่เซิร์ฟเวอร์เปิดพอร์ต HTTP ตอบกลับรหัสสถานะ `200 OK` ผ่าน Endpoint ธรรมดา เช่น `GET /ping` ไม่ได้เป็นเครื่องการันตีว่าแอปพลิเคชันพร้อมทำงานจริง เพราะกระบวนการ Node.js อาจยังทำงานอยู่ (Process is alive) แต่ฐานข้อมูล PostgreSQL หลุดการเชื่อมต่อ, คลัสเตอร์ Redis ล่ม, หรือหน่วยความจำ V8 Heap เต็มจนเกิด Event Loop Lag วิกฤต
+
+หากระบบ Orchestrator ไม่ทราบสถานะที่แท้จริง จะยังคงส่งทราฟฟิกลูกค้าที่เข้ามาสั่งซื้อเนื้อในระบบ **Smart Butcher Marketplace** ไปยังโหนดที่เสียหาย ส่งผลให้ลูกค้าเจอข้อผิดพลาด `500 Internal Server Error` หรือทำรายการชำระเงินค้างเติ่ง
+
+เพื่อแก้ปัญหานี้ Cloud-Native Pattern จึงแบ่งการตรวจสอบสถานะสุขภาพ (Health Probes) ออกเป็น 3 ระดับหลัก:
+1. **Liveness Probe (ยังมีชีวิตอยู่หรือไม่):** ตรวจสอบว่าโพรเซส Node.js ยังไม่ Deadlock หรือติด Infinite Loop หาก Probe นี้ล้มเหลว Container Runtime (Kubelet / Docker Engine) จะทำการสังหาร (Kill) และรีสตาร์ท Pod นั้นใหม่ทันที
+2. **Readiness Probe (พร้อมรับงานหรือไม่):** ตรวจสอบว่าแอปพลิเคชันพร้อมรับคำสั่งซื้อหรือไม่ โดยตรวจสอบการเชื่อมต่อกับ Dependency สำคัญ เช่น PostgreSQL (Prisma), Redis Caching, หรือ Payment Gateway หาก Probe นี้ล้มเหลว Pod จะถูกตัดออกจาก Ingress / Service Load Balancer ชั่วคราว แต่ **ห้ามรีสตาร์ท Pod** จนกว่า Dependency จะฟื้นตัว
+3. **Startup Probe (บูตระบบเสร็จหรือยัง):** สำหรับแอปพลิเคชันที่ต้องใช้เวลาเริ่มต้นทำงานนาน (เช่น รัน Database Migration หรือโหลดโมเดล AI ในหน่วยความจำ) เพื่อป้องกันไม่ให้ Liveness Probe สั่งฆ่าแอปพลิเคชันก่อนที่ระบบจะพร้อม
+
+NestJS 11 จัดเตรียมโมดูลมาตรฐานระดับ Enterprise คือ **`@nestjs/terminus`** ซึ่งผสานพลังของแพ็กเกจ Terminus สากลเข้ากับระบบ Dependency Injection และ Lifecycle Hooks ของ NestJS อย่างสมบูรณ์
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### สถาปัตยกรรมของ `@nestjs/terminus`
+
+เบื้องหลังการทำงานของ `@nestjs/terminus` ประกอบด้วยแกนหลัก 3 ส่วน:
+
+1. **`HealthCheckService` (Orchestrator):** รับฟังก์ชัน Array ของตัวตรวจสอบสุขภาพ (`HealthIndicatorFunction[]`) ทำการรันตัวตรวจสอบแบบขนานหรือตามลำดับ รวมผลลัพธ์ (Composite Health Result) และคำนวณ HTTP Status Code สุดท้าย:
+   - หากตัวตรวจสอบทุกตัวผ่าน: ส่งคืน HTTP Status `200 OK` พร้อมรายละเอียดสถานะ `status: 'ok'`
+   - หากมีตัวตรวจสอบอย่างน้อย 1 ตัวล้มเหลว: ดักจับข้อผิดพลาดและส่งคืน HTTP Status `503 Service Unavailable` พร้อมระบุฟิลด์ `details` และ `error` ของบริการที่ล้มเหลว
+2. **`HealthIndicator` Base Classes:** คลาสต้นแบบที่ห่อหุ้มตรรกะการตรวจสอบสถานะ เช่น `MemoryHealthIndicator`, `DiskHealthIndicator`, `MicroserviceHealthIndicator`, และ `HttpHealthIndicator`
+3. **Graceful Failure Tolerance & Isolation:** การล้มเหลวของ Readiness Probe จะไม่ทำให้ Node.js Process แครช และไม่ปล่อยให้ Unhandled Promise Rejection รั่วไหลออกมาทำลายแอปพลิเคชัน
+
+```text filename="docs/backend/health-probes.txt"
+           ┌──────────────────────────────────────────────┐
+           │        Kubernetes / Cloud Ingress            │
+           └──────┬────────────────────────────────┬──────┘
+                  │ (HTTP Traffic)                 │ (Readiness Probe Failure)
+                  ▼                                ▼
+       ┌──────────────────────┐         ┌──────────────────────┐
+       │      Pod 1 (Ready)   │         │    Pod 2 (Not Ready) │
+       │  [ /health/ready OK] │         │  [ /health/ready 503]│
+       │   Traffic ACCEPTED   │         │    Traffic BLOCKED   │
+       └──────────────────────┘         └──────────────────────┘
+                  ▲                                ▲
+                  │                                │
+                  └───────────────┬────────────────┘
+                                  │ (Liveness Probe Failure -> RESTART POD)
+                                  ▼
+                       ┌──────────────────────┐
+                       │     Pod 3 (Dead)     │
+                       │ [ /health/live FAIL] │
+                       │    Kubelet SIGKILL   │
+                       └──────────────────────┘
+```
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การสร้าง Health Controller ตรวจสอบสถานะหน่วยความจำ, ดิสก์ และ Prisma Database
+
+ในระบบ Smart Butcher Marketplace เราต้องตรวจสอบว่าระบบจัดการออเดอร์เนื้อมีหน่วยความจำ V8 Heap เพียงพอ, พื้นที่ดิสก์สำหรับเก็บใบเสร็จชั่วคราวไม่เต็ม, และฐานข้อมูล Prisma เชื่อมต่อได้ปกติ
+
+```typescript filename="src/modules/health/prisma.health-indicator.ts"
+import { Injectable } from '@nestjs/common';
+import { HealthIndicator, HealthIndicatorResult, HealthCheckError } from '@nestjs/terminus';
+import { PrismaService } from '../prisma/prisma.service';
+
+@Injectable()
+export class PrismaHealthIndicator extends HealthIndicator {
+  constructor(private readonly prisma: PrismaService) {
+    super();
+  }
+
+  async isHealthy(key: string): Promise<HealthIndicatorResult> {
+    try {
+      // ทำการรัน Raw Query สั้นๆ เพื่อทดสอบว่า Connection Pool ยังตอบสนองปกติ
+      await this.prisma.$queryRaw`SELECT 1`;
+      return this.getStatus(key, true, { message: 'Database connection is healthy' });
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown database error';
+      const result = this.getStatus(key, false, { message: errorMessage });
+      throw new HealthCheckError('Prisma check failed', result);
+    }
+  }
+}
+```
+
+```typescript filename="src/modules/health/health.controller.ts"
+import { Controller, Get } from '@nestjs/common';
+import {
+  HealthCheck,
+  HealthCheckService,
+  MemoryHealthIndicator,
+  DiskHealthIndicator,
+} from '@nestjs/terminus';
+import { PrismaHealthIndicator } from './prisma.health-indicator';
+
+@Controller('health')
+export class HealthController {
+  constructor(
+    private readonly health: HealthCheckService,
+    private readonly prismaHealth: PrismaHealthIndicator,
+    private readonly memory: MemoryHealthIndicator,
+    private readonly disk: DiskHealthIndicator,
+  ) {}
+
+  // 1. Liveness Probe: สำหรับ Kubelet เช็คว่าแอปพลิเคชันยังไม่ตาย
+  // ห้ามเช็ค Database เด็ดขาดใน Liveness Probe!
+  @Get('live')
+  @HealthCheck()
+  checkLiveness() {
+    return this.health.check([
+      // V8 Heap Memory ต้องไม่เกิน 500MB (ป้องกัน Memory Leak)
+      () => this.memory.checkHeap('memory_heap', 500 * 1024 * 1024),
+      // RSS Memory (รวม C++ native modules) ไม่เกิน 1GB
+      () => this.memory.checkRSS('memory_rss', 1024 * 1024 * 1024),
+    ]);
+  }
+
+  // 2. Readiness Probe: สำหรับ Ingress เช็คว่าพร้อมรับออเดอร์เนื้อสดหรือไม่
+  @Get('ready')
+  @HealthCheck()
+  checkReadiness() {
+    return this.health.check([
+      // เช็คว่าฐานข้อมูลพร้อมทำงาน
+      () => this.prismaHealth.isHealthy('database_postgres'),
+      // ตรวจสอบพื้นที่จัดเก็บใน Storage Path สำหรับเก็บไฟล์รูปเนื้อสดและใบเสร็จ (ต้องเหลือเกิน 10%)
+      () =>
+        this.disk.checkStorage('storage_receipts', {
+          thresholdPercent: 0.9, // แจ้งเตือนเมื่อใช้เกิน 90%
+          path: process.platform === 'win32' ? 'C:\\' : '/',
+        }),
+    ]);
+  }
+}
+```
+
+```typescript filename="src/modules/health/health.module.ts"
+import { Module } from '@nestjs/common';
+import { TerminusModule } from '@nestjs/terminus';
+import { HealthController } from './health.controller';
+import { PrismaHealthIndicator } from './prisma.health-indicator';
+import { PrismaModule } from '../prisma/prisma.module';
+
+@Module({
+  imports: [TerminusModule, PrismaModule],
+  controllers: [HealthController],
+  providers: [PrismaHealthIndicator],
+})
+export class HealthModule {}
+```
+
+---
+
+### ตัวอย่างที่ 2: ระบบ Enterprise Multi-Target Health Check (Database, Redis, External Payment Gateway)
+
+ในสถานการณ์จริงของ Smart Butcher Marketplace ระบบต้องตรวจสอบ Redis Cache (สำหรับสต็อกเนื้อสด) และ External Payment Gateway (PromptPay / Stripe Service) ก่อนเปิดรับออเดอร์ พร้อมปรับใช้กับ Docker และ Kubernetes Probes
+
+```typescript filename="src/modules/health/redis.health-indicator.ts"
+import { Injectable } from '@nestjs/common';
+import { HealthIndicator, HealthIndicatorResult, HealthCheckError } from '@nestjs/terminus';
+import Redis from 'ioredis';
+
+@Injectable()
+export class RedisHealthIndicator extends HealthIndicator {
+  private readonly redisClient: Redis;
+
+  constructor() {
+    super();
+    this.redisClient = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
+      lazyConnect: true,
+      maxRetriesPerRequest: 1,
+      connectTimeout: 2000,
+    });
+  }
+
+  async isHealthy(key: string): Promise<HealthIndicatorResult> {
+    try {
+      if (this.redisClient.status !== 'ready') {
+        await this.redisClient.connect();
+      }
+      const pingResponse = await this.redisClient.ping();
+      const isOk = pingResponse === 'PONG';
+      const result = this.getStatus(key, isOk, { status: pingResponse });
+
+      if (isOk) {
+        return result;
+      }
+      throw new HealthCheckError('Redis PING did not return PONG', result);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Redis unreachable';
+      throw new HealthCheckError('Redis check failed', this.getStatus(key, false, { message }));
+    }
+  }
+}
+```
+
+```typescript filename="src/modules/health/payment-gateway.health-indicator.ts"
+import { Injectable } from '@nestjs/common';
+import { HealthIndicator, HealthIndicatorResult, HealthCheckError, HttpHealthIndicator } from '@nestjs/terminus';
+
+@Injectable()
+export class PaymentGatewayHealthIndicator extends HealthIndicator {
+  constructor(private readonly http: HttpHealthIndicator) {
+    super();
+  }
+
+  async isHealthy(key: string): Promise<HealthIndicatorResult> {
+    try {
+      // ตรวจสอบสถานะของเครือข่าย Payment Provider ภายนอก
+      return await this.http.pingCheck(key, 'https://api.butcher-payment.internal/health', {
+        timeout: 3000, // Timeout สั้น 3 วินาที เพื่อไม่ให้บล็อก Probe
+      });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Gateway timeout';
+      throw new HealthCheckError('Payment gateway is down', this.getStatus(key, false, { message }));
+    }
+  }
+}
+```
+
+```yaml filename="k8s/butcher-deployment.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smart-butcher-api
+  labels:
+    app: smart-butcher-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: smart-butcher-api
+  template:
+    metadata:
+      labels:
+        app: smart-butcher-api
+    spec:
+      containers:
+        - name: nestjs-api
+          image: registry.smartbutcher.internal/api:v1.2.0
+          ports:
+            - containerPort: 3000
+          # 1. Startup Probe: รอให้ Container บูตเสร็จสมบูรณ์
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12 # ให้เวลารวมสูงสุด 60 วินาที
+          # 2. Liveness Probe: ตรวจจับ Deadlock และ Event Loop Hang
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 3000
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # 3. Readiness Probe: ตรวจสอบความพร้อมของ DB และ Redis ก่อนส่งทราฟฟิกเข้ามา
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 3000
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 2
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+### ❌ โค้ดที่ผิด: ตรวจสอบ Database ภายนอกใน Liveness Probe และใช้คำสั่ง Heavy Query
+
+```typescript filename="bad-health.controller.ts"
+@Controller('health')
+export class BadHealthController {
+  constructor(
+    private health: HealthCheckService,
+    private prisma: PrismaService,
+  ) {}
+
+  // ผิดมหันต์ 1: นำ Database Check ไปใส่ไว้ใน Liveness Probe (/health)
+  // หาก PostgreSQL มีการ Restart หรือ Network กระตุก 10 วินาที
+  // Kubernetes จะเข้าใจว่า Pod พัง จึงสั่ง Restart Pods ทั้งคลัสเตอร์พร้อมกัน (Cascading Failure Crash Loop!)
+  @Get('liveness')
+  @HealthCheck()
+  checkBadLiveness() {
+    return this.health.check([
+      async () => {
+        // ผิดมหันต์ 2: รัน Query ที่หนักหน่วงใน Health Check
+        const totalOrders = await this.prisma.order.count();
+        return { orders: { status: 'up', count: totalOrders } };
+      },
+    ]);
+  }
+}
+```
+
+### ✅ โค้ดที่ถูก: แยก Liveness ออกจาก Readiness และใช้ Lightweight Ping
+
+```typescript filename="good-health.controller.ts"
+@Controller('health')
+export class GoodHealthController {
+  constructor(
+    private readonly health: HealthCheckService,
+    private readonly prismaHealth: PrismaHealthIndicator,
+    private readonly memory: MemoryHealthIndicator,
+  ) {}
+
+  // ถูกต้อง: Liveness ตรวจสอบเฉพาะความมีชีวิตของตัวแอปพลิเคชันเอง (เช่น Memory, Event Loop)
+  @Get('live')
+  @HealthCheck()
+  checkLiveness() {
+    return this.health.check([
+      () => this.memory.checkHeap('memory_heap', 450 * 1024 * 1024),
+    ]);
+  }
+
+  // ถูกต้อง: Readiness ตรวจสอบ Dependency ภายนอกด้วยคำสั่ง Lightweight เช่น SELECT 1
+  // หากล้มเหลว Pod จะแค่หยุดรับงานชั่วคราว ไม่ถูก Restart ซ้ำเติม
+  @Get('ready')
+  @HealthCheck()
+  checkReadiness() {
+    return this.health.check([
+      () => this.prismaHealth.isHealthy('postgres_db'),
+    ]);
+  }
+}
+```
+
+<Callout type="warning" title="ข้อควรระวังเรื่อง Cascading Failures">
+อย่านำ Dependency ภายนอก (Database, Redis, External 3rd Party APIs) ไปผูกไว้กับ Liveness Probe เด็ดขาด เพราะหากเครือข่ายของ Database กระตุกชั่วคราว Kubernetes จะทยอยสังหาร Pod ทั้งหมดพร้อมกัน ทำให้ระบบล่มโดยสมบูรณ์ ให้ตรวจสอบ Dependency ภายนอกเฉพาะใน **Readiness Probe** เท่านั้น
+</Callout>
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้:
+- ระบบ Backend ทุกตัวที่รันบน Docker, Kubernetes, AWS ECS, GCP Cloud Run หรือหลัง Cloud Load Balancers
+- ระบบที่มีหลาย Dependency เช่น มีทั้ง PostgreSQL, Redis Cache, Kafka/RabbitMQ และต้องการให้ Load Balancer สลับทราฟฟิกออกทันทีเมื่อ Dependency ใดหยุดทำงาน
+- ระบบที่ต้องการ Monitor หน่วยความจำ Heap Memory และ Storage ก่อนที่พื้นที่จัดเก็บดิสก์จะเต็ม
+
+### ไม่ควรใช้:
+- งานที่เป็น CLI Script หรือ One-off Batch Job สั้นๆ ที่รันแล้วปิดตัวลงทันที (เพราะไม่มี HTTP Server ประจำการ)
+- การใช้ Health Check แทนระบบ Performance APM Monitoring (ห้ามนำ Health Check ไปใช้วัด Query Latency ละเอียดยิบ เพราะจะสร้าง Overhead ให้กับ Database ทุกๆ 5 วินาที)
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### Q1: ทำไมสถาปัตยกรรมระดับ Senior ถึงเน้นย้ำว่า "ห้ามตรวจสอบ External Dependencies (เช่น PostgreSQL หรือ Redis) ใน Liveness Probe เด็ดขาด"?
+**แนวคำตอบเชิงลึก:**
+เพราะเป้าหมายของ **Liveness Probe** มีเพียงอย่างเดียวคือการตอบคำถามว่า: *"โพรเซส Node.js นี้ตายหรือยัง? (Deadlocked / Infinite loop / Unresponsive) และการรีสตาร์ท Pod จะสามารถแก้ปัญหานี้ได้หรือไม่?"*
+
+หากฐานข้อมูล PostgreSQL ล่มชั่วคราว แล้ว Liveness Probe ตรวจสอบฐานข้อมูลด้วย ผลลัพธ์คือ Liveness Probe จะตอบกลับเป็น Failure ทำให้ Kubernetes Kubelet สั่ง `SIGKILL` รีสตาร์ท Pod ใหม่ทันที เมื่อ Pod บูตขึ้นมาใหม่ แต่ฐานข้อมูลยังไม่ฟื้น Pod ก็จะล้มเหลวและถูกสั่งรีสตาร์ทซ้ำเรื่อยๆ จนเกิดสภาวะ **CrashLoopBackOff** ของทุก Pod ในระบบพร้อมกัน (Cascading Failure Storm) 
+
+สิ่งที่ถูกต้องคือ ตรวจสอบ Dependencies ใน **Readiness Probe** เท่านั้น เพื่อให้ Kubernetes เพียงแค่ตัด Pod นั้นออกจาก Endpoints (ไม่ส่ง Request เข้ามา) โดยปล่อยให้ Pod ยังมีชีวิตอยู่ และเมื่อ Database ฟื้นตัวกลับมา Readiness Probe จะผ่านเองโดยอัตโนมัติ และ Pod จะกลับมารับทราฟฟิกได้ทันทีโดยไม่ต้องผ่านกระบวนการบูตใหม่
+
+---
+
+### Q2: ในกรณีที่ Event Loop ของ NestJS ถูกบล็อกอย่างรุนแรง (Heavy CPU Calculation) Health Probe จะทำงานอย่างไร และ Terminus มีกลไกป้องกันอย่างไร?
+**แนวคำตอบเชิงลึก:**
+เมื่อ Event Loop ถูกบล็อกบน Main Thread เช่น มีการคำนวณ Hash หรือแปลงไฟล์ขนาดใหญ่แบบ Synchronous ตัว HTTP Request ที่ Kubernetes ยิงเข้ามาที่ `/health/live` จะค้างอยู่ใน Socket Buffer และไม่ถูกดึงขึ้นมาประมวลผลบน Call Stack 
+
+ผลลัพธ์คือ Kubernetes จะเจอสภาวะ **Probe Timeout** ตามเวลาที่ระบุในคอนฟิก (เช่น `timeoutSeconds: 3`) และเมื่อ Timeout ติดต่อกันครบโควตา `failureThreshold` ตัว Kubernetes จะสั่ง Restart Pod ทันที ซึ่งถือเป็นพฤติกรรมที่ถูกต้องตามการออกแบบ เพราะถือว่า Node.js ไม่สามารถตอบสนองผู้ใช้ได้แล้ว
+
+เพื่อรับมือกับปัญหานี้ สถาปัตยกรรมระดับสูงจะ:
+1. แยกงาน Heavy CPU ออกไปรันบน `worker_threads` หรือ Background Queue (เช่น BullMQ)
+2. ปรับแต่ง Timeout ของ Probes ให้สอดคล้องกับพฤติกรรมของระบบ
+3. ภายใน `@nestjs/terminus` ตัว `HealthCheckExecutor` จะมีการ Wrap ทุก Indicator Function ด้วย Timeout Promise เพื่อให้แน่ใจว่าตัว Indicator ใดที่ค้างจะไม่ดึงให้การเช็คทั้งหมดค้างเติ่งจน Connection หลุด
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เพื่อความเข้าใจระบบสุขภาพและการรองรับโหลดของระบบในระดับองค์กร แนะนำให้ศึกษาหัวข้อที่เกี่ยวข้องตามลำดับ:
+1. การปิดระบบอย่างปลอดภัยเมื่อได้รับสัญญาณ Terminate จาก Kubelet: [Graceful Shutdown](/docs/backend/nestjs/graceful-shutdown)
+2. การจัดการ Health Check ระดับ Container ใน Docker: [Docker Volumes & Health](/docs/backend/docker/volumes-health)
+3. การบันทึก Structured Logs เมื่อระบบเกิดข้อผิดพลาด: [Enterprise Logging](/docs/backend/nestjs/enterprise-logging)
+4. การสร้าง Service เชื่อมต่อฐานข้อมูลที่มี Connection Resilience: [Prisma Service](/docs/backend/prisma-orm/prisma-service)

@@ -1,0 +1,369 @@
+---
+title: Redis Caching
+category: BACKEND
+parentTitle: NestJS 11
+version: cache-manager + ioredis (NestJS 11)
+updatedAt: 2026-10-23
+---
+
+## 1. แนวคิด (Concept)
+
+ในระบบอีคอมเมิร์ซเนื้อพรีเมียมอย่าง **Smart Butcher Marketplace** ทราฟฟิกฝั่งอ่าน (Read Traffic) เช่น การเปิดดูหน้าหมวดหมู่เนื้อวากิว A5, รายละเอียดชิ้นเนื้อริบอายยอดนิยม, หรือคะแนน Marbling Score มักมีปริมาณสูงกว่าทราฟฟิกฝั่งเขียน (Write Traffic เช่น การสั่งซื้อ หรือการตัดสต็อก) มากถึง 10 ถึง 50 เท่า 
+
+หากทุกคำขอจากผู้ใช้งานต้องวิ่งตรงไปคิวรีฐานข้อมูลหลัก PostgreSQL เสมอ จะเกิดปัญหาคอขวดที่ I/O ของ Database ทันที ส่งผลให้ Latency สูงขึ้นจาก 2ms กลายเป็น 300ms+ และทำให้ Connection Pool เต็มจนระบบปฏิเสธคำสั่งซื้อ
+
+กลยุทธ์มาตรฐานระดับอุตสาหกรรมคือการนำ **Cache-aside Pattern (Lazy Loading)** มาใช้งานร่วมกับ **Redis** ซึ่งเป็น In-Memory Data Store แบบกระจายศูนย์ (Distributed Cache):
+1. **เมื่อมีคำขอข้อมูล:** แอปพลิเคชันจะตรวจสอบใน Redis Cache ก่อนเสมอ โดยใช้ Cache Key เฉพาะ
+2. **หากพบใน Cache (Cache Hit):** ส่งข้อมูลกลับให้ไคลเอนต์ทันทีภายใน 1-3 มิลลิวินาที โดยไม่ต้องแตะต้อง Database
+3. **หากไม่พบใน Cache (Cache Miss):** คิวรีข้อมูลจาก PostgreSQL นำผลลัพธ์มาบันทึกลงใน Redis พร้อมกำหนดอายุขัย (TTL - Time to Live) แล้วจึงส่งข้อมูลกลับไปยังผู้ใช้
+4. **เมื่อข้อมูลมีการเปลี่ยนแปลง (Mutation):** เช่น แอดมินปรับราคาเนื้อสันนอก หรือลูกค้าสั่งตัดสต็อก ระบบจะทำการเคลียร์หรืออัปเดตแคช (Cache Invalidation) ทันทีเพื่อรักษาความถูกต้องของข้อมูล (Data Consistency)
+
+NestJS 11 รองรับการทำงานร่วมกับ `@nestjs/cache-manager` ซึ่งสามารถเชื่อมต่อไปยัง Redis ผ่านแพ็กเกจไดรเวอร์ประสิทธิภาพสูงอย่าง `ioredis` หรือ `keyv`
+
+---
+
+## 2. หลักการเบื้องหลัง (Under the Hood)
+
+### สถาปัตยกรรมภายในของ Redis และ Cache-Manager
+
+```text filename="docs/backend/cache-aside-flow.txt"
+Client (User)
+    │
+    ▼
+[ NestJS Controller / Service ]
+    │
+    ├─► 1. ตรวจสอบ Redis (GET "butcher:product:wagyu-a5")
+    │        ├── Cache Hit (พบข้อมูล) ────► ส่งข้อมูลกลับทันที (1-2ms)
+    │        │
+    │        └── Cache Miss (ไม่พบ) 
+    │                 │
+    │                 ├─► 2. Query จาก PostgreSQL (50-100ms)
+    │                 │
+    │                 ├─► 3. เซ็ตค่าลง Redis (SETEX key ttl data)
+    │                 │
+    │                 └─► 4. ส่งข้อมูลกลับให้ Client
+    ▼
+(เมื่อเกิด Mutation: อัปเดตราคา/สต็อก)
+    │
+    └─► 5. ส่งคำสั่งลบแคช (DEL "butcher:product:wagyu-a5") หรือใช้ Pattern Invalidation
+```
+
+### 1. Redis Memory Engine & Single-threaded Event Loop
+Redis จัดเก็บโครงสร้างข้อมูลทั้งหมดในหน่วยความจำ RAM ของโฮสต์ โดยประมวลผลคำสั่งผ่าน Single-threaded Event Loop (คล้าย Node.js) แต่เขียนด้วยภาษา C ระดับล่าง ทำให้ไม่มีปัญหา Race Condition ในระดับการจัดการหน่วยความจำของ Redis เอง และทำงานได้เร็วกว่า 100,000 Operations/วินาที
+
+### 2. นโยบายการขับไล่ข้อมูลเมื่อ RAM เต็ม (Eviction Policies)
+เมื่อหน่วยความจำของ Redis ถึงขีดจำกัดตามที่กำหนดไว้ใน `maxmemory` กลไก Eviction Policy จะเริ่มทำงาน:
+- **`allkeys-lru`:** ลบ Key ที่ไม่ได้ถูกเรียกใช้นานที่สุด (Least Recently Used) ออกไป เหมาะที่สุดสำหรับ General Caching
+- **`volatile-ttl`:** ลบเฉพาะ Key ที่มีกำหนด TTL โดยเลือกลบ Key ที่ใกล้หมดอายุก่อน
+- **`noeviction`:** ปฏิเสธคำสั่งเขียนทั้งหมดและส่งคืน Error (ไม่เหมาะสำหรับงาน Caching)
+
+### 3. ปัญหา Cache Stampede (Dog-piling Effect)
+เมื่อ Key ยอดนิยม เช่น ชิ้นเนื้อ "Matsusaka Wagyu Ribeye Flash Sale" ซึ่งมีผู้ใช้แย่งกันเปิดดู 5,000 คนพร้อมกันต่อวินาที เกิดหมดอายุ (TTL Expired) ขึ้นมาในเสี้ยววินาทีเดียวกัน คำขอทั้งหมดจะพร้อมใจกันมองเห็นเป็น Cache Miss และพุ่งตรงไประดมคิวรีที่ฐานข้อมูล PostgreSQL พร้อมกัน 5,000 ครั้งจนเซิร์ฟเวอร์ฐานข้อมูลล่มทันที 
+
+วิศวกรระดับ Senior จะป้องกันปัญหานี้ด้วย **Distributed Lock (Redis Mutex via `SET NX PX`)** เพื่อให้มี Worker เพียง 1 รายเท่านั้นที่ได้รับสิทธิ์ไปดึงข้อมูลจาก Database มารีเฟรชแคช ขณะที่คำขออื่นจะรอผลลัพธ์หรือใช้แคชเก่าชั่วคราว
+
+---
+
+## 3. ตัวอย่างโค้ด (Smart Butcher Marketplace)
+
+### ตัวอย่างที่ 1: การตั้งค่า CacheModule และการใช้งาน Cache-aside Service พร้อม Dynamic TTL
+
+การเชื่อมต่อกับ Redis คลัสเตอร์ผ่าน `@nestjs/cache-manager` และการสร้าง Service จัดการแคชข้อมูลสินค้าเนื้อพรีเมียม
+
+```typescript filename="src/app.module.ts"
+import { Module } from '@nestjs/common';
+import { CacheModule } from '@nestjs/cache-manager';
+import { redisStore } from 'cache-manager-ioredis-yet';
+import { ProductsModule } from './modules/products/products.module';
+
+@Module({
+  imports: [
+    CacheModule.registerAsync({
+      isGlobal: true, // กำหนดเป็น Global Module เพื่อใช้งานได้ทุก Feature โดยไม่ต้อง Import ซ้ำ
+      useFactory: async () => {
+        const store = await redisStore({
+          host: process.env.REDIS_HOST || 'localhost',
+          port: parseInt(process.env.REDIS_PORT || '6379', 10),
+          password: process.env.REDIS_PASSWORD || undefined,
+          ttl: 60 * 1000, // ค่า Default TTL 60 วินาที (ระบุเป็นมิลลิวินาทีใน v5)
+          max: 1000, // จำนวน Key สูงสุดในแคช
+        });
+        return { store };
+      },
+    }),
+    ProductsModule,
+  ],
+})
+export class AppModule {}
+```
+
+```typescript filename="src/modules/products/products-cache.service.ts"
+import { Injectable, Inject, Logger } from '@nestjs/common';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Cache } from 'cache-manager';
+import { PrismaService } from '../prisma/prisma.service';
+
+export interface ProductDetailDto {
+  id: string;
+  name: string;
+  category: string;
+  pricePerKg: number;
+  stockKg: number;
+  marblingScore: number;
+}
+
+@Injectable()
+export class ProductsCacheService {
+  private readonly logger = new Logger(ProductsCacheService.name);
+
+  constructor(
+    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+    private readonly prisma: PrismaService,
+  ) {}
+
+  // สร้างฟังก์ชันค้นหาชิ้นเนื้อโดยใช้ Cache-aside Pattern ร่วมกับ Dynamic TTL
+  async getProductById(productId: string): Promise<ProductDetailDto> {
+    const cacheKey = `butcher:product:${productId}`;
+
+    // 1. ลองดึงข้อมูลจาก Redis Cache
+    const cachedProduct = await this.cacheManager.get<ProductDetailDto>(cacheKey);
+    if (cachedProduct) {
+      this.logger.debug(`[CACHE HIT] สินค้าเนื้อรหัส: ${productId}`);
+      return cachedProduct;
+    }
+
+    this.logger.debug(`[CACHE MISS] คิวรีจากฐานข้อมูลหลัก: ${productId}`);
+
+    // 2. หากไม่พบ ให้คิวรีจาก PostgreSQL
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+      include: { category: true },
+    });
+
+    if (!product) {
+      throw new Error(`ไม่พบสินค้าเนื้อรหัส ${productId}`);
+    }
+
+    const result: ProductDetailDto = {
+      id: product.id,
+      name: product.name,
+      category: product.category.name,
+      pricePerKg: Number(product.pricePerKg),
+      stockKg: Number(product.stockKg),
+      marblingScore: product.marblingScore,
+    };
+
+    // 3. กำหนด Dynamic TTL ตามความผันผวนของสินค้า
+    // เนื้อสต็อกเหลือน้อยกว่า 10kg ให้แคชสั้นเพียง 15 วินาที ส่วนเนื้อทั่วไปแคช 5 นาที
+    const ttlMs = result.stockKg < 10 ? 15 * 1000 : 300 * 1000;
+
+    await this.cacheManager.set(cacheKey, result, ttlMs);
+    return result;
+  }
+
+  // เคลียร์แคชเมื่อมีการอัปเดตราคาหรือสต็อกสินค้า
+  async invalidateProductCache(productId: string): Promise<void> {
+    const cacheKey = `butcher:product:${productId}`;
+    await this.cacheManager.del(cacheKey);
+    this.logger.log(`[CACHE INVALIDATED] ลบแคชสินค้าเนื้อ: ${cacheKey}`);
+  }
+}
+```
+
+---
+
+### ตัวอย่างที่ 2: การป้องกัน Cache Stampede ด้วย Redis Mutex (Distributed Lock)
+
+เมื่อชิ้นเนื้อขายดีเกิด Cache Expiration ในช่วงที่มี Flash Sale ตัวอย่างนี้แสดงการใช้ Distributed Lock เพื่ออนุญาตให้มีเพียง 1 Thread เข้าไปคิวรีฐานข้อมูล ส่วน Request ที่เหลือจะรอผลลัพธ์ผ่านการโพลล์ระยะสั้น
+
+```typescript filename="src/modules/products/stampede-resilient-cache.service.ts"
+import { Injectable, Logger } from '@nestjs/common';
+import Redis from 'ioredis';
+import { PrismaService } from '../prisma/prisma.service';
+
+@Injectable()
+export class StampedeResilientCacheService {
+  private readonly logger = new Logger(StampedeResilientCacheService.name);
+  private readonly redis: Redis;
+
+  constructor(private readonly prisma: PrismaService) {
+    this.redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+  }
+
+  async getFlashSaleProduct(productId: string) {
+    const dataKey = `butcher:flash-sale:${productId}`;
+    const lockKey = `lock:flash-sale:${productId}`;
+
+    // 1. ตรวจสอบข้อมูลในแคช
+    const cachedData = await this.redis.get(dataKey);
+    if (cachedData) {
+      return JSON.parse(cachedData);
+    }
+
+    // 2. ถ้า Cache Miss ให้พยายามขอ Lock ด้วย SET NX PX (Atomic Operation)
+    // ถือครอง Lock ได้นานสูงสุด 3000ms เพื่อป้องกัน Deadlock หากโปรเซสล่ม
+    const lockAcquired = await this.redis.set(lockKey, 'locked', 'PX', 3000, 'NX');
+
+    if (lockAcquired === 'OK') {
+      try {
+        this.logger.log(`[LOCK ACQUIRED] โหนดนี้ได้รับสิทธิ์ในการคำนวณและดึงข้อมูลเนื้อ: ${productId}`);
+
+        // ดึงข้อมูลจากฐานข้อมูลหลักพร้อมความสัมพันธ์
+        const freshData = await this.prisma.product.findUnique({
+          where: { id: productId },
+          include: { category: true, orders: { take: 5, orderBy: { createdAt: 'desc' } } },
+        });
+
+        if (!freshData) {
+          throw new Error('ไม่พบสินค้าเนื้อในโปรโมชัน');
+        }
+
+        // เซ็ตค่าลงในแคช TTL 60 วินาที
+        await this.redis.set(dataKey, JSON.stringify(freshData), 'EX', 60);
+        return freshData;
+      } finally {
+        // ปล่อย Lock เพื่อให้ Request ในรอบถัดไปทำงานได้ปกติ
+        await this.redis.del(lockKey);
+      }
+    } else {
+      // 3. หากไม่ได้ Lock (มี Request อื่นกำลังดึงข้อมูลอยู่) ให้รอ 100ms แล้วลองอ่านใหม่อีกครั้ง
+      this.logger.warn(`[CACHE STAMPEDE PREVENTED] มีการแย่งสิทธิ์อ่านเนื้อ ${productId} กำลังรอผลลัพธ์...`);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const retryData = await this.redis.get(dataKey);
+      if (retryData) {
+        return JSON.parse(retryData);
+      }
+
+      // Fallback ฉุกเฉิน: หากรอบแรกรอแล้วยังไม่มา ให้ fallback ไปดึง DB โดยตรง
+      return this.prisma.product.findUnique({ where: { id: productId } });
+    }
+  }
+
+  // ทำการ Invalidate แบบ Bulk Pattern ด้วย SCAN (ปลอดภัย ไม่บล็อก Redis เหมือนคำสั่ง KEYS)
+  async invalidateCategoryPrefix(categorySlug: string): Promise<void> {
+    const pattern = `butcher:catalog:${categorySlug}:*`;
+    let cursor = '0';
+
+    do {
+      const [nextCursor, keys] = await this.redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+      cursor = nextCursor;
+
+      if (keys.length > 0) {
+        // ใช้ UNLINK แทน DEL เพื่อลบคีย์ขนาดใหญ่แบบ Asynchronous ใน Background
+        await this.redis.unlink(...keys);
+        this.logger.log(`[BULK UNLINK] เคลียร์แคชหมวดหมู่ ${keys.length} รายการ`);
+      }
+    } while (cursor !== '0');
+  }
+}
+```
+
+---
+
+## 4. ข้อผิดพลาดที่พบบ่อย (Anti-pattern vs Best Practice)
+
+### ❌ โค้ดที่ผิด: ใช้คำสั่ง `KEYS *` ในการลบแคช และใช้ Local In-Memory Cache ในโหมด Multi-Pod
+
+```typescript filename="bad-cache.service.ts"
+@Injectable()
+export class BadCacheService {
+  constructor(
+    @Inject(CACHE_MANAGER) private cache: Cache,
+    private redisClient: any,
+  ) {}
+
+  // ผิดมหันต์ 1: การใช้คำสั่ง KEYS * บล็อก Redis Main Thread ทั้งคลัสเตอร์!
+  // หากมี 1,000,000 คีย์ Redis จะหยุดตอบสนองทุกโหนดเป็นเวลาหลายวินาที
+  async clearAllCaches() {
+    const allKeys = await this.redisClient.keys('butcher:*');
+    for (const key of allKeys) {
+      await this.cache.del(key);
+    }
+  }
+
+  // ผิดมหันต์ 2: ใช้ Memory Cache ท้องถิ่น (store: 'memory') บน Kubernetes หลาย Pods
+  // Pod A แคชราคาเนื้อวากิว 1,200 บาท แต่ Pod B แคชราคาเก่า 900 บาท 
+  // ลูกค้ากดรีเฟรชหน้าจอแล้วเห็นราคาโดดไปมา (Cache Inconsistency)
+}
+```
+
+### ✅ โค้ดที่ถูก: ใช้ Distributed Redis, SCAN/UNLINK และกำหนด Namespace ชัดเจน
+
+```typescript filename="good-cache.service.ts"
+@Injectable()
+export class GoodCacheService {
+  private readonly redis: Redis;
+
+  constructor() {
+    this.redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+  }
+
+  // ถูกต้อง: ใช้ SCAN แบบ Non-blocking เป็น Batch ละ 100 คีย์
+  // และใช้ UNLINK เพื่อลบข้อมูลใน Background Thread ของ Redis โดยไม่ทำให้ Latency กระตุก
+  async safeInvalidatePrefix(prefix: string): Promise<void> {
+    const stream = this.redis.scanStream({
+      match: `${prefix}:*`,
+      count: 100,
+    });
+
+    stream.on('data', async (keys: string[]) => {
+      if (keys.length > 0) {
+        await this.redis.unlink(...keys);
+      }
+    });
+  }
+}
+```
+
+<Callout type="tip" title="การเลือกคำสั่งลบแคช: DEL vs UNLINK">
+คำสั่ง `DEL` ของ Redis ทำงานแบบ Synchronous หากลบ Key ที่เก็บข้อมูลขนาดใหญ่ (เช่น รายการออเดอร์เนื้อทั้งหมดที่มีสมาชิกแสนตัว) จะบล็อก Event Loop ของ Redis ชั่วขณะ ให้เปลี่ยนมาใช้คำสั่ง `UNLINK` ใน Redis 4.0+ ซึ่งจะทำการคืนหน่วยความจำแบบ Asynchronous ในเบื้องหลังทันที
+</Callout>
+
+---
+
+## 5. ควรใช้เมื่อไหร่ และ ไม่ควรใช้เมื่อไหร่
+
+### ควรใช้:
+- ข้อมูลที่มีอัตราการอ่านสูงกว่าการเขียน (High Read-to-Write Ratio) เช่น แคตตาล็อกเนื้อ, ข้อมูลโภชนาการ, เมนูแนะนำประจำวัน
+- การเก็บผลลัพธ์ของคำนวณที่ซับซ้อน เช่น สถิติยอดขายเนื้อประจำสัปดาห์ หรือ Top 10 เนื้อวัวที่ขายดีที่สุด
+- ข้อมูล Session ของผู้ใช้งาน หรือ Rate Limiting Counter ที่ต้องการความเร็วระดับ Sub-millisecond
+
+### ไม่ควรใช้:
+- ข้อมูลทางการเงินหรือยอดเงินคงเหลือในกระเป๋า (Wallet Balance) ที่ต้องการความถูกต้องแม่นยำระดับ 100% ACID ทันที
+- ข้อมูลที่มีการเขียนถี่มากและอ่านแทบไม่ทัน เช่น ตำแหน่ง GPS พิกัดรถส่งเนื้อสดที่ส่งพิกัดมาทุกๆ 500ms (ควรใช้ Redis Streams หรือ TimescaleDB แทน Caching ทั่วไป)
+
+---
+
+## 6. คำถามสัมภาษณ์งาน (Interview Q&A)
+
+### Q1: จงอธิบายปรากฏการณ์ "Cache Stampede (Dog-piling)" และเปรียบเทียบกลยุทธ์การป้องกันระหว่าง Mutex Lock กับ Probabilistic Early Expiration (XFetch)?
+**แนวคำตอบเชิงลึก:**
+**Cache Stampede** เกิดขึ้นเมื่อคีย์ยอดนิยม (Hot Key) ซึ่งมีทราฟฟิกสูงมาก หมดอายุลงในจังหวะที่มี Request นับพันเข้ามาพร้อมกัน ทุก Request จะไม่พบข้อมูลในแคช และพุ่งตรงไปคิวรีฐานข้อมูลพร้อมกัน ทำให้ Database รองรับโหลดไม่ไหวจนเกิด Downtime
+
+กลยุทธ์รับมือมี 2 แนวทางหลัก:
+1. **Mutex Lock (Distributed Lock):** ใช้ `SET lock:key token PX 3000 NX` อนุญาตให้เฉพาะ Request แรกที่ได้ Lock เป็นผู้คิวรีฐานข้อมูลและเขียนแคชใหม่ ส่วน Request อื่นๆ จะต้องบล็อกรอหรือได้รับแคชเดิมไปก่อน ข้อดีคือรับประกันว่า Database จะถูกเรียกเพียงครั้งเดียวแน่นอน แต่ข้อเสียคือมี Latency เพิ่มขึ้นสำหรับคำขอที่ต้องรอ Lock
+2. **Probabilistic Early Expiration (อัลกอริทึม XFetch):** แทนที่จะรอให้คีย์หมดอายุแบบกะทันหัน อัลกอริทึมนี้จะคำนวณความน่าจะเป็นตามสมการ:
+   $$-\beta \times \delta \times \ln(\text{random}())$$
+   โดยหากเวลาที่เหลือของแคชน้อยกว่าระยะเวลาที่ใช้ในการคำนวณข้อมูลใหม่คูณด้วยค่าถ่วงน้ำหนัก ระบบจะทำการดึงข้อมูลใหม่มาทับแคชล่วงหน้าก่อนที่แคชจะหมดอายุจริง ทำให้ไคลเอนต์ไม่เคยเจอสภาวะ Cache Miss เลยแม้แต่รายเดียว
+
+---
+
+### Q2: ในสถาปัตยกรรม NestJS คลัสเตอร์หลาย Pod ทำไมการใช้ In-memory Cache ของตัว Node.js เองจึงถือเป็น Anti-pattern สำหรับระบบขนาดใหญ่?
+**แนวคำตอบเชิงลึก:**
+การใช้ Local In-memory Caching (เช่น จัดเก็บใน JavaScript Map หรือ Node-cache บน Process Memory) ในระบบ Multi-Pod Microservices ก่อให้เกิดปัญหาใหญ่ 3 ประการ:
+1. **Cache Drift & Data Inconsistency:** เมื่อเกิด Mutation (เช่น อัปเดตราคาเนื้อสันในจาก 1,000 เป็น 1,200 บาท) การ Invalidate แคชจะเกิดขึ้นเฉพาะบน Pod ที่รับ Request การแก้ไข ส่วนอีก 4 Pods ที่เหลือยังคงจำราคาเก่า 1,000 บาท ทำให้ผู้ใช้ที่เปิดหน้าเว็บผ่าน Load Balancer สลับ Pod ไปมาเห็นราคาไม่ตรงกัน
+2. **Memory Overhead:** ข้อมูลแคชก้อนเดียวกันจะถูกสำเนาซ้ำซ้อนใน RAM ของทุก Pod ทำให้สิ้นเปลืองหน่วยความจำของ Node.js Container ไปโดยเปล่าประโยชน์ และเสี่ยงต่อการเกิด Garbage Collection Spikes
+3. **Cold Start Penalty on Auto-scaling:** เมื่อระบบสเกล Pod ใหม่ขึ้นมาเพื่อรองรับเทศกาลปีใหม่ Pod ใหม่จะไม่มีแคชอยู่เลย (Cold Cache) ส่งผลให้ทราฟฟิกที่วิ่งเข้า Pod ใหม่ทะลุผ่านไปยัง Database ทันที
+
+ดังนั้นการใช้ **Centralized Distributed Cache อย่าง Redis** จึงเป็นมาตรฐานเดียวที่การันตี Single Source of Truth สำหรับข้อมูลแคชในทุก Pod
+
+---
+
+## ลำดับการเรียนที่แนะนำ และ ดูเพิ่มเติมที่
+
+เพื่อเพิ่มพูนความเชี่ยวชาญในการออกแบบระบบ Backend ที่ทนทานและรวดเร็ว แนะนำให้ศึกษาหัวข้อต่อไปนี้:
+1. การจัดการงานประมวลผลเบื้องหลังโดยใช้คิวบน Redis: [Queue (BullMQ)](/docs/backend/nestjs/bullmq-queue)
+2. การตั้งเวลาล้างแคชหรือรัน Batch ประจำวัน: [Cron Schedule](/docs/backend/nestjs/cron-schedule)
+3. การเขียน Interceptor เพื่อทำ Cache อัตโนมัติ: [Interceptors](/docs/backend/nestjs/interceptors)
+4. การแก้ปัญหาคิวรีฐานข้อมูลซ้ำซ้อนระดับ Database: [N+1 Query Fix](/docs/backend/prisma-orm/n1-query-fix)
